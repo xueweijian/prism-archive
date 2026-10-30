@@ -58,11 +58,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # windows-latest no longer exposes a VS instance that CMake can find on
+      # its own; this puts cl.exe + the SDK on PATH for the Ninja generator.
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --parallel
 
       - name: Locate 7z.dll
         shell: pwsh
@@ -81,7 +85,7 @@ jobs:
 
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure --no-tests=error -C Release
+        run: ctest --output-on-failure --no-tests=error
 
       - name: Compile HLSL (Liquid Glass optics)
         shell: pwsh

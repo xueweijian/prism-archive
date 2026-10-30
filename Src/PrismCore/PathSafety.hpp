@@ -141,7 +141,11 @@ inline bool IsContainedIn(std::string_view baseDir, std::string_view targetPath)
 
 // "Design_Assets_v4.tar.gz" -> "Design_Assets_v4" (also handles .tar.zst/.tar.bz2)
 inline std::string ArchiveStem(std::string_view archivePath) {
-  const std::string_view name = FileNameOf(NormalizeArchivePath(archivePath));
+  // NOTE: the normalized string must outlive the string_view -- returning a
+  // view into the temporary is a dangling reference that only *sometimes*
+  // survives (it passed locally and produced garbage on CI).
+  const std::string normalized = NormalizeArchivePath(archivePath);
+  const std::string_view name = FileNameOf(normalized);
   std::string stem(name);
   for (const char* compound : {".tar.gz", ".tar.zst", ".tar.bz2", ".tar.xz", ".tar.lz4", ".tar"}) {
     const std::string suffix(compound);

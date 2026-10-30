@@ -76,7 +76,8 @@ inline int RunAll(int argc, char** argv) {
     }
   }
   std::cout << "  " << CheckCount() << " checks, " << FailureCount() << " failures, "
-            << Registry().size() << " cases" << std::endl;
+            << (Registry().size() - static_cast<size_t>(failedCases)) << "/" << Registry().size()
+            << " cases passed" << std::endl;
   return FailureCount() == 0 ? 0 : 1;
 }
 

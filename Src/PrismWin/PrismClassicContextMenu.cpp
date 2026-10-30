@@ -91,42 +91,20 @@ class ClassicMenu final
 
 STGMEDIUM ClassicMenu::medium_{};
 
-// Called by the module entry points below.
+// Called by the module entry points below. The static_cast chain is required:
+// ClassicMenu inherits two IUnknown paths, so an implicit conversion to
+// IUnknown* would be ambiguous.
 HRESULT CreateClassicMenuInstance(IUnknown** out) {
+  if (!out) return E_POINTER;
   ComPtr<ClassicMenu> menu;
   const HRESULT hr = MakeAndInitialize<ClassicMenu>(&menu);
   if (FAILED(hr)) return hr;
-  *out = menu.Detach();
+  *out = static_cast<IShellExtInit*>(menu.Detach());
   return S_OK;
 }
 
 }  // namespace prism::win::classic
 
-// The worker hand-off is a free function so the shell DLL never links the
-// extraction engine directly (process isolation is a blueprint requirement).
-void prism::win::classic::ClassicMenu::LaunchWorker(const std::string& verb) {
-  std::wstring args = Utf8ToWide("--shell-verb " + verb);
-  for (const std::string& path : selected_) {
-    args += L" \"" + Utf8ToWide(path) + L"\"";
-  }
-  // Resolve OUR module path (the DLL), not the host process (explorer.exe):
-  // the companion exe sits beside the DLL.
-  HMODULE self = nullptr;
-  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                     reinterpret_cast<LPCWSTR>(&ClassicMenu::LaunchWorker), &self);
-  wchar_t exe[MAX_PATH * 2]{};
-  GetModuleFileNameW(self, exe, ARRAYSIZE(exe));
-  std::wstring cmdline = std::wstring(L"\"") + exe + L"\" " + args;
-  STARTUPINFOW si{};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi{};
-  if (CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                     &si, &pi)) {
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // COM module entry points (same STDAPI discipline as PrismShellCommand.cpp).

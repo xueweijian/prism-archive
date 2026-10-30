@@ -4,6 +4,7 @@
 // abandon-and-drain contract. SKIPs loudly when 7z is not on the runner.
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -179,13 +180,17 @@ int main(int argc, char** argv) {
   if (!PRISM_CHECK_EQ(lru.Count(), 3u)) return 1;
 
   // Thumbnail geometry: aspect preserved, box-capped, never upscaled.
+  // NOTE: solid mode REORDERS entries (7-Zip groups similar files into one
+  // dictionary), so decode order is NOT packing order -- assert the SET.
   if (!PRISM_CHECK_EQ(spy.dims.size(), size_t(3))) return 1;
-  if (!PRISM_CHECK_EQ(spy.dims[0].first, 64u)) return 1;    // icon kept its size
-  if (!PRISM_CHECK_EQ(spy.dims[0].second, 64u)) return 1;
-  if (!PRISM_CHECK_EQ(spy.dims[1].first, 120u)) return 1;   // mid photo kept size
-  if (!PRISM_CHECK_EQ(spy.dims[1].second, 90u)) return 1;
-  if (!PRISM_CHECK_EQ(spy.dims[2].first, 256u)) return 1;   // 300x200 -> fit box
-  if (!PRISM_CHECK(spy.dims[2].second >= 170 && spy.dims[2].second <= 171)) return 1;
+  std::vector<std::pair<UINT, UINT>> sorted = spy.dims;
+  std::sort(sorted.begin(), sorted.end());
+  if (!PRISM_CHECK_EQ(sorted[0].first, 64u)) return 1;    // icon kept its size
+  if (!PRISM_CHECK_EQ(sorted[0].second, 64u)) return 1;
+  if (!PRISM_CHECK_EQ(sorted[1].first, 120u)) return 1;   // mid photo kept size
+  if (!PRISM_CHECK_EQ(sorted[1].second, 90u)) return 1;
+  if (!PRISM_CHECK_EQ(sorted[2].first, 256u)) return 1;   // 300x200 -> fit box
+  if (!PRISM_CHECK(sorted[2].second >= 170 && sorted[2].second <= 171)) return 1;
 
   // Abandon-and-drain: viewport moved on -> zero decodes, stream consumed.
   prism::gallery::ThumbnailLru lru2{32 << 20};

@@ -11,3 +11,7 @@ target_link_libraries(PrismShellExt PRIVATE prism_core shlwapi.lib)
 # /WX- : Windows SDK headers are not warning-clean under /W4 /WX.
 target_compile_options(PrismShellExt PRIVATE /WX-)
 set_target_properties(PrismShellExt PROPERTIES OUTPUT_NAME "PrismShellExt")
+if(MSVC)
+  set_target_properties(PrismShellExt PROPERTIES
+    LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/PrismShellExt.def")
+endif()

@@ -249,12 +249,12 @@ LONG PrismShellClassFactory::g_lockCount = 0;
 
 }  // namespace prism::win::shell
 
-// COM module entry points. EXTERN_C (not a bare extern "C" block) matches the
-// linkage the SDK headers use for these exports; a mismatch is C2375.
-extern "C" {
-
-EXTERN_C __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid,
-                                                       LPVOID* ppv) {
+// COM module entry points.
+//
+// Written exactly the way the SDK declares them (STDAPI = EXTERN_C HRESULT
+// __stdcall): a bare __declspec(dllexport) definition conflicts with that
+// declaration (C2375 "different linkage"). Exports come from PrismShellExt.def.
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
   using namespace prism::win::shell;
   if (ppv == nullptr) return E_POINTER;
   *ppv = nullptr;
@@ -262,15 +262,13 @@ EXTERN_C __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rcls
   ComPtr<PrismShellClassFactory> factory;
   HRESULT hr = MakeAndInitialize<PrismShellClassFactory>(&factory);
   if (FAILED(hr)) return hr;
-  return factory->QueryInterface(riid, ppv);
+  return factory->QueryInterface(riid, reinterpret_cast<void**>(ppv));
 }
 
-EXTERN_C __declspec(dllexport) HRESULT __stdcall DllCanUnloadNow() {
+STDAPI DllCanUnloadNow() {
   return prism::win::shell::PrismShellClassFactory::g_lockCount == 0 ? S_OK : S_FALSE;
 }
 
-EXTERN_C __declspec(dllexport) BOOL __stdcall DllMain(HINSTANCE, DWORD reason, LPVOID) {
-  return reason == DLL_PROCESS_ATTACH || reason == DLL_PROCESS_DETACH ? TRUE : TRUE;
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+  return TRUE;
 }
-
-}  // extern "C"

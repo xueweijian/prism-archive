@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <wincodec.h>
+#include <wrl/client.h>
 
 #include "../mini_test.hpp"
 #include "PrismEngineBridge.hpp"
@@ -19,6 +20,8 @@
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
+
+using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -143,7 +146,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  prism::SevenZipLibrary library;
+  prism::win::SevenZipLibrary library;
   if (!PRISM_CHECK(library.Load(g_dllPath))) return 0;
   prism::win::ArchiveReader reader(library);
   if (!PRISM_CHECK(reader.Open(dir + L"\\solid.7z"))) {

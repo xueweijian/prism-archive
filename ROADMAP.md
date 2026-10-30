@@ -21,7 +21,8 @@
 - [x] 免解压 CoW 虚拟目录树 → `IOutArchive::UpdateItems` 元数据计划
 - [x] 密码环嗅探策略 + 保险库接口（Windows 侧 DPAPI 已实现）
 - [ ] 畸形归档语料回归：10 000 个真实样本（走 CI，下载到 runner，不入库）
-- [ ] 密码环并发试错器（15 ms / 64 候选，需实测数字）
+- [x] 密码环决策核心 `PasswordRing.hpp`（2026-10-31）：确定性排序（先验+历史加权，断言精确顺序）、探针条目挑选（最小/非固实/低索引）、FullOpen/BodyProbe/Decline 策略（零候选响亮拒绝）、预算化并发计划（ZipCrypto 64 / AES-KDF 12，超预算必须带进度）、RedactSecrets 全量+部分脱敏、SecureZero——15 例含两个突变负向控制
+- [ ] 密码试错执行器（Windows 侧并发探针接线，消费上面的决策核心）
 
 判据：每个规则都有正例 + 反例（负向控制）单测；畸形样本语料 lane 红灯可复现。
 
@@ -52,6 +53,11 @@
 - **防假绿机制**：两个 Windows 集成套件的 stdout 成功标记被 ctest `PASS_REGULAR_EXPRESSION` 强制——静默 SKIP 永远不算过
 
 待做：主窗口文件列表模式、缩略图接进 D2D 瓦片、零拷贝拖拽通道决策、4GB 零 %TEMP% 实测
+
+## M3.5 · 零拷贝拖拽决策核心（2026-10-31，提前落地 ch. 4.4 决策层）
+
+- [x] `DragDrop.hpp`（PR #3 已并入）：三通道决策（DirectToPath / MemoryStream / TempCopyFallback 拒绝必带理由枚举）、路径可信校验、虚拟文件描述符组、按需流泵计划——TDD 22 例 + mutation 双编译负向控制；Win32 桥（FILEDESCRIPTORW/FILECONTENTS）入 m3_compile_check CI 编译验证
+- [ ] 通道 A 砍掉（外部审阅裁决：Win11 多标签/WorkerW 拿错路径风险高），统一 FILECONTENTS + 明确提示右键解压
 
 ## M4 · 安全、性能与发布（第 14–16 周，对应 Phase 4）
 

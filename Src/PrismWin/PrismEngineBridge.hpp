@@ -576,6 +576,9 @@ class ArchiveReader {
         const auto repaired = RepairArchiveName(item.path, false, transcoder_);
         item.path = repaired.name;
       }
+      // 7-Zip reports kpidPath with native separators on Windows; PrismCore's
+      // contract is UTF-8 + '/' everywhere.
+      item.path = NormalizeArchivePath(item.path);
       items.push_back(std::move(item));
     }
     return items;
@@ -624,9 +627,28 @@ class ArchiveReader {
   // itself) and only fall back to the hard-coded enum -- guessing PROPIDs is
   // exactly how ABI drift starts.
   PROPID PropertyId(const std::string& name, PROPID fallback) const {
-    const auto it = propIds_.find(name);
-    if (it != propIds_.end()) return it->second;
+    const std::string want = NormalizePropName(name);
+    // 7-Zip reports display names ("Is Folder", "Packed Size", "Modified");
+    // accept the canonical spellings too.
+    static const std::map<std::string, std::string> kAlias = {
+        {"isdir", "isfolder"}, {"packsize", "packedsize"}, {"mtime", "modified"}};
+    std::string alt;
+    const auto aliasIt = kAlias.find(want);
+    if (aliasIt != kAlias.end()) alt = aliasIt->second;
+    for (const auto& kv : propIds_) {
+      const std::string have = NormalizePropName(kv.first);
+      if (have == want || (!alt.empty() && have == alt)) return kv.second;
+    }
     return fallback;
+  }
+
+  static std::string NormalizePropName(std::string name) {
+    std::string out;
+    for (const char c : name) {
+      if (c == ' ' || c == '_' || c == '\t') continue;
+      out.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
+    }
+    return out;
   }
 
   const std::map<std::string, PROPID>& discoveredProperties() const { return propIds_; }

@@ -24,6 +24,7 @@
 #include <d2d1helper.h>
 #include <dwrite.h>
 
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -200,11 +201,22 @@ class GalleryRenderer {
       } else if (prism::QuickLookPlanner::KindByName(item.path) == prism::PreviewKind::Image) {
         // Photo tile: REAL thumbnail when the sweep harvested one, the ⚡
         // streaming badge for over-limit blocks, gradient stand-in otherwise.
-        const D2D1_ROUNDED_RECT photo = D2D1::RoundedRect(
-            D2D1::RectF(left, top, right, bottom - 30.0f), kRadius, kRadius);
+        // Everything is clipped by a squircle layer: DrawBitmap ignores the
+        // rounded rect, so without the mask a wide photo bleeds past the
+        // tile's corners (visible immediately in the snapshot).
+        const D2D1_RECT_F photoRect = D2D1::RectF(left, top, right, bottom - 30.0f);
         const prism::gallery::DecodedThumb* thumb =
             scene.thumbs ? scene.thumbs->Lookup(item.index) : nullptr;
         if (thumb) ++dbgThumbLookupHits;
+
+        ComPtr<ID2D1PathGeometry> clipGeometry;
+        if (SUCCEEDED(CreateSquircleGeometry(target, photoRect, kRadius,
+                                             clipGeometry.ReleaseAndGetAddressOf()))) {
+          D2D1_LAYER_PARAMETERS layer = D2D1::LayerParameters(
+              photoRect, clipGeometry.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+          target->PushLayer(layer, nullptr);
+        }
+
         if (thumb) {
           SyncThumbBitmap(target, item.index, *thumb, scene.thumbs->Version());
           const auto it = thumbBitmaps_.find(item.index);
@@ -219,7 +231,7 @@ class GalleryRenderer {
                                                 top + (areaH - drawH) / 2.0f,
                                                 left + (areaW + drawW) / 2.0f,
                                                 top + (areaH + drawH) / 2.0f);
-            target->FillRoundedRectangle(photo, tile_.Get());
+            target->FillRectangle(photoRect, tile_.Get());
             ++dbgThumbDraws;
             target->DrawBitmap(it->second.Get(), fit, 1.0f,
                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
@@ -228,7 +240,7 @@ class GalleryRenderer {
           // Over-budget solid block: elegant "tap to stream" badge.
           thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
           thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
-          target->FillRoundedRectangle(photo, thumbs_[index % 3].Get());
+          target->FillRectangle(photoRect, thumbs_[index % 3].Get());
           DrawLabel(target, caption_.Get(), L"\x26A1 \x70B9\x51FB\x6D41\x5F0F\x52A0\x8F7D",
                     D2D1::RectF(left, top + (bottom - top) / 2.0f - 12.0f, right,
                                 top + (bottom - top) / 2.0f + 12.0f),
@@ -236,8 +248,17 @@ class GalleryRenderer {
         } else {
           thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
           thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
-          target->FillRoundedRectangle(photo, thumbs_[index % 3].Get());
+          target->FillRectangle(photoRect, thumbs_[index % 3].Get());
         }
+        if (clipGeometry) target->PopLayer();
+
+        // Name plate under the photo (the grid is unusable without labels).
+        const D2D1_ROUNDED_RECT plate = D2D1::RoundedRect(
+            D2D1::RectF(left, bottom - 28.0f, right, bottom), 10.0f, 10.0f);
+        target->FillRoundedRectangle(plate, tile_.Get());
+        DrawLabel(target, caption_.Get(), Utf8(FileNameOf(item.path)),
+                  D2D1::RectF(left + 8.0f, bottom - 26.0f, right - 8.0f, bottom - 4.0f),
+                  textPrimary_.Get());
       } else {
         // Document tile: paper pane + text lines (the doc quick look reads
         // exactly this silhouette).
@@ -285,6 +306,52 @@ class GalleryRenderer {
                                     slot.ReleaseAndGetAddressOf()))) {
       slot.Reset();
     }
+  }
+
+  // Squircle (G2 continuous corner) clip path for a photo tile. D2D1 has no
+  // "clip to rounded rect" on DrawBitmap, so the tile pushes a geometry
+  // layer instead; superellipse exponent 4.2 per the design tokens.
+  static HRESULT CreateSquircleGeometry(ID2D1RenderTarget* target, const D2D1_RECT_F& rect,
+                                        float radius, ID2D1PathGeometry** out) {
+    ComPtr<ID2D1Factory> factory;
+    target->GetFactory(factory.ReleaseAndGetAddressOf());
+    ComPtr<ID2D1PathGeometry> path;
+    HRESULT hr = factory->CreatePathGeometry(path.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    ComPtr<ID2D1GeometrySink> sink;
+    hr = path->Open(sink.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    const float cx = (rect.left + rect.right) / 2.0f;
+    const float cy = (rect.top + rect.bottom) / 2.0f;
+    const float halfW = (rect.right - rect.left) / 2.0f;
+    const float halfH = (rect.bottom - rect.top) / 2.0f;
+    (void)radius;
+    // Superellipse sampled as a polyline; 32 segments per quadrant is well
+    // under a pixel of sag at tile sizes and keeps the mask cheap. `radius`
+    // only feeds the fallback assumption that the tile is at least as tall
+    // as its corner radius (asserted by the caller's geometry).
+    constexpr int kSegments = 32;
+    constexpr float kExponent = 4.2f;
+    constexpr float kPi = 3.14159265358979f;
+    const auto pointAt = [&](float t) {
+      // Parameterize one quadrant of the superellipse: |x/a|^n + |y/b|^n = 1
+      const float c = std::cos(t);
+      const float s = std::sin(t);
+      const float ex = std::pow(std::fabs(c), 2.0f / kExponent);
+      const float ey = std::pow(std::fabs(s), 2.0f / kExponent);
+      return D2D1::Point2F(cx + (c >= 0 ? ex : -ex) * halfW,
+                           cy + (s >= 0 ? ey : -ey) * halfH);
+    };
+    sink->BeginFigure(pointAt(0.0f), D2D1_FIGURE_BEGIN_FILLED);
+    for (int i = 1; i <= kSegments * 4; ++i) {
+      const float t = (2.0f * kPi) * (static_cast<float>(i) / (kSegments * 4));
+      sink->AddLine(pointAt(t));
+    }
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    hr = sink->Close();
+    if (FAILED(hr)) return hr;
+    *out = path.Detach();
+    return S_OK;
   }
 
   static D2D1_COLOR_F BarColorOf(prism::list::BarColor color) {

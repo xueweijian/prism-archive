@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <set>
+#include <tuple>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -108,11 +110,26 @@ int main(int argc, char** argv) {
   if (!PRISM_CHECK_EQ(result.skipped, 0)) return 1;
   if (!PRISM_CHECK_EQ(result.fraction, 1.0)) return 1;
   if (!PRISM_CHECK_EQ(store.Count(), 3u)) return 1;
+  // Payload CONTENT, not just presence: every pixel must be opaque and
+  // carry one of the three fixture hues (BGRA). Solid reordering means we
+  // assert the multiset, not the order.
+  std::multiset<std::tuple<uint8_t, uint8_t, uint8_t>> got;
   for (uint32_t i = 0; i < indices.size(); ++i) {
     const auto* thumb = store.Lookup(indices[i]);
     if (!PRISM_CHECK(thumb != nullptr)) return 1;
-    if (!PRISM_CHECK(!thumb->pixels.empty())) return 1;  // real payload
+    if (!PRISM_CHECK(!thumb->pixels.empty())) return 1;
+    if (!PRISM_CHECK(thumb->pixels.size() >= 4)) return 1;
+    const uint8_t b = thumb->pixels[0], g = thumb->pixels[1], r = thumb->pixels[2],
+                  a = thumb->pixels[3];
+    if (!PRISM_CHECK(a == 255)) return 1;  // a transparent decode = a broken fixture
+    got.insert({r, g, b});
   }
+  const std::multiset<std::tuple<uint8_t, uint8_t, uint8_t>> expected{
+      {255, 0, 0},    // icon.png   (r,g,b)
+      {0, 255, 0},    // photo.png
+      {0, 0, 255},    // large.png
+  };
+  if (!PRISM_CHECK(got == expected)) return 1;  // decoded the real colors
 
   // Thumbnail geometry: aspect preserved, box-capped, never upscaled.
   // NOTE: solid mode REORDERS entries (7-Zip groups similar files into one

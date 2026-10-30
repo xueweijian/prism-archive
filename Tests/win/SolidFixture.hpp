@@ -43,6 +43,9 @@ inline bool WritePng(const std::wstring& path, UINT width, UINT height, uint8_t 
                                    WICBitmapCacheOnDemand, bitmap.ReleaseAndGetAddressOf()))) {
     return false;
   }
+  // SetPixels WRITES INTO the bitmap (CopyPixels would read the empty
+  // bitmap out -- the classic direction trap; it silently authors an
+  // all-transparent PNG and every downstream "decoded" thumbnail is zero).
   std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
   for (size_t i = 0; i < pixels.size(); i += 4) {
     pixels[i] = b;
@@ -50,8 +53,7 @@ inline bool WritePng(const std::wstring& path, UINT width, UINT height, uint8_t 
     pixels[i + 2] = r;
     pixels[i + 3] = 255;
   }
-  if (FAILED(bitmap->CopyPixels(nullptr, width * 4, static_cast<UINT>(pixels.size()),
-                                pixels.data()))) {
+  if (FAILED(bitmap->SetPixels(nullptr, width * 4, pixels.data()))) {
     return false;
   }
   ComPtr<IWICStream> stream;

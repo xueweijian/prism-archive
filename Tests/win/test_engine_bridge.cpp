@@ -362,5 +362,9 @@ int main(int argc, char** argv) {
   } else {
     std::wcout << L"7z.dll: " << g_dllPath << std::endl;
   }
-  return ::prism::test::RunAll(argc, argv);
+  const int rc = ::prism::test::RunAll(argc, argv);
+  // The marker below is part of the verdict: ctest requires it in stdout, so
+  // a silent SKIP can never count as a pass (L2: negative control).
+  if (rc == 0 && g_haveDll) std::cout << "ALL ENGINE-BRIDGE CHECKS PASSED" << std::endl;
+  return rc;
 }

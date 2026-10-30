@@ -122,12 +122,12 @@ struct SpyDecoder final : prism::gallery::SolidSweepSession::IDecoder {
 
 int main(int argc, char** argv) {
   if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-    std::cout << "    SKIP: COM init" << std::endl;
-    return 0;
+    std::cout << "    FAIL: COM init" << std::endl;
+    return 1;
   }
   if (!LocateSevenZip()) {
-    std::cout << "    SKIP: 7z.exe not found beside 7z.dll" << std::endl;
-    return 0;
+    std::cout << "    FAIL: 7z.exe not found beside 7z.dll (windows-latest ships it)" << std::endl;
+    return 1;
   }
 
   namespace fs = std::filesystem;
@@ -137,24 +137,24 @@ int main(int argc, char** argv) {
   const std::wstring dir = work.wstring();
 
   // A small icon (never upscaled), a mid photo, and one larger than the box.
-  if (!PRISM_CHECK(WritePng(dir + L"\\icon.png", 64, 64, 0, 0, 255))) return 0;
-  if (!PRISM_CHECK(WritePng(dir + L"\\photo.png", 120, 90, 0, 255, 0))) return 0;
-  if (!PRISM_CHECK(WritePng(dir + L"\\large.png", 300, 200, 255, 0, 0))) return 0;
+  if (!PRISM_CHECK(WritePng(dir + L"\\icon.png", 64, 64, 0, 0, 255))) return 1;
+  if (!PRISM_CHECK(WritePng(dir + L"\\photo.png", 120, 90, 0, 255, 0))) return 1;
+  if (!PRISM_CHECK(WritePng(dir + L"\\large.png", 300, 200, 255, 0, 0))) return 1;
   if (!PRISM_CHECK(RunSevenZip(L"a -t7z -ms=on \"" + dir + L"\\solid.7z\" " + dir +
                                L"\\icon.png " + dir + L"\\photo.png " + dir + L"\\large.png"))) {
-    std::cout << "    SKIP: 7z.exe pack failed" << std::endl;
-    return 0;
+    std::cout << "    FAIL: 7z.exe pack failed" << std::endl;
+    return 1;
   }
 
   prism::win::SevenZipLibrary library;
-  if (!PRISM_CHECK(library.Load(g_dllPath))) return 0;
+  if (!PRISM_CHECK(library.Load(g_dllPath))) return 1;
   prism::win::ArchiveReader reader(library);
   if (!PRISM_CHECK(reader.Open(dir + L"\\solid.7z"))) {
     std::cout << "    open trace: " << reader.openTrace() << std::endl;
-    return 0;
+    return 1;
   }
   const auto catalog = reader.ReadCatalog();
-  if (!PRISM_CHECK_EQ(catalog.size(), size_t(3))) return 0;
+  if (!PRISM_CHECK_EQ(catalog.size(), size_t(3))) return 1;
 
   std::vector<uint32_t> indices;
   std::vector<uint64_t> sizes;
@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
   }
 
   prism::win::sweep::WicThumbDecoder wic;
-  if (!PRISM_CHECK(wic.Initialize())) return 0;
+  if (!PRISM_CHECK(wic.Initialize())) return 1;
   SpyDecoder spy(wic);
   prism::gallery::ThumbnailLru lru{32 << 20};
 

@@ -29,6 +29,10 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   target_compile_options(win_engine_bridge_test PRIVATE /WX-)
   target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)
+  # The stdout marker is part of the verdict: a silent SKIP can never count
+  # as a pass (L2 negative control for false greens).
+  set_tests_properties(win.engine_bridge PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL ENGINE-BRIDGE CHECKS PASSED")
 
   # Headless design snapshot: renders the gallery scene to PNG artifacts so
   # the Liquid Glass design can be reviewed from the CI run itself.
@@ -38,6 +42,8 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                                                      windowscodecs.lib)
   target_compile_options(win_solid_sweep_test PRIVATE /WX-)
   add_test(NAME "win.solid_sweep" COMMAND win_solid_sweep_test)
+  set_tests_properties(win.solid_sweep PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL SOLID-SWEEP CHECKS PASSED")
 
   add_executable(gallery_snapshot win/gallery_snapshot.cpp)
   target_link_libraries(gallery_snapshot PRIVATE prism_win_bridge user32.lib gdi32.lib

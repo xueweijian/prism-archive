@@ -37,7 +37,7 @@ class CompanionWindow {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = instance;
     wc.lpszClassName = kClassName;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hCursor = LoadCursorW(nullptr, static_cast<LPCWSTR>(IDC_ARROW));
     // No activation on click: the flyout must never steal focus from Explorer.
     wc.style = CS_HREDRAW | CS_VREDRAW;
     return RegisterClassExW(&wc) != 0;

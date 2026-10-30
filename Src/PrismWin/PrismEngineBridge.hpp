@@ -541,7 +541,12 @@ class ArchiveReader {
       const HRESULT result = candidate->Open(stream_, nullptr, callback);
       callback->Release();
       std::string tag = std::string(name) + ".Open";
-      if (SUCCEEDED(hr(tag.c_str(), result))) {
+      // 7-Zip convention: S_OK = mine, S_FALSE = "not my format, try next".
+      // SUCCEEDED(S_FALSE) is TRUE -- treating it as success silently bound
+      // the Zip handler to .7z files and yielded empty catalogs. Only S_OK
+      // accepts a handler.
+      hr(tag.c_str(), result);
+      if (result == S_OK) {
         archive_ = candidate;
         openTrace_ += "OK ";
         DiscoverPropertyIds();

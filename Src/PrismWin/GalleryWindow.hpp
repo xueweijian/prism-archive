@@ -13,6 +13,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX  // windows.h must not own min/max: PrismCore uses std::min/std::max
+#endif
 #include <windows.h>
 
 #include <d2d1.h>

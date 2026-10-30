@@ -39,7 +39,7 @@ class ViewportWindow {
   }
 
   void SetScroll(double offsetPixels) {
-    scroll_ = std::clamp(offsetPixels, 0.0, MaxScroll());
+    scroll_ = (std::clamp)(offsetPixels, 0.0, MaxScroll());
   }
 
   double Scroll() const { return scroll_; }
@@ -52,7 +52,7 @@ class ViewportWindow {
     return static_cast<double>(Rows()) * layout_.cellHeight;
   }
 
-  double MaxScroll() const { return std::max(0.0, ContentHeight() - height_); }
+  double MaxScroll() const { return (std::max)(0.0, ContentHeight() - height_); }
 
   // Inclusive visible index range, overscan rows added on both sides.
   struct Range {
@@ -63,13 +63,13 @@ class ViewportWindow {
 
   Range Visible(int overscanRows) const {
     if (itemCount_ <= 0 || layout_.columns <= 0 || layout_.cellHeight <= 0.0) return {};
-    const int firstRow = std::max(0, static_cast<int>(scroll_ / layout_.cellHeight) - overscanRows);
+    const int firstRow = (std::max)(0, static_cast<int>(scroll_ / layout_.cellHeight) - overscanRows);
     const int lastVisibleRow =
         static_cast<int>((scroll_ + height_ - 1.0) / layout_.cellHeight);
-    const int lastRow = std::min(Rows() - 1, lastVisibleRow + overscanRows);
+    const int lastRow = (std::min)(Rows() - 1, lastVisibleRow + overscanRows);
     if (lastRow < firstRow) return {};
     const int first = firstRow * layout_.columns;
-    const int last = std::min(itemCount_ - 1, (lastRow + 1) * layout_.columns - 1);
+    const int last = (std::min)(itemCount_ - 1, (lastRow + 1) * layout_.columns - 1);
     if (last < first) return {};
     return {first, last};
   }

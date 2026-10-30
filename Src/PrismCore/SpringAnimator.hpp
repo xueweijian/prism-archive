@@ -49,7 +49,7 @@ class SpringAnimator {
 
   void Tick(double nowSeconds) {
     if (nowSeconds <= lastNow_ || settled_) {
-      lastNow_ = std::max(lastNow_, nowSeconds);
+      lastNow_ = (std::max)(lastNow_, nowSeconds);
       return;
     }
     const double total = (nowSeconds - lastNow_) + carry_;

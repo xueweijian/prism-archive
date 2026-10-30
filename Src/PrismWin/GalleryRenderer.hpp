@@ -219,7 +219,7 @@ class GalleryRenderer {
                                                 top + (areaH + drawH) / 2.0f);
             target->FillRoundedRectangle(photo, tile_.Get());
             target->DrawBitmap(it->second.Get(), fit, 1.0f,
-                               D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
           }
         } else if (item.size > prism::QuickLookPlanner::kDefaultByteLimit) {
           // Over-budget solid block: elegant "tap to stream" badge.
@@ -344,14 +344,14 @@ class GalleryRenderer {
         const D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
             D2D1::RectF(28.0f, top + 9.0f, 60.0f, top + 27.0f), 5.0f, 5.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
-        DrawLabel(target, body_.Get(), name, D2D1::RectF(70.0f, top + 5.0f,
+        DrawLabel(target, caption_.Get(), name, D2D1::RectF(70.0f, top + 5.0f,
                       cols.sizeX(size.width) - 80.0f, bottom - 4.0f), textPrimary_.Get());
         DrawTrailingLabel(target, L"--", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
                           top + 6.0f, cols.sizeW - 18, textSecondary_.Get());
         DrawTrailingLabel(target, L"--", size.width - cols.packedW - cols.ratioW + 6,
                           top + 6.0f, cols.packedW - 18, textSecondary_.Get());
       } else {
-        DrawLabel(target, body_.Get(), name, D2D1::RectF(44.0f, top + 5.0f,
+        DrawLabel(target, caption_.Get(), name, D2D1::RectF(44.0f, top + 5.0f,
                       cols.sizeX(size.width) - 52.0f, bottom - 4.0f), textPrimary_.Get());
         const std::wstring sizeText = Utf8(prism::list::FormatBytes(row.size));
         const std::wstring packedText = Utf8(prism::list::FormatBytes(row.packedSize));
@@ -387,10 +387,10 @@ class GalleryRenderer {
 
   void DrawTrailingLabel(ID2D1RenderTarget* target, const std::wstring& text, float x,
                          float y, float w, ID2D1Brush* brush) {
-    if (!body_ || text.empty()) return;
-    body_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-    DrawLabel(target, body_.Get(), text, D2D1::RectF(x, y, x + w, y + 24.0f), brush);
-    body_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    if (!caption_ || text.empty()) return;
+    caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawLabel(target, caption_.Get(), text, D2D1::RectF(x, y, x + w, y + 24.0f), brush);
+    caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
   }
 
   void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,

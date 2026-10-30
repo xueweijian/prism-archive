@@ -261,18 +261,18 @@ int main(int argc, char** argv) {
     // Scene 4: the main-window file list mode, straight from the swept
     // catalog plus a couple of synthesized rows for folder/crypto coverage.
     std::vector<prism::list::SortItem> rows;
-    rows.push_back({L"01_Brand_Guidelines", 0, 0, true, false, prism::PreviewKind::Directory});
-    rows.push_back({L"02_UI_Kit_iOS26", 0, 0, true, false, prism::PreviewKind::Directory});
+    rows.push_back({"01_Brand_Guidelines", 0, 0, true, false, prism::PreviewKind::Directory});
+    rows.push_back({"02_UI_Kit_iOS26", 0, 0, true, false, prism::PreviewKind::Directory});
     for (const auto& item : real) {
       prism::list::SortItem row;
-      row.name = Utf8(item.path);
+      row.name = item.path;
       row.size = item.size;
       row.packedSize = item.size * 3 / 4;  // plausible LZMA2 ratios for the visual
       row.kind = prism::QuickLookPlanner::KindByName(item.path);
       rows.push_back(row);
     }
     prism::list::SortItem encrypted;
-    encrypted.name = L"client_w9_encrypted.pdf";
+    encrypted.name = "client_w9_encrypted.pdf";
     encrypted.size = 4'200'000;
     encrypted.packedSize = 1'100'000;
     encrypted.encrypted = true;

@@ -134,7 +134,8 @@ class GlassIslandHost {
   // Draw one island: binds the D2D target and calls the painter with the
   // prepared device context.
   template <typename Paint>
-  bool PaintIsland(size_t islandIndex, const IslandRect& rect, Paint&& paint) {
+  bool PaintIsland(size_t islandIndex, const prism::glass::IslandRect& rect,
+                   Paint&& paint) {
     if (islandIndex >= surfaces_.size()) return false;
     IslandSurface& surface = surfaces_[islandIndex];
     ComPtr<IDCompositionVisual>& visual = visuals_[islandIndex];

@@ -246,7 +246,7 @@ inline SweepResult RunSolidSweep(const ArchiveReader& reader,
                                  const std::vector<uint32_t>& indices,
                                  const std::vector<uint64_t>& sizes,
                                  prism::gallery::SolidSweepSession::IDecoder& decoder,
-                                 prism::gallery::SolidSweepSession::IThumbSink& sink,
+                                 prism::gallery::IThumbSink& sink,
                                  uint64_t decodeLimit = prism::QuickLookPlanner::kDefaultByteLimit,
                                  bool startAbandoned = false) {
   prism::gallery::SolidSweepSession session(indices, sizes, decodeLimit, decoder, sink);

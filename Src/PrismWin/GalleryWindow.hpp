@@ -278,7 +278,6 @@ class GalleryWindow {
   Host host_;
   prism::gallery::GridLayout layout_{};
   prism::gallery::ViewportWindow viewport_{layout_, 0};
-  double scrollTarget_ = 0;
   bool listMode_ = false;  // Ctrl+2: the four-column file list (ch. 3.2)
   prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint cache budget
   SpringAnimator scrollSpring_{kScrollSpring, 0.0};

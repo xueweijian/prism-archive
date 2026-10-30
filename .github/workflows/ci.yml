@@ -105,6 +105,7 @@ jobs:
       # to a commit comment over api.github.com.
       - name: Mirror test output to a commit comment
         if: always() && github.event_name == 'push'
+        continue-on-error: true
         shell: pwsh
         run: |
           $log = Get-Content "$env:RUNNER_TEMP/prism_test.log" -Raw -ErrorAction SilentlyContinue

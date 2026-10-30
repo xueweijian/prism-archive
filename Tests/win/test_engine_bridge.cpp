@@ -201,15 +201,16 @@ PRISM_TEST("catalog scan reads the central directory with zero payload work") {
   PRISM_CHECK_EQ(catalog[2].path, std::string("README.md"));
 
   // PROPID discovery must have found the authoritative ids inside the DLL.
-  std::cout << "    discovered props:";
-  for (const auto& kv : reader.discoveredProperties()) std::cout << ' ' << kv.first;
+  std::cout << "    discovered propids:";
+  for (const uint32_t id : reader.discoveredProperties()) std::cout << ' ' << id;
   std::cout << std::endl;
   if (!PRISM_CHECK(!reader.discoveredProperties().empty())) {
     std::cout << "    prop trace: " << reader.propTrace() << std::endl;
     return;
   }
-  PRISM_CHECK_EQ(reader.PropertyId("Path", 0), uint32_t(3));      // kpidPath
-  PRISM_CHECK_EQ(reader.PropertyId("PackSize", 0), uint32_t(8));  // kpidPackSize
+  // kpidPath = 3, kpidPackSize = 8 must both be exposed by the Zip handler.
+  PRISM_CHECK_EQ(reader.PropertyId("Path", 3), uint32_t(3));
+  PRISM_CHECK_EQ(reader.PropertyId("PackSize", 8), uint32_t(8));
 
   std::filesystem::remove_all(dir);
 }

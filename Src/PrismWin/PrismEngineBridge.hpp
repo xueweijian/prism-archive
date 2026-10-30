@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -627,30 +628,17 @@ class ArchiveReader {
   // Property ids are discovered by name (authoritative, read out of the DLL
   // itself) and only fall back to the hard-coded enum -- guessing PROPIDs is
   // exactly how ABI drift starts.
-  PROPID PropertyId(const std::string& name, PROPID fallback) const {
-    const std::string want = NormalizePropName(name);
-    // 7-Zip reports display names ("Is Folder", "Packed Size", "Modified");
-    // accept the canonical spellings too.
-    static const std::map<std::string, std::string> kAlias = {
-        {"isdir", "isfolder"}, {"packsize", "packedsize"}, {"mtime", "modified"}};
-    std::string alt;
-    const auto aliasIt = kAlias.find(want);
-    if (aliasIt != kAlias.end()) alt = aliasIt->second;
-    for (const auto& kv : propIds_) {
-      const std::string have = NormalizePropName(kv.first);
-      if (have == want || (!alt.empty() && have == alt)) return kv.second;
-    }
+  PROPID PropertyId(const std::string&, PROPID fallback) const {
+    // GetPropertyInfo() reports standard properties with name = NULL and only
+    // fills PROPID/VARTYPE, so discovery is a *set of PROPIDs*, not names.
+    // If discovery ran and the handler lacks `fallback`, report 0 (absent);
+    // otherwise trust the compile-time constant.
+    if (discovered_ && propIdSet_.find(fallback) == propIdSet_.end()) return 0;
     return fallback;
   }
 
-  static std::string NormalizePropName(std::string name) {
-    std::string out;
-    for (const char c : name) {
-      if (c == ' ' || c == '_' || c == '\t') continue;
-      out.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
-    }
-    return out;
-  }
+  // The set of PROPIDs this handler actually exposes.
+  const std::set<uint32_t>& discoveredProperties() const { return propIdSet_; }
 
   const std::map<std::string, PROPID>& discoveredProperties() const { return propIds_; }
 
@@ -714,9 +702,10 @@ class ArchiveReader {
       PROPID propId = 0;
       VARTYPE vt = VT_EMPTY;
       const HRESULT hr = archive_->GetPropertyInfo(i, &name, &propId, &vt);
-      if (SUCCEEDED(hr) && name) {
-        propIds_[WideToUtf8(name)] = propId;
-        SysFreeString(name);
+      if (SUCCEEDED(hr)) {
+        propIdSet_.insert(static_cast<uint32_t>(propId));
+        discovered_ = true;
+        if (name) SysFreeString(name);
       } else {
         std::snprintf(buf, sizeof(buf), "[%u] hr=0x%08lX ", static_cast<unsigned>(i),
                       static_cast<unsigned long>(hr));
@@ -782,7 +771,8 @@ class ArchiveReader {
   InFileStream* stream_ = nullptr;
   abi::IInArchive* archive_ = nullptr;
   std::string openTrace_;
-  std::map<std::string, PROPID> propIds_;
+  std::set<uint32_t> propIdSet_;
+  bool discovered_ = false;
   std::string propTrace_;
 };
 

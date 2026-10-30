@@ -229,13 +229,15 @@ class PrismRootCommand final
     return S_OK;
   }
 
-  IFACEMETHODIMP EnumSubCommands(IShellItemArray* selection,
-                                 IEnumExplorerCommand** ppEnum) override {
-    if (!ppEnum) return E_POINTER;
-    const auto selected = paths::FromSelection(selection);
-    if (selected.empty()) return E_FAIL;
+  // IExplorerCommand has no EnumSubCommands: subcommands are reached by
+  // QueryInterface(IID_IEnumExplorerCommand) on the root command.
+  IFACEMETHODIMP QueryInterfaceEnum(IShellItemArray* selection,
+                                    IEnumExplorerCommand** ppEnum) {
     ComPtr<SubCommandEnumerator> enumerator;
-    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, selected))) return E_FAIL;
+    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator,
+                                                      paths::FromSelection(selection)))) {
+      return E_FAIL;
+    }
     return enumerator->QueryInterface(IID_PPV_ARGS(ppEnum));
   }
 };

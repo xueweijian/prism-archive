@@ -38,6 +38,8 @@ HLSL 编译）交给 windows-latest 真机验证。
 
 架构决策记录与外部审阅勘误（**改代码前先读**）：[docs/ADR.md](docs/ADR.md)
 总进度与作战计划（进度唯一权威口径）：[docs/PROGRESS.md](docs/PROGRESS.md)
+契约台账（跨边界改动前必读）：[docs/CONTRACTS.md](docs/CONTRACTS.md)
+AI 研发方法论（契约先行+分层验证）：[docs/METHODOLOGY.md](docs/METHODOLOGY.md)
 
 ## 已落地模块
 

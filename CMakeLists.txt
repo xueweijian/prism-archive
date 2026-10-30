@@ -21,17 +21,20 @@ option(PRISM_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 add_library(prism_core INTERFACE)
 target_include_directories(prism_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/Src/PrismCore)
 
+# Warning policy is global, not on the INTERFACE target: consumers of
+# prism_core (shell ext, integration test) compile against Windows SDK headers
+# that are not /W4-clean, and escalating *their* warnings would be noise.
 if(MSVC)
-  target_compile_options(prism_core INTERFACE /W4 /permissive- /utf-8)
+  add_compile_options(/W3 /permissive- /utf-8 /D_CRT_SECURE_NO_WARNINGS)
 else()
-  target_compile_options(prism_core INTERFACE -Wall -Wextra -Wpedantic)
+  add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
 if(PRISM_WARNINGS_AS_ERRORS)
   if(MSVC)
-    target_compile_options(prism_core INTERFACE /WX)
+    add_compile_options(/WX)
   else()
-    target_compile_options(prism_core INTERFACE -Werror)
+    add_compile_options(-Werror)
   endif()
 endif()
 

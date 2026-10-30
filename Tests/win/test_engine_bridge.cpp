@@ -133,7 +133,11 @@ std::wstring MakeTempDir() {
 }
 
 std::wstring Locate7zDll() {
-  if (const wchar_t* fromEnv = _wgetenv(L"PRISM_7Z_DLL")) {
+  // GetEnvironmentVariableW instead of _wgetenv: the latter is C4996-deprecated
+  // and MSVC /WX turns that into an error.
+  wchar_t envValue[MAX_PATH * 2]{};
+  if (GetEnvironmentVariableW(L"PRISM_7Z_DLL", envValue, ARRAYSIZE(envValue)) > 0) {
+    const wchar_t* fromEnv = envValue;
     if (std::filesystem::exists(fromEnv)) return fromEnv;
   }
   for (const wchar_t* candidate : {L"C:\\Program Files\\7-Zip\\7z.dll",

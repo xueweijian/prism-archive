@@ -270,5 +270,14 @@ STDAPI DllCanUnloadNow() {
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+  switch (reason) {
+    case DLL_PROCESS_ATTACH:
+    case DLL_PROCESS_DETACH:
+    case DLL_THREAD_ATTACH:
+    case DLL_THREAD_DETACH:
+      break;
+    default:
+      break;
+  }
   return TRUE;
 }

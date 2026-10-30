@@ -16,7 +16,8 @@ set(PRISM_CORE_TESTS
     test_list_layout.cpp
     test_glass_island.cpp
     test_drag_drop.cpp
-    test_windows_name.cpp)
+    test_windows_name.cpp
+    bench_sweep.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)
@@ -66,6 +67,18 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "win.solid_sweep" COMMAND win_solid_sweep_test)
   set_tests_properties(win.solid_sweep PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL SOLID-SWEEP CHECKS PASSED")
+
+  # Performance benchmark (blueprint ch. 7.2): real 7z.dll, real solid archive,
+  # one sweep pass vs per-item extraction. Missing 7z.exe is a FAIL, not a
+  # skip -- the BENCH JSON line in stdout feeds the CI step summary.
+  add_executable(win_bench_solid win/bench_solid.cpp)
+  target_link_libraries(win_bench_solid PRIVATE prism_core prism_win_bridge
+                                                user32.lib gdi32.lib ole32.lib
+                                                windowscodecs.lib psapi.lib)
+  target_compile_options(win_bench_solid PRIVATE /WX-)
+  add_test(NAME "win.bench_solid" COMMAND win_bench_solid)
+  set_tests_properties(win.bench_solid PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL BENCH CHECKS PASSED")
 
   add_executable(gallery_snapshot win/gallery_snapshot.cpp)
   target_link_libraries(gallery_snapshot PRIVATE prism_win_bridge user32.lib gdi32.lib

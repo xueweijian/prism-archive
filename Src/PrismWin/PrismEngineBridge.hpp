@@ -115,7 +115,7 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
       if (GetFileSizeEx(handle_, &size)) size_ = static_cast<uint64_t>(size.QuadPart);
     }
   }
-  ~InFileStream() override {
+  ~InFileStream() {
     if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
   }
 
@@ -613,7 +613,7 @@ class ArchiveReader {
   class MemoryExtractCallback final : public abi::IArchiveExtractCallback {
    public:
     explicit MemoryExtractCallback(MemoryOutStream* sink) : sink_(sink) { sink_->AddRef(); }
-    ~MemoryExtractCallback() override {
+    ~MemoryExtractCallback() {
       if (sink_) sink_->Release();
     }
     STDMETHODIMP QueryInterface(REFIID iid, void** out) override {

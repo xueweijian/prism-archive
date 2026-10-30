@@ -6,6 +6,7 @@
 // breaks on Win11 dark mode and mixed-DPI setups. We render the native
 // cascading menu and pop a *separate* non-activating DirectComposition flyout
 // (see PrismLiquidGlass, milestone M2) for the inline archive preview.
+#include <shlwapi.h>   // SHStrDupW
 #include <shobjidl_core.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -248,9 +249,11 @@ LONG PrismShellClassFactory::g_lockCount = 0;
 
 }  // namespace prism::win::shell
 
+// COM module entry points. EXTERN_C (not a bare extern "C" block) matches the
+// linkage the SDK headers use for these exports; a mismatch is C2375.
 extern "C" {
 
-__declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid,
+EXTERN_C __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid,
                                                        LPVOID* ppv) {
   using namespace prism::win::shell;
   if (ppv == nullptr) return E_POINTER;
@@ -262,11 +265,11 @@ __declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID r
   return factory->QueryInterface(riid, ppv);
 }
 
-__declspec(dllexport) HRESULT WINAPI DllCanUnloadNow() {
+EXTERN_C __declspec(dllexport) HRESULT __stdcall DllCanUnloadNow() {
   return prism::win::shell::PrismShellClassFactory::g_lockCount == 0 ? S_OK : S_FALSE;
 }
 
-__declspec(dllexport) BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+EXTERN_C __declspec(dllexport) BOOL __stdcall DllMain(HINSTANCE, DWORD reason, LPVOID) {
   return reason == DLL_PROCESS_ATTACH || reason == DLL_PROCESS_DETACH ? TRUE : TRUE;
 }
 

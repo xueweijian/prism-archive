@@ -65,6 +65,14 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
+      - name: Probe SDK declaration of the COM entry points
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Filter *.h -Recurse -ErrorAction SilentlyContinue |
+            Select-String -Pattern "DllGetClassObject|DllCanUnloadNow" -List |
+            Select-Object -First 6 | ForEach-Object { "$($_.Filename): $($_.Line)" }
+
       - name: Build
         run: cmake --build build --parallel
 

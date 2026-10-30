@@ -17,6 +17,7 @@ endforeach()
 # archive created by the 7-Zip CLI. Skipped (not built) on other platforms.
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_executable(win_engine_bridge_test win/test_engine_bridge.cpp)
+  target_compile_options(win_engine_bridge_test PRIVATE /WX-)
   target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)
 endif()

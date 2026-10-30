@@ -15,3 +15,13 @@ if(MSVC)
   set_target_properties(PrismShellExt PROPERTIES
     LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/PrismShellExt.def")
 endif()
+
+# Win10 classic IContextMenu layer (separate DLL: its own CLSID + exports).
+add_library(PrismShellExtClassic SHARED PrismClassicContextMenu.cpp)
+target_link_libraries(PrismShellExtClassic PRIVATE prism_core shlwapi.lib)
+target_compile_options(PrismShellExtClassic PRIVATE /WX-)
+set_target_properties(PrismShellExtClassic PROPERTIES OUTPUT_NAME "PrismShellExtClassic")
+if(MSVC)
+  set_target_properties(PrismShellExtClassic PROPERTIES
+    LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/PrismClassic.def")
+endif()

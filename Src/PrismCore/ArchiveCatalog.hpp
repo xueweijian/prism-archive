@@ -59,6 +59,13 @@ class ArchiveCatalog {
 
   // All item indices sharing a solid block (7z/RAR). Used by the adaptive
   // solid-block sliding-window thumbnail cache (blueprint ch. 4.3).
+  const ArchiveItem* FindByIndex(uint32_t index) const {
+    for (const auto& item : items_) {
+      if (item.index == index) return &item;
+    }
+    return nullptr;
+  }
+
   std::vector<uint32_t> IndicesOfBlock(uint32_t block) const {
     std::vector<uint32_t> out;
     for (const auto& item : items_) {

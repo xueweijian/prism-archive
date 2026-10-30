@@ -8,7 +8,9 @@
 
 #include "ArchiveCatalog.hpp"
 #include "CharsetRepair.hpp"
+#include "ContextMenuModel.hpp"
 #include "PasswordVault.hpp"
+#include "Preview.hpp"
 #include "PathSafety.hpp"
 #include "SecurityGuard.hpp"
 #include "SmartExtractor.hpp"

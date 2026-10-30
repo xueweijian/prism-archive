@@ -1,0 +1,5 @@
+LIBRARY PrismShellExtClassic
+EXPORTS
+    DllGetClassObject
+    DllCanUnloadNow
+    DllMain

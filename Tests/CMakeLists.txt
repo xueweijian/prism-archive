@@ -4,7 +4,10 @@ set(PRISM_CORE_TESTS
     test_smart_extractor.cpp
     test_charset_repair.cpp
     test_virtual_tree.cpp
-    test_security_guard.cpp)
+    test_security_guard.cpp
+    test_collision_resolver.cpp
+    test_preview.cpp
+    test_context_menu.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)
@@ -20,4 +23,13 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   target_compile_options(win_engine_bridge_test PRIVATE /WX-)
   target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)
+endif()
+
+# The MSIX sparse-package manifest is install-time-critical: parse it on every
+# push (Linux lane) so a malformed manifest can never reach a user machine.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+  add_test(NAME manifest.check
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_manifest.py
+                   ${CMAKE_CURRENT_SOURCE_DIR}/../Assets/Package/AppxManifest.xml)
 endif()

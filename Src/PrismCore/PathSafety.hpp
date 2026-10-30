@@ -4,6 +4,8 @@
 #pragma once
 
 #include <cctype>
+#include <functional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -173,5 +175,94 @@ inline bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
   }
   return true;
 }
+
+}  // namespace prism
+
+namespace prism {
+
+
+// Lowercase ASCII only -- UTF-8 bytes pass through untouched.
+inline std::string ToLower(std::string s) {
+  for (char& c : s) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return s;
+}
+
+// ".ext" (with dot, lowercased) or "" when the last segment has no extension.
+inline std::string ExtensionOf(std::string_view path) {
+  const std::string name = std::string(FileNameOf(NormalizeArchivePath(path)));
+  const size_t dot = name.find_last_of('.');
+  if (dot == std::string::npos || dot == 0) return "";
+  return ToLower(name.substr(dot));
+}
+
+// ---------------------------------------------------------------------------
+// Extraction-time collision policy (blueprint ch. 4.2 / 7.1)
+//
+// Never overwrite a user file silently; keep names unique even for duplicates
+// *inside* one archive (the plan set is checked before the disk); merge
+// directory collisions; bound the "name (37).txt" chain and fail loudly.
+// ---------------------------------------------------------------------------
+struct CollisionPolicy {
+  bool rename = true;
+  bool caseInsensitive = true;  // for the *plan* set; the disk decides its own
+  int maxAttempts = 32;         // per-entry suffix ceiling: (2)..(maxAttempts+1)
+};
+
+class CollisionResolver {
+ public:
+  using ExistsFn = std::function<bool(const std::string&)>;
+  CollisionResolver(ExistsFn exists, CollisionPolicy policy = {})
+      : exists_(std::move(exists)), policy_(policy) {}
+
+  std::string Resolve(const std::string& finalPath, bool isDirectory) {
+    error_ = false;
+    if (isDirectory) return finalPath;  // directories merge, never rename
+    if (!Taken(finalPath)) {
+      Reserve(finalPath);
+      return finalPath;
+    }
+    const std::string stem = StemOf(finalPath);
+    const std::string ext = ExtensionOf(finalPath);  // ".ext" form, lowercased
+    for (int n = 2; n <= policy_.maxAttempts + 1; ++n) {
+      std::string candidate = stem + " (" + std::to_string(n) + ")" + ext;
+      if (Taken(candidate)) continue;
+      Reserve(candidate);
+      return candidate;
+    }
+    error_ = true;
+    return "";
+  }
+
+  bool error() const { return error_; }
+
+ private:
+  std::string Fold(const std::string& p) const {
+    if (!policy_.caseInsensitive) return p;
+    std::string out = p;
+    for (char& c : out) {
+      if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
+  }
+  bool Taken(const std::string& p) const {
+    if (planned_.count(Fold(p)) != 0) return true;
+    return exists_(p);
+  }
+  void Reserve(const std::string& p) { planned_.insert(Fold(p)); }
+
+  static std::string StemOf(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const size_t dot = name.find_last_of('.');
+    if (dot == std::string::npos || dot == 0) return path;
+    return path.substr(0, path.size() - (name.size() - dot));
+  }
+  ExistsFn exists_;
+  CollisionPolicy policy_;
+  std::set<std::string> planned_;
+  bool error_ = false;
+};
 
 }  // namespace prism

@@ -182,10 +182,19 @@ float interleavedGradientNoise(vec2 screenPos) {
     return fract(magic.z * fract(dot(screenPos, magic.xy)));
 }
 
+// Interior sampling (existing logic): Kawase-blurred Pass B texture, mixed back
+// toward the sharp Pass A scene as uBlurMix falls, so blur=0 stays fully sharp.
 vec3 opticalSample(vec2 uv) {
     vec3 sharp = texture(uScene, clamp(uv, 0.0, 1.0)).rgb;
     vec3 soft = texture(uBlurred, clamp(uv, 0.0, 1.0)).rgb;
     return mix(sharp, soft, uBlurMix);
+}
+
+// Pipeline fix: the refraction lens band must read the SHARP Pass A scene so
+// high-frequency detail is bent by the lens instead of being pre-blurred by
+// Pass B (blur >= 24 px used to erase refraction entirely).
+vec3 sharpSample(vec2 uv) {
+    return texture(uScene, clamp(uv, 0.0, 1.0)).rgb;
 }
 
 void main() {
@@ -215,11 +224,26 @@ void main() {
         // fragPos uses top-left coordinates, whereas OpenGL texture V points upward.
         vec2 refractUV = vec2(refractOffsetPx.x, -refractOffsetPx.y) * texelSize;
 
-        // §6.4 exact R/G/B refraction multipliers: 0.88 / 1.00 / 1.14.
-        float rCh = opticalSample(screenUV + refractUV * 0.88).r;
-        float gCh = opticalSample(screenUV + refractUV * 1.00).g;
-        float bCh = opticalSample(screenUV + refractUV * 1.14).b;
-        vec3 refractedBg = vec3(rCh, gCh, bCh);
+        // Pipeline fix, two-region sampling. bandWeight is 1.0 across the bevel
+        // band [-bevel, 0] and smoothsteps to 0.0 one bevel-width deeper, so the
+        // lens band and the frosted interior blend without a seam.
+        float bandWeight = smoothstep(-uRefractionBevel * 2.0, -uRefractionBevel, dist);
+
+        // Refraction band: SHARP Pass A scene, full §6.4 R/G/B split 0.88/1.00/1.14
+        // — clear, but bent.
+        vec3 bandRGB = vec3(
+            sharpSample(screenUV + refractUV * 0.88).r,
+            sharpSample(screenUV + refractUV * 1.00).g,
+            sharpSample(screenUV + refractUV * 1.14).b);
+
+        // Interior: existing blurred sampling; residual bend damped to 15%.
+        vec2 dampedUV = refractUV * 0.15;
+        vec3 interiorRGB = vec3(
+            opticalSample(screenUV + dampedUV * 0.88).r,
+            opticalSample(screenUV + dampedUV * 1.00).g,
+            opticalSample(screenUV + dampedUV * 1.14).b);
+
+        vec3 refractedBg = mix(interiorRGB, bandRGB, bandWeight);
 
         // §6.4 Layer 3: Rec.709 luma weights and Apple vibrancy matrix.
         float luma = dot(refractedBg, vec3(0.2126, 0.7152, 0.0722));

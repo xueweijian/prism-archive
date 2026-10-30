@@ -159,10 +159,13 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
 class SubCommandEnumerator final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IEnumExplorerCommand> {
  public:
-  HRESULT RuntimeClassInitialize(const std::vector<std::string>& selectedPaths) {
-    if (selectedPaths.empty()) return E_INVALIDARG;
-    archive_ = Utf8ToWide(selectedPaths.front());
-    const auto model = prism::ContextMenuModel::Build(selectedPaths);
+  // Takes the already-decided model (GetState cached it); this class only
+  // renders. Keeping the decision out of the renderer is what lets the Win10
+  // layer and the in-app menu show byte-identical commands.
+  HRESULT RuntimeClassInitialize(const std::vector<prism::MenuCommand>& model,
+                                 const std::wstring& archivePath) {
+    if (model.empty()) return E_INVALIDARG;
+    archive_ = archivePath;
     for (const auto& command : model) {
       ComPtr<SubCommand> cmd;
       if (SUCCEEDED(MakeAndInitialize<SubCommand>(&cmd, command, archive_))) {
@@ -210,6 +213,7 @@ class PrismRootCommand final
 
  private:
   std::vector<prism::MenuCommand> cachedCommands_;
+  std::wstring selectionArchive_;
 
  public:
 
@@ -235,7 +239,11 @@ class PrismRootCommand final
     *pCmdState = ECS_ENABLED;
     const auto selected = paths::FromSelection(selection);
     cachedCommands_ = prism::ContextMenuModel::Build(selected);
-    if (!selected.empty()) NotifyCompanionPreviewFlyout(selected.front());
+    selectionArchive_.clear();
+    if (!selected.empty()) {
+      selectionArchive_ = Utf8ToWide(selected.front());
+      NotifyCompanionPreviewFlyout(selected.front());
+    }
     // An empty model means "nothing here" -- hide the command entirely.
     if (cachedCommands_.empty()) *pCmdState = ECS_HIDDEN;
     return S_OK;
@@ -261,7 +269,11 @@ class PrismRootCommand final
     *ppEnum = nullptr;
     if (cachedCommands_.empty()) return E_NOTIMPL;
     ComPtr<SubCommandEnumerator> enumerator;
-    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, cachedCommands_))) {
+    // The archive path that the model was built for is the first selection.
+    const std::wstring archivePath =
+        selectionArchive_.empty() ? std::wstring() : selectionArchive_;
+    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, cachedCommands_,
+                                                      archivePath))) {
       return E_FAIL;
     }
     return enumerator->QueryInterface(IID_PPV_ARGS(ppEnum));

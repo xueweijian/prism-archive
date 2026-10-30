@@ -29,7 +29,10 @@
 此时 `RepairResult.ambiguous = true`，UI 必须提供编码切换器（蓝图第 7.1 节正是这么要求的）。
 后续接入 `uchardet` / ICU 可消除并列。
 
-## M2 · 双栈右键引擎与内联预览（第 5–8 周，对应 Phase 2）
+## M2 · 双栈右键引擎与内联预览（第 5–8 周，对应 Phase 2）— 进行中
+
+已完成：MSIX sparse manifest（XML 由 CI 校验）、`PrismShellExtClassic.dll`（Win10 IContextMenu，渲染 ContextMenuModel）、ContextMenuModel 跨平台菜单模型。
+待做：SparsePackageRegistrar（PackageManager API）、伴生预览窗（CompanionWindow）、IExplorerCommand 的阴影菜单渲染对齐新模型。
 
 - [x] `IExplorerCommand` + `IEnumExplorerCommand` 级联菜单（编译通过）
 - [ ] MSIX Sparse Package 清单与签名注册（`AppxManifest.xml`）

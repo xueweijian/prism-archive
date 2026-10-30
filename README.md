@@ -34,7 +34,14 @@ tools/glass-preview/  同一套数学的 WebGL2 参考实现，浏览器里可�
 在 Linux 上就有完整回归；而"只有 Windows 能证伪的"（COM vtable 顺序、7z.dll ABI、
 HLSL 编译）交给 windows-latest 真机验证。
 
-## 已落地模块（M0 / M1）
+## 已落地模块
+
+**三 lane CI 全绿**（gcc-release / clang asan+ubsan / windows MSVC）。
+
+- **M0/M1 完成**：PrismCore 决策脑（智能解压五分支、ZipSlip、炸弹熔断、CJK 修复、CoW 虚拟树、密码环）+ 7z.dll 真桥接（Windows 集成测试加载运行器上的真实 `7z.dll`：目录扫描 / 内存解压 / 智能解压落盘 / 套娃剥离 / ZipSlip 拦截 / GBK 修复全过）
+- **M2 进行中**：MSIX Sparse Package manifest（Linux lane 校验 XML 完整性）✓ · Win10 IContextMenu 兼容层 `PrismShellExtClassic.dll` ✓ · 稀疏包注册器待做
+- **TDD 增量**：CollisionResolver（计划集唯一性 + 有界后缀链）、QuickLookPlanner、SolidBlockPrefetcher、ContextMenuModel（一份模型，三处渲染：Win11 IExplorerCommand / Win10 IContextMenu / 应用内菜单）
+- **Liquid Glass**：HLSL 两个 ps_5_0 过 fxc；WebGL2 参照实现修复了"先模糊后折射导致折射不可见"的管线缺陷 —— 折射带采样锐利背景、内部采样模糊背景，blur=24 下边缘弯曲肉眼可见
 
 | 模块 | 文件 | 判据 |
 | :--- | :--- | :--- |

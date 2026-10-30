@@ -138,8 +138,17 @@ class SmartExtractionPlanner {
         plan.strategy = SmartStrategy::FlatDirectly;
         plan.baseTargetDir = outputDir;
         plan.reason = "single root '" + soleRoot + "' with no name collision";
+      } else if (!topDirs.count(soleRoot)) {
+        // Collision on a LOOSE FILE: never rename it into a directory named
+        // after itself ("pack.txt (2)/pack.txt") -- that buries the file in a
+        // folder the user never asked for. Keep the output dir and let the
+        // per-item collision resolver rename the file beside its siblings.
+        plan.strategy = SmartStrategy::FlatDirectly;
+        plan.baseTargetDir = outputDir;
+        plan.reason = "target '" + soleRoot + "' exists -> file renamed in place";
       } else {
-        // Collision: never silently overwrite. Wrap into "<name> (2)".
+        // Collision on a real DIRECTORY: never silently merge/overwrite.
+        // Wrap into "<name> (2)" so the existing folder survives intact.
         plan.strategy = SmartStrategy::StripRedundantNestedRoot;
         plan.stripPrefix = (topDirs.size() == 1) ? (soleRoot + "/") : std::string();
         plan.baseTargetDir = ResolveCollisionFreeDir(outputDir, soleRoot, exists);

@@ -265,4 +265,48 @@ class CollisionResolver {
   bool error_ = false;
 };
 
+// --- Windows filename hygiene (review item 5.5) ----------------------------
+// Windows does not fail loudly on hostile names: it mangles them. Trailing
+// dots/spaces vanish, "CON.txt" opens the console device, "a.txt:stream"
+// creates an invisible alternate data stream. An extractor that writes the
+// archive's names verbatim therefore loses or hides data. Sanitising is
+// lexical and platform-independent, so it lives here and is tested on Linux.
+inline std::string SanitizeWindowsName(std::string_view raw) {
+  static const char* kReserved[] = {"CON", "PRN", "AUX", "NUL",
+                                    "COM1", "COM2", "COM3", "COM4", "COM5",
+                                    "COM6", "COM7", "COM8", "COM9",
+                                    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+                                    "LPT6", "LPT7", "LPT8", "LPT9"};
+  std::string name(raw);
+  // 1. Illegal / dangerous characters. ':' is replaced rather than dropped so
+  //    "a.txt:hidden" cannot become an ADS; control chars likewise.
+  for (char& c : name) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*' ||
+        u < 0x20 || u == 0x7F) {
+      c = '_';
+    }
+  }
+  // 2. Trailing dots and spaces are silently stripped by the filesystem, which
+  //    turns distinct archive entries into collisions after extraction.
+  while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
+  if (name.empty()) return "_";  // never hand back an unusable empty name
+
+  // 3. Reserved device names, with or without an extension ("CON.txt" too).
+  const size_t dot = name.find('.');
+  const std::string base = dot == std::string::npos ? name : name.substr(0, dot);
+  std::string upper;
+  upper.reserve(base.size());
+  for (char c : base) {
+    upper.push_back(static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c));
+  }
+  for (const char* reserved : kReserved) {
+    if (upper == reserved) {
+      name.insert(base.size(), "_");
+      break;
+    }
+  }
+  return name;
+}
+
 }  // namespace prism

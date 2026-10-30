@@ -14,7 +14,8 @@ set(PRISM_CORE_TESTS
     test_sweep.cpp
     test_thumb_store.cpp
     test_list_layout.cpp
-    test_glass_island.cpp)
+    test_glass_island.cpp
+    test_windows_name.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)

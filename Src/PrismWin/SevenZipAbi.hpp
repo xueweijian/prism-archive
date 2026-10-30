@@ -117,9 +117,11 @@ using FnGetHandlerProperty2 = HRESULT(WINAPI*)(UInt32 formatIndex, PROPID propID
                                                PROPVARIANT* value);
 using FnSetLargePageMode = HRESULT(WINAPI*)();
 
-// Blueprint ch. 2.2: kpidPath..kpidEncrypted are stable across every 7-Zip
-// release we target; everything beyond that is discovered by name at runtime
-// through IInArchive::GetPropertyInfo (see ArchiveReader::PropertyIdByName).
+// Blueprint ch. 2.2 / 7-Zip CPP/7zip/PropID.h (authoritative ordinal list --
+// kpidNoProperty = 0 first, so never guess these): the low ordinals are the
+// stable ones every 7-Zip build agrees on, and the ones we actually read are
+// pinned here. Everything is still validated against the handler's own
+// GetPropertyInfo() set at open time, because a handler may expose fewer.
 enum : PROPID {
   kpidPath = 3,
   kpidIsDir = 6,
@@ -127,7 +129,9 @@ enum : PROPID {
   kpidPackSize = 8,
   kpidAttrib = 9,
   kpidMTime = 12,
-  kpidEncrypted = 15
+  kpidEncrypted = 15,
+  kpidMethod = 22,
+  kpidBlock = 27
 };
 
 // AskExtractMode

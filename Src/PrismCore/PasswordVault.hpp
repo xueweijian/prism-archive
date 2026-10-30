@@ -33,7 +33,9 @@ inline std::vector<std::string> ExtractPasswordCandidates(
       "[:：=\\s_\\-\\[\\]{}()（）【】]*"
       // '.' is excluded on purpose: otherwise "素材包_密码123456.7z" captures
       // the file extension as part of the password.
-      "([A-Za-z0-9!@#$%^&*_+\\-=\\[\\]{};:,?~/`｜|]{3,32})",
+      // Brackets are NOT in the class: "[密码:abc123]" must stop at ']' instead
+      // of swallowing the closing bracket as a password character.
+      "([A-Za-z0-9!@#$%^&*_+\\-={};,?~/`｜|]{3,32})",
       std::regex_constants::icase);
 
   std::vector<std::string> out;

@@ -599,7 +599,12 @@ class ArchiveReader {
     const PROPID pidPack = PropertyId("PackSize", abi::kpidPackSize);
     const PROPID pidMTime = PropertyId("MTime", abi::kpidMTime);
     const PROPID pidEnc = PropertyId("Encrypted", abi::kpidEncrypted);
-    const PROPID pidBlock = PropertyId("Block", 0);
+    // kpidBlock (27) is how solid blocks are identified -- the whole
+    // single-pass sweep keys off it. Passing 0 as the fallback made this
+    // ALWAYS return 0, so every item looked like block 0 and block grouping
+    // silently collapsed. Standard properties carry name = NULL in
+    // GetPropertyInfo, so the fallback must be the authoritative ordinal.
+    const PROPID pidBlock = PropertyId("Block", abi::kpidBlock);
 
     items.reserve(count);
     for (abi::UInt32 i = 0; i < count; ++i) {

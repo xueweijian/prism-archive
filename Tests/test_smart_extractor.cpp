@@ -73,6 +73,43 @@ PRISM_TEST("branch B+: A/A nesting doll is peeled exactly one level") {
                  std::string("C:/dl/Photo"));
 }
 
+PRISM_TEST("branch A collision: a loose FILE never becomes a directory name") {
+  // Review item 5.3: when the single root is a file that already exists, the
+  // collision helper was handed the file name and produced
+  // "C:/dl/pack.txt (2)/pack.txt" -- a directory named after the file, with
+  // the file inside it. That is never what the user wants; the file must be
+  // renamed next to its sibling instead.
+  FakeFs fs;
+  fs.existing.insert("C:/dl/pack.txt");
+  const auto catalog = MakeCatalog({{"pack.txt", false}});
+  const auto plan = prism::SmartExtractionPlanner::Build("C:/dl/pack.zip", "C:/dl", catalog,
+                                                         fs.Fn());
+  const std::string target =
+      prism::SmartExtractionPlanner::TransformItemPath(plan, "pack.txt");
+  // The plan lays the file flat in the output dir and does NOT invent a
+  // directory for it; renaming to "pack (2).txt" is the CollisionResolver's
+  // job one layer down (it is the component that touches the filesystem).
+  if (!PRISM_CHECK_EQ(plan.baseTargetDir, std::string("C:/dl"))) return;
+  if (!PRISM_CHECK_EQ(target, std::string("C:/dl/pack.txt"))) return;
+  // ...and the resolver, given that same visible path, does rename it.
+  prism::CollisionPolicy policy;
+  prism::CollisionResolver resolver(
+      [&fs](const std::string& p) { return fs.existing.count(p) > 0; }, policy);
+  if (!PRISM_CHECK_EQ(resolver.Resolve("C:/dl/pack.txt", false),
+                      std::string("C:/dl/pack (2).txt"))) return;
+}
+
+PRISM_TEST("branch B collision: a real DIRECTORY still gets the (2) suffix") {
+  FakeFs fs;
+  fs.existing.insert("C:/dl/Assets");
+  const auto catalog = MakeCatalog({{"Assets/", true}, {"Assets/a.png", false}});
+  const auto plan = prism::SmartExtractionPlanner::Build("C:/dl/pack.zip", "C:/dl", catalog,
+                                                         fs.Fn());
+  PRISM_CHECK_EQ(plan.baseTargetDir, std::string("C:/dl/Assets (2)"));
+  PRISM_CHECK_EQ(prism::SmartExtractionPlanner::TransformItemPath(plan, "Assets/a.png"),
+                 std::string("C:/dl/Assets (2)/a.png"));
+}
+
 PRISM_TEST("branch D: scattered roots are wrapped into an archive-named capsule") {
   FakeFs fs;
   const auto catalog = MakeCatalog({{"src/main.cpp", false}, {"README.md", false}});

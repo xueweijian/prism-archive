@@ -204,10 +204,12 @@ class GalleryRenderer {
             D2D1::RectF(left, top, right, bottom - 30.0f), kRadius, kRadius);
         const prism::gallery::DecodedThumb* thumb =
             scene.thumbs ? scene.thumbs->Lookup(item.index) : nullptr;
+        if (thumb) ++dbgThumbLookupHits;
         if (thumb) {
           SyncThumbBitmap(target, item.index, *thumb, scene.thumbs->Version());
           const auto it = thumbBitmaps_.find(item.index);
           if (it != thumbBitmaps_.end() && it->second) {
+            ++dbgThumbBitmaps;
             const float areaW = right - left;
             const float areaH = bottom - 30.0f - top;
             const float scale = (std::min)(areaW / thumb->width, areaH / thumb->height);
@@ -218,6 +220,7 @@ class GalleryRenderer {
                                                 left + (areaW + drawW) / 2.0f,
                                                 top + (areaH + drawH) / 2.0f);
             target->FillRoundedRectangle(photo, tile_.Get());
+            ++dbgThumbDraws;
             target->DrawBitmap(it->second.Get(), fit, 1.0f,
                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
           }
@@ -517,6 +520,15 @@ class GalleryRenderer {
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
   std::unordered_map<uint32_t, ComPtr<ID2D1Bitmap>> thumbBitmaps_;
   uint64_t thumbVersion_ = 0;
+
+ public:
+  // Debug counters (printed by the snapshot; drop when the pipeline is
+  // proven -- they cost nothing).
+  int dbgThumbLookupHits = 0;
+  int dbgThumbBitmaps = 0;
+  int dbgThumbDraws = 0;
+
+ private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;
 };
 

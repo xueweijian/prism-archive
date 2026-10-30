@@ -131,6 +131,8 @@ int main(int argc, char** argv) {
     }
     target->BeginDraw();
     renderer.Draw(target.Get(), scene);
+    std::printf("  renderer dbg: lookupHits=%d bitmaps=%d draws=%d\n",
+                renderer.dbgThumbLookupHits, renderer.dbgThumbBitmaps, renderer.dbgThumbDraws);
     if (FAILED(target->EndDraw())) {
       std::puts("SKIP: EndDraw");
       return;
@@ -256,6 +258,12 @@ int main(int argc, char** argv) {
     sceneReal.viewport = &viewport2;
     sceneReal.thumbs = &store;
     sceneReal.breadcrumb = L"Design_Assets_v4.7z  |  4 items  |  solid block 1/1  |  REAL sweep";
+    for (const auto& item : real) {
+      std::printf("  catalog[%u] path=%s size=%llu\n", item.index, item.path.c_str(),
+                  static_cast<unsigned long long>(item.size));
+    }
+    std::printf("  store: count=%zu version=%llu\n", store.Count(),
+                static_cast<unsigned long long>(store.Version()));
     renderScene(sceneReal, L"prism_gallery_real.png");
 
     // Scene 4: the main-window file list mode, straight from the swept

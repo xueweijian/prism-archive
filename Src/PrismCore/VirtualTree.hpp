@@ -4,9 +4,16 @@
 // Lets the user create folders, rename and move entries directly inside an
 // archive. All mutations stay in memory until the UI commits one transaction,
 // which is translated into a single IOutArchive::UpdateItems() call where every
-// untouched entry reports newData = 0 / newProps = 1 -- i.e. only the trailing
-// central directory is rewritten, never the payload (a 10 GB archive rename
-// costs milliseconds instead of a full rewrite).
+// untouched entry reports newData = 0 / newProps = 1.
+//
+// HONEST COST MODEL (corrected after external review): newData = 0 does NOT
+// mean "only the central directory is rewritten". 7-Zip's OutArchive copies
+// every untouched entry's *compressed* stream into a brand-new archive file,
+// then replaces the original. So the cost is one full sequential copy of the
+// archive: on NVMe roughly 2-4 GB/s, i.e. a 10 GB rename is a few seconds, not
+// milliseconds. In-place tail patching (rewriting only EOCD / NextHeader) is
+// possible for ZIP and 7z but is a high-risk, format-specific advanced feature
+// that we deliberately keep out of the MVP. Do not advertise instant renames.
 #pragma once
 
 #include <cstdint>

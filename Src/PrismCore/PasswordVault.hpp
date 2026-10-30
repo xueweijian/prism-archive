@@ -158,13 +158,45 @@ class FileVault final : public IPasswordVault {
   std::vector<std::string> entries_;
 };
 
+// How expensive is ONE password guess? This governs how many candidates we are
+// allowed to try before the user is made to wait, and it is format-specific --
+// treating every archive alike is how "try 64 passwords instantly" promises get
+// written into a design doc and then never met.
+//
+//  * ZipCrypto: legacy 12-byte header + a 3-round CRC check -- microseconds per
+//    guess, so sweeping the whole vault list really is instant.
+//  * 7zAES / RAR5: key derivation runs 2^19 = 524,288 SHA-256 rounds by default
+//    (7-Zip NumCyclesPower = 19). Even with SHA-NI that is ~15-40 ms per guess
+//    on one core, so 64 candidates is ~0.5-2.5 s of wall clock even with
+//    perfect parallelism. Only a short, high-prior list is worth trying
+//    silently.
+enum class PasswordKdfClass : uint8_t {
+  ZipCrypto,        // microseconds per guess
+  AesKeyDerivation  // 7zAES / RAR5: hundreds of thousands of rounds
+};
+
+inline PasswordKdfClass KdfClassOf(std::string_view archivePath) {
+  const std::string ext = ExtensionOf(std::string(archivePath));
+  return ext == ".zip" ? PasswordKdfClass::ZipCrypto : PasswordKdfClass::AesKeyDerivation;
+}
+
+// Silent-attempt ceiling: how many guesses may run before the UI must show
+// progress. ZipCrypto can burn through the whole list; AES key derivation gets
+// a short high-prior list only.
+inline size_t SilentAttemptBudget(PasswordKdfClass kdf) {
+  return kdf == PasswordKdfClass::ZipCrypto ? 64 : 12;
+}
+
 // Builds the ordered collision list handed to the concurrent password prober:
 // context-derived guesses first (they are right far more often), then the vault.
+// `maxCandidates = 0` means "use the format's silent budget"; callers wanting a
+// deeper sweep must pass a number explicitly and show progress while it runs.
 inline std::vector<std::string> BuildCandidateList(const IPasswordVault& vault,
                                                    const std::string& archivePath,
                                                    const std::string& archiveComment = {},
                                                    const std::vector<std::string>& siblings = {},
-                                                   size_t maxCandidates = 64) {
+                                                   size_t maxCandidates = 0) {
+  if (maxCandidates == 0) maxCandidates = SilentAttemptBudget(KdfClassOf(archivePath));
   std::vector<std::string> out =
       ExtractPasswordCandidates(archivePath, archiveComment, siblings);
   for (const std::string& p : vault.List()) {

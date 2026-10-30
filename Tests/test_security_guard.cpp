@@ -104,6 +104,28 @@ PRISM_TEST("password sniffing: no false positives on clean names") {
   }
 }
 
+PRISM_TEST("silent attempt budget is format-aware: AES key derivation gets a short list") {
+  // Review item 3a: 7zAES key derivation costs 2^19 SHA-256 rounds per guess
+  // (~15-40 ms), so silently trying 64 passwords is 0.5-2.5 s of stall. Only
+  // ZipCrypto is cheap enough to sweep the whole vault.
+  PRISM_CHECK_EQ(prism::SilentAttemptBudget(prism::PasswordKdfClass::ZipCrypto), size_t(64));
+  PRISM_CHECK_EQ(prism::SilentAttemptBudget(prism::PasswordKdfClass::AesKeyDerivation),
+                 size_t(12));
+  PRISM_CHECK(prism::KdfClassOf("a.zip") == prism::PasswordKdfClass::ZipCrypto);
+  PRISM_CHECK(prism::KdfClassOf("a.7z") == prism::PasswordKdfClass::AesKeyDerivation);
+  PRISM_CHECK(prism::KdfClassOf("a.rar") == prism::PasswordKdfClass::AesKeyDerivation);
+
+  // A vault deeper than the budget must be truncated, not merely reordered.
+  prism::MemoryVault vault;
+  for (int i = 0; i < 40; ++i) vault.Add("pw" + std::to_string(i));
+  const auto aes = prism::BuildCandidateList(vault, "secret.7z");
+  PRISM_CHECK(aes.size() <= 12);
+  const auto zip = prism::BuildCandidateList(vault, "secret.zip");
+  PRISM_CHECK(zip.size() > aes.size());  // ZipCrypto may take the whole list
+  // An explicit number always wins over the format default.
+  PRISM_CHECK_EQ(prism::BuildCandidateList(vault, "secret.7z", {}, {}, 3).size(), size_t(3));
+}
+
 PRISM_TEST("candidate list: context guesses rank above vault entries") {
   prism::MemoryVault vault;
   vault.Add("vault-first");

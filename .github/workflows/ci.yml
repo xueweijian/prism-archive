@@ -100,6 +100,23 @@ jobs:
           ctest --output-on-failure --no-tests=error 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
+      # Headless design review: the gallery renderer paints the real D2D code
+      # path to PNGs; uploaded as artifacts so the design is reviewable
+      # directly from the run.
+      - name: Render design snapshots
+        working-directory: build
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/design"
+          ./Tests/gallery_snapshot.exe "$RUNNER_TEMP/design"
+
+      - name: Upload design snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-snapshots
+          path: ${{ runner.temp }}/design/*.png
+          if-no-files-found: warn
+
       # The sandbox this project is developed from cannot always reach
       # blob.core.windows.net (where job logs live), so mirror the test output
       # to a commit comment over api.github.com.

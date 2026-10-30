@@ -543,6 +543,23 @@ class ArchiveReader {
   const std::string& openTrace() const { return openTrace_; }
   const std::string& propTrace() const { return propTrace_; }
 
+  // Release the archive and the file handle *before* the caller deletes the
+  // temp directory: Windows refuses to unlink a file with an open handle, and
+  // std::filesystem::remove_all would then throw.
+  void Close() {
+    if (archive_) {
+      archive_->Close();
+      archive_->Release();
+      archive_ = nullptr;
+    }
+    if (stream_) {
+      stream_->Release();
+      stream_ = nullptr;
+    }
+    openTrace_.clear();
+    propTrace_.clear();
+  }
+
   bool opened() const { return archive_ != nullptr; }
 
   // Blueprint ch. 2.2: a 50 000-entry directory tree in about a millisecond,

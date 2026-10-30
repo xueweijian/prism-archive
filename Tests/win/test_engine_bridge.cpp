@@ -127,6 +127,7 @@ std::wstring MakeTempDir() {
   wchar_t tmp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, tmp);
   std::wstring dir = std::wstring(tmp) + L"prism_it_" + std::to_wstring(GetCurrentProcessId());
+  reader.Close();
   std::filesystem::remove_all(dir);
   std::filesystem::create_directories(dir);
   return dir;
@@ -212,6 +213,7 @@ PRISM_TEST("catalog scan reads the central directory with zero payload work") {
   PRISM_CHECK_EQ(reader.PropertyId("Path", 3), uint32_t(3));
   PRISM_CHECK_EQ(reader.PropertyId("PackSize", 8), uint32_t(8));
 
+  reader.Close();
   std::filesystem::remove_all(dir);
 }
 
@@ -238,6 +240,7 @@ PRISM_TEST("in-memory extraction feeds the thumbnail pipeline") {
     const std::string text(bytes->begin(), bytes->end());
     PRISM_CHECK_EQ(text, std::string("PNGDATA-1234567890"));
   }
+  reader.Close();
   std::filesystem::remove_all(dir);
 }
 
@@ -274,6 +277,7 @@ PRISM_TEST("smart extraction writes straight into the wrapped capsule folder") {
   const std::wstring capsule = dir + L"\\pack";
   PRISM_CHECK(ReadFileEquals(capsule + L"\\Assets\\logo.txt", "hello prism"));
   PRISM_CHECK(ReadFileEquals(capsule + L"\\README.md", "readme"));
+  reader.Close();
   std::filesystem::remove_all(dir);
 }
 
@@ -304,6 +308,7 @@ PRISM_TEST("nesting-doll archive is flattened to a single folder") {
   // The whole point: Photo/Photo/1.jpg must land as Photo/1.jpg, not Photo/Photo/1.jpg.
   PRISM_CHECK(ReadFileEquals(dir + L"\\Photo\\1.jpg", "JPEGBYTES"));
   PRISM_CHECK(!std::filesystem::exists(dir + L"\\Photo\\Photo"));
+  reader.Close();
   std::filesystem::remove_all(dir);
 }
 
@@ -335,6 +340,7 @@ PRISM_TEST("zip slip payload is blocked by the write guard") {
   }
   PRISM_CHECK(!std::filesystem::exists(dir + L"\\evil.txt"));
   PRISM_CHECK(!std::filesystem::exists(dir + L"\\..\\evil.txt"));
+  reader.Close();
   std::filesystem::remove_all(dir);
 }
 

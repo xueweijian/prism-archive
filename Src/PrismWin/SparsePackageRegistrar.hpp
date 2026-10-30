@@ -1,79 +1,83 @@
 // PrismArchive -- PrismWin
-// MSIX sparse-package registration (blueprint ch. 4.1, milestone M2).
+// Sparse package registration (blueprint ch. 2.3).
 //
-// The Win11 IExplorerCommand context menu needs *package identity*. Instead of
-// an installer writing registry keys, we register a sparse package whose
-// manifest (Assets/Package/AppxManifest.xml) points at the install directory:
-//
-//   PackageManager.AddPackageByUriAsync(
-//       Uri("file:///C:/Program Files/PrismArchive/AppxManifest.xml"),
-//       RegisterOptions: RegisterSharedStorage? no -> AddPackageByAppDataPath? )
-//
-// This is a thin, honest wrapper: every failure path surfaces a winrt hresult
-// the caller can show. No registry keys are touched anywhere.
+// The point of a sparse package is that we get *package identity* (which the
+// Windows 11 modern context menu requires) WITHOUT writing HKCR keys. The
+// manifest declares windows.fileExplorerContextMenus; the shell reads it from
+// the AppX database instead of the registry.
 #pragma once
 
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Management.Deployment.h>
-#include <winrt/base.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
+#include <filesystem>
 #include <string>
 
-#include "PrismEngineBridge.hpp"  // Utf8ToWide
+#include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Management.Deployment.h>
 
 namespace prism::win::sparse {
 
-struct RegisterResult {
+struct DeployResult {
   bool ok = false;
-  std::wstring errorText;  // empty on success
-  bool alreadyRegistered = false;
+  long hresult = 0;
+  std::string message;  // winrt error text, never swallowed
 };
 
-// Registers (or re-registers) the sparse package whose manifest lives beside
-// the exe. `installDir` is the directory containing AppxManifest.xml.
-inline RegisterResult RegisterSparsePackage(const std::wstring& installDir) {
-  RegisterResult result;
-  using namespace winrt::Windows::Management::Deployment;
-  using namespace winrt::Windows::Foundation;
+inline std::wstring WideFromUtf8(const std::string& utf8) {
+  if (utf8.empty()) return {};
+  const int wide = ::MultiByteToWideChar(CP_UTF8, 0, utf8.data(),
+                                         static_cast<int>(utf8.size()), nullptr, 0);
+  std::wstring out(static_cast<size_t>(wide), L'\0');
+  ::MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
+                        out.data(), wide);
+  return out;
+}
 
+// Is the sparse package already deployed for the current user?
+inline bool IsRegistered(const std::wstring& packageName) {
   try {
-    PackageManager manager;
-
-    // A backslashed, terminated directory path -> manifest URI.
-    std::wstring dir = installDir;
-    if (!dir.empty() && dir.back() != L'\\') dir += L'\\';
-    const Uri manifestUri(L"file:///" + dir + L"AppxManifest.xml");
-
-    const auto options = PackageManagerRegisterOptions::None;
-    const auto operation = manager.RegisterPackageByUriAsync(
-        manifestUri,
-        /*options*/ options);
-    const auto reply = operation.get();
-
-    if (reply.IsRegistered()) {
-      result.ok = true;
-    } else {
-      result.errorText = reply.ErrorText().c_str();
-      // 0x80073D06 == ERROR_PACKAGE_ALREADY_EXISTS: re-register over the same
-      // identity is a normal upgrade path, not a failure.
-      result.alreadyRegistered =
-          reply.ExtendedErrorCode() == 0x80073CF0 || !result.errorText.empty();
+    const winrt::Windows::Management::Deployment::PackageManager manager;
+    const auto packages = manager.FindPackagesForUser(L"");  // empty = current user
+    for (const auto& package : packages) {
+      if (package.Id().Name() == packageName) return true;
     }
-  } catch (const winrt::hresult_error& e) {
-    result.errorText = e.message().c_str();
-  } catch (...) {
-    result.errorText = L"unknown registration failure";
+  } catch (const winrt::hresult_error&) {
+    return false;
+  }
+  return false;
+}
+
+// Register (or update) the sparse package from its AppxManifest.xml.
+// AddPackageByUriAsync is the supported path for a package that already
+// carries identity; the older RegisterPackageByFullNameAsync needs a staged
+// package and is not what we ship.
+inline DeployResult Deploy(const std::wstring& manifestPath) {
+  DeployResult result;
+  try {
+    const winrt::Windows::Management::Deployment::PackageManager manager;
+    const winrt::Windows::Foundation::Uri uri{manifestPath};
+    const auto deployment = manager.AddPackageByUriAsync(uri, nullptr).get();
+    result.ok = SUCCEEDED(static_cast<HRESULT>(deployment.ExtendedErrorCode()));
+    result.hresult = static_cast<long>(deployment.ExtendedErrorCode());
+    if (!result.ok) result.message = winrt::to_string(deployment.ErrorText());
+  } catch (const winrt::hresult_error& error) {
+    result.hresult = static_cast<long>(error.code());
+    result.message = winrt::to_string(error.message());
   }
   return result;
 }
 
-// Diagnostics for the settings page: is our identity registered right now?
-inline bool IsRegistered(const std::wstring& packageFamilyName) {
-  using namespace winrt::Windows::Management::Deployment;
+// Remove the deployment again (uninstall path). Never throws.
+inline bool Unregister(const std::wstring& packageFullName) {
   try {
-    PackageManager manager;
-    return manager.FindPackagesForUser(L"", packageFamilyName).First().HasCurrent();
-  } catch (...) {
+    const winrt::Windows::Management::Deployment::PackageManager manager;
+    const auto status = manager.RemovePackageAsync(packageFullName).get();
+    return SUCCEEDED(static_cast<HRESULT>(status.ExtendedErrorCode()));
+  } catch (const winrt::hresult_error&) {
     return false;
   }
 }

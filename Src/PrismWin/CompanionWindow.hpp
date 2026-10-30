@@ -11,6 +11,7 @@
 #pragma once
 
 #include <windows.h>
+#include <windowsx.h>  // IDC_ARROW etc.
 
 #include <string>
 

@@ -2,6 +2,11 @@
 // Windows 11 modern context menu: IExplorerCommand + IEnumExplorerCommand
 // (blueprint ch. 4.1 / ch. 6.3).
 //
+// This file is a VIEW. Every decision -- which verbs exist, their order, their
+// default -- comes from prism::ContextMenuModel and is unit-tested in
+// Tests/test_context_menu.cpp. The Win10 IContextMenu DLL
+// (PrismClassicContextMenu.cpp) renders the same model.
+//
 // Deliberately NOT MFT_OWNERDRAW: Bandizip's ownerdraw menu is the reason it
 // breaks on Win11 dark mode and mixed-DPI setups. We render the native
 // cascading menu and pop a *separate* non-activating DirectComposition flyout
@@ -15,6 +20,9 @@
 #include <string>
 #include <vector>
 
+#include "../PrismCore/ContextMenuModel.hpp"
+#include "PrismEngineBridge.hpp"  // WideToUtf8 / Utf8ToWide
+
 using namespace Microsoft::WRL;
 
 namespace prism::win::shell {
@@ -23,8 +31,8 @@ namespace {
 
 constexpr wchar_t kPreviewWakeEvent[] = L"Local\\PrismLiquidPreviewWakeEvent";
 
-// Blueprint ch. 4.1: the companion Liquid Glass flyout is woken through shared
-// memory + a named event, so explorer.exe never blocks on us.
+// Blueprint ch. 4.1: the companion Liquid Glass flyout is woken through a named
+// event, so explorer.exe never blocks on us.
 void NotifyCompanionPreviewFlyout() noexcept {
   HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, kPreviewWakeEvent);
   if (!event) return;
@@ -37,32 +45,60 @@ void LaunchWorker(const std::wstring& args) noexcept {
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};
   std::wstring cmd = L"PrismArchive.exe " + args;
-  if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
-                     nullptr, &si, &pi)) {
+  if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                     nullptr, nullptr, &si, &pi)) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
   }
 }
 
+// Model verb -> companion CLI. The verb ids live in ContextMenuModel; this is
+// the single place they become command lines.
+std::wstring ArgsForVerb(const std::string& verb, const std::wstring& archive) {
+  const std::wstring quoted = L"\"" + archive + L"\"";
+  if (verb == "smart.extract.here") return L"--smart-extract " + quoted;
+  if (verb == "extract.here") return L"--extract-here " + quoted;
+  if (verb == "extract.to.subfolder") return L"--extract-sub " + quoted;
+  if (verb == "test.integrity") return L"--test-integrity " + quoted;
+  if (verb == "smart.extract.each.to.own.folder") return L"--smart-extract-each " + quoted;
+  if (verb == "compress.to.7z") return L"--compress-7z " + quoted;
+  if (verb == "compress.to.zip") return L"--compress-zip " + quoted;
+  return quoted;  // open.in.prism
+}
+
 }  // namespace
 
-enum class Verb {
-  SmartExtractHere,
-  ExtractHere,
-  ExtractToSubfolder,
-  ExtractToCustomPath,
-  TestIntegrity,
-  OpenInPrism
-};
+namespace paths {
 
+// IShellItemArray -> UTF-8 filesystem paths (PrismCore's contract).
+std::vector<std::string> FromSelection(IShellItemArray* selection) {
+  std::vector<std::string> out;
+  if (!selection) return out;
+  DWORD count = 0;
+  if (FAILED(selection->GetCount(&count))) return out;
+  for (DWORD i = 0; i < count; ++i) {
+    ComPtr<IShellItem> item;
+    if (FAILED(selection->GetItemAt(i, &item))) continue;
+    PWSTR path = nullptr;
+    if (SUCCEEDED(item->GetDisplayName(SIGI_FILESYSPATH, &path))) {
+      out.push_back(WideToUtf8(path));
+      CoTaskMemFree(path);
+    }
+  }
+  return out;
+}
+
+}  // namespace paths
+
+// One cascade entry. The model decides IF it exists; this class only renders
+// and hands the verb to the companion process.
 class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExplorerCommand> {
  public:
-  HRESULT RuntimeClassInitialize(Verb verb, std::wstring title, std::wstring archivePath,
-                                 bool separatorAfter = false) {
-    verb_ = verb;
-    title_ = std::move(title);
-    archive_ = std::move(archivePath);
-    separatorAfter_ = separatorAfter;
+  HRESULT RuntimeClassInitialize(const prism::MenuCommand& command,
+                                 const std::wstring& archivePath) {
+    verb_ = command.verb;
+    title_ = Utf8ToWide(command.title);
+    archive_ = archivePath;
     return S_OK;
   }
 
@@ -78,7 +114,7 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
     return E_NOTIMPL;
   }
   IFACEMETHODIMP GetCanonicalName(GUID* pguidCommandName) override {
-    *pguidCommandName = GUID_NULL;
+    *pguidCommandName = GUID_NULL;  // verb identity is carried by the CLI args
     return S_OK;
   }
   IFACEMETHODIMP GetState(IShellItemArray*, BOOL, EXPCMDSTATE* pCmdState) override {
@@ -86,20 +122,11 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
     return S_OK;
   }
   IFACEMETHODIMP Invoke(IShellItemArray*, IBindCtx*) override {
-    std::wstring args = L"\"" + archive_ + L"\"";
-    switch (verb_) {
-      case Verb::SmartExtractHere: args = L"--smart-extract " + args; break;
-      case Verb::ExtractHere: args = L"--extract-here " + args; break;
-      case Verb::ExtractToSubfolder: args = L"--extract-sub " + args; break;
-      case Verb::ExtractToCustomPath: args = L"--extract-to " + args; break;
-      case Verb::TestIntegrity: args = L"--test-integrity " + args; break;
-      case Verb::OpenInPrism: break;
-    }
-    LaunchWorker(args);
+    LaunchWorker(ArgsForVerb(verb_, archive_));
     return S_OK;
   }
   IFACEMETHODIMP GetFlags(EXPCMDFLAGS* pFlags) override {
-    *pFlags = separatorAfter_ ? (ECF_DEFAULT | ECF_SEPARATORAFTER) : ECF_DEFAULT;
+    *pFlags = ECF_DEFAULT;
     return S_OK;
   }
   IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override {
@@ -108,26 +135,22 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
   }
 
  private:
-  Verb verb_ = Verb::OpenInPrism;
+  std::string verb_;
   std::wstring title_;
   std::wstring archive_;
-  bool separatorAfter_ = false;
 };
 
+// Renders prism::ContextMenuModel::Build(selection) as an Explorer enum.
 class SubCommandEnumerator final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IEnumExplorerCommand> {
  public:
-  HRESULT RuntimeClassInitialize(const std::wstring& archivePath) {
-    const std::pair<Verb, const wchar_t*> defs[] = {
-        {Verb::SmartExtractHere, L"Smart extract here"},
-        {Verb::ExtractHere, L"Extract here"},
-        {Verb::ExtractToSubfolder, L"Extract to \"<archive>\""},
-        {Verb::ExtractToCustomPath, L"Extract to..."},
-        {Verb::TestIntegrity, L"Test archive integrity"}};
-    for (const auto& def : defs) {
+  HRESULT RuntimeClassInitialize(const std::vector<std::string>& selectedPaths) {
+    if (selectedPaths.empty()) return E_INVALIDARG;
+    archive_ = Utf8ToWide(selectedPaths.front());
+    const auto model = prism::ContextMenuModel::Build(selectedPaths);
+    for (const auto& command : model) {
       ComPtr<SubCommand> cmd;
-      if (SUCCEEDED(MakeAndInitialize<SubCommand>(&cmd, def.first, std::wstring(def.second),
-                                                  archivePath))) {
+      if (SUCCEEDED(MakeAndInitialize<SubCommand>(&cmd, command, archive_))) {
         items_.push_back(cmd);
       }
     }
@@ -159,6 +182,7 @@ class SubCommandEnumerator final
 
  private:
   std::vector<ComPtr<SubCommand>> items_;
+  std::wstring archive_;
   size_t pos_ = 0;
 };
 
@@ -167,10 +191,7 @@ class SubCommandEnumerator final
 class PrismRootCommand final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExplorerCommand> {
  public:
-  HRESULT RuntimeClassInitialize(std::wstring archivePath) {
-    archive_ = std::move(archivePath);
-    return S_OK;
-  }
+  HRESULT RuntimeClassInitialize(std::wstring) { return S_OK; }  // selection comes per-query
 
   IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* ppszName) override {
     return SHStrDupW(L"PrismArchive", ppszName);
@@ -192,12 +213,14 @@ class PrismRootCommand final
   // the Liquid Glass inline preview flyout (< 12 ms budget, blueprint ch. 7.2).
   IFACEMETHODIMP GetState(IShellItemArray* selection, BOOL, EXPCMDSTATE* pCmdState) override {
     *pCmdState = ECS_ENABLED;
-    if (selection) NotifyCompanionPreviewFlyout();
+    if (selection && !paths::FromSelection(selection).empty()) NotifyCompanionPreviewFlyout();
     return S_OK;
   }
 
-  IFACEMETHODIMP Invoke(IShellItemArray*, IBindCtx*) override {
-    LaunchWorker(L"\"" + archive_ + L"\"");
+  IFACEMETHODIMP Invoke(IShellItemArray* selection, IBindCtx*) override {
+    const auto selected = paths::FromSelection(selection);
+    if (selected.empty()) return E_INVALIDARG;
+    LaunchWorker(L"\"" + Utf8ToWide(selected.front()) + L"\"");
     return S_OK;
   }
 
@@ -206,15 +229,15 @@ class PrismRootCommand final
     return S_OK;
   }
 
-  IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override {
+  IFACEMETHODIMP EnumSubCommands(IShellItemArray* selection,
+                                 IEnumExplorerCommand** ppEnum) override {
     if (!ppEnum) return E_POINTER;
+    const auto selected = paths::FromSelection(selection);
+    if (selected.empty()) return E_FAIL;
     ComPtr<SubCommandEnumerator> enumerator;
-    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, archive_))) return E_FAIL;
+    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, selected))) return E_FAIL;
     return enumerator->QueryInterface(IID_PPV_ARGS(ppEnum));
   }
-
- private:
-  std::wstring archive_;
 };
 
 // {6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F}

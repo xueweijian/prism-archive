@@ -11,6 +11,7 @@
 #include "ContextMenuModel.hpp"
 #include "PasswordVault.hpp"
 #include "Preview.hpp"
+#include "ProgressHud.hpp"
 #include "PathSafety.hpp"
 #include "SecurityGuard.hpp"
 #include "SmartExtractor.hpp"

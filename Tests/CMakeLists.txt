@@ -7,7 +7,8 @@ set(PRISM_CORE_TESTS
     test_security_guard.cpp
     test_collision_resolver.cpp
     test_preview.cpp
-    test_context_menu.cpp)
+    test_context_menu.cpp
+    test_progress_hud.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)
@@ -19,7 +20,8 @@ endforeach()
 # Windows-only integration test: loads the real 7z.dll and round-trips an
 # archive created by the 7-Zip CLI. Skipped (not built) on other platforms.
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
-  add_executable(win_engine_bridge_test win/test_engine_bridge.cpp)
+  add_executable(win_engine_bridge_test win/test_engine_bridge.cpp win/m2_compile_check.cpp)
+  target_link_libraries(win_engine_bridge_test PRIVATE user32.lib gdi32.lib)
   target_compile_options(win_engine_bridge_test PRIVATE /WX-)
   target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)

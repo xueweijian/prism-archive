@@ -73,9 +73,10 @@ struct IProgress : public IUnknown {
   STDMETHOD(SetCompleted)(const UInt64* completeValue) PURE;
 };
 
-// NOTE: the two-pointer SetTotal/SetCompleted are *additional* vtable slots;
-// they hide (but do not replace) the IProgress ones declared above.
-struct IArchiveOpenCallback : public IProgress {
+// NOTE: per IDecl.h, IArchiveOpenCallback derives **IUnknown directly** (unlike
+// IArchiveExtractCallback which derives IProgress). Its vtable has exactly five
+// slots: QI/AddRef/Release + the two-pointer SetTotal/SetCompleted.
+struct IArchiveOpenCallback : public IUnknown {
   STDMETHOD(SetTotal)(const UInt64* files, const UInt64* bytes) PURE;
   STDMETHOD(SetCompleted)(const UInt64* files, const UInt64* bytes) PURE;
 };

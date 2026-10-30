@@ -189,7 +189,9 @@ PRISM_TEST("catalog scan reads the central directory with zero payload work") {
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::Win32Transcoder transcoder;
   prism::win::ArchiveReader reader(library, &transcoder);
-  if (!PRISM_CHECK(reader.Open(zip))) return;  // never index an empty catalog
+  const bool opened = reader.Open(zip);
+  std::cout << "    open trace: " << reader.openTrace() << std::endl;
+  if (!PRISM_CHECK(opened)) return;  // never index an empty catalog
 
   const auto catalog = reader.ReadCatalog();
   if (!PRISM_CHECK_EQ(catalog.size(), size_t(3))) return;
@@ -216,7 +218,9 @@ PRISM_TEST("in-memory extraction feeds the thumbnail pipeline") {
   prism::win::SevenZipLibrary library;
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::ArchiveReader reader(library);
-  if (!PRISM_CHECK(reader.Open(zip))) return;
+  const bool opened = reader.Open(zip);
+  std::cout << "    open trace: " << reader.openTrace() << std::endl;
+  if (!PRISM_CHECK(opened)) return;
   const auto catalog = reader.ReadCatalog();
   if (!PRISM_CHECK_EQ(catalog.size(), size_t(1))) return;
   const auto bytes = reader.ExtractToMemory(0, 1024 * 1024);
@@ -240,7 +244,7 @@ PRISM_TEST("smart extraction writes straight into the wrapped capsule folder") {
   prism::win::SevenZipLibrary library;
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::ArchiveReader reader(library);
-  PRISM_CHECK(reader.Open(zip));
+  if (!PRISM_CHECK(reader.Open(zip))) { std::cout << "    open trace: " << reader.openTrace() << std::endl; return; }
   const auto catalog = reader.ReadCatalog();
 
   const std::string outDir = prism::win::WideToUtf8(dir);
@@ -276,7 +280,7 @@ PRISM_TEST("nesting-doll archive is flattened to a single folder") {
   prism::win::SevenZipLibrary library;
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::ArchiveReader reader(library);
-  PRISM_CHECK(reader.Open(zip));
+  if (!PRISM_CHECK(reader.Open(zip))) { std::cout << "    open trace: " << reader.openTrace() << std::endl; return; }
   const auto catalog = reader.ReadCatalog();
 
   const std::string outDir = prism::win::WideToUtf8(dir);
@@ -306,7 +310,7 @@ PRISM_TEST("zip slip payload is blocked by the write guard") {
   prism::win::SevenZipLibrary library;
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::ArchiveReader reader(library);
-  PRISM_CHECK(reader.Open(zip));
+  if (!PRISM_CHECK(reader.Open(zip))) { std::cout << "    open trace: " << reader.openTrace() << std::endl; return; }
   const auto catalog = reader.ReadCatalog();
 
   const std::string outDir = prism::win::WideToUtf8(dir) + "/out";

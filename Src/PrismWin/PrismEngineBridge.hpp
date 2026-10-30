@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <string>
@@ -287,6 +288,8 @@ class DiskOutStream final : public abi::ISequentialOutStream {
 // Open callback (also doubles as the password provider)
 // ---------------------------------------------------------------------------
 class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICryptoGetTextPassword {
+  // (IArchiveOpenCallback is IUnknown-based; ICryptoGetTextPassword is queried
+  //  separately when a password is needed.)
  public:
   explicit OpenCallback(std::wstring password = {}) : password_(std::move(password)) {}
 
@@ -323,10 +326,9 @@ class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICrypto
     return r;
   }
 
-  // IProgress
-  STDMETHODIMP SetTotal(abi::UInt64) override { return S_OK; }
-  STDMETHODIMP SetCompleted(const abi::UInt64*) override { return S_OK; }
-  // IArchiveOpenCallback (two-pointer variants: separate vtable slots)
+  // IArchiveOpenCallback only -- five vtable slots in total. The one-pointer
+  // IProgress overloads must NOT be declared here: the real interface does not
+  // derive IProgress (IDecl.h), so they would shift every later slot.
   STDMETHODIMP SetTotal(const abi::UInt64*, const abi::UInt64*) override { return S_OK; }
   STDMETHODIMP SetCompleted(const abi::UInt64*, const abi::UInt64*) override { return S_OK; }
 
@@ -497,23 +499,37 @@ class ArchiveReader {
   }
 
   bool Open(const std::wstring& archivePath, const std::wstring& password = {}) {
+    auto hr = [this](const char* what, HRESULT code) {
+      char buf[80];
+      std::snprintf(buf, sizeof(buf), "%s hr=0x%08lX; ", what,
+                    static_cast<unsigned long>(code));
+      openTrace_ += buf;
+      return code;
+    };
     stream_ = new InFileStream(archivePath);
-    if (!stream_->valid()) return false;
+    if (!stream_->valid()) {
+      openTrace_ = "CreateFileW failed; ";
+      return false;
+    }
 
     // Try candidate handlers in order: no registry, no sniffing table needed --
     // the handler itself rejects anything it cannot parse.
-    for (const GUID* clsid : {&abi::CLSID_CFormat7z, &abi::CLSID_CFormatZip}) {
+    for (const GUID* clsid : {&abi::CLSID_CFormatZip, &abi::CLSID_CFormat7z}) {
       abi::IInArchive* candidate = nullptr;
-      if (FAILED(library_.CreateObject(*clsid, abi::IID_IInArchive,
-                                       reinterpret_cast<void**>(&candidate))) ||
+      const char* name = (clsid == &abi::CLSID_CFormatZip) ? "Zip" : "7z";
+      if (FAILED(hr(name, library_.CreateObject(*clsid, abi::IID_IInArchive,
+                                                reinterpret_cast<void**>(&candidate)))) ||
           !candidate) {
+        openTrace_ += "(no object) ";
         continue;
       }
       auto* callback = new OpenCallback(password);
-      const HRESULT hr = candidate->Open(stream_, nullptr, callback);
+      const HRESULT result = candidate->Open(stream_, nullptr, callback);
       callback->Release();
-      if (SUCCEEDED(hr)) {
+      std::string tag = std::string(name) + ".Open";
+      if (SUCCEEDED(hr(tag.c_str(), result))) {
         archive_ = candidate;
+        openTrace_ += "OK ";
         DiscoverPropertyIds();
         return true;
       }
@@ -521,6 +537,9 @@ class ArchiveReader {
     }
     return false;
   }
+
+  // Diagnostics for the last Open() attempt (printed by the integration test).
+  const std::string& openTrace() const { return openTrace_; }
 
   bool opened() const { return archive_ != nullptr; }
 
@@ -724,6 +743,7 @@ class ArchiveReader {
   ITranscoder* transcoder_ = nullptr;
   InFileStream* stream_ = nullptr;
   abi::IInArchive* archive_ = nullptr;
+  std::string openTrace_;
   std::map<std::string, PROPID> propIds_;
 };
 

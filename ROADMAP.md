@@ -40,13 +40,15 @@
 - [ ] Win10 经典 `IContextMenu` 兼容层
 - [ ] 右键呼出延迟实测 < 12 ms（CI 上跑 benchmark lane，出数字）
 
-## M3 · 主界面与流式画廊（第 9–13 周，对应 Phase 3）
+## M3 · 主界面与流式画廊（第 9–13 周，对应 Phase 3）— 进行中
 
-- [ ] 悬浮胶囊导航岛 / 上下文动作岛 / 三阶段流体进度 HUD
-- [ ] 120fps 虚拟化文件列表（DirectWrite）
-- [ ] 免解压流式缩略图画廊 + 固实块单次扫描缓存（突破 Bandizip 禁区）
-- [ ] 空格键 Quick Look（图片 / 代码 / PDF）
-- [ ] 零拷贝拖拽出包（通道 A 直写 + 通道 B 虚拟流）实测：4 GB 文件零 `%TEMP%` 写入
+已完成（决策层全部 TDD，三 lane 全绿）：
+- [x] 三阶段流体进度 HUD（M2 已交付 `ProgressHud`，TDD 8 例）
+- [x] 画廊决策核心 `Gallery.hpp`：ViewportWindow（钳位/单调虚拟化 + 命中测试）、ThumbnailLru（字节预算真 LRU、超预算响亮拒绝）、固实块扫描规划（≤256MB 单趟扫描、边界含、focus 优先确定性顺序）、QuickLookSession（空格切换/Esc 关闭/跳过不可预览项/超限标记 Streaming）——TDD 12 例
+- [x] 弹簧物理 `SpringAnimator.hpp`：蓝图两档预设（k=420/c=28 ζ≈0.68 灵动回弹；k=280/c=34 ζ≈1.0 无过冲），固定子步辛积分器——同 tick 序列位级一致；settle 吸附让 UI 定时器可休眠；中途换目标保留动量——TDD 6 例
+- [x] `GalleryWindow.hpp`：D2D/DirectWrite 渲染器只消费上述决策（网格瓦片 + 标题先行；环形缓冲缩略图下一增量）；m3_compile_check 拉进 Windows 测试二进制
+
+待做：引擎侧固实块单趟扫描执行器（7z.dll → 环形缓冲 → WIC 解码管线）、主窗口文件列表模式、零拷贝拖拽通道决策、4GB 零 %TEMP% 实测
 
 ## M4 · 安全、性能与发布（第 14–16 周，对应 Phase 4）
 

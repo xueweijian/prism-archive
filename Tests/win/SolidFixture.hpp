@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -43,19 +44,31 @@ inline bool WritePng(const std::wstring& path, UINT width, UINT height, uint8_t 
                                    WICBitmapCacheOnDemand, bitmap.ReleaseAndGetAddressOf()))) {
     return false;
   }
-  // SetPixels WRITES INTO the bitmap (CopyPixels would read the empty
-  // bitmap out -- the classic direction trap; it silently authors an
-  // all-transparent PNG and every downstream "decoded" thumbnail is zero).
+  // Author pixels through IWICBitmapLock: WIC has no SetPixels on
+  // IWICBitmap (CopyPixels reads OUT -- using it here silently authored an
+  // all-transparent PNG, and every "decoded" thumbnail came back zero).
   std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
   for (size_t i = 0; i < pixels.size(); i += 4) {
-    pixels[i] = b;
-    pixels[i + 1] = g;
-    pixels[i + 2] = r;
+    pixels[i] = b;      // B
+    pixels[i + 1] = g;  // G
+    pixels[i + 2] = r;  // R
     pixels[i + 3] = 255;
   }
-  if (FAILED(bitmap->SetPixels(nullptr, width * 4, pixels.data()))) {
+  WICRect lockRect{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
+  ComPtr<IWICBitmapLock> lock;
+  if (FAILED(bitmap->Lock(&lockRect, WICBitmapLockWrite,
+                          lock.ReleaseAndGetAddressOf()))) {
     return false;
   }
+  UINT stride = 0, bufferSize = 0;
+  BYTE* buffer = nullptr;
+  if (FAILED(lock->GetStride(&stride)) || FAILED(lock->GetDataPointer(&bufferSize, &buffer)) ||
+      buffer == nullptr || bufferSize < static_cast<UINT>(pixels.size())) {
+    return false;
+  }
+  std::memcpy(buffer, pixels.data(), pixels.size());
+  // Release the lock before the encoder reads the bitmap.
+  lock.Reset();
   ComPtr<IWICStream> stream;
   if (FAILED(factory->CreateStream(stream.ReleaseAndGetAddressOf()))) return false;
   if (FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE))) return false;

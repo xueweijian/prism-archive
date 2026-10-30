@@ -172,8 +172,10 @@ class GalleryWindow {
     const std::wstring caption = CaptionOf(item.path);
     if (!caption.empty() && captionFormat_) {
       D2D1_RECT_F layout = D2D1::RectF(left + 8.0f, bottom - 28.0f, right - 8.0f, bottom - 4.0f);
-      target_->DrawTextW(caption.c_str(), static_cast<UINT32>(caption.size()), captionFormat_.Get(),
-                         layout, textBrush_.Get());
+      // d2d1.h stows the windows.h DrawText macro around the interface, so the
+      // member is plain DrawText (there is no DrawTextW member on D2D targets).
+      target_->DrawText(caption.c_str(), static_cast<UINT32>(caption.size()), captionFormat_.Get(),
+                        layout, textBrush_.Get());
     }
   }
 
@@ -207,7 +209,9 @@ class GalleryWindow {
                                                     host_.hwnd,
                                                     D2D1::SizeU(static_cast<UINT32>(rc.right),
                                                                 static_cast<UINT32>(rc.bottom))),
-                                                IID_PPV_ARGS(target_.GetAddressOf())))) {
+                                                target_.ReleaseAndGetAddressOf()))) {
+    // note: CreateHwndRenderTarget takes a bare **out -- IID_PPV_ARGS would
+    // expand to two arguments and break the arity.
       return false;
     }
     if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(0x2A3138, 0.92f),

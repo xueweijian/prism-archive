@@ -538,6 +538,11 @@ class ArchiveReader {
         continue;
       }
       auto* callback = new OpenCallback(password);
+      // A failed Open may leave the stream mid-file (the Zip handler reads
+      // the header before rejecting): rewind so the next candidate sees the
+      // real magic bytes, not the leftovers.
+      abi::UInt64 newPos = 0;
+      stream_->Seek(0, /*STREAM_SEEK_SET=*/0, &newPos);
       const HRESULT result = candidate->Open(stream_, nullptr, callback);
       callback->Release();
       std::string tag = std::string(name) + ".Open";

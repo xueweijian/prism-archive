@@ -37,7 +37,9 @@ class CompanionWindow {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = instance;
     wc.lpszClassName = kClassName;
-    wc.hCursor = LoadCursorW(nullptr, static_cast<LPCWSTR>(IDC_ARROW));
+    // IDC_ARROW expands to MAKEINTRESOURCEA when UNICODE is not defined for this
+    // TU; name the wide integer directly so the call stays ASCII/Unicode-proof.
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
     // No activation on click: the flyout must never steal focus from Explorer.
     wc.style = CS_HREDRAW | CS_VREDRAW;
     return RegisterClassExW(&wc) != 0;

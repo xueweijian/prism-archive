@@ -17,6 +17,7 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -32,8 +33,22 @@ namespace {
 constexpr wchar_t kPreviewWakeEvent[] = L"Local\\PrismLiquidPreviewWakeEvent";
 
 // Blueprint ch. 4.1: the companion Liquid Glass flyout is woken through a named
-// event, so explorer.exe never blocks on us.
-void NotifyCompanionPreviewFlyout() noexcept {
+// event, so explorer.exe never blocks on us. The selected path travels in a
+// second named object so the flyout can render before it is visible.
+constexpr wchar_t kPreviewTargetMapping[] = L"Local\PrismLiquidPreviewTarget";
+
+void NotifyCompanionPreviewFlyout(const std::string& path) noexcept {
+  const std::wstring wide = Utf8ToWide(path);
+  const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+  HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                      static_cast<DWORD>(bytes), kPreviewTargetMapping);
+  if (mapping) {
+    if (void* view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, bytes)) {
+      std::memcpy(view, wide.c_str(), bytes);
+      UnmapViewOfFile(view);
+    }
+    CloseHandle(mapping);
+  }
   HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, kPreviewWakeEvent);
   if (!event) return;
   SetEvent(event);
@@ -193,6 +208,11 @@ class PrismRootCommand final
  public:
   HRESULT RuntimeClassInitialize(std::wstring) { return S_OK; }  // selection comes per-query
 
+ private:
+  std::vector<prism::MenuCommand> cachedCommands_;
+
+ public:
+
   IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* ppszName) override {
     return SHStrDupW(L"PrismArchive", ppszName);
   }
@@ -213,7 +233,11 @@ class PrismRootCommand final
   // the Liquid Glass inline preview flyout (< 12 ms budget, blueprint ch. 7.2).
   IFACEMETHODIMP GetState(IShellItemArray* selection, BOOL, EXPCMDSTATE* pCmdState) override {
     *pCmdState = ECS_ENABLED;
-    if (selection && !paths::FromSelection(selection).empty()) NotifyCompanionPreviewFlyout();
+    const auto selected = paths::FromSelection(selection);
+    cachedCommands_ = prism::ContextMenuModel::Build(selected);
+    if (!selected.empty()) NotifyCompanionPreviewFlyout(selected.front());
+    // An empty model means "nothing here" -- hide the command entirely.
+    if (cachedCommands_.empty()) *pCmdState = ECS_HIDDEN;
     return S_OK;
   }
 
@@ -229,13 +253,15 @@ class PrismRootCommand final
     return S_OK;
   }
 
-  // IExplorerCommand has no EnumSubCommands: subcommands are reached by
-  // QueryInterface(IID_IEnumExplorerCommand) on the root command.
-  IFACEMETHODIMP QueryInterfaceEnum(IShellItemArray* selection,
-                                    IEnumExplorerCommand** ppEnum) {
+  // IExplorerCommand::EnumSubCommands takes no selection: Windows passes the
+  // items to GetState() first, so that is where we build and cache the model
+  // for the invocation. EnumSubCommands then renders the cached decision.
+  IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override {
+    if (!ppEnum) return E_POINTER;
+    *ppEnum = nullptr;
+    if (cachedCommands_.empty()) return E_NOTIMPL;
     ComPtr<SubCommandEnumerator> enumerator;
-    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator,
-                                                      paths::FromSelection(selection)))) {
+    if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, cachedCommands_))) {
       return E_FAIL;
     }
     return enumerator->QueryInterface(IID_PPV_ARGS(ppEnum));

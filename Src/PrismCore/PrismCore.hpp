@@ -12,6 +12,8 @@
 #include "PasswordVault.hpp"
 #include "Preview.hpp"
 #include "ProgressHud.hpp"
+#include "SpringAnimator.hpp"
+#include "Gallery.hpp"
 #include "PathSafety.hpp"
 #include "SecurityGuard.hpp"
 #include "SmartExtractor.hpp"

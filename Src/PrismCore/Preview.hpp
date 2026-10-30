@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ostream>
 #include <string_view>
 #include <vector>
 
@@ -15,6 +16,18 @@ namespace prism {
 
 enum class PreviewKind { None, Directory, Image, Text, Pdf, Media };
 
+inline std::ostream& operator<<(std::ostream& os, PreviewKind kind) {
+  switch (kind) {
+    case PreviewKind::None: return os << "None";
+    case PreviewKind::Directory: return os << "Directory";
+    case PreviewKind::Image: return os << "Image";
+    case PreviewKind::Text: return os << "Text";
+    case PreviewKind::Pdf: return os << "Pdf";
+    case PreviewKind::Media: return os << "Media";
+  }
+  return os << "?";
+}
+
 class QuickLookPlanner {
  public:
   static constexpr uint64_t kDefaultByteLimit = 32ull << 20;
@@ -23,8 +36,12 @@ class QuickLookPlanner {
     // ExtensionOf returns ".png" (dot included, already lowercased).
     std::string ext = ExtensionOf(fileName);
     if (!ext.empty()) ext.erase(0, 1);
+    // Blueprint ch. 4.3: the gallery decodes JPEG, PNG, WebP, AVIF, HEIC,
+    // PSD, RAW and SVG via WIC/Direct2D -- Quick Look types must match.
     if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" || ext == "webp" ||
-        ext == "bmp" || ext == "avif" || ext == "heic" || ext == "svg") {
+        ext == "bmp" || ext == "avif" || ext == "heic" || ext == "heif" || ext == "svg" ||
+        ext == "psd" || ext == "tif" || ext == "tiff" || ext == "cr2" || ext == "nef" ||
+        ext == "arw" || ext == "dng") {
       return PreviewKind::Image;
     }
     if (ext == "pdf") return PreviewKind::Pdf;

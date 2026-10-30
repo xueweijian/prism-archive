@@ -144,3 +144,22 @@ jobs:
         shell: pwsh
         run: |
           python tools/hlsl/compile_hlsl.py --strict
+
+      # Performance benchmark (blueprint ch. 7.2): the real solid-sweep vs
+      # per-item numbers, appended to the run summary so every CI visitor sees
+      # digits instead of adjectives. Appended AFTER the existing steps -- the
+      # lane structure above is untouched.
+      - name: Performance benchmark -> step summary
+        working-directory: build
+        shell: bash
+        run: |
+          set -o pipefail
+          ./Tests/win_bench_solid.exe | tee "$RUNNER_TEMP/prism_bench.log"
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Solid sweep benchmark (Windows lane)"
+            echo '```json'
+            grep -E '^BENCH \{' "$RUNNER_TEMP/prism_bench.log" | sed 's/^BENCH //'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status

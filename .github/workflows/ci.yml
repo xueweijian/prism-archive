@@ -43,6 +43,12 @@ jobs:
           ${{ matrix.configure-args }}
       - name: Build
         run: cmake --build build --parallel
+      - name: Header self-containment gate
+        # A header must compile alone AND include what it uses: relying on a
+        # transitive <regex> pull-in for <cstdint> passes locally and fails on
+        # the runner (libstdc++ version difference). This gate is lexical and
+        # deterministic, so it cannot drift.
+        run: sh tools/check_headers.sh
       - name: Test
         working-directory: build
         run: ctest --output-on-failure --no-tests=error

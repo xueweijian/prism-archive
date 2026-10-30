@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>  // uint8_t: the KDF class enum has a fixed underlying type
 #include <fstream>
 #include <map>
 #include <regex>

@@ -8,6 +8,7 @@
 // its final physical path with zero post-extraction MoveFile traffic.
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <set>
 #include <string>

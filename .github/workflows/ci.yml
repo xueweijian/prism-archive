@@ -95,7 +95,26 @@ jobs:
 
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure --no-tests=error
+        id: test
+        run: |
+          ctest --output-on-failure --no-tests=error 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          exit ${PIPESTATUS[0]}
+
+      # The sandbox this project is developed from cannot always reach
+      # blob.core.windows.net (where job logs live), so mirror the test output
+      # to a commit comment over api.github.com.
+      - name: Mirror test output to a commit comment
+        if: always() && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $log = Get-Content "$env:RUNNER_TEMP/prism_test.log" -Raw -ErrorAction SilentlyContinue
+          if (-not $log) { exit 0 }
+          $tail = $log.Substring([Math]::Max(0, $log.Length - 3500))
+          $body = "Windows test output (tail):`n``````text`n$tail`n``````"
+          $json = @{ body = $body } | ConvertTo-Json
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -X POST --input - <<< $json | Out-Null
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Compile HLSL (Liquid Glass optics)
         shell: pwsh

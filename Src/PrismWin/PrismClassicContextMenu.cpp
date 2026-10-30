@@ -91,10 +91,12 @@ class ClassicMenu final
       args += L" \"" + Utf8ToWide(path) + L"\"";
     }
     // Resolve OUR module path (the DLL), not the host's (explorer.exe).
+    // A free function inside this .obj is the address anchor -- member
+    // function pointers do not convert to LPCWSTR.
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&ClassicMenu::InvokeCommand), &self);
+                       reinterpret_cast<LPCWSTR>(&ModuleAnchor), &self);
     wchar_t exe[MAX_PATH * 2]{};
     GetModuleFileNameW(self, exe, ARRAYSIZE(exe));
     std::wstring cmdline = std::wstring(L"\"") + exe + L"\" " + args;
@@ -113,6 +115,12 @@ class ClassicMenu final
 };
 
 STGMEDIUM ClassicMenu::medium_{};
+
+namespace {
+// Address anchor for GetModuleHandleExW(FROM_ADDRESS): member function
+// pointers cannot be reinterpreted as LPCWSTR, free function pointers can.
+void ModuleAnchor() {}
+}  // namespace
 
 // Called by the module entry points below. The static_cast chain is required:
 // ClassicMenu inherits two IUnknown paths, so an implicit conversion to

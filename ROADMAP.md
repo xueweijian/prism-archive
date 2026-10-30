@@ -48,7 +48,10 @@
 - [x] 弹簧物理 `SpringAnimator.hpp`：蓝图两档预设（k=420/c=28 ζ≈0.68 灵动回弹；k=280/c=34 ζ≈1.0 无过冲），固定子步辛积分器——同 tick 序列位级一致；settle 吸附让 UI 定时器可休眠；中途换目标保留动量——TDD 6 例
 - [x] `GalleryWindow.hpp`：D2D/DirectWrite 渲染器只消费上述决策（网格瓦片 + 标题先行；环形缓冲缩略图下一增量）；m3_compile_check 拉进 Windows 测试二进制
 
-待做：引擎侧固实块单趟扫描执行器（7z.dll → 环形缓冲 → WIC 解码管线）、主窗口文件列表模式、零拷贝拖拽通道决策、4GB 零 %TEMP% 实测
+- [x] **引擎侧固实块单趟扫描执行器**（批次 2）：`SolidSweepSession`（PrismCore，TDD 7 例：零拷贝契约 / 超限从尺寸表拒绝 / abandon 只排空不解码 / 解码失败不毒化 / 进度单调）+ `SolidSweeper.hpp`（ScratchStream 恒消费超限丢弃 / WicThumbDecoder 装箱 256 不放大 / 单趟 Extract 回调）+ 真 7z.dll 集成测试（真固实 7z + WIC 夹具 + 几何断言 + abandon 契约）
+- **防假绿机制**：两个 Windows 集成套件的 stdout 成功标记被 ctest `PASS_REGULAR_EXPRESSION` 强制——静默 SKIP 永远不算过
+
+待做：主窗口文件列表模式、缩略图接进 D2D 瓦片、零拷贝拖拽通道决策、4GB 零 %TEMP% 实测
 
 ## M4 · 安全、性能与发布（第 14–16 周，对应 Phase 4）
 

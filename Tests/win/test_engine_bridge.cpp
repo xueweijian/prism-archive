@@ -204,7 +204,10 @@ PRISM_TEST("catalog scan reads the central directory with zero payload work") {
   std::cout << "    discovered props:";
   for (const auto& kv : reader.discoveredProperties()) std::cout << ' ' << kv.first;
   std::cout << std::endl;
-  if (!PRISM_CHECK(!reader.discoveredProperties().empty())) return;
+  if (!PRISM_CHECK(!reader.discoveredProperties().empty())) {
+    std::cout << "    prop trace: " << reader.propTrace() << std::endl;
+    return;
+  }
   PRISM_CHECK_EQ(reader.PropertyId("Path", 0), uint32_t(3));      // kpidPath
   PRISM_CHECK_EQ(reader.PropertyId("PackSize", 0), uint32_t(8));  // kpidPackSize
 

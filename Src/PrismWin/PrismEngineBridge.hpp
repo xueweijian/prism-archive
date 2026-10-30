@@ -697,18 +697,34 @@ class ArchiveReader {
   };
 
   void DiscoverPropertyIds() {
+    char buf[96];
+    if (!archive_) {
+      propTrace_ = "no archive";
+      return;
+    }
     abi::UInt32 count = 0;
-    if (!archive_ || FAILED(archive_->GetNumberOfProperties(&count))) return;
+    const HRESULT hrCount = archive_->GetNumberOfProperties(&count);
+    std::snprintf(buf, sizeof(buf), "GetNumberOfProperties hr=0x%08lX n=%u; ",
+                  static_cast<unsigned long>(hrCount), static_cast<unsigned>(count));
+    propTrace_ = buf;
+    if (FAILED(hrCount)) return;
     for (abi::UInt32 i = 0; i < count; ++i) {
       BSTR name = nullptr;
       PROPID propId = 0;
       VARTYPE vt = VT_EMPTY;
-      if (SUCCEEDED(archive_->GetPropertyInfo(i, &name, &propId, &vt)) && name) {
+      const HRESULT hr = archive_->GetPropertyInfo(i, &name, &propId, &vt);
+      if (SUCCEEDED(hr) && name) {
         propIds_[WideToUtf8(name)] = propId;
         SysFreeString(name);
+      } else {
+        std::snprintf(buf, sizeof(buf), "[%u] hr=0x%08lX ", static_cast<unsigned>(i),
+                      static_cast<unsigned long>(hr));
+        propTrace_ += buf;
       }
     }
   }
+
+  const std::string& propTrace() const { return propTrace_; }
 
   std::string GetString(abi::UInt32 index, PROPID pid) const {
     if (!archive_ || pid == 0) return {};
@@ -767,6 +783,7 @@ class ArchiveReader {
   abi::IInArchive* archive_ = nullptr;
   std::string openTrace_;
   std::map<std::string, PROPID> propIds_;
+  std::string propTrace_;
 };
 
 }  // namespace prism::win

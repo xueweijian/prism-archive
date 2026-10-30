@@ -16,6 +16,7 @@
 //  (e) decoded thumbs go into the LRU (the only cache); scratch bytes never
 //      linger.
 #include "SolidSweep.hpp"
+#include "ThumbStore.hpp"
 #include "mini_test.hpp"
 
 #include <optional>
@@ -25,8 +26,10 @@
 namespace {
 
 using prism::gallery::DecodedThumb;
+using prism::gallery::LruAccountingSink;
 using prism::gallery::SolidSweepSession;
 using prism::gallery::ThumbnailLru;
+using prism::gallery::ThumbStore;
 
 // Records calls; decodes only payloads that "look like" images (start 'P').
 struct FakeDecoder final : SolidSweepSession::IDecoder {
@@ -46,14 +49,15 @@ struct FakeDecoder final : SolidSweepSession::IDecoder {
 
 SolidSweepSession MakeSession(const std::vector<uint32_t>& indices,
                               const std::vector<uint64_t>& sizes, FakeDecoder& decoder,
-                              ThumbnailLru& lru, uint64_t limit = 32ull << 20) {
-  return SolidSweepSession(indices, sizes, limit, decoder, lru);
+                              LruAccountingSink& sink, uint64_t limit = 32ull << 20) {
+  return SolidSweepSession(indices, sizes, limit, decoder, sink);
 }
 
 PRISM_TEST("one pass over three items decodes three thumbnails into the LRU") {
   ThumbnailLru lru{8 << 20};
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
-  auto session = MakeSession({0, 1, 2}, {100, 200, 300}, decoder, lru);
+  auto session = MakeSession({0, 1, 2}, {100, 200, 300}, decoder, sink);
 
   for (uint32_t i : {0u, 1u, 2u}) {
     session.OnItemStart(i);
@@ -70,9 +74,10 @@ PRISM_TEST("one pass over three items decodes three thumbnails into the LRU") {
 
 PRISM_TEST("over-limit items are skipped without decoding, others still harvest") {
   ThumbnailLru lru{8 << 20};
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
   // item 1 is 40 MB against a 32 MB decode limit
-  auto session = MakeSession({0, 1, 2}, {100, 40ull << 20, 300}, decoder, lru);
+  auto session = MakeSession({0, 1, 2}, {100, 40ull << 20, 300}, decoder, sink);
 
   for (uint32_t i : {0u, 1u, 2u}) {
     session.OnItemStart(i);
@@ -89,8 +94,9 @@ PRISM_TEST("over-limit items are skipped without decoding, others still harvest"
 
 PRISM_TEST("abandon drains remaining bytes but decodes nothing further") {
   ThumbnailLru lru{8 << 20};
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
-  auto session = MakeSession({0, 1, 2}, {100, 200, 300}, decoder, lru);
+  auto session = MakeSession({0, 1, 2}, {100, 200, 300}, decoder, sink);
 
   session.OnItemStart(0);
   session.OnItemBytes(2);
@@ -110,8 +116,9 @@ PRISM_TEST("abandon drains remaining bytes but decodes nothing further") {
 
 PRISM_TEST("a failed decode does not poison the pass") {
   ThumbnailLru lru{8 << 20};
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
-  auto session = MakeSession({0, 1}, {100, 100}, decoder, lru);
+  auto session = MakeSession({0, 1}, {100, 100}, decoder, sink);
 
   session.OnItemStart(0);  // 'X' payload -> decoder returns nullopt
   session.OnItemBytes(4);
@@ -127,8 +134,9 @@ PRISM_TEST("a failed decode does not poison the pass") {
 
 PRISM_TEST("empty payloads never reach the decoder") {
   ThumbnailLru lru{8 << 20};
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
-  auto session = MakeSession({0}, {0}, decoder, lru);
+  auto session = MakeSession({0}, {0}, decoder, sink);
   session.OnItemStart(0);
   session.OnItemBytes(0);
   session.OnItemEnd(nullptr, 0);
@@ -138,8 +146,9 @@ PRISM_TEST("empty payloads never reach the decoder") {
 
 PRISM_TEST("fraction is monotonic between zero and one") {
   ThumbnailLru lru{8 << 20};
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
-  auto session = MakeSession({0, 1, 2, 3}, {1, 1, 1, 1}, decoder, lru);
+  auto session = MakeSession({0, 1, 2, 3}, {1, 1, 1, 1}, decoder, sink);
   double previous = 0.0;
   for (uint32_t i : {0u, 1u, 2u, 3u}) {
     session.OnItemStart(i);
@@ -154,6 +163,7 @@ PRISM_TEST("fraction is monotonic between zero and one") {
 
 PRISM_TEST("LRU pressure: a big session evicts old thumbs instead of growing") {
   ThumbnailLru lru{64 * 1024};  // fits ~4 thumbs of 16 KB
+  LruAccountingSink sink{lru};
   FakeDecoder decoder;
   std::vector<uint32_t> indices;
   std::vector<uint64_t> sizes;
@@ -161,7 +171,7 @@ PRISM_TEST("LRU pressure: a big session evicts old thumbs instead of growing") {
     indices.push_back(i);
     sizes.push_back(10);
   }
-  auto session = MakeSession(indices, sizes, decoder, lru);
+  auto session = MakeSession(indices, sizes, decoder, sink);
   for (uint32_t i : indices) {
     session.OnItemStart(i);
     session.OnItemBytes(1);

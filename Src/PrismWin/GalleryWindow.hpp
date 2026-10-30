@@ -67,6 +67,7 @@ class GalleryWindow {
 
   // Cache-policy handle the decode pipeline shares with this window.
   prism::gallery::ThumbnailLru& Thumbnails() { return thumbnails_; }
+  bool ListMode() const { return listMode_; }  // Ctrl+1/2 toggles (ch. 9.1)
   prism::gallery::ViewportWindow& Viewport() { return viewport_; }
 
   void Run() {
@@ -101,6 +102,19 @@ class GalleryWindow {
         viewport_.SetViewportSize(static_cast<double>(LOWORD(lparam)),
                                   static_cast<double>(HIWORD(lparam)));
         Invalidate();
+        return 0;
+      }
+      case WM_KEYDOWN: {
+        // Blueprint ch. 9.1: Ctrl+1 gallery grid, Ctrl+2 file list. The
+        // paint path switch rides the renderer adoption (next batch); the
+        // mode state is the contract this window owns.
+        if (LOWORD(wparam) == '1' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+          listMode_ = false;
+          Invalidate();
+        } else if (LOWORD(wparam) == '2' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+          listMode_ = true;
+          Invalidate();
+        }
         return 0;
       }
       case WM_MOUSEWHEEL: {
@@ -264,6 +278,8 @@ class GalleryWindow {
   Host host_;
   prism::gallery::GridLayout layout_{};
   prism::gallery::ViewportWindow viewport_{layout_, 0};
+  double scrollTarget_ = 0;
+  bool listMode_ = false;  // Ctrl+2: the four-column file list (ch. 3.2)
   prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint cache budget
   SpringAnimator scrollSpring_{kScrollSpring, 0.0};
   double scrollTarget_ = 0.0;

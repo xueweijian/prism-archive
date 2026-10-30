@@ -25,6 +25,7 @@
 #include <wincodec.h>
 
 #include "../PrismCore/Gallery.hpp"
+#include "../PrismCore/Preview.hpp"
 #include "../PrismCore/SolidSweep.hpp"
 #include "PrismEngineBridge.hpp"
 
@@ -245,10 +246,10 @@ inline SweepResult RunSolidSweep(const ArchiveReader& reader,
                                  const std::vector<uint32_t>& indices,
                                  const std::vector<uint64_t>& sizes,
                                  prism::gallery::SolidSweepSession::IDecoder& decoder,
-                                 prism::gallery::ThumbnailLru& lru,
+                                 prism::gallery::SolidSweepSession::IThumbSink& sink,
                                  uint64_t decodeLimit = prism::QuickLookPlanner::kDefaultByteLimit,
                                  bool startAbandoned = false) {
-  prism::gallery::SolidSweepSession session(indices, sizes, decodeLimit, decoder, lru);
+  prism::gallery::SolidSweepSession session(indices, sizes, decodeLimit, decoder, sink);
   if (startAbandoned) session.Abandon();
   ScratchStream scratch(32ull << 20);  // one 32 MB scratch, reused per item
   SweepExtractCallback callback(&session, &scratch);

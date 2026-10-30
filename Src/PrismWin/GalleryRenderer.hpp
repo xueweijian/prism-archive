@@ -25,11 +25,16 @@
 #include <dwrite.h>
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "../PrismCore/Gallery.hpp"
+#include "../PrismCore/GlassIsland.hpp"
+#include "../PrismCore/ListLayout.hpp"
 #include "../PrismCore/PathSafety.hpp"  // FileNameOf
+#include "../PrismCore/Preview.hpp"
 #include "../PrismCore/ProgressHud.hpp"
+#include "../PrismCore/ThumbStore.hpp"
 
 namespace prism::win::gallery {
 
@@ -56,6 +61,16 @@ class GalleryRenderer {
     std::wstring quickLookTitle;
     std::wstring quickLookMeta;
     std::wstring breadcrumb;
+
+    // Batch 3: real thumbnails from the solid sweep (nullptr -> gradient
+    // placeholders), the glass island model (nullptr -> static islands),
+    // and the main-window list mode.
+    prism::gallery::ThumbStore* thumbs = nullptr;
+    prism::glass::GlassIslandScene* islands = nullptr;
+    bool listMode = false;
+    std::vector<prism::list::SortItem>* listItems = nullptr;
+    uint32_t listScroll = 0;
+    int selectedRow = -1;
   };
 
   HRESULT Initialize() {
@@ -127,6 +142,11 @@ class GalleryRenderer {
 
     if (scene.viewport && scene.items) DrawGrid(target, scene, size);
 
+    if (scene.listMode) {
+      DrawListMode(target, scene, size);
+    } else {
+      DrawGrid(target, scene, size);
+    }
     DrawBreadcrumbIsland(target, scene, size);
     DrawProgressCapsule(target, scene, size);
     if (scene.quickLookOpen) DrawQuickLookCard(target, scene, size);
@@ -178,12 +198,43 @@ class GalleryRenderer {
                                    6.0f, 6.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
       } else if (prism::QuickLookPlanner::KindByName(item.path) == prism::PreviewKind::Image) {
-        // Photo tile: gradient placeholder + name plate.
-        thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
-        thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
-        D2D1_ROUNDED_RECT photo = D2D1::RoundedRect(
+        // Photo tile: REAL thumbnail when the sweep harvested one, the ⚡
+        // streaming badge for over-limit blocks, gradient stand-in otherwise.
+        const D2D1_ROUNDED_RECT photo = D2D1::RoundedRect(
             D2D1::RectF(left, top, right, bottom - 30.0f), kRadius, kRadius);
-        target->FillRoundedRectangle(photo, thumbs_[index % 3].Get());
+        const prism::gallery::DecodedThumb* thumb =
+            scene.thumbs ? scene.thumbs->Lookup(item.index) : nullptr;
+        if (thumb) {
+          SyncThumbBitmap(target, item.index, *thumb, scene.thumbs->Version());
+          const auto it = thumbBitmaps_.find(item.index);
+          if (it != thumbBitmaps_.end() && it->second) {
+            const float areaW = right - left;
+            const float areaH = bottom - 30.0f - top;
+            const float scale = (std::min)(areaW / thumb->width, areaH / thumb->height);
+            const float drawW = thumb->width * scale;
+            const float drawH = thumb->height * scale;
+            const D2D1_RECT_F fit = D2D1::RectF(left + (areaW - drawW) / 2.0f,
+                                                top + (areaH - drawH) / 2.0f,
+                                                left + (areaW + drawW) / 2.0f,
+                                                top + (areaH + drawH) / 2.0f);
+            target->FillRoundedRectangle(photo, tile_.Get());
+            target->DrawBitmap(it->second.Get(), fit, 1.0f,
+                               D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+          }
+        } else if (item.size > prism::QuickLookPlanner::kDefaultByteLimit) {
+          // Over-budget solid block: elegant "tap to stream" badge.
+          thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
+          thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
+          target->FillRoundedRectangle(photo, thumbs_[index % 3].Get());
+          DrawLabel(target, caption_.Get(), L"\x26A1 \x70B9\x51FB\x6D41\x5F0F\x52A0\x8F7D",
+                    D2D1::RectF(left, top + (bottom - top) / 2.0f - 12.0f, right,
+                                top + (bottom - top) / 2.0f + 12.0f),
+                    textPrimary_.Get());
+        } else {
+          thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
+          thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
+          target->FillRoundedRectangle(photo, thumbs_[index % 3].Get());
+        }
       } else {
         // Document tile: paper pane + text lines (the doc quick look reads
         // exactly this silhouette).
@@ -213,17 +264,175 @@ class GalleryRenderer {
     }
   }
 
+  // Device-bitmap cache for decoded thumbnails; invalidated exactly when the
+  // ThumbStore mutates (Version()), never per frame.
+  void SyncThumbBitmap(ID2D1RenderTarget* target, uint32_t itemIndex,
+                       const prism::gallery::DecodedThumb& thumb, uint64_t version) {
+    if (version != thumbVersion_) {
+      thumbBitmaps_.clear();
+      thumbVersion_ = version;
+    }
+    auto& slot = thumbBitmaps_[itemIndex];
+    if (slot) return;
+    D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    if (FAILED(target->CreateBitmap(D2D1::SizeU(thumb.width, thumb.height),
+                                    thumb.pixels.data(),
+                                    thumb.width * 4, props,
+                                    slot.ReleaseAndGetAddressOf()))) {
+      slot.Reset();
+    }
+  }
+
+  static D2D1_COLOR_F BarColorOf(prism::list::BarColor color) {
+    switch (color) {
+      case prism::list::BarColor::Teal: return {0.0f, 0.780f, 0.745f, 1.0f};   // #00C7BE
+      case prism::list::BarColor::Blue: return {0.0f, 0.478f, 1.0f, 1.0f};     // #007AFF
+      case prism::list::BarColor::Green: return {0.204f, 0.780f, 0.349f, 1.0f}; // #34C759
+      case prism::list::BarColor::Amber: return {1.0f, 0.584f, 0.0f, 1.0f};    // #FF9500
+    }
+    return {1.0f, 1.0f, 1.0f, 1.0f};
+  }
+
+  // The main-window file list (blueprint ch. 3.2): 名称 | 原始大小 | 压缩后 |
+  // 压缩率, 36px virtualized rows, semantic micro-capsule bars, folders first.
+  void DrawListMode(ID2D1RenderTarget* target, const Scene& scene,
+                    const D2D1_SIZE_F& size) {
+    if (!scene.listItems) return;
+    const auto& rows = *scene.listItems;
+    const prism::list::ColumnLayout cols;
+    const float headerY = 68.0f;
+    const float footerY = size.height - 56.0f;
+    const float contentTop = headerY + 36.0f;
+    const uint32_t viewportH =
+        static_cast<uint32_t>((std::max)(0.0f, footerY - contentTop));
+
+    // Header
+    DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^", D2D1::RectF(24.0f, headerY,
+                                                cols.sizeX(size.width) - 12.0f,
+                                                headerY + 26.0f), textSecondary_.Get());
+    DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
+                      headerY, cols.sizeW - 18, textSecondary_.Get());
+    DrawTrailingLabel(target, L"\x538B\x7F29\x540E", size.width - cols.packedW - cols.ratioW + 6,
+                      headerY, cols.packedW - 18, textSecondary_.Get());
+    DrawTrailingLabel(target, L"\x538B\x7F29\x7387", size.width - cols.ratioW + 6, headerY,
+                      cols.ratioW - 18, textSecondary_.Get());
+
+    const auto window =
+        prism::list::RowWindow(scene.listScroll, viewportH, static_cast<uint32_t>(rows.size()));
+    for (uint32_t i = window.first; i <= window.last && i < rows.size(); ++i) {
+      const auto& row = rows[i];
+      const float top = contentTop + static_cast<float>(i) * prism::list::kRowHeight -
+                        static_cast<float>(scene.listScroll);
+      const float bottom = top + prism::list::kRowHeight;
+      if (bottom < contentTop || top > footerY) continue;
+
+      if (static_cast<int>(i) == scene.selectedRow) {
+        // Selection highlight: G2 squircle R=10, accent fluid fill.
+        D2D1_ROUNDED_RECT sel =
+            D2D1::RoundedRect(D2D1::RectF(16.0f, top + 3.0f, size.width - 16.0f, bottom - 3.0f),
+                              10.0f, 10.0f);
+        D2D1_COLOR_F selColor = kAccent;
+        selColor.a = 0.26f;
+        accent_->SetColor(selColor);
+        target->FillRoundedRectangle(sel, accent_.Get());
+        accent_->SetColor(kAccent);
+      }
+
+      const std::wstring name = Utf8(row.name);
+      if (row.isDir) {
+        const D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
+            D2D1::RectF(28.0f, top + 9.0f, 60.0f, top + 27.0f), 5.0f, 5.0f);
+        target->FillRoundedRectangle(folder, accent_.Get());
+        DrawLabel(target, body_.Get(), name, D2D1::RectF(70.0f, top + 5.0f,
+                      cols.sizeX(size.width) - 80.0f, bottom - 4.0f), textPrimary_.Get());
+        DrawTrailingLabel(target, L"--", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
+                          top + 6.0f, cols.sizeW - 18, textSecondary_.Get());
+        DrawTrailingLabel(target, L"--", size.width - cols.packedW - cols.ratioW + 6,
+                          top + 6.0f, cols.packedW - 18, textSecondary_.Get());
+      } else {
+        DrawLabel(target, body_.Get(), name, D2D1::RectF(44.0f, top + 5.0f,
+                      cols.sizeX(size.width) - 52.0f, bottom - 4.0f), textPrimary_.Get());
+        const std::wstring sizeText = Utf8(prism::list::FormatBytes(row.size));
+        const std::wstring packedText = Utf8(prism::list::FormatBytes(row.packedSize));
+        DrawTrailingLabel(target, sizeText, size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
+                          top + 6.0f, cols.sizeW - 18, textPrimary_.Get());
+        DrawTrailingLabel(target, packedText, size.width - cols.packedW - cols.ratioW + 6,
+                          top + 6.0f, cols.packedW - 18, textPrimary_.Get());
+      }
+
+      // Semantic micro-capsule ratio bar (blueprint ch. 3.2.3).
+      if (const auto bar = prism::list::RatioBar(row)) {
+        const float trackX = size.width - cols.ratioW + 8.0f;
+        const float trackW = cols.ratioW - 64.0f;
+        const float cy = top + prism::list::kRowHeight / 2.0f;
+        D2D1_ROUNDED_RECT track =
+            D2D1::RoundedRect(D2D1::RectF(trackX, cy - 3.0f, trackX + trackW, cy + 3.0f),
+                              3.0f, 3.0f);
+        tileBorder_->SetColor(kTileBorder);
+        target->FillRoundedRectangle(track, tileBorder_.Get());
+        D2D1_ROUNDED_RECT fill = D2D1::RoundedRect(
+            D2D1::RectF(trackX, cy - 3.0f, trackX + trackW * bar->percent / 100.0f, cy + 3.0f),
+            3.0f, 3.0f);
+        tileBorder_->SetColor(BarColorOf(bar->color));
+        target->FillRoundedRectangle(fill, tileBorder_.Get());
+        tileBorder_->SetColor(kTileBorder);
+        wchar_t pct[8];
+        swprintf_s(pct, L"%d%%", bar->percent);
+        DrawTrailingLabel(target, pct, size.width - cols.ratioW + 8.0f + trackW + 6.0f, top + 6.0f,
+                          40, textSecondary_.Get());
+      }
+    }
+  }
+
+  void DrawTrailingLabel(ID2D1RenderTarget* target, const std::wstring& text, float x,
+                         float y, float w, ID2D1Brush* brush) {
+    if (!body_ || text.empty()) return;
+    body_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawLabel(target, body_.Get(), text, D2D1::RectF(x, y, x + w, y + 24.0f), brush);
+    body_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+  }
+
   void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,
                             const D2D1_SIZE_F& size) {
-    const float width = size.width * 0.62f;
-    const float left = (size.width - width) / 2.0f;
+    float width = size.width * 0.62f;
+    float left = (size.width - width) / 2.0f;
+    float top = 16.0f;
+    float height = 44.0f;
+    if (scene.islands) {
+      // The island model owns the geometry (blueprint ch. 3.2); the renderer
+      // only paints what the scene computed.
+      const auto r = scene.islands->RectOf(prism::glass::IslandId::Nav);
+      left = static_cast<float>(r.x);
+      top = static_cast<float>(r.y);
+      width = static_cast<float>(r.w);
+      height = static_cast<float>(r.h);
+    }
     const D2D1_ROUNDED_RECT pill =
-        D2D1::RoundedRect(D2D1::RectF(left, 16.0f, left + width, 60.0f), 22.0f, 22.0f);
+        D2D1::RoundedRect(D2D1::RectF(left, top, left + width, top + height),
+                          height / 2.0f, height / 2.0f);
     target->FillRoundedRectangle(pill, island_.Get());
     target->DrawRoundedRectangle(pill, islandBorder_.Get(), 1.0f);
     DrawLabel(target, title_.Get(), scene.breadcrumb,
-              D2D1::RectF(left + 24.0f, 26.0f, left + width - 24.0f, 50.0f),
+              D2D1::RectF(left + 24.0f, top + 10.0f, left + width - 24.0f, top + 34.0f),
               textPrimary_.Get());
+    if (scene.islands) {
+      // Pointer-tracked specular rim (blueprint ch. 3.1 Layer 5): a bright
+      // segment flows along the top edge toward the cursor. In the real
+      // pipeline this comes from the HLSL shader; the software snapshot
+      // approximates it from the SAME cbuffer params (pointer xy).
+      float cb[20];
+      scene.islands->WriteCbuffer(prism::glass::IslandId::Nav,
+                                  static_cast<uint32_t>(size.width),
+                                  static_cast<uint32_t>(size.height), cb);
+      const float px = (std::min)((std::max)(cb[4], left + 70.0f), left + width - 70.0f);
+      D2D1_COLOR_F rim = {1.0f, 1.0f, 1.0f, 0.62f};
+      islandBorder_->SetColor(rim);
+      D2D1_ROUNDED_RECT glow = D2D1::RoundedRect(
+          D2D1::RectF(px - 62.0f, top + 1.0f, px + 62.0f, top + 3.0f), 1.0f, 1.0f);
+      target->FillRoundedRectangle(glow, islandBorder_.Get());
+      islandBorder_->SetColor(kIslandBorder);
+    }
   }
 
   void DrawProgressCapsule(ID2D1RenderTarget* target, const Scene& scene,
@@ -306,6 +515,8 @@ class GalleryRenderer {
   ComPtr<ID2D1SolidColorBrush> accent_, tile_, tileBorder_, island_, card_, islandBorder_;
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
+  std::unordered_map<uint32_t, ComPtr<ID2D1Bitmap>> thumbBitmaps_;
+  uint64_t thumbVersion_ = 0;
   ComPtr<IDWriteTextFormat> caption_, title_, small_;
 };
 

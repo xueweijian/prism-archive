@@ -4,17 +4,30 @@
 // what the app paints.
 //
 //   gallery_snapshot.exe <out-dir>
-//   -> <out-dir>/prism_gallery.png      grid + breadcrumb + progress capsule
-//   -> <out-dir>/prism_quicklook.png    same + Quick Look glass card
+//   -> <out-dir>/prism_gallery.png       grid + breadcrumb + progress capsule
+//   -> <out-dir>/prism_quicklook.png     same + Quick Look glass card
+//   -> <out-dir>/prism_gallery_real.png  REAL thumbnails: a genuine solid 7z
+//                                        swept single-pass through the real
+//                                        7z.dll + WIC pipeline, decoded BGRA
+//                                        painted into the tiles
+//   -> <out-dir>/prism_list.png          main-window file list mode: 名称 |
+//                                        原始大小 | 压缩后 | 压缩率 with
+//                                        semantic micro-capsule bars
 #include <shlwapi.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cwchar>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 #include "../../Src/PrismWin/GalleryRenderer.hpp"
+#include "../../Src/PrismWin/PrismEngineBridge.hpp"
+#include "../../Src/PrismWin/SolidSweeper.hpp"
+#include "SolidFixture.hpp"
 
 #pragma comment(lib, "windowscodecs.lib")
 
@@ -23,6 +36,15 @@ using namespace prism::win::gallery;
 using Microsoft::WRL::ComPtr;
 
 namespace {
+
+std::wstring Utf8(std::string_view s) {
+  if (s.empty()) return {};
+  const int wide = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                       nullptr, 0);
+  std::wstring out(static_cast<size_t>(wide), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), wide);
+  return out;
+}
 
 ArchiveItem MakeItem(const std::string& path, uint64_t size, uint32_t block, bool dir = false) {
   ArchiveItem item;
@@ -164,6 +186,109 @@ int main(int argc, char** argv) {
   scene.quickLookMeta = L"PNG  |  3.3 MB  |  solid block 3/5  |  decoded in 41 ms";
   renderScene(scene, L"prism_quicklook.png");
 
-  std::puts("DONE");
+  // ---------------------------------------------------------------
+  // Scene 3: REAL thumbnails -- the end-to-end proof. A genuine solid 7z is
+  // packed on the runner, swept in ONE Extract call through the real 7z.dll
+  // bridge and WIC decoder, and the harvested BGRA pixels are painted into
+  // the tiles by the same renderer the window uses.
+  // ---------------------------------------------------------------
+  {
+    const std::wstring exe = prism::fixture::ExePath();
+    const std::wstring dll = prism::fixture::DllPath();
+    if (exe.empty() || dll.empty()) {
+      std::puts("FAIL: 7z.exe not found beside 7z.dll -- real-thumbnail snapshot cannot run");
+      return 1;
+    }
+    namespace fs = std::filesystem;
+    const fs::path work = fs::temp_directory_path() / L"prism_snapshot_solid";
+    fs::remove_all(work);
+    fs::create_directories(work);
+    const std::wstring dir = work.wstring();
+    if (!prism::fixture::WritePng(dir + L"\\gate_front.png", 320, 200, 40, 60, 90)) return 1;
+    if (!prism::fixture::WritePng(dir + L"\\quadriga.png", 640, 400, 180, 60, 30)) return 1;
+    if (!prism::fixture::WritePng(dir + L"\\mural.png", 900, 600, 30, 120, 160)) return 1;
+    if (!prism::fixture::WritePng(dir + L"\\street.png", 512, 512, 200, 180, 40)) return 1;
+    if (!prism::fixture::PackSolid(exe, dir, L"solid.7z",
+                                   {L"gate_front.png", L"quadriga.png", L"mural.png",
+                                    L"street.png"})) {
+      std::puts("FAIL: solid pack failed");
+      return 1;
+    }
+
+    prism::win::SevenZipLibrary library;
+    if (!library.Load(dll)) {
+      std::puts("FAIL: 7z.dll load failed");
+      return 1;
+    }
+    prism::win::ArchiveReader reader(library);
+    if (!reader.Open(dir + L"\\solid.7z")) {
+      std::puts("FAIL: open failed");
+      return 1;
+    }
+    const auto catalog = reader.ReadCatalog();
+
+    std::vector<uint32_t> indices;
+    std::vector<uint64_t> sizes;
+    std::vector<ArchiveItem> real;
+    for (const auto& item : catalog) {
+      if (item.isDir) continue;
+      indices.push_back(item.index);
+      sizes.push_back(item.size);
+      real.push_back(item);
+    }
+    prism::win::sweep::WicThumbDecoder wic;
+    if (!wic.Initialize()) {
+      std::puts("FAIL: WIC init failed");
+      return 1;
+    }
+    prism::gallery::ThumbStore store{64 << 20};
+    const auto sweep = prism::win::sweep::RunSolidSweep(reader, indices, sizes, wic, store);
+    if (sweep.decoded != static_cast<int>(indices.size())) {
+      std::printf("FAIL: sweep decoded %d of %zu\n", sweep.decoded, indices.size());
+      return 1;
+    }
+
+    gallery::ViewportWindow viewport2{{.columns = 4, .cellHeight = 220.0},
+                                      static_cast<int>(real.size())};
+    viewport2.SetViewportSize(kW, kH);
+    GalleryRenderer::Scene sceneReal;
+    sceneReal.items = &real;
+    sceneReal.viewport = &viewport2;
+    sceneReal.thumbs = &store;
+    sceneReal.breadcrumb = L"Design_Assets_v4.7z  |  4 items  |  solid block 1/1  |  REAL sweep";
+    renderScene(sceneReal, L"prism_gallery_real.png");
+
+    // Scene 4: the main-window file list mode, straight from the swept
+    // catalog plus a couple of synthesized rows for folder/crypto coverage.
+    std::vector<prism::list::SortItem> rows;
+    rows.push_back({L"01_Brand_Guidelines", 0, 0, true, false, prism::PreviewKind::Directory});
+    rows.push_back({L"02_UI_Kit_iOS26", 0, 0, true, false, prism::PreviewKind::Directory});
+    for (const auto& item : real) {
+      prism::list::SortItem row;
+      row.name = Utf8(item.path);
+      row.size = item.size;
+      row.packedSize = item.size * 3 / 4;  // plausible LZMA2 ratios for the visual
+      row.kind = prism::QuickLookPlanner::KindByName(item.path);
+      rows.push_back(row);
+    }
+    prism::list::SortItem encrypted;
+    encrypted.name = L"client_w9_encrypted.pdf";
+    encrypted.size = 4'200'000;
+    encrypted.packedSize = 1'100'000;
+    encrypted.encrypted = true;
+    encrypted.kind = prism::PreviewKind::Pdf;
+    rows.push_back(encrypted);
+    prism::list::FolderFirstOrder(rows);
+
+    GalleryRenderer::Scene sceneList;
+    sceneList.listMode = true;
+    sceneList.listItems = &rows;
+    sceneList.listScroll = 0;
+    sceneList.selectedRow = 4;
+    sceneList.breadcrumb = L"Design_Assets_v4.7z  |  7 items";
+    renderScene(sceneList, L"prism_list.png");
+  }
+
+  std::puts("ALL SNAPSHOT CHECKS PASSED");
   return 0;
 }

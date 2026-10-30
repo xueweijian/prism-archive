@@ -11,7 +11,10 @@ set(PRISM_CORE_TESTS
     test_progress_hud.cpp
     test_spring.cpp
     test_gallery.cpp
-    test_sweep.cpp)
+    test_sweep.cpp
+    test_thumb_store.cpp
+    test_list_layout.cpp
+    test_glass_island.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)
@@ -25,7 +28,9 @@ endforeach()
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_executable(win_engine_bridge_test win/test_engine_bridge.cpp win/m2_compile_check.cpp win/m3_compile_check.cpp)
   # WindowsApp.lib provides the C++/WinRT activation-factory entry points
-  target_link_libraries(win_engine_bridge_test PRIVATE user32.lib gdi32.lib d2d1.lib dwrite.lib WindowsApp.lib)
+  target_link_libraries(win_engine_bridge_test PRIVATE user32.lib gdi32.lib d2d1.lib
+                                                      dwrite.lib d3d11.lib dxgi.lib
+                                                      dcomp.lib WindowsApp.lib)
   target_compile_options(win_engine_bridge_test PRIVATE /WX-)
   target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)
@@ -50,6 +55,10 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                                                 d2d1.lib dwrite.lib windowscodecs.lib
                                                 ole32.lib WindowsApp.lib)
   target_compile_options(gallery_snapshot PRIVATE /WX-)
+  add_test(NAME "win.gallery_snapshot" COMMAND gallery_snapshot
+           $ENV{TEMP}/prism_snapshots)
+  set_tests_properties(win.gallery_snapshot PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL SNAPSHOT CHECKS PASSED")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

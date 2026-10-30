@@ -27,6 +27,29 @@ struct DecodedThumb {
   std::vector<uint8_t> pixels;  // 32bpp BGRA, row-major, top-down
 };
 
+// Where decoded thumbnails go. Implementations decide storage policy
+// (pixels vs accounting, budget, eviction); the session only reports.
+struct IThumbSink {
+  virtual ~IThumbSink() = default;
+  // Returns true if the thumb was accepted (e.g. it fits the budget).
+  virtual bool OnThumb(uint32_t itemIndex, const DecodedThumb& thumb) = 0;
+};
+
+// Accounting-only sink (size bookkeeping, no pixels) -- unit tests and
+// telemetry; the real pipeline uses ThumbStore (ThumbStore.hpp).
+class LruAccountingSink final : public IThumbSink {
+ public:
+  explicit LruAccountingSink(ThumbnailLru& lru) : lru_(lru) {}
+  bool OnThumb(uint32_t itemIndex, const DecodedThumb& thumb) override {
+    const bool ok = lru_.Insert(itemIndex, thumb.pixels.size());
+    if (ok) lru_.Touch(itemIndex);
+    return ok;
+  }
+
+ private:
+  ThumbnailLru& lru_;
+};
+
 class SolidSweepSession {
  public:
   struct IDecoder {
@@ -40,12 +63,12 @@ class SolidSweepSession {
   // catalog); the limit decision is made from them BEFORE bytes arrive, so a
   // truncated or lying payload can never talk us into a huge decode.
   SolidSweepSession(const std::vector<uint32_t>& indices, const std::vector<uint64_t>& sizes,
-                    uint64_t decodeLimitBytes, IDecoder& decoder, ThumbnailLru& lru)
+                    uint64_t decodeLimitBytes, IDecoder& decoder, IThumbSink& sink)
       : indices_(indices),
         sizes_(sizes),
         decodeLimit_(decodeLimitBytes),
         decoder_(decoder),
-        lru_(lru) {
+        sink_(sink) {
     total_ = static_cast<int>(indices_.size());
   }
 
@@ -67,9 +90,11 @@ class SolidSweepSession {
   void OnItemEnd(const uint8_t* data, size_t bytes) {
     if (!abandoned_ && !currentOverLimit_ && data != nullptr && bytes > 0) {
       if (auto thumb = decoder_.Decode(data, bytes)) {
-        lru_.Insert(current_, thumb->pixels.size());
-        lru_.Touch(current_);
-        ++decodedCount;
+        if (sink_.OnThumb(current_, *thumb)) {
+          ++decodedCount;
+        } else {
+          ++skippedCount;  // sink refused (budget) -- loud, never silent
+        }
       } else {
         ++skippedCount;
       }
@@ -100,7 +125,7 @@ class SolidSweepSession {
   std::vector<uint64_t> sizes_;
   uint64_t decodeLimit_ = 0;
   IDecoder& decoder_;
-  ThumbnailLru& lru_;
+  IThumbSink& sink_;
   uint32_t current_ = 0;
   bool currentOverLimit_ = false;
   bool abandoned_ = false;

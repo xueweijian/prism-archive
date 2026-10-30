@@ -34,6 +34,8 @@ tools/glass-preview/  同一套数学的 WebGL2 参考实现，浏览器里可�
 在 Linux 上就有完整回归；而"只有 Windows 能证伪的"（COM vtable 顺序、7z.dll ABI、
 HLSL 编译）交给 windows-latest 真机验证。
 
+**设计蓝本**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md) —— 11 章完整架构蓝图（7-Zip 引擎 × Bandizip 交互 × iOS 26 Liquid Glass 光学），本项目即按此从零实现。
+
 ## 已落地模块
 
 **三 lane CI 全绿**（gcc-release / clang asan+ubsan / windows MSVC）。

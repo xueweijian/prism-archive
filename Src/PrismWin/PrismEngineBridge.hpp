@@ -540,6 +540,7 @@ class ArchiveReader {
 
   // Diagnostics for the last Open() attempt (printed by the integration test).
   const std::string& openTrace() const { return openTrace_; }
+  const std::string& propTrace() const { return propTrace_; }
 
   bool opened() const { return archive_ != nullptr; }
 
@@ -724,7 +725,6 @@ class ArchiveReader {
     }
   }
 
-  const std::string& propTrace() const { return propTrace_; }
 
   std::string GetString(abi::UInt32 index, PROPID pid) const {
     if (!archive_ || pid == 0) return {};

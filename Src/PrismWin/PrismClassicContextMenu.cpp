@@ -11,6 +11,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>  // RuntimeClass / ClassicCom / MakeAndInitialize
 
 #include <string>
 #include <vector>

@@ -18,7 +18,7 @@ endif()
 
 # Win10 classic IContextMenu layer (separate DLL: its own CLSID + exports).
 add_library(PrismShellExtClassic SHARED PrismClassicContextMenu.cpp)
-target_link_libraries(PrismShellExtClassic PRIVATE prism_core shlwapi.lib)
+target_link_libraries(PrismShellExtClassic PRIVATE prism_core shlwapi.lib shell32.lib)
 target_compile_options(PrismShellExtClassic PRIVATE /WX-)
 set_target_properties(PrismShellExtClassic PROPERTIES OUTPUT_NAME "PrismShellExtClassic")
 if(MSVC)

@@ -37,6 +37,7 @@ HLSL 编译）交给 windows-latest 真机验证。
 **设计蓝本**：[docs/BLUEPRINT.md](docs/BLUEPRINT.md) —— 11 章完整架构蓝图（7-Zip 引擎 × Bandizip 交互 × iOS 26 Liquid Glass 光学），本项目即按此从零实现。
 
 架构决策记录与外部审阅勘误（**改代码前先读**）：[docs/ADR.md](docs/ADR.md)
+总进度与作战计划（进度唯一权威口径）：[docs/PROGRESS.md](docs/PROGRESS.md)
 
 ## 已落地模块
 

@@ -42,6 +42,7 @@ class GalleryRenderer {
   static constexpr D2D1_COLOR_F kTileFill = {1.0f, 1.0f, 1.0f, 0.06f};        // glass pane
   static constexpr D2D1_COLOR_F kTileBorder = {1.0f, 1.0f, 1.0f, 0.12f};
   static constexpr D2D1_COLOR_F kIslandFill = {0.10f, 0.12f, 0.16f, 0.72f};   // floating glass
+  static constexpr D2D1_COLOR_F kCardFill = {0.086f, 0.10f, 0.13f, 0.90f};    // Quick Look body
   static constexpr D2D1_COLOR_F kIslandBorder = {1.0f, 1.0f, 1.0f, 0.16f};
   static constexpr D2D1_COLOR_F kAccent = {0.243f, 0.545f, 1.0f, 1.0f};       // #3E8BFF
   static constexpr D2D1_COLOR_F kTextPrimary = {0.910f, 0.925f, 0.945f, 1.0f};
@@ -76,6 +77,8 @@ class GalleryRenderer {
     hr = target->CreateSolidColorBrush(kTileBorder, tileBorder_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
     hr = target->CreateSolidColorBrush(kIslandFill, island_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = target->CreateSolidColorBrush(kCardFill, card_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
     hr = target->CreateSolidColorBrush(kIslandBorder, islandBorder_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
@@ -174,13 +177,30 @@ class GalleryRenderer {
         folder = D2D1::RoundedRect(D2D1::RectF(cx - 34.0f, cy - 30.0f, cx + 6.0f, cy - 14.0f),
                                    6.0f, 6.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
-      } else {
+      } else if (prism::QuickLookPlanner::KindByName(item.path) == prism::PreviewKind::Image) {
         // Photo tile: gradient placeholder + name plate.
         thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
         thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
         D2D1_ROUNDED_RECT photo = D2D1::RoundedRect(
             D2D1::RectF(left, top, right, bottom - 30.0f), kRadius, kRadius);
         target->FillRoundedRectangle(photo, thumbs_[index % 3].Get());
+      } else {
+        // Document tile: paper pane + text lines (the doc quick look reads
+        // exactly this silhouette).
+        D2D1_ROUNDED_RECT paper = D2D1::RoundedRect(
+            D2D1::RectF(left, top, right, bottom - 30.0f), kRadius, kRadius);
+        target->FillRoundedRectangle(paper, island_.Get());
+        target->DrawRoundedRectangle(paper, tileBorder_.Get(), 1.0f);
+        const float lineTop = top + 24.0f;
+        const float lineW[4] = {0.62f, 0.84f, 0.74f, 0.50f};
+        for (int line = 0; line < 4; ++line) {
+          const float w = (right - left - 32.0f) * lineW[line];
+          D2D1_ROUNDED_RECT textLine = D2D1::RoundedRect(
+              D2D1::RectF(left + 16.0f, lineTop + line * 22.0f, left + 16.0f + w,
+                          lineTop + line * 22.0f + 7.0f),
+              3.5f, 3.5f);
+          target->FillRoundedRectangle(textLine, line == 0 ? accent_.Get() : tileBorder_.Get());
+        }
 
         const D2D1_ROUNDED_RECT pane =
             D2D1::RoundedRect(D2D1::RectF(left, bottom - 28.0f, right, bottom), 10.0f, 10.0f);
@@ -251,7 +271,7 @@ class GalleryRenderer {
     const float top = 96.0f;
     const D2D1_ROUNDED_RECT card =
         D2D1::RoundedRect(D2D1::RectF(left, top, left + width, top + height), 24.0f, 24.0f);
-    target->FillRoundedRectangle(card, island_.Get());
+    target->FillRoundedRectangle(card, card_.Get());
     target->DrawRoundedRectangle(card, islandBorder_.Get(), 1.2f);
 
     // Preview area: gradient stand-in for the decoded texture.
@@ -283,7 +303,7 @@ class GalleryRenderer {
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> writeFactory_;
-  ComPtr<ID2D1SolidColorBrush> accent_, tile_, tileBorder_, island_, islandBorder_;
+  ComPtr<ID2D1SolidColorBrush> accent_, tile_, tileBorder_, island_, card_, islandBorder_;
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
   ComPtr<IDWriteTextFormat> caption_, title_, small_;

@@ -15,6 +15,7 @@ set(PRISM_CORE_TESTS
     test_thumb_store.cpp
     test_list_layout.cpp
     test_glass_island.cpp
+    test_drag_drop.cpp
     test_windows_name.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
@@ -22,6 +23,21 @@ foreach(source IN LISTS PRISM_CORE_TESTS)
   add_executable("${name}" "${source}")
   target_link_libraries("${name}" PRIVATE prism_core)
   add_test(NAME "core.${name}" COMMAND "${name}")
+endforeach()
+
+# Deliberate rule mutations are expected to fail the same assertions. WILL_FAIL
+# makes the mutation check itself green only when the test suite catches it;
+# this guards the trust and free-space checks against vacuous/fake-green tests.
+foreach(mutant IN ITEMS trust_all ignore_space)
+  add_executable("test_drag_drop_mutant_${mutant}" test_drag_drop.cpp)
+  target_link_libraries("test_drag_drop_mutant_${mutant}" PRIVATE prism_core)
+  if(mutant STREQUAL "trust_all")
+    target_compile_definitions("test_drag_drop_mutant_${mutant}" PRIVATE PRISM_DND_MUTANT_TRUST_ALL=1)
+  else()
+    target_compile_definitions("test_drag_drop_mutant_${mutant}" PRIVATE PRISM_DND_MUTANT_IGNORE_SPACE=1)
+  endif()
+  add_test(NAME "mutation.drag_drop.${mutant}" COMMAND "test_drag_drop_mutant_${mutant}")
+  set_tests_properties("mutation.drag_drop.${mutant}" PROPERTIES WILL_FAIL TRUE)
 endforeach()
 
 # Windows-only integration test: loads the real 7z.dll and round-trips an

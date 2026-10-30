@@ -108,7 +108,9 @@ class DelayedExtractStream final : public RuntimeClass<RuntimeClassFlags<Classic
     if (position_ >= totalSize_ || count == 0) return S_FALSE;
     const std::string chunk = producer_ ? producer_(count) : std::string();
     if (chunk.empty()) return S_FALSE;
-    const size_t bytes = min(static_cast<size_t>(count), chunk.size());
+    // No min() macro: TUs that define NOMINMAX (project convention) would not compile.
+    const size_t bytes = chunk.size() < static_cast<size_t>(count) ? chunk.size()
+                                                                   : static_cast<size_t>(count);
     memcpy(buffer, chunk.data(), bytes);
     position_ += bytes;
     if (read) *read = static_cast<ULONG>(bytes);

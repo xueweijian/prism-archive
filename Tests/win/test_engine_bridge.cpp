@@ -189,10 +189,10 @@ PRISM_TEST("catalog scan reads the central directory with zero payload work") {
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::Win32Transcoder transcoder;
   prism::win::ArchiveReader reader(library, &transcoder);
-  PRISM_CHECK(reader.Open(zip));
+  if (!PRISM_CHECK(reader.Open(zip))) return;  // never index an empty catalog
 
   const auto catalog = reader.ReadCatalog();
-  PRISM_CHECK_EQ(catalog.size(), size_t(3));
+  if (!PRISM_CHECK_EQ(catalog.size(), size_t(3))) return;
   PRISM_CHECK_EQ(catalog[0].path, std::string("Assets/logo.txt"));
   PRISM_CHECK_EQ(catalog[0].size, uint64_t(11));
   PRISM_CHECK(!catalog[0].isDir);
@@ -216,9 +216,9 @@ PRISM_TEST("in-memory extraction feeds the thumbnail pipeline") {
   prism::win::SevenZipLibrary library;
   PRISM_CHECK(library.Load(g_dllPath));
   prism::win::ArchiveReader reader(library);
-  PRISM_CHECK(reader.Open(zip));
+  if (!PRISM_CHECK(reader.Open(zip))) return;
   const auto catalog = reader.ReadCatalog();
-  PRISM_CHECK_EQ(catalog.size(), size_t(1));
+  if (!PRISM_CHECK_EQ(catalog.size(), size_t(1))) return;
   const auto bytes = reader.ExtractToMemory(0, 1024 * 1024);
   PRISM_CHECK(bytes.has_value());
   if (bytes) {

@@ -310,7 +310,10 @@ class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICrypto
   static bool IsOpenCallbackIid(REFIID iid) {
     if (iid == abi::IID_IArchiveOpenCallback) return true;
     if (iid.Data1 != 0x23170F69 || iid.Data2 != 0x40C1 || iid.Data3 != 0x278A) return false;
-    return iid.Data4[3] == 0x05 && iid.Data4[5] != 0x06 && iid.Data4[5] != 0x10;
+    // Exact per Guid.txt: IArchiveOpenCallback = family 06 member 10,
+    // IProgress = family 00 member 05.
+    const BYTE fam = iid.Data4[3], member = iid.Data4[5];
+    return (fam == 0x06 && member == 0x10) || (fam == 0x00 && member == 0x05);
   }
 
   STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }

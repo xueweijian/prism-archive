@@ -24,30 +24,31 @@ constexpr GUID IID_IInArchive = {0x23170F69, 0x40C1, 0x278A,
 // {23170F69-40C1-278A-0000-000300030000}
 constexpr GUID IID_IInStream = {0x23170F69, 0x40C1, 0x278A,
                                 {0x00, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000300010000}
+// {23170F69-40C1-278A-0000-000300020000}  (Guid.txt: family 03, member 02)
 constexpr GUID IID_ISequentialOutStream = {0x23170F69, 0x40C1, 0x278A,
-                                           {0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000300020000}
+                                           {0x00, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00}};
+// {23170F69-40C1-278A-0000-000300010000}
 constexpr GUID IID_ISequentialInStream = {0x23170F69, 0x40C1, 0x278A,
-                                          {0x00, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000300040000}
+                                          {0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00}};
+// {23170F69-40C1-278A-0000-000300060000}  -- member 06; member 04 is IOutStream!
 constexpr GUID IID_IStreamGetSize = {0x23170F69, 0x40C1, 0x278A,
-                                     {0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000500100000}
+                                     {0x00, 0x00, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00}};
+// {23170F69-40C1-278A-0000-000500100000}  (IPassword.h: family 05, member 10)
 constexpr GUID IID_ICryptoGetTextPassword = {0x23170F69, 0x40C1, 0x278A,
                                              {0x00, 0x00, 0x00, 0x05, 0x00, 0x10, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000500050000}
+// {23170F69-40C1-278A-0000-000600100000}  (IArchive.h: family 06, member 10)
 constexpr GUID IID_IArchiveOpenCallback = {0x23170F69, 0x40C1, 0x278A,
-                                           {0x00, 0x00, 0x00, 0x05, 0x00, 0x05, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000500060000}
+                                           {0x00, 0x00, 0x00, 0x06, 0x00, 0x10, 0x00, 0x00}};
+// {23170F69-40C1-278A-0000-000600200000}  (IArchive.h: family 06, member 20)
 constexpr GUID IID_IArchiveExtractCallback = {0x23170F69, 0x40C1, 0x278A,
-                                              {0x00, 0x00, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00}};
+                                              {0x00, 0x00, 0x00, 0x06, 0x00, 0x20, 0x00, 0x00}};
 
-// Format CLSIDs (CreateObject).
+// Format CLSIDs (CreateObject). Handler GUIDs use a DIFFERENT pattern from
+// interface IIDs -- Guid.txt: {23170F69-40C1-278A-1000-000110xx0000}.
 constexpr GUID CLSID_CFormat7z = {0x23170F69, 0x40C1, 0x278A,
-                                  {0x00, 0x00, 0x00, 0x07, 0x00, 0x07, 0x00, 0x00}};
+                                  {0x10, 0x00, 0x00, 0x01, 0x10, 0x07, 0x00, 0x00}};
 constexpr GUID CLSID_CFormatZip = {0x23170F69, 0x40C1, 0x278A,
-                                   {0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00}};
+                                   {0x10, 0x00, 0x00, 0x01, 0x10, 0x01, 0x00, 0x00}};
 
 // ---- Streams ---------------------------------------------------------------
 struct ISequentialInStream : public IUnknown {

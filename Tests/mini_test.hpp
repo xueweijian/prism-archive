@@ -45,19 +45,22 @@ inline void ReportFailure(const char* file, int line, const std::string& what) {
 }
 
 template <class A, class B>
-void CheckEq(const A& a, const B& b, const char* exprA, const char* exprB, const char* file,
+bool CheckEq(const A& a, const B& b, const char* exprA, const char* exprB, const char* file,
              int line) {
   ++CheckCount();
   if (!(a == b)) {
     std::ostringstream os;
     os << "expected (" << exprA << ") == (" << exprB << ")   got '" << a << "' vs '" << b << "'";
     ReportFailure(file, line, os.str());
+    return false;
   }
+  return true;
 }
 
-inline void Check(bool cond, const char* expr, const char* file, int line) {
+inline bool Check(bool cond, const char* expr, const char* file, int line) {
   ++CheckCount();
   if (!cond) ReportFailure(file, line, std::string("expected true: ") + expr);
+  return cond;
 }
 
 inline int RunAll(int argc, char** argv) {

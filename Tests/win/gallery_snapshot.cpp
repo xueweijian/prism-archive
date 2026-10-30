@@ -264,6 +264,15 @@ int main(int argc, char** argv) {
     }
     std::printf("  store: count=%zu version=%llu\n", store.Count(),
                 static_cast<unsigned long long>(store.Version()));
+    for (uint32_t i = 0; i < indices.size(); ++i) {
+      const auto* t = store.Lookup(indices[i]);
+      if (!t) continue;
+      size_t nonzero = 0;
+      for (uint8_t v : t->pixels) nonzero += v != 0;
+      std::printf("  thumb[%u] %ux%u px0=%d,%d,%d,%d nonzero=%zu/%zu\n", indices[i], t->width,
+                  t->height, t->pixels[0], t->pixels[1], t->pixels[2], t->pixels[3], nonzero,
+                  t->pixels.size());
+    }
     renderScene(sceneReal, L"prism_gallery_real.png");
 
     // Scene 4: the main-window file list mode, straight from the swept

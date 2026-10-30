@@ -231,6 +231,14 @@ class MemoryOutStream final : public abi::ISequentialOutStream {
 // ---------------------------------------------------------------------------
 // Sink 2: final physical file (NT long-path aware, \\?\ prefix)
 // ---------------------------------------------------------------------------
+// '\'/' -> '\': \?\-prefixed paths get no Win32 normalization.
+inline std::wstring ToBackslashes(std::wstring p) {
+  for (wchar_t& c : p) {
+    if (c == L'/') c = L'\\';
+  }
+  return p;
+}
+
 class DiskOutStream final : public abi::ISequentialOutStream {
  public:
   explicit DiskOutStream(std::wstring finalPath) : path_(std::move(finalPath)) {}
@@ -238,7 +246,11 @@ class DiskOutStream final : public abi::ISequentialOutStream {
   bool Open() {
     // Blueprint ch. 7.2: \\?\ lifts the MAX_PATH ceiling and allows the Linux
     // reserved names (aux.c, con.txt) that 7-Zip otherwise chokes on.
-    const std::wstring ntPath = L"\\\\?\\" + path_;
+    // CAVEAT: the \\?\ prefix DISABLES Win32 path normalization, so '/'
+    // segments are no longer converted to '\' and CreateFileW fails. Convert
+    // separators ourselves (PrismCore's contract is '/' everywhere).
+    std::wstring ntPath = ToBackslashes(path_);
+    if (ntPath.rfind(L"\\\\?\\", 0) != 0) ntPath.insert(0, L"\\\\?\\");
     handle_ = CreateFileW(ntPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     return handle_ != INVALID_HANDLE_VALUE;
@@ -459,7 +471,8 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   }
 
  private:
-  static void CreateParentDirectories(const std::wstring& fullPath) {
+  static void CreateParentDirectories(const std::wstring& fullPathRaw) {
+    const std::wstring fullPath = ToBackslashes(fullPathRaw);
     for (size_t i = 0; i < fullPath.size(); ++i) {
       if (fullPath[i] != L'\\' && fullPath[i] != L'/') continue;
       if (i < 3) continue;  // skip "C:\"

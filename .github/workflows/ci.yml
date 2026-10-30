@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # PrismCore: the platform-neutral brain. Builds and tests on Linux in seconds
+  # so every rule (smart extraction, Zip Slip, bomb fuse, CJK repair, CoW tree)
+  # is verified without a Windows host.
+  # -------------------------------------------------------------------------
+  core:
+    name: PrismCore (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-release
+            build-type: Release
+            cxx: g++
+            configure-args: ""
+          - name: asan+ubsan
+            build-type: Debug
+            cxx: clang++
+            configure-args: >-
+              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DPRISM_BUILD_WIN_LAYER=OFF
+          ${{ matrix.configure-args }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --no-tests=error
+
+  # -------------------------------------------------------------------------
+  # Windows: real MSVC build of the 7z.dll bridge + Win11 shell extension,
+  # plus a real round-trip against the 7-Zip DLL shipped in the runner image,
+  # plus fxc.exe compilation of the Liquid Glass HLSL.
+  # -------------------------------------------------------------------------
+  windows:
+    name: Windows (MSVC + 7z.dll + HLSL)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Locate 7z.dll
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\7-Zip\7z.dll",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.dll",
+            "$env:LOCALAPPDATA\Programs\7-Zip\7z.dll")
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($found) {
+            Write-Host "7z.dll: $found"
+            "PRISM_7Z_DLL=$found" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Host "::warning::7z.dll not found - integration test will SKIP"
+          }
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --no-tests=error -C Release
+
+      - name: Compile HLSL (Liquid Glass optics)
+        shell: pwsh
+        run: |
+          python tools/hlsl/compile_hlsl.py --strict

@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en" data-theme="day">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>PrismArchive · Liquid Glass Optical Reference</title>
+  <style>
+    :root {
+      --ink: #10213c;
+      --muted: rgba(16, 33, 60, .62);
+      --control: rgba(255, 255, 255, .82);
+      --control-border: rgba(255, 255, 255, .90);
+      --accent: #007aff;
+      --shadow: 0 20px 60px rgba(20, 45, 90, .24);
+    }
+    html[data-theme="dark"] {
+      --ink: #f4f7ff;
+      --muted: rgba(238, 243, 255, .65);
+      --control: rgba(24, 28, 38, .88);
+      --control-border: rgba(255, 255, 255, .16);
+      --accent: #0a84ff;
+      --shadow: 0 24px 72px rgba(0, 0, 0, .48);
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "PingFang SC", sans-serif;
+      font-size: 14px;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #glass-canvas {
+      position: fixed; inset: 0; z-index: 0;
+      width: 100%; height: 100%; display: block;
+      touch-action: none;
+    }
+    #desktop-source { display: none; }
+    .glass-content {
+      position: fixed; z-index: 2;
+      background: transparent;
+      overflow: hidden;
+      pointer-events: auto;
+      color: var(--ink);
+      text-shadow: 0 1px 1px rgba(255,255,255,.18);
+      will-change: width, height, transform;
+    }
+    .nav-island {
+      left: max(14px, env(safe-area-inset-left)); top: max(14px, env(safe-area-inset-top));
+      width: min(620px, calc(100vw - 320px)); height: 52px;
+      display: flex; align-items: center; gap: 12px; padding: 0 17px;
+    }
+    .brand-mark {
+      width: 26px; height: 26px; border-radius: 9px;
+      display: grid; place-items: center; flex: 0 0 auto;
+      color: white; font-weight: 800; font-size: 12px;
+      background: linear-gradient(145deg, #00c7be, #007aff 56%, #7d5cff);
+      box-shadow: inset 0 1px 1px rgba(255,255,255,.55), 0 5px 14px rgba(0,122,255,.25);
+    }
+    .crumbs { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 650; }
+    .crumbs span { color: var(--muted); font-weight: 500; }
+    .nav-spacer { flex: 1; }
+    .round-action {
+      width: 30px; height: 30px; border: 0; border-radius: 50%; color: inherit;
+      background: rgba(127,127,127,.10); font-size: 15px; cursor: pointer;
+    }
+    .action-island {
+      left: 50%; top: 112px; transform: translateX(-50%);
+      width: min(560px, calc(100vw - 36px)); height: 56px;
+      display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px;
+    }
+    .action-island button {
+      height: 44px; min-width: 0; flex: 1; padding: 0 14px; border: 0; border-radius: 22px;
+      color: inherit; font: inherit; font-weight: 620; background: transparent; cursor: pointer;
+      transition: background .18s ease, transform .18s ease;
+    }
+    .action-island button:hover { background: rgba(127,127,127,.13); transform: translateY(-1px); }
+    .action-island .primary { color: white; background: linear-gradient(135deg, rgba(0,122,255,.88), rgba(0,85,212,.88)); }
+    html[data-theme="dark"] .action-island .primary { background: linear-gradient(135deg, rgba(10,132,255,.82), rgba(0,96,223,.82)); }
+    .preview-card {
+      right: 22px; top: 210px; width: 290px; height: 244px;
+      padding: 18px;
+    }
+    .card-eyebrow { color: var(--muted); text-transform: uppercase; letter-spacing: .12em; font-size: 10px; font-weight: 750; }
+    .archive-title { display: flex; align-items: center; gap: 11px; margin: 12px 0 14px; }
+    .archive-icon {
+      width: 42px; height: 48px; border-radius: 12px; display: grid; place-items: center;
+      color: white; font-size: 20px; background: linear-gradient(145deg,#6e5dff,#007aff);
+      box-shadow: inset 0 1px 1px rgba(255,255,255,.45), 0 7px 20px rgba(55,65,190,.24);
+    }
+    .archive-name { font-weight: 720; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+    .archive-meta { margin-top: 3px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .file-row {
+      display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+      height: 34px; border-top: 1px solid rgba(127,127,127,.12); font-size: 12px;
+    }
+    .file-row span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-row span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .progress-hud {
+      left: 50%; bottom: max(48px, calc(env(safe-area-inset-bottom) + 34px));
+      transform: translateX(-50%); width: 0; height: 0; opacity: 0;
+      display: flex; align-items: center; padding: 0; transition: opacity .12s linear;
+    }
+    .progress-hud.visible { opacity: 1; }
+    .progress-main { width: 100%; height: 54px; display: flex; align-items: center; gap: 12px; padding: 0 17px; }
+    .activity-dot { width: 10px; height: 10px; border-radius: 50%; background: #34c759; box-shadow: 0 0 18px #34c759; flex: 0 0 auto; }
+    .progress-copy { min-width: 0; flex: 1; }
+    .progress-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+    .progress-track { height: 3px; margin-top: 7px; overflow: hidden; border-radius: 2px; background: rgba(127,127,127,.18); }
+    .progress-fill { width: 0%; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#00c7be,#007aff); box-shadow: 0 0 10px rgba(0,122,255,.6); }
+    .progress-stats { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 11px; color: var(--muted); }
+    .progress-stats strong { display: block; color: var(--ink); font-size: 12px; }
+    .expanded-detail { position: absolute; left: 16px; right: 16px; top: 62px; opacity: 0; transition: opacity .18s ease; }
+    .progress-hud.expanded .expanded-detail { opacity: 1; }
+    .detail-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+    .cpu-grid { display: grid; grid-template-columns: repeat(12,1fr); gap: 4px; margin-top: 10px; }
+    .cpu-grid i { height: 20px; border-radius: 5px; background: linear-gradient(180deg,rgba(0,199,190,.95),rgba(0,122,255,.62)); transform-origin: bottom; animation: cpu 1.2s ease-in-out infinite alternate; }
+    .cpu-grid i:nth-child(3n) { animation-delay: -.6s; } .cpu-grid i:nth-child(4n) { animation-delay: -.3s; }
+    @keyframes cpu { from { opacity: .32; transform: scaleY(.35); } to { opacity: .9; transform: scaleY(1); } }
+    #ripple {
+      position: fixed; z-index: 3; left: 50%; top: 139px; width: 10px; height: 10px;
+      margin: -5px; border-radius: 50%; pointer-events: none; opacity: 0;
+      border: 2px solid rgba(52,199,89,.9); box-shadow: 0 0 20px rgba(52,199,89,.8);
+    }
+    #ripple.play { animation: ripple 350ms ease-out; }
+    @keyframes ripple { 0% { opacity: .9; transform: scale(.5); } 100% { opacity: 0; transform: scale(8); } }
+    .controls {
+      position: fixed; z-index: 5; right: 14px; top: 14px; width: 264px;
+      padding: 14px 14px 12px; border: 1px solid var(--control-border); border-radius: 18px;
+      color: var(--ink); background: var(--control); box-shadow: var(--shadow);
+      backdrop-filter: blur(22px) saturate(150%); -webkit-backdrop-filter: blur(22px) saturate(150%);
+    }
+    .controls header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+    .controls h1 { margin: 0; font-size: 13px; letter-spacing: -.01em; }
+    .controls .badge { color: var(--muted); font-size: 9px; font-weight: 720; letter-spacing: .12em; }
+    .control-row { display: grid; grid-template-columns: 78px 1fr 36px; align-items: center; gap: 8px; height: 28px; font-size: 10px; }
+    .control-row label { color: var(--muted); }
+    .control-row output { text-align: right; font-variant-numeric: tabular-nums; }
+    input[type="range"] { width: 100%; height: 3px; accent-color: var(--accent); }
+    .control-footer { display: flex; gap: 8px; margin-top: 8px; }
+    .control-footer button, .noise-toggle {
+      height: 29px; border: 1px solid rgba(127,127,127,.15); border-radius: 9px;
+      color: inherit; background: rgba(127,127,127,.09); font: inherit; font-size: 10px; cursor: pointer;
+    }
+    .control-footer button { flex: 1; }
+    .noise-toggle { display: flex; flex: 1; align-items: center; justify-content: center; gap: 6px; }
+    .noise-toggle input { accent-color: var(--accent); }
+    .telemetry {
+      position: fixed; z-index: 6; left: 12px; bottom: max(10px, env(safe-area-inset-bottom));
+      max-width: calc(100vw - 24px); padding: 6px 10px; border-radius: 9px;
+      color: rgba(255,255,255,.92); background: rgba(8,12,20,.62);
+      font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    }
+    #error-box {
+      display: none; position: fixed; z-index: 99; inset: 16px; overflow: auto;
+      padding: 18px; border-radius: 14px; color: #fff; background: rgba(90,8,20,.96);
+      box-shadow: 0 20px 70px rgba(0,0,0,.5); white-space: pre-wrap;
+      font: 12px/1.5 ui-monospace, monospace; user-select: text;
+    }
+    @media (max-width: 760px) {
+      .nav-island { width: calc(100vw - 28px); }
+      .crumbs { max-width: 52vw; }
+      .controls { top: 78px; right: 10px; width: 220px; padding: 10px; }
+      .control-row { grid-template-columns: 66px 1fr 31px; gap: 5px; height: 25px; }
+      .action-island { top: 292px; }
+      .action-island button { padding: 0 7px; font-size: 11px; }
+      .preview-card { right: 14px; top: 370px; width: calc(100vw - 28px); height: 206px; padding: 14px; }
+      .preview-card .file-row:last-child { display: none; }
+      .progress-hud { bottom: 47px; max-width: calc(100vw - 24px); }
+    }
+    @media (max-width: 420px) {
+      .controls { width: 206px; }
+      .nav-island { height: 48px; }
+      .brand-mark { width: 24px; height: 24px; }
+      .action-island { top: 286px; height: 52px; }
+      .preview-card { top: 356px; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="glass-canvas" aria-label="WebGL2 Liquid Glass optical preview"></canvas>
+  <canvas id="desktop-source" width="2048" height="1536" aria-hidden="true"></canvas>
+
+  <nav class="glass-content nav-island" data-glass="nav" aria-label="Archive navigation">
+    <div class="brand-mark">PA</div>
+    <div class="crumbs"><span>Archives /</span> Design_Assets_v4.7z <span>/ UI Kit</span></div>
+    <div class="nav-spacer"></div>
+    <button class="round-action" aria-label="Search">⌕</button>
+    <button class="round-action" aria-label="More options">•••</button>
+  </nav>
+
+  <section class="glass-content action-island" data-glass="actions" aria-label="Archive actions">
+    <button class="primary">✦ Extract here</button>
+    <button>＋ Add files</button>
+    <button>◇ Test integrity</button>
+  </section>
+
+  <aside class="glass-content preview-card" data-glass="preview" aria-label="Inline archive preview">
+    <div class="card-eyebrow">Inline archive preview</div>
+    <div class="archive-title">
+      <div class="archive-icon">◆</div>
+      <div><div class="archive-name">Design_Assets_v4.7z</div><div class="archive-meta">608 MB · AES-256 · LZMA2</div></div>
+    </div>
+    <div class="file-row"><span>▣ 01_Brand_Guidelines</span><span>84 MB</span></div>
+    <div class="file-row"><span>◫ 02_UI_Kit_iOS26</span><span>176 MB</span></div>
+    <div class="file-row"><span>▧ Hero_Banner_4K.webp</span><span>18.4 MB</span></div>
+    <div class="file-row"><span>▤ Architecture_Spec.pdf</span><span>4.2 MB</span></div>
+  </aside>
+
+  <section class="glass-content progress-hud" data-glass="progress" data-glass-visible="false" aria-live="polite">
+    <div class="progress-main">
+      <i class="activity-dot"></i>
+      <div class="progress-copy">
+        <div class="progress-file">Extracting UI_Kit/Components.fig</div>
+        <div class="progress-track"><div class="progress-fill"></div></div>
+      </div>
+      <div class="progress-stats"><strong class="percent">0%</strong><span>1.84 GB/s · <b class="eta">4.6s</b></span></div>
+    </div>
+    <div class="expanded-detail">
+      <div class="detail-head"><span>CPU thread matrix</span><span>Live I/O sonar · Turbo</span></div>
+      <div class="cpu-grid"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+  </section>
+  <div id="ripple"></div>
+
+  <aside class="controls" aria-label="Optical controls">
+    <header><h1>Liquid Glass Lab</h1><span class="badge">WEBGL2 · 5 LAYERS</span></header>
+    <div class="control-row"><label for="blur">Blur radius</label><input id="blur" type="range" min="0" max="64" step="1" value="36"><output for="blur">36</output></div>
+    <div class="control-row"><label for="saturation">Saturation</label><input id="saturation" type="range" min="1" max="2" step="0.01" value="1.55"><output for="saturation">1.55</output></div>
+    <div class="control-row"><label for="bevel">Refract band</label><input id="bevel" type="range" min="0" max="20" step="0.5" value="6"><output for="bevel">6</output></div>
+    <div class="control-row"><label for="strength">Refraction</label><input id="strength" type="range" min="0" max="40" step="0.5" value="14"><output for="strength">14</output></div>
+    <div class="control-row"><label for="radius">Corner base</label><input id="radius" type="range" min="0" max="40" step="1" value="16"><output for="radius">16</output></div>
+    <div class="control-footer">
+      <label class="noise-toggle"><input id="noise" type="checkbox" checked> Blue noise</label>
+      <button id="theme" type="button">Switch to dark</button>
+    </div>
+  </aside>
+
+  <div class="telemetry"><span id="fps">-- FPS</span> · <span id="params">initializing optical pipeline…</span></div>
+  <pre id="error-box" role="alert"></pre>
+  <script src="glass.js"></script>
+</body>
+</html>

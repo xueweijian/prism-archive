@@ -83,7 +83,30 @@ class ClassicMenu final
   }
 
  private:
-  static void LaunchWorker(const std::string& verb);
+  // Hand the verb + selection to the companion process; the shell DLL never
+  // links the extraction engine directly (process isolation, blueprint ch. 7).
+  void LaunchWorker(const std::string& verb) {
+    std::wstring args = Utf8ToWide("--shell-verb " + verb);
+    for (const std::string& path : selected_) {
+      args += L" \"" + Utf8ToWide(path) + L"\"";
+    }
+    // Resolve OUR module path (the DLL), not the host's (explorer.exe).
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&ClassicMenu::InvokeCommand), &self);
+    wchar_t exe[MAX_PATH * 2]{};
+    GetModuleFileNameW(self, exe, ARRAYSIZE(exe));
+    std::wstring cmdline = std::wstring(L"\"") + exe + L"\" " + args;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                       nullptr, &si, &pi)) {
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+    }
+  }
 
   static STGMEDIUM medium_;
   std::vector<std::string> selected_;

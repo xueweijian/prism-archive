@@ -80,7 +80,7 @@ std::vector<std::string> FromSelection(IShellItemArray* selection) {
     ComPtr<IShellItem> item;
     if (FAILED(selection->GetItemAt(i, &item))) continue;
     PWSTR path = nullptr;
-    if (SUCCEEDED(item->GetDisplayName(SIGI_FILESYSPATH, &path))) {
+    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
       out.push_back(WideToUtf8(path));
       CoTaskMemFree(path);
     }

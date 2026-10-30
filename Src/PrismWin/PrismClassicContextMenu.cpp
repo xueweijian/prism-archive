@@ -21,6 +21,12 @@
 
 using namespace Microsoft::WRL;
 
+namespace {
+// Address anchor for GetModuleHandleExW(FROM_ADDRESS): member function
+// pointers cannot be reinterpreted as LPCWSTR, free function pointers can.
+void ModuleAnchor() {}
+}  // namespace
+
 namespace prism::win::classic {
 
 // {8C1B7E52-1F3A-4B7E-9C41-PRISM0000C100} -- classic menu CLSID (independent of
@@ -116,11 +122,6 @@ class ClassicMenu final
 
 STGMEDIUM ClassicMenu::medium_{};
 
-namespace {
-// Address anchor for GetModuleHandleExW(FROM_ADDRESS): member function
-// pointers cannot be reinterpreted as LPCWSTR, free function pointers can.
-void ModuleAnchor() {}
-}  // namespace
 
 // Called by the module entry points below. The static_cast chain is required:
 // ClassicMenu inherits two IUnknown paths, so an implicit conversion to

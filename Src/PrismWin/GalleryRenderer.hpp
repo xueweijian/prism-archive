@@ -130,7 +130,7 @@ class GalleryRenderer {
   }
 
  private:
-  static std::wstring Utf8(const std::string& s) {
+  static std::wstring Utf8(std::string_view s) {
     if (s.empty()) return {};
     const int wide = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
                                          nullptr, 0);
@@ -176,7 +176,6 @@ class GalleryRenderer {
         target->FillRoundedRectangle(folder, accent_.Get());
       } else {
         // Photo tile: gradient placeholder + name plate.
-        thumbs_[index % 3]->ResetTransform();
         thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
         thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
         D2D1_ROUNDED_RECT photo = D2D1::RoundedRect(
@@ -256,7 +255,6 @@ class GalleryRenderer {
     target->DrawRoundedRectangle(card, islandBorder_.Get(), 1.2f);
 
     // Preview area: gradient stand-in for the decoded texture.
-    thumbs_[1]->ResetTransform();
     thumbs_[1]->SetStartPoint(D2D1::Point2F(left, top));
     thumbs_[1]->SetEndPoint(D2D1::Point2F(left, top + height - 110.0f));
     D2D1_ROUNDED_RECT preview = D2D1::RoundedRect(

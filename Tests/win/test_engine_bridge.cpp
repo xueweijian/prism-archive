@@ -127,7 +127,6 @@ std::wstring MakeTempDir() {
   wchar_t tmp[MAX_PATH]{};
   GetTempPathW(MAX_PATH, tmp);
   std::wstring dir = std::wstring(tmp) + L"prism_it_" + std::to_wstring(GetCurrentProcessId());
-  reader.Close();
   std::filesystem::remove_all(dir);
   std::filesystem::create_directories(dir);
   return dir;

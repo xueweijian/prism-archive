@@ -640,8 +640,6 @@ class ArchiveReader {
   // The set of PROPIDs this handler actually exposes.
   const std::set<uint32_t>& discoveredProperties() const { return propIdSet_; }
 
-  const std::map<std::string, PROPID>& discoveredProperties() const { return propIds_; }
-
  private:
   class MemoryExtractCallback final : public abi::IArchiveExtractCallback {
    public:

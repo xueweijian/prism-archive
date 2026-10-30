@@ -14,6 +14,7 @@
 #include "ProgressHud.hpp"
 #include "SpringAnimator.hpp"
 #include "Gallery.hpp"
+#include "SolidSweep.hpp"
 #include "PathSafety.hpp"
 #include "SecurityGuard.hpp"
 #include "SmartExtractor.hpp"

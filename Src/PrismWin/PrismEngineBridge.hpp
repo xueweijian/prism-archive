@@ -655,6 +655,16 @@ class ArchiveReader {
     return ok;
   }
 
+  // Sink 3: the solid sweep (blueprint ch. 4.3) -- ONE Extract call over a
+  // whole solid block; the callback demuxes per-item bytes as they stream by.
+  bool ExtractBatch(const std::vector<uint32_t>& indices,
+                    abi::IArchiveExtractCallback* callback) const {
+    if (!archive_ || indices.empty() || !callback) return false;
+    std::vector<abi::UInt32> idx(indices.begin(), indices.end());
+    return SUCCEEDED(
+        archive_->Extract(idx.data(), static_cast<abi::UInt32>(idx.size()), 0, callback));
+  }
+
   // Property ids are discovered by name (authoritative, read out of the DLL
   // itself) and only fall back to the hard-coded enum -- guessing PROPIDs is
   // exactly how ABI drift starts.

@@ -10,7 +10,8 @@ set(PRISM_CORE_TESTS
     test_context_menu.cpp
     test_progress_hud.cpp
     test_spring.cpp
-    test_gallery.cpp)
+    test_gallery.cpp
+    test_sweep.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)
@@ -31,6 +32,13 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
 
   # Headless design snapshot: renders the gallery scene to PNG artifacts so
   # the Liquid Glass design can be reviewed from the CI run itself.
+  add_executable(win_solid_sweep_test win/test_solid_sweep.cpp)
+  target_link_libraries(win_solid_sweep_test PRIVATE prism_core prism_win_bridge
+                                                     user32.lib gdi32.lib ole32.lib
+                                                     windowscodecs.lib)
+  target_compile_options(win_solid_sweep_test PRIVATE /WX-)
+  add_test(NAME "win.solid_sweep" COMMAND win_solid_sweep_test)
+
   add_executable(gallery_snapshot win/gallery_snapshot.cpp)
   target_link_libraries(gallery_snapshot PRIVATE prism_win_bridge user32.lib gdi32.lib
                                                 d2d1.lib dwrite.lib windowscodecs.lib

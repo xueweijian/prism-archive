@@ -284,6 +284,13 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
       value->vt = VT_UI4;
       value->ulVal = FILE_ATTRIBUTE_DIRECTORY;
       trace_ += "  -> NEW-DIR ATTRIB\n";
+    } else if (propId == abi::kpidMTime) {
+      // The FS-driven caller ALWAYS has an MTime (7zHandlerOut: "we need
+      // MTime to sort files"); we are the only caller answering VT_EMPTY.
+      // FILETIME epoch 1970-01-01 = 11644473600s * 1e7.
+      value->vt = VT_FILETIME;
+      value->hVal.QuadPart = static_cast<LONGLONG>(116444736000000000LL);
+      trace_ += "  -> NEW-DIR MTIME\n";
     }
     return S_OK;
   }

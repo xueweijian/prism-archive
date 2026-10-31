@@ -193,6 +193,11 @@ class MemoryOutStream final : public abi::ISequentialOutStream {
       AddRef();
       return S_OK;
     }
+    if (iid == abi::IID_IOutStream) {
+      *out = static_cast<abi::IOutStream*>(this);
+      AddRef();
+      return S_OK;
+    }
     *out = nullptr;
     return E_NOINTERFACE;
   }
@@ -239,7 +244,11 @@ inline std::wstring ToBackslashes(std::wstring p) {
   return p;
 }
 
-class DiskOutStream final : public abi::ISequentialOutStream {
+// Full IOutStream: the 7z UPDATE engine QIs the out stream for IOutStream
+// and returns E_NOTIMPL without it (7zUpdate.cpp ~L1927, newer engines);
+// Seek/SetSize ride SetFilePointerEx/SetEndOfFile (STREAM_SEEK_* values are
+// identical to FILE_*).
+class DiskOutStream final : public abi::IOutStream {
  public:
   explicit DiskOutStream(std::wstring finalPath) : path_(std::move(finalPath)) {}
 
@@ -287,6 +296,40 @@ class DiskOutStream final : public abi::ISequentialOutStream {
     }
     written_ += done;
     if (processed) *processed = done;
+    return S_OK;
+  }
+
+  STDMETHODIMP Seek(abi::Int64 offset, abi::UInt32 seekOrigin,
+                    abi::UInt64* newPosition) override {
+    if (handle_ == INVALID_HANDLE_VALUE) return E_FAIL;
+    if (seekOrigin > STREAM_SEEK_END) return STG_E_INVALIDFUNCTION;
+    LARGE_INTEGER move{};
+    move.QuadPart = offset;
+    LARGE_INTEGER newPos{};
+    if (!SetFilePointerEx(handle_, move, &newPos,
+                          static_cast<DWORD>(seekOrigin))) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (newPosition) *newPosition = static_cast<abi::UInt64>(newPos.QuadPart);
+    return S_OK;
+  }
+
+  STDMETHODIMP SetSize(abi::UInt64 newSize) override {
+    if (handle_ == INVALID_HANDLE_VALUE) return E_FAIL;
+    LARGE_INTEGER saved{};
+    if (!SetFilePointerEx(handle_, LARGE_INTEGER{}, &saved, FILE_CURRENT)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    LARGE_INTEGER end{};
+    end.QuadPart = static_cast<LONGLONG>(newSize);
+    if (!SetFilePointerEx(handle_, end, nullptr, FILE_BEGIN) || !SetEndOfFile(handle_)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    LARGE_INTEGER restore{};
+    restore.QuadPart = saved.QuadPart;
+    if (!SetFilePointerEx(handle_, restore, nullptr, FILE_BEGIN)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
     return S_OK;
   }
 

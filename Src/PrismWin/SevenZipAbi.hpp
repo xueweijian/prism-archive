@@ -30,12 +30,12 @@ constexpr GUID IID_ISequentialOutStream = {0x23170F69, 0x40C1, 0x278A,
 // {23170F69-40C1-278A-0000-000300010000}
 constexpr GUID IID_ISequentialInStream = {0x23170F69, 0x40C1, 0x278A,
                                           {0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00}};
-// {23170F69-40C1-278A-0000-000300040000}  (Guid.txt: family 03, member 04)
-constexpr GUID IID_IOutStream = {0x23170F69, 0x40C1, 0x278A,
-                                 {0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00}};
 // {23170F69-40C1-278A-0000-000300060000}  -- member 06; member 04 is IOutStream!
 constexpr GUID IID_IStreamGetSize = {0x23170F69, 0x40C1, 0x278A,
                                      {0x00, 0x00, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00}};
+// {23170F69-40C1-278A-0000-000300040000}  (Guid.txt: family 03, member 04)
+constexpr GUID IID_IOutStream = {0x23170F69, 0x40C1, 0x278A,
+                                 {0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00}};
 // {23170F69-40C1-278A-0000-000500100000}  (IPassword.h: family 05, member 10)
 constexpr GUID IID_ICryptoGetTextPassword = {0x23170F69, 0x40C1, 0x278A,
                                              {0x00, 0x00, 0x00, 0x05, 0x00, 0x10, 0x00, 0x00}};
@@ -66,10 +66,10 @@ struct IInStream : public ISequentialInStream {
   STDMETHOD(Seek)(Int64 offset, UInt32 seekOrigin, UInt64* newPosition) PURE;
 };
 
-// IOutStream.h (Guid.txt family 03, member 04). REQUIRED for
-// IOutArchive::UpdateItems: the 7z update engine QIs the destination to this
-// seekable form and returns E_NOTIMPL when only ISequentialOutStream is
-// offered (B1's first run dies on exactly that).
+// IOutStream: the UPDATE engine QIs the out stream for this (7zUpdate.cpp:
+// Z7_DECL_CMyComPtr_QI_FROM(IOutStream, outStream, seqOutStream);
+// if (!outStream) return E_NOTIMPL). A sequential-only out stream makes
+// every commit fail with hr=0x80004001 on engines that require it.
 struct IOutStream : public ISequentialOutStream {
   STDMETHOD(Seek)(Int64 offset, UInt32 seekOrigin, UInt64* newPosition) PURE;
   STDMETHOD(SetSize)(UInt64 newSize) PURE;

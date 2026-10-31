@@ -127,20 +127,21 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
 
   # mkdir variant MATRIX (batch B1 evidence): eight parameterized "commit a
   # new empty directory" cells against the real 7z.dll in ONE run, each with
-  # its own fixture + UpdateItems commit + re-open readback. REPORT-ONLY by
-  # design: it always exits non-zero so --output-on-failure prints the full
-  # VARIANT table into the job log (a green test's stdout would be swallowed).
+  # its own fixture + UpdateItems commit + re-open readback. Verified by an
+  # explicit verdict line: REPORT-ONLY ("always exit 1 so the table prints")
+  # made green and red indistinguishable -- exactly the D1 trap. The test now
+  # exits 0 only when no variant failed beyond the deliberate bare control.
   add_executable(win_mkdir_matrix win/test_mkdir_matrix.cpp)
   target_link_libraries(win_mkdir_matrix PRIVATE prism_core prism_win_bridge
                                                  user32.lib gdi32.lib ole32.lib
                                                  windowscodecs.lib)
   target_compile_options(win_mkdir_matrix PRIVATE /WX-)
   add_test(NAME "win.mkdir_matrix" COMMAND win_mkdir_matrix)
-  # REPORT-ONLY: the test exits non-zero ON PURPOSE after printing the table,
-  # so --output-on-failure carries it into the CI log. No PASS_REGULAR_
-  # EXPRESSION here -- it would convert the deliberate failure into a fake
-  # pass and swallow the evidence (the D1 lesson, again).
-  set_tests_properties(win.mkdir_matrix PROPERTIES TIMEOUT 300)
+  # The PASS regex is a CONJUNCTION with the exit code, not a replacement for
+  # it: ctest requires exit 0 AND this marker. That is what makes a silent skip
+  # (or a crash after printing) still fail while a real success is provable.
+  set_tests_properties(win.mkdir_matrix PROPERTIES TIMEOUT 300
+      PASS_REGULAR_EXPRESSION "MATRIX VERDICT: OK")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

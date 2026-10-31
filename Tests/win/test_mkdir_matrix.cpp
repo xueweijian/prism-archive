@@ -611,9 +611,20 @@ int RunMatrix() {
   Emit("MATRIX COMPLETE: variants=8 produced=" + std::to_string(produced) +
        " failed=" + std::to_string(failed) +
        " inProcessFallbacks=" + std::to_string(fallbacks));
-  Emit("MATRIX REPORT-ONLY: verdicts are read from the VARIANT lines above; "
-       "exit 1 on purpose so --output-on-failure prints the table");
-  return 1;
+
+  // Honest verdict (D1): the matrix used to always exit 1 "so the table
+  // prints", which made a green run indistinguishable from a red one. There is
+  // exactly ONE defensible failure -- nd1_bare, the deliberately signal-free
+  // control, where 7z cannot know a path denotes a directory and refusing with
+  // E_INVALIDARG is the correct engine behaviour. Everything else must pass.
+  // Any other red means the executor regressed; the table is printed either
+  // way because CTest captures stdout regardless of exit code.
+  if (failed > 1 || fallbacks > 0) {
+    Emit("MATRIX VERDICT: FAILED -- unexpected failure(s) beyond the bare control");
+    return 1;
+  }
+  Emit("MATRIX VERDICT: OK -- every labelled variant produced the right node"
+       " kinds (nd1_bare is the intended refusal)");
 }
 
 }  // namespace

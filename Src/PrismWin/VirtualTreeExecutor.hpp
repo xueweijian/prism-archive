@@ -615,7 +615,7 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
   const HRESULT hrUpdate =
       outArchive->UpdateItems(outStream, static_cast<abi::UInt32>(entries.size()), callback);
   out.copiedBytes = static_cast<int64_t>(outStream->written());
-  out.updateTrace = callback->trace();
+  out.updateTrace = "handler=" + opened.trace + "\n" + callback->trace();
   const std::string cbReason = callback->reason();
   callback->Release();
   outStream->Release();  // closes the temp handle before validation re-opens it

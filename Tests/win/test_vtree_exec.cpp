@@ -390,8 +390,17 @@ PRISM_TEST("mkdir alone commits a directory entry") {
   want["photo.png"] = false;
   want["empty_docs"] = true;
   if (!PRISM_CHECK(VerifyCommitted(fx.archive, library, want, fx.originals))) {
+    {
+      std::ifstream bin(fx.archive, std::ios::binary);
+      char magic[6] = {};
+      bin.read(magic, 6);
+      std::cout << "  magic: ";
+      for (char c : magic) std::cout << "\x" << std::hex << (int)(unsigned char)c << std::dec;
+      std::cout << std::endl;  // 7z = 37 7a bc af 27 1c, zip = 50 4b ...
+    }
     prism::win::ArchiveReader dumpReader(library);
     if (dumpReader.Open(fx.archive)) {
+      std::cout << "  reopen trace: " << dumpReader.openTrace() << std::endl;
       for (const auto& it : dumpReader.ReadCatalog()) {
         std::cout << "  committed: '" << it.path << "' dir=" << it.isDir
                   << " size=" << it.size << std::endl;

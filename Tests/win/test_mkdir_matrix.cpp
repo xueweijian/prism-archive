@@ -55,6 +55,45 @@ namespace fs = std::filesystem;
 namespace abi = prism::win::abi;
 namespace vt = prism::win::vt;
 
+// Minimal sequential reader over a static buffer (create0 payloads).
+class MemSeqStream final : public abi::ISequentialInStream {
+ public:
+  MemSeqStream(const char* data, UInt32 size) : data_(data), size_(size) {}
+  STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+    if (!out) return E_POINTER;
+    if (iid == IID_IUnknown || iid == abi::IID_ISequentialInStream) {
+      *out = static_cast<abi::ISequentialInStream*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+  STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }
+  STDMETHODIMP_(ULONG) Release() override {
+    const ULONG r = InterlockedDecrement(&refs_);
+    if (r == 0) delete this;
+    return r;
+  }
+  STDMETHODIMP Read(const void* data, UInt32 size, UInt32* processedSize) override {
+    if (pos_ >= size_) {
+      if (processedSize) *processedSize = 0;
+      return S_OK;
+    }
+    const UInt32 n = (size < size_ - pos_) ? size : size_ - pos_;
+    memcpy(const_cast<void*>(data), data_ + pos_, n);
+    pos_ += n;
+    if (processedSize) *processedSize = n;
+    return S_OK;
+  }
+
+ private:
+  const char* data_;
+  UInt32 size_;
+  UInt32 pos_ = 0;
+  LONG refs_ = 1;
+};
+
 struct VariantSpec {
   const char* name;
   int newData;
@@ -62,13 +101,24 @@ struct VariantSpec {
   bool isDirTrue;    // kpidIsDir: VT_BOOL TRUE vs VT_EMPTY
   bool attribDir;    // kpidAttrib: FILE_ATTRIBUTE_DIRECTORY vs VT_EMPTY
   const char* path;  // "docs" or "docs/"
+  int createMode = 0;  // 0 = open the 7z.exe fixture; 1 = create from nothing;
+                       // 2 = create from nothing, then mkdir-commit on it
 };
 
 // Eight representative cells of the 32-cell factorial space: both
 // newData/newProps shapes, each prop dimension toggled on/off against the
 // spec-complete baseline, the trailing-slash path form, and the newData=1
 // S_OK+NULL GetStream answer.
+// CREATE0 pair -- the input-poison discriminator. create0 builds a 2-file
+// archive from NOTHING (both nodes newData=1 with real memory payloads, no
+// 7z.exe, no input open). create0_then_mkdir re-opens THAT archive and runs
+// the standard mkdir commit on it. If create0 fails too, the plumbing (our
+// callback/stream QI surface) is broken fundamentally; if create0 works and
+// create0_then_mkdir fails, the 7z.exe-packed INPUT (or our open of it) is
+// what flags the database un-updatable.
 const VariantSpec kVariants[] = {
+    {"create0", 1, 1, false, false, "one.bin", 1},
+    {"create0_then_mkdir", 0, 1, true, true, "docs", 2},
     {"meta_spec", 0, 1, true, true, "docs"},        // shipped-callback shape
     {"meta_isdir_only", 0, 1, true, false, "docs"},     // kpidAttrib VT_EMPTY
     {"meta_attrib_only", 0, 1, false, true, "docs"},    // kpidIsDir VT_EMPTY
@@ -181,6 +231,19 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
       if (reason_.empty()) reason_ = "engine asked a stream for a metadata-only item";
       return E_NOTIMPL;  // unreachable by construction; loud on purpose
     }
+    // create0's file nodes carry REAL payloads (4/8 bytes) so the created
+    // archive is a valid, non-degenerate base for create0_then_mkdir.
+    if (spec_.createMode && !entries_[index].isDir) {
+      static const char kPayloadA[4] = {'A', 'A', 'A', 'A'};
+      static const char kPayloadB[8] = {'B', 'B', 'B', 'B', 'B', 'B', 'B', 'B'};
+      const char* data = (index == 0) ? kPayloadA : kPayloadB;
+      const UInt32 size = (index == 0) ? 4 : 8;
+      prism::win::abi::ISequentialInStream* stream =
+          new prism::win::detail::MemSeqStream(data, size);
+      *inStream = stream;
+      stream->AddRef();
+      return S_OK;
+    }
     // The matrix cell under test: S_OK + NULL. 7zUpdate then treats the item
     // as content-less -- the suspected "silent 0-byte file" path.
     return S_OK;
@@ -250,6 +313,55 @@ int RunOne(const VariantSpec& spec, prism::win::SevenZipLibrary& library) {
     return 1;
   }
 
+  const std::wstring archive = dir + L"\\base.7z";
+  if (spec.createMode >= 1) {
+    // CREATE0: build the base archive from NOTHING -- both nodes newData=1
+    // with real memory payloads, no 7z.exe, no input open. This separates
+    // "our callback/stream plumbing cannot commit at all" from "the
+    // 7z.exe-packed input (or our open of it) poisons the update".
+    std::vector<vt::detail::OutEntry> create;
+    const wchar_t* names2[2] = {L"one.bin", L"two.bin"};
+    for (int i = 0; i < 2; ++i) {
+      vt::detail::OutEntry e;
+      e.indexInArchive = -1;
+      e.newProps = true;
+      e.newData = true;
+      e.isDir = false;
+      e.newPath = names2[i];
+      e.expectedPath = prism::win::WideToUtf8(names2[i]);
+      create.push_back(std::move(e));
+    }
+    vt::IOutArchive* mk = nullptr;
+    HRESULT hr = library.CreateObject(abi::CLSID_CFormat7z, vt::kIID_IOutArchive,
+                                      reinterpret_cast<void**>(&mk));
+    if (FAILED(hr)) {
+      char buf[120];
+      std::snprintf(buf, sizeof(buf), "VARIANT %s: committed=[CREATE-QI 0x%08lX]",
+                    spec.name, static_cast<unsigned long>(hr));
+      Emit(buf);
+      return 1;
+    }
+    MatrixUpdateCallback cb(create, spec, nullptr);
+    const std::wstring tmp0 = dir + L"\\created.7z";
+    auto* os = new prism::win::DiskOutStream(tmp0);
+    if (!os->Open()) {
+      os->Release(); mk->Release();
+      Emit(std::string("VARIANT ") + spec.name + ": committed=[CREATE-TEMP-FAILED]");
+      return 1;
+    }
+    hr = mk->UpdateItems(os, static_cast<abi::UInt32>(create.size()), &cb);
+    const uint64_t bytes = os->written();
+    os->Release();
+    mk->Release();
+    char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "VARIANT %s: create hr=0x%08lX bytes=%llu", spec.name,
+                  static_cast<unsigned long>(hr), static_cast<unsigned long long>(bytes));
+    Emit(buf);
+    if (FAILED(hr)) return 1;
+    if (spec.createMode == 1) return 0;  // create-only row: done
+    // createMode == 2: fall through and mkdir-commit on the CREATED archive
+  } else {
   struct Png {
     const wchar_t* file;
     UINT w, h;
@@ -268,10 +380,10 @@ int RunOne(const VariantSpec& spec, prism::win::SevenZipLibrary& library) {
     }
     names.push_back(f.file);
   }
-  const std::wstring archive = dir + L"\\solid.7z";
-  if (!prism::fixture::PackSolid(prism::fixture::ExePath(), dir, L"solid.7z", names)) {
+  if (!prism::fixture::PackSolid(prism::fixture::ExePath(), dir, L"base.7z", names)) {
     Emit(std::string("VARIANT ") + spec.name + ": committed=[FIXTURE-FAILED(pack)]");
     return 1;
+  }
   }
 
   // Open + mini catalog (7z handler first: the zip tail-scan poisons the 7z

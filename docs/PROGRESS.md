@@ -36,7 +36,9 @@
 
 ## 三、剩余作战计划（四批次，每批有硬验收）
 
-### 批次 A：装配出 PrismArchive.exe（UI 主线，解锁"能跑"）
+### 批次 A：装配出 PrismArchive.exe（UI 主线，解锁"能跑"）　**★ 首个增量已落地（2026-10-31 深夜）**
+
+> **PrismArchive.exe 第一次存在**：CI 构建 + 上传 artifact（`PrismArchive-exe`，PE 头验证 x64 GUI 子系统）。GalleryWindow 已改为纯宿主（全部像素走 GalleryRenderer::Scene，双绘制路径 drift 隐患清除）；缩略图经互斥指针交换从扫描线程交接（只有 UI 线程碰可见 store，LRU recency 单线程化 by construction）。装配契约在 Main.cpp 文件头注。
 1. `App/Main.cpp`：WinMain + 消息循环 + COM/WIC/D2D 初始化顺序（已有 GlassIslandHost 模式可复用）
 2. GalleryWindow 换血：删旧 DrawTile，全量消费 GalleryRenderer（Scene 驱动）
 3. 三事件源接线：catalog 载入 → 视口；sweep 进度 → ProgressHud；空格 → QuickLookSession

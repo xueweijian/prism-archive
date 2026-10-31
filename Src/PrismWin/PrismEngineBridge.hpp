@@ -773,9 +773,19 @@ class ArchiveReader {
   PROPID PropertyId(const std::string&, PROPID fallback) const {
     // GetPropertyInfo() reports standard properties with name = NULL and only
     // fills PROPID/VARTYPE, so discovery is a *set of PROPIDs*, not names.
-    // If discovery ran and the handler lacks `fallback`, report 0 (absent);
-    // otherwise trust the compile-time constant.
-    if (discovered_ && propIdSet_.find(fallback) == propIdSet_.end()) return 0;
+    //
+    // CRITICAL: the discovered set describes what the handler will ADMIT to,
+    // not what GetProperty(i, pid, ...) answers. 7z's discovery table
+    // (Archive/7z/7zProperties.cpp kPropMap -> _fileInfoPopIDs) has no entry
+    // for kpidIsDir, yet CHandler::GetProperty answers kpidIsDir truthfully
+    // (7zHandler.cpp: case kpidIsDir: PropVarEm_Set_Bool(value, item.IsDir)).
+    // Gating on discovery therefore reported pid 0, GetBool returned false,
+    // and EVERY DIRECTORY IN EVERY 7z ARCHIVE READ AS A FILE (2026-10-31).
+    //
+    // So: always trust the compile-time ordinal (pinned against
+    // CPP/7zip/PropID.h); discovery is diagnostics only. A handler that does
+    // not answer a property returns an empty PROPVARIANT, which every caller
+    // already treats as absent -- the failure is local, not a silent default.
     return fallback;
   }
 
@@ -844,7 +854,6 @@ class ArchiveReader {
       const HRESULT hr = archive_->GetPropertyInfo(i, &name, &propId, &vt);
       if (SUCCEEDED(hr)) {
         propIdSet_.insert(static_cast<uint32_t>(propId));
-        discovered_ = true;
         if (name) SysFreeString(name);
       } else {
         std::snprintf(buf, sizeof(buf), "[%u] hr=0x%08lX ", static_cast<unsigned>(i),
@@ -911,8 +920,9 @@ class ArchiveReader {
   InFileStream* stream_ = nullptr;
   abi::IInArchive* archive_ = nullptr;
   std::string openTrace_;
+  // Diagnostics only -- see PropertyId(): this set must never gate a
+  // property read, because handlers answer properties they do not advertise.
   std::set<uint32_t> propIdSet_;
-  bool discovered_ = false;
   std::string propTrace_;
 };
 

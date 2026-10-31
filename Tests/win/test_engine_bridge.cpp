@@ -212,6 +212,18 @@ PRISM_TEST("catalog scan reads the central directory with zero payload work") {
   PRISM_CHECK_EQ(reader.PropertyId("Path", 3), uint32_t(3));
   PRISM_CHECK_EQ(reader.PropertyId("PackSize", 8), uint32_t(8));
 
+  // Regression for the 2026-10-31 "every directory reads as a file" bug:
+  // kpidIsDir (6) is ANSWERED by the handler but never ADVERTISED in its
+  // property-discovery table (7z's kPropMap has no kpidIsDir row). Gating the
+  // read on discovery returned pid 0 and GetBool silently said "not a dir".
+  // Discovery must never be able to change what we ask for.
+  PRISM_CHECK_EQ(reader.PropertyId("IsDir", 6), uint32_t(6));
+  if (reader.discoveredProperties().count(6) == 0) {
+    std::cout << "    (kpidIsDir is not advertised by this handler -- the"
+                 " exact condition that used to break directory listing)"
+              << std::endl;
+  }
+
   reader.Close();
   std::filesystem::remove_all(dir);
 }

@@ -218,6 +218,13 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
       } else if (propId == abi::kpidMTime) {
         value->vt = VT_FILETIME;
         value->hVal.QuadPart = static_cast<LONGLONG>(116444736000000000LL);
+      } else if (propId == abi::kpidSize) {
+        // 7zHandlerOut.cpp:672 -- for any newProps item the engine REQUIRES
+        // kpidSize to be VT_UI8 and returns E_INVALIDARG otherwise. Answering
+        // VT_EMPTY here is what made create0 fail with 0x80070057.
+        value->vt = VT_UI8;
+        // Must match GetStream byte-for-byte (payload 0 -> 4B, 1 -> 8B).
+        value->uhVal.QuadPart = entry.isDir ? 0 : ((index == 0) ? 4 : 8);
       }
       return S_OK;
     }

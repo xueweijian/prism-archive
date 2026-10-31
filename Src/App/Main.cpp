@@ -1,0 +1,161 @@
+// PrismArchive -- the runnable application (batch A assembly).
+//
+// This is the entry point the project never had: every part below was already
+// proven in isolation (engine bridge against real 7z.dll, single-pass solid
+// sweep with pixel-verified thumbnails, renderer validated by CI snapshots);
+// this file is deliberately boring glue, because assembly bugs live in
+// ordering and lifetime, not in cleverness.
+//
+// Assembly contract (batch A):
+//   1. COM apartment-threaded for the UI thread; the sweep worker uses MTA.
+//   2. Archive path: argv[1], else a common dialog. No archive -> quiet exit.
+//   3. 7z.dll resolution: PRISM_7Z_DLL env, then the standard install paths.
+//   4. Catalog loads on the UI thread (v1: one seek+header read; directories
+//      load in milliseconds per the blueprint's zero-payload scan).
+//   5. Thumbnails: ONE background sweep over all image entries (single-pass
+//      per solid block) into a worker-owned ThumbStore, handed to the window
+//      by pointer swap; the window is told via kThumbsChanged. The worker owns
+//      the reader reference until it finishes -- the reader outlives the
+//      thread because the app context is kept alive by shared_ptr on both
+//      sides and the thread is joined after the message loop exits.
+#pragma once
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <commdlg.h>   // GetOpenFileNameW
+#include <shellapi.h>  // CommandLineToArgvW
+#include <shlwapi.h>   // PathFileExistsW
+
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "../PrismCore/Preview.hpp"    // KindByName
+#include "../PrismCore/ThumbStore.hpp"
+#include "../PrismWin/GalleryWindow.hpp"
+#include "../PrismWin/PrismEngineBridge.hpp"
+#include "../PrismWin/SolidSweeper.hpp"
+
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "shlwapi.lib")
+
+namespace {
+
+std::wstring Locate7zDll() {
+  wchar_t buf[MAX_PATH]{};
+  if (GetEnvironmentVariableW(L"PRISM_7Z_DLL", buf, MAX_PATH) > 0 && PathFileExistsW(buf)) {
+    return buf;
+  }
+  for (const wchar_t* candidate : {L"C:\\Program Files\\7-Zip\\7z.dll",
+                                   L"C:\\Program Files (x86)\\7-Zip\\7z.dll"}) {
+    if (PathFileExistsW(candidate)) return candidate;
+  }
+  return {};
+}
+
+std::wstring PickArchive() {
+  OPENFILENAMEW ofn{};
+  wchar_t file[MAX_PATH]{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = nullptr;
+  ofn.lpstrFilter = L"Archives\0*.zip;*.7z;*.rar\0All files\0*.*\0";
+  ofn.lpstrFile = file;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+  if (GetOpenFileNameW(&ofn)) return file;
+  return {};
+}
+
+std::wstring FileNameWide(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"/\\");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+// Everything the UI thread and the sweep worker share. Kept alive by
+// shared_ptr on both sides; the worker is joined after the message loop.
+struct AppContext {
+  prism::win::SevenZipLibrary library;
+  std::unique_ptr<prism::win::ArchiveReader> reader;
+  std::vector<prism::ArchiveItem> items;
+};
+
+}  // namespace
+
+int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  const HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+  int argc = 0;
+  wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  std::wstring archive = (argv && argc > 1) ? argv[1] : std::wstring();
+  if (argv) LocalFree(argv);
+  if (archive.empty()) archive = PickArchive();
+  if (archive.empty()) {
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 0;  // user closed the picker: not an error
+  }
+
+  const std::wstring dll = Locate7zDll();
+  if (dll.empty()) {
+    MessageBoxW(nullptr, L"7z.dll not found.\nInstall 7-Zip or set PRISM_7Z_DLL.",
+                L"PrismArchive", MB_ICONERROR);
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 1;
+  }
+
+  auto app = std::make_shared<AppContext>();
+  if (!app->library.Load(dll)) {
+    MessageBoxW(nullptr, L"Failed to load 7z.dll.", L"PrismArchive", MB_ICONERROR);
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 1;
+  }
+  app->reader = std::make_unique<prism::win::ArchiveReader>(app->library);
+  if (!app->reader->Open(archive)) {
+    const std::wstring trace(app->reader->openTrace().begin(),
+                             app->reader->openTrace().end());
+    MessageBoxW(nullptr, (L"Failed to open:\n" + archive + L"\n\n" + trace).c_str(),
+                L"PrismArchive", MB_ICONERROR);
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 1;
+  }
+  app->items = app->reader->ReadCatalog();
+
+  prism::win::gallery::GalleryWindow window;
+  if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) return 1;
+  window.SetItems(&app->items);
+  window.SetBreadcrumb(FileNameWide(archive) + L"  |  " +
+                       std::to_wstring(app->items.size()) + L" items");
+
+  // One background pass: every image entry, single Extract per solid block.
+  std::vector<uint32_t> sweepIndices;
+  std::vector<uint64_t> sweepSizes;
+  for (const auto& item : app->items) {
+    if (item.isDir) continue;
+    if (prism::QuickLookPlanner::KindByName(item.path) != prism::PreviewKind::Image) continue;
+    sweepIndices.push_back(item.index);
+    sweepSizes.push_back(item.size);
+  }
+  std::thread worker([app, &window, archive, sweepIndices, sweepSizes]() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    prism::win::sweep::WicThumbDecoder wic;
+    if (wic.Initialize()) {
+      auto store = std::make_shared<prism::gallery::ThumbStore>(64ull << 20);
+      prism::win::sweep::RunSolidSweep(*app->reader, sweepIndices, sweepSizes, wic, *store);
+      window.SetThumbs(store);
+      PostMessageW(window.Hwnd(), prism::win::gallery::GalleryWindow::kThumbsChanged, 0, 0);
+    }
+    CoUninitialize();
+  });
+
+  window.Run();
+  worker.join();
+
+  if (SUCCEEDED(coInit)) CoUninitialize();
+  return 0;
+}

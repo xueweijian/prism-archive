@@ -1,13 +1,15 @@
 // PrismArchive -- PrismWin
-// The gallery window (blueprint ch. 4.3 + ch. 5): a Direct2D render loop that
-// draws EXACTLY what prism::gallery tells it and animates scroll with the
-// blueprint springs. All decisions live in PrismCore; this file is a renderer.
+// The gallery window (blueprint ch. 4.3 + ch. 5): a Direct2D host that owns
+// the HWND, the swap of user events into PrismCore decisions, and NOTHING
+// else. Every pixel is painted by GalleryRenderer from a Scene snapshot --
+// the window stopped drawing tiles itself when the renderer was adopted
+// (batch A): two paint paths for one model is how drift starts.
 //
-// M3 scope: grid of rounded-rect placeholder tiles + DirectWrite captions,
-// wheel scrolling driven by SpringAnimator (fluid-sheet), DirectWrite glyph
-// caching for the 120 fps target. Thumbnail textures arrive from the engine
-// bridge (ring-buffer decode) in the next increment -- the cache policy is
-// already the PrismCore ThumbnailLru, so the renderer never invents policy.
+// Threading contract for thumbnails: the sweep worker builds its OWN
+// ThumbStore and hands it over via SetThumbs (pointer swap under a mutex).
+// Only the UI thread ever calls Lookup (it mutates LRU recency), and it only
+// ever touches the swapped-in store -- the worker never writes a store the
+// UI can see.
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -20,13 +22,19 @@
 
 #include <d2d1.h>
 #include <d2d1helper.h>
-#include <dwrite.h>
 #include <wrl/client.h>
 
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "../PrismCore/Gallery.hpp"
+#include "../PrismCore/ListLayout.hpp"
+#include "../PrismCore/Preview.hpp"
 #include "../PrismCore/SpringAnimator.hpp"
+#include "../PrismCore/ThumbStore.hpp"
+#include "GalleryRenderer.hpp"
 
 namespace prism::win::gallery {
 
@@ -36,6 +44,8 @@ class GalleryWindow {
  public:
   // Fixed scroll animation: the blueprint's "panel smooth transition" preset.
   static constexpr SpringPreset kScrollSpring = kSpringFluidSheet;
+  // Posted by the sweep worker when a fresh ThumbStore has been swapped in.
+  static constexpr UINT kThumbsChanged = WM_APP + 0x1;
 
   struct Host {
     HWND hwnd = nullptr;
@@ -62,17 +72,34 @@ class GalleryWindow {
 
   void SetItems(std::vector<prism::ArchiveItem>* items) {
     host_.items = items;
+    RebuildListItems();
     RebuildLayout();
   }
 
-  // Cache-policy handle the decode pipeline shares with this window.
+  // Cache-policy handle kept for the compile contract (m3_compile_check); the
+  // live pixel store arrives via SetThumbs.
   prism::gallery::ThumbnailLru& Thumbnails() { return thumbnails_; }
   bool ListMode() const { return listMode_; }  // Ctrl+1/2 toggles (ch. 9.1)
   prism::gallery::ViewportWindow& Viewport() { return viewport_; }
+  HWND Hwnd() const { return host_.hwnd; }
+
+  // Ownership handoff from the sweep worker (see threading contract above).
+  void SetThumbs(std::shared_ptr<prism::gallery::ThumbStore> store) {
+    std::lock_guard<std::mutex> lock(thumbMutex_);
+    thumbs_ = std::move(store);
+  }
+
+  void SetBreadcrumb(const std::wstring& text) {
+    breadcrumb_ = text;
+    Invalidate();
+  }
+
+  void Show() {
+    if (host_.hwnd) ShowWindow(host_.hwnd, SW_SHOW);
+  }
 
   void Run() {
-    if (!host_.hwnd) return;
-    ShowWindow(host_.hwnd, SW_SHOW);
+    Show();
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
       TranslateMessage(&msg);
@@ -89,15 +116,15 @@ class GalleryWindow {
       self->host_.hwnd = hwnd;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     }
-    return self ? self->Proc(message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+    return self ? self->Proc(message, wparam, lparam)
+                : DefWindowProcW(hwnd, message, wparam, lparam);
   }
 
   LRESULT Proc(UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
       case WM_SIZE: {
         if (target_) {
-          D2D1_SIZE_U size = D2D1::SizeU(LOWORD(lparam), HIWORD(lparam));
-          target_->Resize(size);
+          target_->Resize(D2D1::SizeU(LOWORD(lparam), HIWORD(lparam)));
         }
         viewport_.SetViewportSize(static_cast<double>(LOWORD(lparam)),
                                   static_cast<double>(HIWORD(lparam)));
@@ -105,9 +132,7 @@ class GalleryWindow {
         return 0;
       }
       case WM_KEYDOWN: {
-        // Blueprint ch. 9.1: Ctrl+1 gallery grid, Ctrl+2 file list. The
-        // paint path switch rides the renderer adoption (next batch); the
-        // mode state is the contract this window owns.
+        // Blueprint ch. 9.1: Ctrl+1 gallery grid, Ctrl+2 file list.
         if (LOWORD(wparam) == '1' && (GetKeyState(VK_CONTROL) & 0x8000)) {
           listMode_ = false;
           Invalidate();
@@ -127,6 +152,9 @@ class GalleryWindow {
         Invalidate();
         return 0;
       }
+      case kThumbsChanged:
+        Invalidate();
+        return 0;
       case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(host_.hwnd, &ps);
@@ -156,50 +184,23 @@ class GalleryWindow {
 
   void Render() {
     if (!EnsureDeviceResources()) return;
+    if (!rendererReady_) {
+      rendererReady_ = SUCCEEDED(renderer_.CreateDeviceResources(target_.Get()));
+      if (!rendererReady_) return;
+    }
     target_->BeginDraw();
-    target_->Clear(D2D1::ColorF(0x101418, 1.0f));  // deep glass backdrop
-    const auto range = viewport_.Visible(kOverscanRows);
-    if (range.Empty() || !host_.items) {
-      target_->EndDraw();
-      return;
+    GalleryRenderer::Scene scene;
+    scene.items = host_.items;
+    scene.viewport = &viewport_;
+    scene.listMode = listMode_;
+    scene.listItems = listMode_ ? &listItems_ : nullptr;
+    scene.breadcrumb = breadcrumb_;
+    {
+      std::lock_guard<std::mutex> lock(thumbMutex_);
+      scene.thumbs = thumbs_.get();
     }
-    for (int index = range.first; index <= range.last; ++index) {
-      if (index >= static_cast<int>(host_.items->size())) break;
-      DrawTile(index, (*host_.items)[index]);
-    }
+    renderer_.Draw(target_.Get(), scene);
     target_->EndDraw();
-  }
-
-  void DrawTile(int index, const prism::ArchiveItem& item) {
-    const int col = index % viewport_.Columns();
-    const int row = index / viewport_.Columns();
-    const float cellH = static_cast<float>(viewport_.CellHeight());
-    const float left = static_cast<float>(col) * TileWidth() + kTileInset;
-    const float top = static_cast<float>(row) * cellH - static_cast<float>(viewport_.Scroll()) +
-                      kTileInset;
-    const float right = static_cast<float>((col + 1) * TileWidth()) - kTileInset;
-    const float bottom = top + cellH - 2.0f * kTileInset;
-    const D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(
-        D2D1::RectF(left, top, right, bottom), kTileRadius, kTileRadius);
-    target_->FillRoundedRectangle(tile, tileBrush_.Get());
-
-    const std::wstring caption = CaptionOf(item.path);
-    if (!caption.empty() && captionFormat_) {
-      D2D1_RECT_F layout = D2D1::RectF(left + 8.0f, bottom - 28.0f, right - 8.0f, bottom - 4.0f);
-      // d2d1.h stows the windows.h DrawText macro around the interface, so the
-      // member is plain DrawText (there is no DrawTextW member on D2D targets).
-      target_->DrawText(caption.c_str(), static_cast<UINT32>(caption.size()), captionFormat_.Get(),
-                        layout, textBrush_.Get());
-    }
-  }
-
-  static std::wstring CaptionOf(const std::string& utf8) {
-    if (utf8.empty()) return {};
-    const int wide = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
-                                         nullptr, 0);
-    std::wstring out(static_cast<size_t>(wide), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), out.data(), wide);
-    return out;
   }
 
   bool EnsureDeviceResources() {
@@ -228,37 +229,29 @@ class GalleryWindow {
     // expand to two arguments and break the arity.
       return false;
     }
-    if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(0x2A3138, 0.92f),
-                                              tileBrush_.ReleaseAndGetAddressOf()))) {
-      return false;
-    }
-    if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(0xE8ECF1, 1.0f),
-                                              textBrush_.ReleaseAndGetAddressOf()))) {
-      return false;
-    }
-    if (!writeFactory_) {
-      if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                     reinterpret_cast<IUnknown**>(writeFactory_.GetAddressOf())))) {
-        return false;
-      }
-    }
-    if (!captionFormat_) {
-      writeFactory_->CreateTextFormat(L"Segoe UI Variable", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                      13.0f, L"en-US", captionFormat_.ReleaseAndGetAddressOf());
-    }
     return true;
   }
 
-  void RebuildLayout() { viewport_ = prism::gallery::ViewportWindow(CurrentLayout(), ItemsCount()); }
+  void RebuildListItems() {
+    listItems_.clear();
+    if (!host_.items) return;
+    listItems_.reserve(host_.items->size());
+    for (const auto& item : *host_.items) {
+      prism::list::SortItem row;
+      row.name = item.path;
+      row.size = item.size;
+      row.packedSize = item.packSize;
+      row.isDir = item.isDir;
+      row.encrypted = item.encrypted;
+      row.kind = prism::QuickLookPlanner::KindByName(item.path);
+      listItems_.push_back(row);
+    }
+    prism::list::FolderFirstOrder(listItems_);
+  }
+
+  void RebuildLayout() { viewport_ = prism::gallery::ViewportWindow(layout_, ItemsCount()); }
 
   int ItemsCount() const { return host_.items ? static_cast<int>(host_.items->size()) : 0; }
-
-  prism::gallery::GridLayout CurrentLayout() const { return layout_; }
-
-  float TileWidth() const {
-    return static_cast<float>(viewport_.ColumnWidth());  // viewport width / columns
-  }
 
   void Invalidate() { if (host_.hwnd) InvalidateRect(host_.hwnd, nullptr, FALSE); }
 
@@ -271,24 +264,25 @@ class GalleryWindow {
 
   // ---------------------------------------------------------------- state
   static constexpr int kOverscanRows = 2;
-  static constexpr float kTileInset = 6.0f;
-  static constexpr float kTileRadius = 14.0f;
   static constexpr double kWheelScrollPixels = 120.0 * 3.0;
 
   Host host_;
   prism::gallery::GridLayout layout_{};
   prism::gallery::ViewportWindow viewport_{layout_, 0};
   bool listMode_ = false;  // Ctrl+2: the four-column file list (ch. 3.2)
-  prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint cache budget
+  prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint budget
+  std::vector<prism::list::SortItem> listItems_;  // list-mode rows (built from catalog)
+  std::wstring breadcrumb_;
   SpringAnimator scrollSpring_{kScrollSpring, 0.0};
   double scrollTarget_ = 0.0;
 
+  GalleryRenderer renderer_;
+  bool rendererReady_ = false;
+  std::mutex thumbMutex_;
+  std::shared_ptr<prism::gallery::ThumbStore> thumbs_;
+
   ComPtr<ID2D1Factory> factory_;
   ComPtr<ID2D1HwndRenderTarget> target_;
-  ComPtr<ID2D1SolidColorBrush> tileBrush_;
-  ComPtr<ID2D1SolidColorBrush> textBrush_;
-  ComPtr<IDWriteFactory> writeFactory_;
-  ComPtr<IDWriteTextFormat> captionFormat_;
 };
 
 }  // namespace prism::win::gallery

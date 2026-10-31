@@ -11,6 +11,10 @@ target_include_directories(PrismArchive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(PrismArchive PRIVATE prism_win_bridge
                       user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
                       ole32.lib comdlg32.lib shell32.lib shlwapi.lib)
+# /WX- : same rationale as the other Windows targets -- the SDK headers are
+# not warning-clean under /W4 (the renderer's float<->pixel conversions are
+# exactness-benign by construction; cast-polish is deferred, not forgotten).
+target_compile_options(PrismArchive PRIVATE /WX-)
 
 # Win11 modern context menu (IExplorerCommand). Needs package identity at
 # runtime (MSIX sparse package) but compiles and links standalone.

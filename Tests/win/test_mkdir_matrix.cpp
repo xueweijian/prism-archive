@@ -90,6 +90,7 @@ void Emit(const std::string& line) { std::cout << line << std::endl; }
 // FS-driven caller would have one) -- MTime is deliberately NOT a matrix
 // dimension, rounds 9-10 already pinned it.
 class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
+                                   public abi::ICryptoGetTextPassword,
                                    public vt::ICryptoGetTextPassword2 {
  public:
   MatrixUpdateCallback(std::vector<vt::detail::OutEntry> entries,
@@ -102,6 +103,8 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
       *out = static_cast<vt::IArchiveUpdateCallback*>(this);
     } else if (iid == vt::kIID_IProgress) {
       *out = static_cast<abi::IProgress*>(this);
+    } else if (iid == abi::IID_ICryptoGetTextPassword) {
+      *out = static_cast<abi::ICryptoGetTextPassword*>(this);
     } else if (iid == vt::kIID_ICryptoGetTextPassword2) {
       *out = static_cast<vt::ICryptoGetTextPassword2*>(this);
     } else {

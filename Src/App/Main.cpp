@@ -109,6 +109,7 @@ struct AppContext {
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  using GalleryWindow = prism::win::gallery::GalleryWindow;
   const HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   int argc = 0;

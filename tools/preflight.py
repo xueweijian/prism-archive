@@ -89,6 +89,24 @@ def check_b2_fixed_width():
                             f"#include <cstdint>")
 
 
+def check_b7_app_qualified_statics():
+    """B7: Src/App glue has no local MSVC compile -- the class-static
+    references that bit us twice (GalleryWindow::NowMs / ::kProgressMessage)
+    must be qualified or backed by a using-alias in the same TU."""
+    known = ("GalleryWindow",)
+    for f in sorted((ROOT / "Src" / "App").glob("*.cpp")):
+        text = scan(f)
+        has_alias = any(
+            re.search(rf"using\s+{name}\s*=\s*prism", text) for name in known
+        )
+        for name in known:
+            bare = re.search(rf"(?<![\w:]){name}::", text)
+            if bare and not has_alias:
+                failures.append(
+                    f"B7 {f.relative_to(ROOT)} references {name}:: without a "
+                    f"using-alias (C2653 on MSVC; the class lives in prism::win::gallery)")
+
+
 def check_b5_cfstr():
     """B5: CFSTR_* is TEXT-based -- it expands to a NARROW string in this
     project's non-UNICODE build, failing RegisterClipboardFormatW. Clipboard
@@ -173,6 +191,7 @@ def main():
     check_arch_no_windows()
     check_b2_fixed_width()
     check_b5_cfstr()
+    check_b7_app_qualified_statics()
     check_b6_enum_print()
     check_d1_skip_gates()
     if failures:

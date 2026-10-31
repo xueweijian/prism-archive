@@ -377,6 +377,11 @@ int main(int argc, char** argv) {
   const int rc = ::prism::test::RunAll(argc, argv);
   // The marker below is part of the verdict: ctest requires it in stdout, so
   // a silent SKIP can never count as a pass (L2: negative control).
-  if (rc == 0 && g_haveDll) std::cout << "ALL ENGINE-BRIDGE CHECKS PASSED" << std::endl;
+  // Flush BEFORE the process may be killed by an at-exit sanitizer report from
+  // the engine DLL, so a green assertion run is still provably green.
+  if (rc == 0 && g_haveDll) {
+    std::cout << "ALL ENGINE-BRIDGE CHECKS PASSED" << std::endl;
+    std::cout.flush();
+  }
   return rc;
 }

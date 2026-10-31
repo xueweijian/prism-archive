@@ -101,6 +101,7 @@ struct CommitResult {
   int64_t copiedBytes = 0;
   int64_t elapsedMs = 0;
   std::wstring newArchivePath;
+  std::string updateTrace;  // diagnostic: what the engine asked the callback
 };
 
 namespace detail {
@@ -244,6 +245,15 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
     PropVariantInit(value);
     if (index >= entries_.size()) return E_INVALIDARG;
     const OutEntry& entry = entries_[index];
+    // Diagnostic ask-trace (evidence round): what the engine asked and which
+    // branch answered. Cheap always-on; the test prints it on failure only.
+    {
+      char line[64];
+      std::snprintf(line, sizeof(line), "ask i=%u pid=%u entry.idx=%lld\n",
+                    static_cast<unsigned>(index), static_cast<unsigned>(propId),
+                    static_cast<long long>(entry.indexInArchive));
+      trace_ += line;
+    }
     // The new path wins for touched/new items; everything else is forwarded to
     // the old archive so untouched metadata (times, attributes, sizes)
     // survives the rewrite. Reentrancy is safe: the engine calls us on the
@@ -255,12 +265,15 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
       return value->bstrVal ? S_OK : E_OUTOFMEMORY;
     }
     if (entry.indexInArchive >= 0 && old_ != nullptr) {
+      trace_ += "  -> FWD old-archive\n";
       return old_->GetProperty(static_cast<abi::UInt32>(entry.indexInArchive), propId, value);
     }
+    trace_ += "  -> EMPTY\n";
     // Brand-new node: an empty folder carries nothing but its directory flag.
     if (propId == abi::kpidIsDir) {
       value->vt = VT_BOOL;
       value->boolVal = VARIANT_TRUE;
+      trace_ += "  -> NEW-DIR TRUE\n";
     }
     return S_OK;
   }
@@ -296,6 +309,7 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
   }
 
   const std::string& reason() const { return reason_; }
+  const std::string& trace() const { return trace_; }
 
  private:
   void Fail(const std::string& why) {
@@ -303,6 +317,7 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
   }
 
   std::vector<OutEntry> entries_;
+  std::string trace_;
   abi::IInArchive* old_ = nullptr;
   std::function<bool(int64_t)> progress_;
   std::string reason_;
@@ -591,6 +606,7 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
   const HRESULT hrUpdate =
       outArchive->UpdateItems(outStream, static_cast<abi::UInt32>(entries.size()), callback);
   out.copiedBytes = static_cast<int64_t>(outStream->written());
+  out.updateTrace = callback->trace();
   const std::string cbReason = callback->reason();
   callback->Release();
   outStream->Release();  // closes the temp handle before validation re-opens it

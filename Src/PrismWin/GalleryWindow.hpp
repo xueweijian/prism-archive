@@ -46,6 +46,14 @@ using Microsoft::WRL::ComPtr;
 
 class GalleryWindow {
  public:
+  // Monotonic millisecond clock -- public because Main.cpp drives HUD phases
+  // on the SAME timeline as the window's internal animation timing.
+  static uint64_t NowMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+  }
   // Fixed scroll animation: the blueprint's "panel smooth transition" preset.
   static constexpr SpringPreset kScrollSpring = kSpringFluidSheet;
   // Posted by the sweep worker when a fresh ThumbStore has been swapped in.
@@ -285,13 +293,6 @@ class GalleryWindow {
     MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
                         out.data(), wide);
     return out;
-  }
-
-  static uint64_t NowMs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
   }
 
   bool quickLookClose() {

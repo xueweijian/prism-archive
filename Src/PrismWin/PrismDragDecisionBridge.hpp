@@ -524,6 +524,7 @@ class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
         owner_->chunks_.emplace_back(static_cast<const char*>(data),
                                      static_cast<const char*>(data) + size);
         owner_->queuedBytes_ += size;
+        owner_->producedBytes_ += size;
       }
       owner_->waitReadable_.notify_all();
       if (processed) *processed = size;
@@ -613,6 +614,16 @@ class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
     queuedBytes_ = 0;
   }
 
+  // Evidence accessors: a red CI run must say WHICH side starved.
+  bool workerFailed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return failed_;
+  }
+  uint64_t producedBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return producedBytes_;
+  }
+
   prism::win::ArchiveReader* reader_;
   uint32_t index_;
   size_t highWater_;
@@ -625,6 +636,7 @@ class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
   size_t queuedBytes_ = 0;
   bool started_ = false;
   bool eof_ = false;
+  uint64_t producedBytes_ = 0;
   bool failed_ = false;
   bool abort_ = false;
   uint64_t restarts_ = 0;

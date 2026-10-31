@@ -257,7 +257,20 @@ int main() {
       return 1;
     }
     std::string got;
-    if (!PRISM_CHECK(ReadAll(stream.Get(), &got, kGamma))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK(ReadAll(stream.Get(), &got, kGamma))) {
+      std::cout << "    e2e read failed; reproducing on the observable channel"
+                << std::endl;
+      Wired w = makeStream(3);
+      std::string got2;
+      const bool direct = ReadAll(w.stream.Get(), &got2, kGamma);
+      std::cout << "    direct read ok=" << direct << " bytes=" << got2.size()
+                << std::endl;
+      std::cout << "    stream diag: " << w.stream->diagnostics() << std::endl;
+      std::cout << "    producer: failed=" << w.producer->workerFailed()
+                << " produced=" << w.producer->producedBytes() << std::endl;
+      RemoveDir(dir);
+      return 1;
+    }
     if (!PRISM_CHECK(ByteEquals(got, contentGamma, 0))) {
       std::cout << "    E2E sequential read is not byte-exact" << std::endl;
       RemoveDir(dir);

@@ -480,6 +480,16 @@ class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
     return true;
   }
 
+  // Evidence accessors: a red CI run must say WHICH side starved.
+  bool workerFailed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return failed_;
+  }
+  uint64_t producedBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return producedBytes_;
+  }
+
   uint64_t restarts() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return restarts_;
@@ -612,16 +622,6 @@ class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
     if (worker_.joinable()) worker_.join();
     std::lock_guard<std::mutex> lock(mutex_);
     queuedBytes_ = 0;
-  }
-
-  // Evidence accessors: a red CI run must say WHICH side starved.
-  bool workerFailed() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return failed_;
-  }
-  uint64_t producedBytes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return producedBytes_;
   }
 
   prism::win::ArchiveReader* reader_;

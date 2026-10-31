@@ -12,6 +12,7 @@ set(PRISM_CORE_TESTS
     test_spring.cpp
     test_gallery.cpp
     test_sweep.cpp
+    test_pwd_probe_core.cpp
     test_thumb_store.cpp
     test_list_layout.cpp
     test_glass_island.cpp
@@ -25,6 +26,10 @@ foreach(source IN LISTS PRISM_CORE_TESTS)
   target_link_libraries("${name}" PRIVATE prism_core)
   add_test(NAME "core.${name}" COMMAND "${name}")
 endforeach()
+
+# The probe core drives a thread-pool plan; link Threads explicitly.
+find_package(Threads REQUIRED)
+target_link_libraries(test_pwd_probe_core PRIVATE Threads::Threads)
 
 # Deliberate rule mutations are expected to fail the same assertions. WILL_FAIL
 # makes the mutation check itself green only when the test suite catches it;
@@ -89,6 +94,17 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
            $ENV{TEMP}/prism_snapshots)
   set_tests_properties(win.gallery_snapshot PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL SNAPSHOT CHECKS PASSED")
+
+  # Password probe: the executor is COM-glue + the ring decisions; the win
+  # test drives a real AES-encrypted archive through it.
+  add_executable(win_pwd_probe_test win/test_pwd_probe.cpp)
+  target_link_libraries(win_pwd_probe_test PRIVATE prism_core prism_win_bridge
+                                                   user32.lib gdi32.lib ole32.lib
+                                                   windowscodecs.lib)
+  target_compile_options(win_pwd_probe_test PRIVATE /WX-)
+  add_test(NAME "win.pwd_probe" COMMAND win_pwd_probe_test)
+  set_tests_properties(win.pwd_probe PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL PWD-PROBE CHECKS PASSED")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

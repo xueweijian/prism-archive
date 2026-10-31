@@ -407,6 +407,7 @@ PRISM_TEST("mkdir alone commits a directory entry") {
         std::cout << "  committed: '" << it.path << "' dir=" << it.isDir
                   << " size=" << it.size << std::endl;
       }
+      std::cout << dumpReader.RawProbe() << std::endl;
       dumpReader.Close();
     }
     std::cout << "  update-trace:" << std::endl << result.updateTrace;

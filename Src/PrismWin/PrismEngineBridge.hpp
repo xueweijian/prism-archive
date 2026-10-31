@@ -55,7 +55,16 @@ class SevenZipLibrary {
  public:
   SevenZipLibrary() = default;
   ~SevenZipLibrary() {
-    if (module_) FreeLibrary(module_);
+    // Deliberately NOT FreeLibrary'd. 7z.dll keeps process-wide state
+    // (g_ExternalCodecs in DllExports2.cpp, filled by its SetCodecs export),
+    // and handing the module back frees that state while stale pointers
+    // survive: load/free/load cycles inside one process make the next
+    // SetCodecs read freed memory. AddressSanitizer reports it as
+    // heap-use-after-free inside SetCodecs, which looks like our bug and is
+    // not. A real archive manager loads the engine once and keeps it; the OS
+    // reclaims the image at process exit, so leaking one HMODULE here is the
+    // correct trade. (Repeated cross-DLL unload/reload is a 7-Zip hazard, not
+    // a supported pattern.)
   }
   SevenZipLibrary(const SevenZipLibrary&) = delete;
   SevenZipLibrary& operator=(const SevenZipLibrary&) = delete;
@@ -193,6 +202,8 @@ class MemoryOutStream final : public abi::ISequentialOutStream {
       AddRef();
       return S_OK;
     }
+    // (No IID_IOutStream here: MemoryOutStream is the in-memory extraction
+    // sink; only DiskOutStream -- the physical file -- is seekable/sizable.)
     *out = nullptr;
     return E_NOINTERFACE;
   }
@@ -239,7 +250,11 @@ inline std::wstring ToBackslashes(std::wstring p) {
   return p;
 }
 
-class DiskOutStream final : public abi::ISequentialOutStream {
+// Full IOutStream: the 7z UPDATE engine QIs the out stream for IOutStream
+// and returns E_NOTIMPL without it (7zUpdate.cpp ~L1927, newer engines);
+// Seek/SetSize ride SetFilePointerEx/SetEndOfFile (STREAM_SEEK_* values are
+// identical to FILE_*).
+class DiskOutStream final : public abi::IOutStream {
  public:
   explicit DiskOutStream(std::wstring finalPath) : path_(std::move(finalPath)) {}
 
@@ -260,6 +275,11 @@ class DiskOutStream final : public abi::ISequentialOutStream {
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
+    if (iid == abi::IID_IOutStream) {
+      *out = static_cast<abi::IOutStream*>(this);
+      AddRef();
+      return S_OK;
+    }
     if (iid == IID_IUnknown || iid == abi::IID_ISequentialOutStream) {
       *out = static_cast<abi::ISequentialOutStream*>(this);
       AddRef();
@@ -287,6 +307,40 @@ class DiskOutStream final : public abi::ISequentialOutStream {
     }
     written_ += done;
     if (processed) *processed = done;
+    return S_OK;
+  }
+
+  STDMETHODIMP Seek(abi::Int64 offset, abi::UInt32 seekOrigin,
+                    abi::UInt64* newPosition) override {
+    if (handle_ == INVALID_HANDLE_VALUE) return E_FAIL;
+    if (seekOrigin > STREAM_SEEK_END) return STG_E_INVALIDFUNCTION;
+    LARGE_INTEGER move{};
+    move.QuadPart = offset;
+    LARGE_INTEGER newPos{};
+    if (!SetFilePointerEx(handle_, move, &newPos,
+                          static_cast<DWORD>(seekOrigin))) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (newPosition) *newPosition = static_cast<abi::UInt64>(newPos.QuadPart);
+    return S_OK;
+  }
+
+  STDMETHODIMP SetSize(abi::UInt64 newSize) override {
+    if (handle_ == INVALID_HANDLE_VALUE) return E_FAIL;
+    LARGE_INTEGER saved{};
+    if (!SetFilePointerEx(handle_, LARGE_INTEGER{}, &saved, FILE_CURRENT)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    LARGE_INTEGER end{};
+    end.QuadPart = static_cast<LONGLONG>(newSize);
+    if (!SetFilePointerEx(handle_, end, nullptr, FILE_BEGIN) || !SetEndOfFile(handle_)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    LARGE_INTEGER restore{};
+    restore.QuadPart = saved.QuadPart;
+    if (!SetFilePointerEx(handle_, restore, nullptr, FILE_BEGIN)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
     return S_OK;
   }
 
@@ -452,8 +506,17 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       return E_ABORT;
     }
     currentPath_ = finalPath;
+    // TWO references are needed and they are different things:
+    //   * outStream  -- handed to 7z, which OWNS it and will Release it once
+    //                   the item is written;
+    //   * currentSink_ -- ours, purely so SetOperationResult can read
+    //                   written() before the engine drops the stream.
+    // Handing the same single reference to both (sink refs=1, out param, no
+    // AddRef) meant 7z freed the object and currentSink_ dangled:
+    // AddressSanitizer reported heap-use-after-free on exactly this path.
+    sink->AddRef();          // ours
     currentSink_ = sink;
-    *outStream = sink;
+    *outStream = sink;       // engine's (the one created by operator new)
     return S_OK;
   }
 
@@ -465,6 +528,9 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       result_.writtenPaths.push_back(currentPath_);
       if (currentSink_) result_.bytesWritten += currentSink_->written();
     }
+    // Drop OUR reference (see GetStream); the engine drops its own when it is
+    // done with the stream. Without this the AddRef above would leak.
+    if (currentSink_) currentSink_->Release();
     currentSink_ = nullptr;
     currentPath_.clear();
     return S_OK;
@@ -631,6 +697,48 @@ class ArchiveReader {
     return items;
   }
 
+  // Evidence probe: the RAW property truth per entry, VT type included --
+  // ReadCatalog's interpretation (GetBool/GetString) is one hypothesis this
+  // can contradict. One line per entry: i|path|pid6(vt,val)|pid9|pid7.
+  std::string RawProbe() const {
+    std::string out;
+    if (!archive_) return "no archive";
+    abi::UInt32 count = 0;
+    if (FAILED(archive_->GetNumberOfItems(&count))) return "no count";
+    for (abi::UInt32 i = 0; i < count; ++i) {
+      char line[256];
+      std::snprintf(line, sizeof(line), "probe i=%u ", static_cast<unsigned>(i));
+      out += line;
+      const PROPID pids[] = {abi::kpidPath, abi::kpidIsDir, abi::kpidAttrib, abi::kpidSize};
+      for (PROPID pid : pids) {
+        PROPVARIANT v{};
+        PropVariantInit(&v);
+        std::string rendered;
+        if (SUCCEEDED(archive_->GetProperty(i, pid, &v))) {
+          switch (v.vt) {
+            case VT_BOOL: rendered = v.boolVal ? "true" : "false"; break;
+            case VT_UI4: rendered = std::to_string(v.ulVal); break;
+            case VT_UI8: rendered = std::to_string(v.uhVal.QuadPart); break;
+            case VT_BSTR: {
+              std::wstring w(v.bstrVal ? v.bstrVal : L"");
+              rendered.assign(w.begin(), w.end());
+              break;
+            }
+            case VT_FILETIME: rendered = "filetime"; break;
+            case VT_EMPTY: rendered = "EMPTY"; break;
+            default: rendered = "vt=" + std::to_string(v.vt); break;
+          }
+        } else {
+          rendered = "HR_FAIL";
+        }
+        out += " pid" + std::to_string(pid) + "=" + rendered;
+        PropVariantClear(&v);
+      }
+      out += "\n";
+    }
+    return out;
+  }
+
   // Sink 1: thumbnail / preview extraction under a hard memory budget.
   std::optional<std::vector<uint8_t>> ExtractToMemory(
       uint32_t index, size_t maxBytes = 16ull * 1024 * 1024) const {
@@ -686,9 +794,19 @@ class ArchiveReader {
   PROPID PropertyId(const std::string&, PROPID fallback) const {
     // GetPropertyInfo() reports standard properties with name = NULL and only
     // fills PROPID/VARTYPE, so discovery is a *set of PROPIDs*, not names.
-    // If discovery ran and the handler lacks `fallback`, report 0 (absent);
-    // otherwise trust the compile-time constant.
-    if (discovered_ && propIdSet_.find(fallback) == propIdSet_.end()) return 0;
+    //
+    // CRITICAL: the discovered set describes what the handler will ADMIT to,
+    // not what GetProperty(i, pid, ...) answers. 7z's discovery table
+    // (Archive/7z/7zProperties.cpp kPropMap -> _fileInfoPopIDs) has no entry
+    // for kpidIsDir, yet CHandler::GetProperty answers kpidIsDir truthfully
+    // (7zHandler.cpp: case kpidIsDir: PropVarEm_Set_Bool(value, item.IsDir)).
+    // Gating on discovery therefore reported pid 0, GetBool returned false,
+    // and EVERY DIRECTORY IN EVERY 7z ARCHIVE READ AS A FILE (2026-10-31).
+    //
+    // So: always trust the compile-time ordinal (pinned against
+    // CPP/7zip/PropID.h); discovery is diagnostics only. A handler that does
+    // not answer a property returns an empty PROPVARIANT, which every caller
+    // already treats as absent -- the failure is local, not a silent default.
     return fallback;
   }
 
@@ -757,7 +875,6 @@ class ArchiveReader {
       const HRESULT hr = archive_->GetPropertyInfo(i, &name, &propId, &vt);
       if (SUCCEEDED(hr)) {
         propIdSet_.insert(static_cast<uint32_t>(propId));
-        discovered_ = true;
         if (name) SysFreeString(name);
       } else {
         std::snprintf(buf, sizeof(buf), "[%u] hr=0x%08lX ", static_cast<unsigned>(i),
@@ -824,8 +941,9 @@ class ArchiveReader {
   InFileStream* stream_ = nullptr;
   abi::IInArchive* archive_ = nullptr;
   std::string openTrace_;
+  // Diagnostics only -- see PropertyId(): this set must never gate a
+  // property read, because handlers answer properties they do not advertise.
   std::set<uint32_t> propIdSet_;
-  bool discovered_ = false;
   std::string propTrace_;
 };
 

@@ -406,7 +406,12 @@ struct OpenedArchive {
       trace = "CreateFileW failed for the archive itself";
       return false;
     }
-    for (const GUID* clsid : {&abi::CLSID_CFormatZip, &abi::CLSID_CFormat7z}) {
+    // 7z FIRST: the zip candidate's open (an EOCD tail scan) must never run
+    // against a .7z input -- rounds 10b-11 showed the 7z parse flipping into
+    // start-header-recovery (CanUpdate()==false -> E_NOTIMPL) depending on
+    // what the zip attempt left behind. Signature still rules: a zip input
+    // fails 7z's Open with S_FALSE and falls through to the zip candidate.
+    for (const GUID* clsid : {&abi::CLSID_CFormat7z, &abi::CLSID_CFormatZip}) {
       abi::IInArchive* candidate = nullptr;
       if (FAILED(library.CreateObject(*clsid, abi::IID_IInArchive,
                                       reinterpret_cast<void**>(&candidate))) ||

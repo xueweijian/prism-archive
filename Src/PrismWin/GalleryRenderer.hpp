@@ -66,6 +66,8 @@ class GalleryRenderer {
     // Batch 3: real thumbnails from the solid sweep (nullptr -> gradient
     // placeholders), the glass island model (nullptr -> static islands),
     // and the main-window list mode.
+    int selectedItem = -1;  // grid-mode selection (accent border)
+
     prism::gallery::ThumbStore* thumbs = nullptr;
     prism::glass::GlassIslandScene* islands = nullptr;
     bool listMode = false;
@@ -252,6 +254,15 @@ class GalleryRenderer {
         }
         if (clipGeometry) target->PopLayer();
 
+        if (static_cast<int>(item.index) == scene.selectedItem) {
+          // Selection ring: 2px accent, squircle-ish corners stay readable.
+          islandBorder_->SetColor(kAccent);
+          D2D1_ROUNDED_RECT ring =
+              D2D1::RoundedRect(D2D1::RectF(left - 1.0f, top - 1.0f, right + 1.0f,
+                                            bottom + 1.0f), kRadius, kRadius);
+          target->DrawRoundedRectangle(ring, islandBorder_.Get(), 2.0f);
+          islandBorder_->SetColor(kIslandBorder);
+        }
         // Name plate under the photo (the grid is unusable without labels).
         const D2D1_ROUNDED_RECT plate = D2D1::RoundedRect(
             D2D1::RectF(left, bottom - 28.0f, right, bottom), 10.0f, 10.0f);

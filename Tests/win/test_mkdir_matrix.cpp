@@ -58,7 +58,7 @@ namespace vt = prism::win::vt;
 // Minimal sequential reader over a static buffer (create0 payloads).
 class MemSeqStream final : public abi::ISequentialInStream {
  public:
-  MemSeqStream(const char* data, UInt32 size) : data_(data), size_(size) {}
+  MemSeqStream(const char* data, abi::UInt32 size) : data_(data), size_(size) {}
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
     if (iid == IID_IUnknown || iid == abi::IID_ISequentialInStream) {
@@ -75,12 +75,12 @@ class MemSeqStream final : public abi::ISequentialInStream {
     if (r == 0) delete this;
     return r;
   }
-  STDMETHODIMP Read(const void* data, UInt32 size, UInt32* processedSize) override {
+  STDMETHODIMP Read(const void* data, abi::UInt32 size, abi::UInt32* processedSize) override {
     if (pos_ >= size_) {
       if (processedSize) *processedSize = 0;
       return S_OK;
     }
-    const UInt32 n = (size < size_ - pos_) ? size : size_ - pos_;
+    const abi::UInt32 n = (size < size_ - pos_) ? size : size_ - pos_;
     memcpy(const_cast<void*>(data), data_ + pos_, n);
     pos_ += n;
     if (processedSize) *processedSize = n;
@@ -89,8 +89,8 @@ class MemSeqStream final : public abi::ISequentialInStream {
 
  private:
   const char* data_;
-  UInt32 size_;
-  UInt32 pos_ = 0;
+  abi::UInt32 size_;
+  abi::UInt32 pos_ = 0;
   LONG refs_ = 1;
 };
 
@@ -237,7 +237,7 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
       static const char kPayloadA[4] = {'A', 'A', 'A', 'A'};
       static const char kPayloadB[8] = {'B', 'B', 'B', 'B', 'B', 'B', 'B', 'B'};
       const char* data = (index == 0) ? kPayloadA : kPayloadB;
-      const UInt32 size = (index == 0) ? 4 : 8;
+      const abi::UInt32 size = (index == 0) ? 4 : 8;
       prism::win::abi::ISequentialInStream* stream =
           new prism::win::detail::MemSeqStream(data, size);
       *inStream = stream;

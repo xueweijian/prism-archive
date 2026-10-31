@@ -355,13 +355,18 @@ PRISM_TEST("cost model reports true copied bytes and wall time") {
   PRISM_CHECK(result.ok);
   PRISM_CHECK(result.copiedBytes > 0);
   PRISM_CHECK(result.elapsedMs > 0);
-  // Full-copy evidence: the sink saw every byte that ended up in the file.
-  // Honest cost model: copiedBytes equals the NEW archive's size (a rename
-  // with a longer name legitimately grows the header); the old size is not
-  // the right reference.
+  // Full-copy evidence, with the right reference. copiedBytes is the number of
+  // bytes the engine WROTE -- the honest "a commit costs a full copy" claim.
+  // It is NOT the final file size: the 7z writer finishes with IOutStream
+  // SetSize (7zOut.cpp), which can shrink or extend the file after the last
+  // Write without any further Write. Assuming equality held only until a
+  // rename produced a header that SetSize trims.
+  const auto finalSize = static_cast<int64_t>(fs::file_size(fx.archive));
   PRISM_CHECK(result.copiedBytes > 0);
-  PRISM_CHECK_EQ(result.copiedBytes,
-                 static_cast<int64_t>(fs::file_size(fx.archive)));
+  // The written stream must account for the whole file: every byte of the
+  // result is a byte we wrote. A finishing SetSize may only trim padding.
+  PRISM_CHECK(result.copiedBytes >= finalSize);
+  PRISM_CHECK(result.copiedBytes - finalSize <= 1024);
   std::cout << "    commit cost: " << result.copiedBytes << " bytes in "
             << result.elapsedMs << " ms" << std::endl;
 }

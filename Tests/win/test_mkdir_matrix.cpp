@@ -313,7 +313,7 @@ int RunOne(const VariantSpec& spec, prism::win::SevenZipLibrary& library) {
     return 1;
   }
 
-  const std::wstring archive = dir + L"\\base.7z";
+  std::wstring archive = dir + L"\\base.7z";
   if (spec.createMode >= 1) {
     // CREATE0: build the base archive from NOTHING -- both nodes newData=1
     // with real memory payloads, no 7z.exe, no input open. This separates
@@ -360,7 +360,11 @@ int RunOne(const VariantSpec& spec, prism::win::SevenZipLibrary& library) {
     Emit(buf);
     if (FAILED(hr)) return 1;
     if (spec.createMode == 1) return 0;  // create-only row: done
-    // createMode == 2: fall through and mkdir-commit on the CREATED archive
+    // createMode == 2: mkdir-commit on the archive we just CREATED. Point
+    // `archive` at it -- leaving it as base.7z (which create0 never writes)
+    // made the reopen fail with "CreateFileW failed for the archive itself"
+    // and told us nothing about the plumbing.
+    archive = tmp0;
   } else {
   struct Png {
     const wchar_t* file;

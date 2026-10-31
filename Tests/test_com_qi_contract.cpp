@@ -103,7 +103,10 @@ PRISM_TEST("qi.iid_constants_match_guid_txt") {
   PRISM_CHECK_EQ(int(IID_IOutStream.Data4[3]), 0x03);
   PRISM_CHECK_EQ(int(IID_IOutStream.Data4[5]), 0x04);
   PRISM_CHECK_EQ(int(IID_IStreamGetSize.Data4[5]), 0x06);
-  PRISM_CHECK_EQ(int(IID_ISequentialOutStream.Data4[5]), 0x01);
+  // ISeqOut is member 0x02 (0x01 is ISequentialInStream) -- Guid.txt line 33
+  // and IStream.h:70 agree; my first draft asserted 0x01 and this suite
+  // caught it, which is the whole point of pinning constants to a source.
+  PRISM_CHECK_EQ(int(IID_ISequentialOutStream.Data4[5]), 0x02);
   PRISM_CHECK_EQ(IID_IOutStream.Data1, 0x23170F69u);
 }
 

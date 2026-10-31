@@ -230,11 +230,6 @@ PRISM_TEST("mkdir and move rebuild the archive structure") {
   prism::win::SevenZipLibrary library;
   if (!PRISM_CHECK(library.Load(prism::fixture::DllPath()))) return;
   {  // evidence hygiene: pin which engine we are reasoning about
-    wchar_t exe[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    DWORD h = 0;
-    const DWORD n = GetFileVersionInfoSizeW(exe, &h);
-    (void)n;
     char dllPath[MAX_PATH]{};
     const DWORD dn = GetEnvironmentVariableA("PRISM_7Z_DLL", dllPath, MAX_PATH);
     std::cout << "    7z.dll = " << (dn ? dllPath : "(default locate)") << std::endl;

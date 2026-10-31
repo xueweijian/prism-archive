@@ -179,7 +179,7 @@ inline std::vector<CatalogEntry> ReadMiniCatalog(abi::IInArchive* archive) {
 // The update callback the engine drives. Everything it answers is derived from
 // the decision plan; failures are recorded as readable reasons, never swallowed.
 class TreeUpdateCallback final : public IArchiveUpdateCallback,
-                                 public ICryptoGetTextPassword,
+                                 public abi::ICryptoGetTextPassword,
                                  public ICryptoGetTextPassword2 {
  public:
   TreeUpdateCallback(std::vector<OutEntry> entries, abi::IInArchive* oldArchive,

@@ -105,6 +105,15 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "win.pwd_probe" COMMAND win_pwd_probe_test)
   set_tests_properties(win.pwd_probe PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL PWD-PROBE CHECKS PASSED")
+
+  add_executable(win_vtree_exec_test win/test_vtree_exec.cpp)
+  target_link_libraries(win_vtree_exec_test PRIVATE prism_core prism_win_bridge
+                                                     user32.lib gdi32.lib ole32.lib
+                                                     windowscodecs.lib)
+  target_compile_options(win_vtree_exec_test PRIVATE /WX-)
+  add_test(NAME "win.vtree_exec" COMMAND win_vtree_exec_test)
+  set_tests_properties(win.vtree_exec PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL VTREE-EXEC CHECKS PASSED")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

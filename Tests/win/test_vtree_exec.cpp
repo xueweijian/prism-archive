@@ -111,7 +111,7 @@ bool BuildTree(const std::wstring& archive, prism::win::SevenZipLibrary& library
     return false;
   }
   *catalog = reader.ReadCatalog();
-  *tree = prism::VirtualArchiveTree::FromCatalog(*catalog);
+  tree->Rebuild(*catalog);  // in place: moves would dangle parent pointers
   reader.Close();
   return true;
 }
@@ -179,7 +179,19 @@ PRISM_TEST("rename commits as metadata-only and keeps payloads byte-identical") 
   std::vector<prism::ArchiveItem> catalog;
   if (!PRISM_CHECK(BuildTree(fx.archive, library, &tree, &catalog))) return;
   PRISM_CHECK_EQ(catalog.size(), size_t(3));
+  // Evidence for the rename path: the real 7z.exe catalog is the one input a
+  // Linux repro cannot fake. stderr + newline: unbuffered, survives crashes.
+  std::fprintf(stderr, "step: tree built\n");
+  for (const auto& it : catalog) {
+    std::fprintf(stderr, "  catalog: '%s' idx=%u dir=%d\n", it.path.c_str(), it.index,
+                 static_cast<int>(it.isDir));
+  }
+  std::fprintf(stderr, "step: find icon=%d find renamed=%d root children=%d\n",
+               tree.Find("icon.png") != nullptr, tree.Find("renamed.png") != nullptr,
+               tree.RootChildrenCount());
+  std::fprintf(stderr, "step: before rename\n");
   PRISM_CHECK(tree.Rename("icon.png", "renamed.png"));
+  std::fprintf(stderr, "step: rename ok\n");
   PRISM_CHECK(tree.dirty());
 
   // The plan IS the contract the executor implements: one entry, data untouched.

@@ -52,13 +52,56 @@ class VirtualArchiveTree {
 
   static VirtualArchiveTree FromCatalog(const std::vector<ArchiveItem>& items) {
     VirtualArchiveTree tree;
+    tree.Rebuild(items);
+    return tree;
+  }
+
+  // Reset and reseed from a catalog, IN PLACE. Nodes carry raw parent
+  // pointers, so moving/assigning a whole tree dangles every child's parent
+  // (the MSVC-only segfault in the first B1 CI round: gcc survived because
+  // the freed source tree got reused at identical addresses). Copy and move
+  // are therefore deleted -- rebuild in place instead.
+  void RepinRootLevel() {
+    for (auto& [name, child] : root_.children) {
+      (void)name;
+      child->parent = &root_;
+    }
+  }
+
+  void Rebuild(const std::vector<ArchiveItem>& items) {
+    root_ = Node{};
+    root_.name.clear();
+    dirty_ = false;
     for (const auto& item : items) {
       const std::string p = NormalizeArchivePath(item.path);
       if (p.empty()) continue;
-      tree.Insert(p, item.isDir, item.index);
+      Insert(p, item.isDir, item.index);
     }
-    return tree;
   }
+
+  // Root-level children point at *this* tree's root_ member, so a move must
+  // repoint exactly that one level (deeper parents aim at heap nodes, which
+  // unique_ptr handoff never relocates). Getting this wrong is a use-after-
+  // free that gcc masks by memory reuse -- MSVC's debug heap crashes (B1's
+  // first CI segfault). Copy stays deleted: a deep copy needs the same fixup
+  // and nothing needs it.
+  VirtualArchiveTree() = default;
+  VirtualArchiveTree(VirtualArchiveTree&& other) noexcept
+      : root_(std::move(other.root_)), dirty_(other.dirty_) {
+    RepinRootLevel();
+    other.dirty_ = false;
+  }
+  VirtualArchiveTree& operator=(VirtualArchiveTree&& other) noexcept {
+    if (this != &other) {
+      root_ = std::move(other.root_);
+      dirty_ = other.dirty_;
+      RepinRootLevel();
+      other.dirty_ = false;
+    }
+    return *this;
+  }
+  VirtualArchiveTree(const VirtualArchiveTree&) = delete;
+  VirtualArchiveTree& operator=(const VirtualArchiveTree&) = delete;
 
   bool dirty() const { return dirty_; }
 
@@ -111,6 +154,10 @@ class VirtualArchiveTree {
     }
     cur->isDir = true;
     return true;
+  }
+
+  int RootChildrenCount() const {
+    return static_cast<int>(root_.children.size());
   }
 
   bool Rename(std::string_view from, std::string_view to) {

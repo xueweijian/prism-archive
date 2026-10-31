@@ -188,7 +188,14 @@ class MemoryOutStream final : public abi::ISequentialOutStream {
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
+    // Sequential-only: extraction sinks never seek. (IOutStream without
+    // Seek/SetSize would be a lying static_cast.)
     if (iid == IID_IUnknown || iid == abi::IID_ISequentialOutStream) {
+      *out = static_cast<abi::ISequentialOutStream*>(this);
+      AddRef();
+      return S_OK;
+    }
+    if (iid == abi::IID_ISequentialOutStream) {
       *out = static_cast<abi::ISequentialOutStream*>(this);
       AddRef();
       return S_OK;
@@ -239,7 +246,9 @@ inline std::wstring ToBackslashes(std::wstring p) {
   return p;
 }
 
-class DiskOutStream final : public abi::ISequentialOutStream {
+// IOutStream (seekable+setsize), not just sequential: UpdateItems QIs the
+// destination for it and answers E_NOTIMPL without it.
+class DiskOutStream final : public abi::IOutStream {
  public:
   explicit DiskOutStream(std::wstring finalPath) : path_(std::move(finalPath)) {}
 
@@ -260,7 +269,12 @@ class DiskOutStream final : public abi::ISequentialOutStream {
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
-    if (iid == IID_IUnknown || iid == abi::IID_ISequentialOutStream) {
+    if (iid == IID_IUnknown || iid == abi::IID_IOutStream) {
+      *out = static_cast<abi::IOutStream*>(this);
+      AddRef();
+      return S_OK;
+    }
+    if (iid == abi::IID_ISequentialOutStream) {
       *out = static_cast<abi::ISequentialOutStream*>(this);
       AddRef();
       return S_OK;
@@ -287,6 +301,33 @@ class DiskOutStream final : public abi::ISequentialOutStream {
     }
     written_ += done;
     if (processed) *processed = done;
+    return S_OK;
+  }
+
+  STDMETHODIMP Seek(abi::Int64 offset, abi::UInt32 seekOrigin,
+                    abi::UInt64* newPosition) override {
+    if (newPosition) *newPosition = 0;
+    if (handle_ == INVALID_HANDLE_VALUE) return E_FAIL;
+    LARGE_INTEGER li;
+    li.QuadPart = offset;
+    LARGE_INTEGER np{};
+    if (!SetFilePointerEx(handle_, li, &np, seekOrigin)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (newPosition) *newPosition = static_cast<abi::UInt64>(np.QuadPart);
+    return S_OK;
+  }
+
+  STDMETHODIMP SetSize(abi::UInt64 newSize) override {
+    if (handle_ == INVALID_HANDLE_VALUE) return E_FAIL;
+    LARGE_INTEGER li;
+    li.QuadPart = static_cast<LONGLONG>(newSize);
+    if (!SetFilePointerEx(handle_, li, nullptr, FILE_BEGIN)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (!SetEndOfFile(handle_)) {
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
     return S_OK;
   }
 

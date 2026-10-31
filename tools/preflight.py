@@ -100,6 +100,56 @@ def check_b5_cfstr():
                                 f"non-UNICODE builds -- use explicit L\"...\" format name")
 
 
+def check_b8_com_query_iff_impl():
+    """B8: a COM class that INHERITS a 7-Zip interface must also ANSWER that
+    IID in QueryInterface. The engine reaches optional interfaces only through
+    QI (Z7_DECL_CMyComPtr_QI_FROM); a class can implement the full vtable and
+    still be invisible to it.
+
+    Evidence (2026-10-31, 18 CI rounds): DiskOutStream inherited abi::IOutStream
+    and implemented SetSize, but its QueryInterface answered only IUnknown and
+    ISequentialOutStream. 7zUpdate.cpp QIs IOutStream before the data stage and
+    returns E_NOTIMPL on failure -- every mkdir commit died with 0x80004001 and
+    a misleading streamAsks=0 trace."""
+    iid_for = {
+        "IOutStream": "IID_IOutStream",
+        "IInStream": "IID_IInStream",
+        "IStreamGetSize": "IID_IStreamGetSize",
+        "IArchiveUpdateCallback": "IID_IArchiveUpdateCallback",
+        "IArchiveUpdateCallback2": "IID_IArchiveUpdateCallback2",
+        "ICryptoGetTextPassword": "IID_ICryptoGetTextPassword",
+        "ICryptoGetTextPassword2": "IID_ICryptoGetTextPassword2",
+        "IArchiveUpdateCallbackFile": "IID_IArchiveUpdateCallbackFile",
+    }
+    for f in sorted(list(WIN.glob("*.hpp")) + list(WIN.glob("*.cpp"))):
+        text = scan(f)
+        for m in re.finditer(r"class\s+(\w+)[^{;]*?:([^{\n]*)\{", text):
+            cls, bases = m.group(1), m.group(2)
+            body_start = m.end()
+            body = text[body_start:body_start + 6000]
+            qm = re.search(r"QueryInterface\s*\(([^)]*)\)", body)
+            if not qm:
+                continue
+            qi = body[qm.start():qm.start() + 1200]
+            # Strip comments BEFORE matching: a comment that merely NAMES the
+            # constant ("IID_IOutStream MUST be answered") is not an answer.
+            # Caught by this rule's own negative control, 2026-10-31.
+            qi_code = "\n".join(l.split("//", 1)[0] for l in qi.splitlines())
+            if "E_NOINTERFACE" not in qi_code:
+                continue
+            for base in re.findall(r"(?:abi::)?(I\w+)", bases):
+                bare = iid_for.get(base)
+                if not bare:
+                    continue
+                # The constant may be spelled kIID_X (local) or abi::IID_X.
+                if bare in qi_code:  # matches IID_X, kIID_X and abi::IID_X alike
+                    continue
+                if True:
+                    failures.append(
+                        f"B8 {f.relative_to(ROOT)}: class {cls} inherits {base} but its "
+                        f"QueryInterface never answers {bare} -- the engine QIs it and "
+                        f"gets E_NOINTERFACE (7z returns E_NOTIMPL)")
+
 def check_b6_enum_print():
     """B6: an enum CONSTANT passed as a TOP-LEVEL PRISM_CHECK_EQ argument gets
     printed on failure, so its type needs operator<< in the header. An enum
@@ -173,6 +223,7 @@ def main():
     check_arch_no_windows()
     check_b2_fixed_width()
     check_b5_cfstr()
+    check_b8_com_query_iff_impl()
     check_b6_enum_print()
     check_d1_skip_gates()
     if failures:
@@ -182,7 +233,7 @@ def main():
         print("\nEach ID maps to docs/CONTRACTS.md -- fix the code or amend the ledger.")
         return 1
     print("PREFLIGHT: PASSED (B1 parens / ARCH windows.h / B2 cstdint / B5 CFSTR / "
-          "B6 enum print / D1 skip gates)")
+          "B6 enum print / B8 QI-iff-impl / D1 skip gates)")
     return 0
 
 

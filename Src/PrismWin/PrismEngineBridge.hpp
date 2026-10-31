@@ -266,6 +266,11 @@ class DiskOutStream final : public abi::IOutStream {
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
+    if (iid == abi::IID_IOutStream) {
+      *out = static_cast<abi::IOutStream*>(this);
+      AddRef();
+      return S_OK;
+    }
     if (iid == IID_IUnknown || iid == abi::IID_ISequentialOutStream) {
       *out = static_cast<abi::ISequentialOutStream*>(this);
       AddRef();

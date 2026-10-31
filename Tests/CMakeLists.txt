@@ -62,6 +62,16 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties(win.engine_bridge PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL ENGINE-BRIDGE CHECKS PASSED")
 
+  # COM surface contract (B8). Cheap, no 7z.dll: proves a class that inherits
+  # IOutStream actually ANSWERS IID_IOutStream through QueryInterface -- the
+  # exact defect that burned 18 CI rounds on 2026-10-31 (7-Zip QIs, never
+  # static_casts, so a complete vtable can still be invisible to the engine).
+  add_executable(win_com_qi_contract_test test_com_qi_contract.cpp)
+  target_link_libraries(win_com_qi_contract_test PRIVATE prism_win_bridge)
+  add_test(NAME "win.com_qi_contract" COMMAND win_com_qi_contract_test)
+  set_tests_properties(win.com_qi_contract PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL COM-QI CONTRACT CHECKS PASSED")
+
   # Headless design snapshot: renders the gallery scene to PNG artifacts so
   # the Liquid Glass design can be reviewed from the CI run itself.
   add_executable(win_solid_sweep_test win/test_solid_sweep.cpp)

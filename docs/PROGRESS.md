@@ -1,17 +1,19 @@
 # PrismArchive 总进度与作战计划
 
-> 更新：2026-10-31。本文档是**进度的唯一权威口径**（ROADMAP 的 checkbox 是按批次的执行清单，可能滞后）。
+> 更新：2026-11-01（B1 引擎执行器落地）。本文档是**进度的唯一权威口径**（ROADMAP 的 checkbox 是按批次的执行清单，可能滞后）。
 > 口径原则：**写了 ≠ 能用；CI 编译过 ≠ 真机可用**。每项进度都按"可交付成品"的标尺打分。
 
-## 一、总进度：≈55%
+## 一、总进度：≈58%
 
 | 口径 | 进度 | 说明 |
 |---|---|---|
 | 代码模块覆盖 | ~75% | 蓝图 11 章核心模块均有实现 |
-| 验证深度 | ~70% | 决策层极深（18 套件/553+ 检查/突变负向控制），执行层弱 |
+| 验证深度 | ~74% | 决策层极深（20 套件/566+ 检查/突变负向控制）；执行层因 B1 落地（`win.vtree_exec`/`win.mkdir_matrix`/`win.com_qi_contract` 对真 7z.dll）显著加强 |
 | **可交付成品** | ~35% | 无 exe、无安装器、未在真 explorer 验证 |
 
-加权主数字 **55%**（决策 20% · 引擎 20% · Shell 15% · UI 30% · 产品化 15%）。
+加权主数字 **58%**（决策 20% · 引擎 20% · Shell 15% · UI 30% · 产品化 15%）。
+
+> 2026-11-01：批次 B1（VirtualTree 执行器）合入 main（PR #9），引擎桥接层 65% → 78%。可交付成品仍是 35% —— 决定它的是 WinMain/安装器/真 explorer 验证，跟引擎无关。
 
 ## 二、分维度明细
 
@@ -19,9 +21,13 @@
 **已交付**（全部 TDD + 负向控制）：ArchiveCatalog · CharsetRepair（GBK/Big5/SJIS/EUC-KR）· ContextMenuModel · Gallery（视口虚拟化/LRU/固实规划/QuickLook 会话）· GlassIsland（五寄存器 cbuffer 契约）· ListLayout（四列+语义胶囊条）· PasswordVault+PasswordRing（确定性排序/探针/预算/脱敏）· PathSafety（ZipSlip/碰撞/Windows 名净化）· Preview · ProgressHud · SecurityGuard · SmartExtractor（五分支，两处真 bug 已修）· SolidSweep（零拷贝契约）· SpringAnimator（位级确定性）· ThumbStore · VirtualTree（CoW 计划）· DragDrop（三通道+理由枚举）
 **缺**：IORING 落盘调度决策、MoTW/AMSI 决策接主流程、密码试错的进度反馈模型细化
 
-### 2. 引擎桥接层 —— 65%
-**已交付**：Open（S_OK 纪律+候选回绕）· 目录（PROPID 集合发现，kpidBlock=27）· ExtractToMemory · 智能解压落盘 · 固实单趟扫描（ExtractBatch）· GBK 修复集成
-**缺**：`IOutArchive::UpdateItems` 执行接线（VirtualTree 只有计划）· 拖拽流的随机访问 Seek · 压缩/打包方向 · 大页
+### 2. 引擎桥接层 —— 78%
+**已交付**：Open（S_OK 纪律+候选回绕）· 目录（PROPID 集合发现，kpidBlock=27）· ExtractToMemory · 智能解压落盘 · 固实单趟扫描（ExtractBatch）· GBK 修复集成 · **`IOutArchive::UpdateItems` 真接线**（`VirtualTreeExecutor.hpp`：CommitTree / 目录提交 / 包内重命名 / 诚实成本模型 / 重开验证闸门）
+**缺**：拖拽流的随机访问 Seek · 压缩/打包方向 · 大页
+
+> **B1 落地（2026-11-01，PR #9）**：真因是 `DiskOutStream` 继承了 `IOutStream`、实现了 `SetSize`，却没在 `QueryInterface` 里应答 `IID_IOutStream` —— 7-Zip 只用 QI 拿可选接口（`7zUpdate.cpp` `Z7_DECL_CMyComPtr_QI_FROM(IOutStream, ...)`，失败即 `E_NOTIMPL`），对象在 C++ 层面完美、在 COM 层面自称"我不是"。**18 轮 CI 全打在这上面**（CONTRACTS D10-D13）。
+> 顺带挖出三个产品级 bug：`PropertyId` 用属性发现集合做门 → **所有 7z 目录被读成 0 字节文件**（D16）；`~SevenZipLibrary` 卸 7z.dll 毒化下次加载；`SmartExtractCallback::GetStream` 一个引用给两个主人 → heap-use-after-free（D15）。
+> 空目录提交按 CONTRACTS A10 虚拟化（shipped 7z.dll 对新建空目录节点行为不定，目录结构由子路径隐含）。Windows lane 现带 `/fsanitize=address`。
 
 ### 3. Shell 集成 —— 50%
 **已交付**：双栈 DLL（Win11 IExplorerCommand / Win10 IContextMenu）编译链接+CI、菜单模型 TDD、manifest 由 check_manifest.py 每次校验、SparsePackageRegistrar 代码在
@@ -49,10 +55,10 @@
 **验收**：exe 双击打开 .7z/.zip → 网格/列表切换 → 真缩略图 → 弹簧滚动 → QuickLook 卡片 → 文件夹导航。CI 快照对比无回归。
 
 ### 批次 B：引擎执行层补全（并行线 1）
-1. VirtualTree 执行器：UpdateItems 真接线（诚实成本模型：全量拷贝语义，UI 必须显示进度）
+1. ~~VirtualTree 执行器：UpdateItems 真接线（诚实成本模型：全量拷贝语义，UI 必须显示进度）~~ **✅ 已落地（2026-11-01，PR #9）**——CommitTree 端到端：计划→备份→UpdateItems→重开验证→原子替换；矩阵 8 变体验证目录节点；`win.vtree_exec` / `win.mkdir_matrix` / `win.com_qi_contract` 三套件进主线 CI
 2. 拖拽流随机访问：DelayedExtractStream 的 Seek 真实现（依赖 7z.dll 的块内随机解码）
 3. 密码试错执行器：消费 PasswordRing 决策，并发探针 + "匹配中 3/12" 进度回调
-**验收**：包内重命名在真 7z.dll 上落盘成功且可再打开；Explorer 从虚拟流真拉到文件；AES 包试错出真实结果。
+**验收**：包内重命名在真 7z.dll 上落盘成功且可再打开（✅）；Explorer 从虚拟流真拉到文件；AES 包试错出真实结果。
 
 ### 批次 C：Shell 真机验证 + 产品化（并行线 2）
 1. MSIX Sparse 真注册（CI runner 上 AddPackageByUriAsync 真跑 + 证据截图/日志）

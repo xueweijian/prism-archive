@@ -126,8 +126,11 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                                                  windowscodecs.lib)
   target_compile_options(win_mkdir_matrix PRIVATE /WX-)
   add_test(NAME "win.mkdir_matrix" COMMAND win_mkdir_matrix)
-  set_tests_properties(win.mkdir_matrix PROPERTIES
-      PASS_REGULAR_EXPRESSION "MATRIX COMPLETE")
+  # REPORT-ONLY: the test exits non-zero ON PURPOSE after printing the table,
+  # so --output-on-failure carries it into the CI log. No PASS_REGULAR_
+  # EXPRESSION here -- it would convert the deliberate failure into a fake
+  # pass and swallow the evidence (the D1 lesson, again).
+  set_tests_properties(win.mkdir_matrix PROPERTIES TIMEOUT 300)
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

@@ -75,13 +75,13 @@ class MemSeqStream final : public abi::ISequentialInStream {
     if (r == 0) delete this;
     return r;
   }
-  STDMETHODIMP Read(const void* data, abi::UInt32 size, abi::UInt32* processedSize) override {
+  STDMETHODIMP Read(void* data, abi::UInt32 size, abi::UInt32* processedSize) override {
     if (pos_ >= size_) {
       if (processedSize) *processedSize = 0;
       return S_OK;
     }
     const abi::UInt32 n = (size < size_ - pos_) ? size : size_ - pos_;
-    memcpy(const_cast<void*>(data), data_ + pos_, n);
+    memcpy(data, data_ + pos_, n);
     pos_ += n;
     if (processedSize) *processedSize = n;
     return S_OK;
@@ -238,10 +238,10 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
       static const char kPayloadB[8] = {'B', 'B', 'B', 'B', 'B', 'B', 'B', 'B'};
       const char* data = (index == 0) ? kPayloadA : kPayloadB;
       const abi::UInt32 size = (index == 0) ? 4 : 8;
-      prism::win::abi::ISequentialInStream* stream =
-          new prism::win::detail::MemSeqStream(data, size);
-      *inStream = stream;
-      stream->AddRef();
+      // COM out-params transfer ONE reference: the caller Releases it.
+      // MemSeqStream starts at refs_=1, so no extra AddRef here (an extra one
+      // leaks the stream and trips ASAN on the Windows lane).
+      *inStream = new MemSeqStream(data, size);
       return S_OK;
     }
     // The matrix cell under test: S_OK + NULL. 7zUpdate then treats the item

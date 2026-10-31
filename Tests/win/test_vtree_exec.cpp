@@ -251,7 +251,23 @@ PRISM_TEST("mkdir and move rebuild the archive structure") {
   Payloads wantPayloads = fx.originals;
   wantPayloads["docs/photo.png"] = wantPayloads["photo.png"];
   wantPayloads.erase("photo.png");
-  if (!PRISM_CHECK(VerifyCommitted(fx.archive, library, want, wantPayloads))) return;
+  if (!PRISM_CHECK(VerifyCommitted(fx.archive, library, want, wantPayloads))) {
+    // Evidence dump: the committed catalog entry-by-entry, plus what the
+    // engine asked the update callback (evidence round for the mkdir bug).
+    prism::win::ArchiveReader dumpReader(library);
+    if (dumpReader.Open(fx.archive)) {
+      for (const auto& it : dumpReader.ReadCatalog()) {
+        std::cout << "  committed: '" << it.path << "' dir=" << it.isDir
+                  << " size=" << it.size << std::endl;
+      }
+      dumpReader.Close();
+    } else {
+      std::cout << "  reopen for dump failed: " << dumpReader.openTrace()
+                << std::endl;
+    }
+    std::cout << "  update-trace:" << std::endl << result.updateTrace;
+    return false;
+  }
   PRISM_CHECK_EQ(CountTempLitter(fx.dir), size_t(0));
 }
 

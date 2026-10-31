@@ -11,6 +11,11 @@ target_include_directories(PrismArchive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(PrismArchive PRIVATE prism_win_bridge
                       user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
                       ole32.lib comdlg32.lib shell32.lib shlwapi.lib)
+# GUI subsystem + UNICODE: wWinMain is only selected when UNICODE is defined
+# (otherwise the CRT wants plain main). The other TUs use explicit W APIs, so
+# the define changes nothing for them.
+set_target_properties(PrismArchive PROPERTIES WIN32_EXECUTABLE TRUE)
+target_compile_definitions(PrismArchive PRIVATE UNICODE _UNICODE)
 # /WX- : same rationale as the other Windows targets -- the SDK headers are
 # not warning-clean under /W4 (the renderer's float<->pixel conversions are
 # exactness-benign by construction; cast-polish is deferred, not forgotten).

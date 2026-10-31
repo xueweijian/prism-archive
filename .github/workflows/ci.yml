@@ -109,13 +109,13 @@ jobs:
         shell: bash
         run: |
           ctest --output-on-failure --no-tests=error 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          exit ${PIPESTATUS[0]}
       - name: Upload the runnable app (batch A)
         uses: actions/upload-artifact@v4
         with:
           name: PrismArchive-exe
           path: build/Src/PrismWin/PrismArchive.exe
           if-no-files-found: error
-          exit ${PIPESTATUS[0]}
 
       # Headless design review: the gallery renderer paints the real D2D code
       # path to PNGs; uploaded as artifacts so the design is reviewable

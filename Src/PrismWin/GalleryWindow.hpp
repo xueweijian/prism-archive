@@ -25,8 +25,6 @@
 #include <wrl/client.h>
 
 #include <memory>
-#include <chrono>
-#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -95,23 +93,6 @@ class GalleryWindow {
     breadcrumb_ = text;
     Invalidate();
   }
-
-  // ---------- interaction (batch A increment 2) ----------
-  // Double-click activates an item; the app decides what that means (v1:
-  // smart-extract the whole archive). The window only maps pixels -> index.
-  void SetActivateHandler(std::function<void(int)> handler) {
-    onActivate_ = std::move(handler);
-  }
-  void SetSelection(int index) {
-    if (selection_ == index) return;
-    selection_ = index;
-    Invalidate();
-  }
-  int Selection() const { return selection_; }
-  // Progress: the worker posts kProgressMessage (wparam=done, lparam=total
-  // bytes); the UI thread feeds the HUD -- single-threaded by rule.
-  static constexpr UINT kProgressMessage = WM_APP + 2;
-  prism::ProgressHud& Hud() { return hud_; }  // worker drives phases; UI renders
 
   void Show() {
     if (host_.hwnd) ShowWindow(host_.hwnd, SW_SHOW);
@@ -184,25 +165,6 @@ class GalleryWindow {
       }
       case WM_ERASEBKGND:
         return 1;  // D2D paints the whole client area
-      case WM_LBUTTONDBLCLK: {
-        const int idx = ItemAtPoint(lparam);
-        if (idx >= 0 && onActivate_) {
-          selection_ = idx;
-          onActivate_(idx);
-          return 0;
-        }
-        break;
-      }
-      case WM_LBUTTONDOWN: {
-        SetSelection(ItemAtPoint(lparam));  // -1 clears: click on empty space
-        return 0;
-      }
-      case kProgressMessage: {
-        hud_.OnProgress(NowMs(), static_cast<uint64_t>(wparam),
-                        static_cast<uint64_t>(lparam));
-        Invalidate();
-        return 0;
-      }
       case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -218,29 +180,6 @@ class GalleryWindow {
       viewport_.SetScroll(scrollSpring_.Value());
       Invalidate();  // keep the loop alive until the motion settles
     }
-  }
-
-  int ItemAtPoint(LPARAM lparam) const {
-    const double x = static_cast<short>(LOWORD(lparam));
-    const double y = static_cast<short>(HIWORD(lparam));
-    if (listMode_) {
-      const uint32_t count =
-          static_cast<uint32_t>(host_.items ? host_.items->size() : 0);
-      if (count == 0) return -1;
-      const uint32_t row = prism::list::RowAtClamped(
-          static_cast<uint32_t>(y), static_cast<uint32_t>(viewport_.Scroll()),
-          count);
-      const bool inRow = y >= 0.0 && x >= 0.0;
-      return inRow ? static_cast<int>(row) : -1;
-    }
-    return viewport_.IndexAt(x, y);  // -1 outside any tile
-  }
-
-  static uint64_t NowMs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
   }
 
   void Render() {
@@ -259,9 +198,6 @@ class GalleryWindow {
     {
       std::lock_guard<std::mutex> lock(thumbMutex_);
       scene.thumbs = thumbs_.get();
-    scene.selectedItem = selection_;
-    scene.selectedRow = listMode_ ? selection_ : -1;
-    scene.hud = hud_.Render(NowMs());
     }
     renderer_.Draw(target_.Get(), scene);
     target_->EndDraw();
@@ -344,9 +280,6 @@ class GalleryWindow {
   bool rendererReady_ = false;
   std::mutex thumbMutex_;
   std::shared_ptr<prism::gallery::ThumbStore> thumbs_;
-  std::function<void(int)> onActivate_;
-  int selection_ = -1;
-  prism::ProgressHud hud_;
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<ID2D1HwndRenderTarget> target_;

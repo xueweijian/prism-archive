@@ -16,8 +16,13 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>  // Probe() reports real elapsed time
+#include <condition_variable>  // the probe's batch pipeline stages
 #include <cstdint>
 #include <map>
+#include <mutex>  // Probe() reports which worker accepted the hit
+#include <set>
+#include <thread>  // AttemptPlan.concurrency is a real pool, not a hint
 #include <optional>
 #include <string>
 #include <string_view>
@@ -219,5 +224,206 @@ class PasswordRing {
     return (std::min)(10, 5 + hits);
   }
 };
+
+// ---------------------------------------------------------------------------
+// B3: user-facing probe diagnostics (PrismCore decision, executor-agnostic).
+//
+// SECURITY CONTRACT (CONTRACTS red line): the string goes to logs and UI, so
+// it must never contain candidate plaintext -- not even a >=4-char fragment.
+// The formatter only embeds counts and fixed labels, and the WHOLE string is
+// still passed through RedactSecrets last: if a future edit ever embeds a
+// candidate-derived fragment, the filter is already in the path (the Windows
+// test asserts content-level absence, CONTRACTS D2).
+// ---------------------------------------------------------------------------
+struct ProbeReport {
+  std::string diagnostics;
+};
+
+// Fixed UI labels; display order == Source ordinal, so the breakdown is
+// byte-stable across builds.
+inline const char* SourceLabel(Source s) {
+  switch (s) {
+    case Source::FilenameHint: return "文件名嗅探";
+    case Source::ArchiveComment: return "压缩包注释";
+    case Source::SidecarText: return "旁车文本";
+    case Source::VaultHistory: return "密码库";
+    case Source::UserInput: return "用户输入";
+  }
+  return "未知来源";
+}
+
+// Pure formatter for one probe outcome. Deterministic byte-for-byte: the tests
+// pin the full string, so format drift turns a test red instead of turning a
+// user report vague. The per-source breakdown counts the FIRST
+// min(attemptsMade, size) entries of the plan -- for a sequential executor
+// that is exactly the set of tried candidates; with concurrency > 1 the
+// executor only knows the completion COUNT, and the prefix is the planned
+// attempt order (documented approximation, kept deterministic on purpose).
+inline ProbeReport BuildDiagnostics(const PasswordRing::AttemptPlan& plan,
+                                    int attemptsMade, bool found,
+                                    int64_t elapsedMs) {
+  std::vector<std::string> secrets;
+  secrets.reserve(plan.ordered.size());
+  for (const Candidate& c : plan.ordered) secrets.push_back(c.text);
+
+  size_t tried = attemptsMade < 0 ? 0 : static_cast<size_t>(attemptsMade);
+  if (tried > plan.ordered.size()) tried = plan.ordered.size();
+
+  std::string text;
+  if (plan.ordered.empty()) {
+    text = "无可用候选密码，未执行探测（用时 " + std::to_string(elapsedMs) + " ms）";
+  } else {
+    // Source enum is a dense 0..4 ordinal; count via array, never via map
+    // (iteration order would leak into the message otherwise).
+    int perSource[5] = {0, 0, 0, 0, 0};
+    for (size_t i = 0; i < tried; ++i) {
+      const int s = static_cast<int>(plan.ordered[i].source);
+      if (s >= 0 && s < 5) ++perSource[s];
+    }
+    text = "已尝试 " + std::to_string(tried) + "/" +
+           std::to_string(plan.ordered.size()) + " 个候选（来源：";
+    bool first = true;
+    for (int s = 0; s < 5; ++s) {
+      if (perSource[s] == 0) continue;
+      if (!first) text += "、";
+      text += std::string(SourceLabel(static_cast<Source>(s))) + " " +
+              std::to_string(perSource[s]);
+      first = false;
+    }
+    text += found ? "），命中" : "），未命中";
+    text += "（用时 " + std::to_string(elapsedMs) + " ms）";
+  }
+
+  ProbeReport report;
+  // Redaction runs LAST and over the WHOLE string -- defense in depth, see
+  // the security contract above.
+  report.diagnostics = PasswordRing::RedactSecrets(text, secrets);
+  return report;
+}
+
+}  // namespace prism::pwd
+
+// --- Executor (B3): run a plan against an injected open-callable ---------
+// Relocated from PrismWin/PasswordProbe.hpp: the executor is COM-free policy
+// (stop on hit, monotonic progress, redacted diagnostics) and PrismCore tests
+// drive it -- a PrismWin include there is impossible (they only link prism_core).
+
+namespace prism::pwd {
+
+// Result of one probe run. `password` is the only field that ever carries
+// plaintext, and only when found==true (the caller asked for it back);
+// `diagnostics` is safe for logs/UI by construction.
+struct ProbeOutcome {
+  bool found = false;
+  std::string password;
+  std::string diagnostics;
+  int attemptsMade = 0;
+  int64_t elapsedMs = 0;
+};
+
+// Flattened candidate texts, in plan order -- the secret list for redaction.
+inline std::vector<std::string> CandidateTexts(
+    const prism::pwd::PasswordRing::AttemptPlan& plan) {
+  std::vector<std::string> texts;
+  texts.reserve(plan.ordered.size());
+  for (const prism::pwd::Candidate& c : plan.ordered) texts.push_back(c.text);
+  return texts;
+}
+
+// Runs plan.ordered against tryOpen(password)->bool.
+//
+// Semantics (the tests pin each of these):
+//   a. candidates are tried in plan.ordered order, up to plan.concurrency
+//      workers at a time (concurrency <= 1 runs on the calling thread's
+//      single pool worker, which makes every count deterministic);
+//   b. first hit stops the run: no NEW candidate is started after a hit
+//      (already-running workers are allowed to finish -- abandoning a
+//      half-done 7z Open would leak a stream), found=true, password filled;
+//   c. progress(done, total) fires once per completed attempt, under the
+//      bookkeeping lock, so `done` can never be observed going backwards;
+//      exhausted without a hit => found=false, attemptsMade==ordered.size();
+//   d. diagnostics never contain candidate plaintext (RedactSecrets);
+//   e. elapsedMs is a real steady-clock measurement.
+template <typename OpenFn>
+ProbeOutcome Probe(const prism::pwd::PasswordRing::AttemptPlan& plan, OpenFn tryOpen,
+                   std::function<void(int done, int total)> progress) {
+  const auto started = std::chrono::steady_clock::now();
+  ProbeOutcome outcome;
+  const int total = static_cast<int>(plan.ordered.size());
+
+  // AES key derivation saturates the SHA pipeline long before many workers
+  // help (see PasswordRing::PlanAttempts), so the pool is capped by the plan;
+  // an empty plan must not spawn a thread at all.
+  int workers = plan.concurrency <= 0 ? 1 : (std::min)(plan.concurrency, total);
+
+  std::mutex gate;                // orders progress + attempt bookkeeping
+  std::atomic<int> next{0};       // next candidate index to claim
+  std::atomic<bool> stop{false};  // set on hit: no NEW attempt may start
+  std::string failureNotes;       // untrusted exception text, redacted later
+
+  auto worker = [&]() {
+    for (;;) {
+      if (stop.load(std::memory_order_relaxed)) return;
+      const int idx = next.fetch_add(1, std::memory_order_relaxed);
+      if (idx >= total) return;
+
+      bool hit = false;
+      std::string note;
+      try {
+        hit = tryOpen(plan.ordered[idx].text);
+      } catch (const std::exception& e) {
+        // Never rethrow with e.what() baked into a public message: the
+        // exception text may embed the candidate (that is exactly what the
+        // redaction test simulates). Park it; redaction happens below.
+        note = e.what();
+      } catch (...) {
+        note = "unknown error";
+      }
+
+      std::lock_guard<std::mutex> lock(gate);
+      ++outcome.attemptsMade;
+      if (!note.empty()) {
+        if (!failureNotes.empty()) failureNotes += "；";
+        failureNotes += "候选 " + std::to_string(idx + 1) + " 探测异常: " + note;
+      }
+      if (hit && !outcome.found) {
+        outcome.found = true;
+        outcome.password = plan.ordered[idx].text;
+        stop.store(true, std::memory_order_relaxed);
+      }
+      if (progress) progress(outcome.attemptsMade, total);
+      // progress() is invoked under the lock on purpose: releasing first
+      // would let a second completion overtake this one and a `done` value
+      // could be observed going backwards.
+    }
+  };
+
+  if (total > 0) {
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(workers));
+    for (int i = 0; i < workers; ++i) pool.emplace_back(worker);
+    for (std::thread& t : pool) t.join();
+  }
+
+  const auto ended = std::chrono::steady_clock::now();
+  const int64_t elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                ended - started).count();
+
+  outcome.diagnostics =
+      prism::pwd::BuildDiagnostics(plan, outcome.attemptsMade, outcome.found,
+                                   elapsedMs)
+          .diagnostics;
+  if (!failureNotes.empty()) {
+    // The redaction here is load-bearing, not decorative: failureNotes is
+    // built from foreign exception text. Mutating this line away must turn
+    // the redaction tests red (CONTRACTS D3 -- and they do).
+    outcome.diagnostics +=
+        "；异常: " + prism::pwd::PasswordRing::RedactSecrets(
+                         failureNotes, CandidateTexts(plan));
+  }
+
+  outcome.elapsedMs = elapsedMs;
+  return outcome;
+}
 
 }  // namespace prism::pwd

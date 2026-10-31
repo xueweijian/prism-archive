@@ -31,15 +31,12 @@
 #include <shellapi.h>  // CommandLineToArgvW
 #include <shlwapi.h>   // PathFileExistsW
 
-#include <cstdio>      // fprintf (extraction telemetry)
-#include <filesystem>  // parent_path for the default output dir
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "../PrismCore/Preview.hpp"    // KindByName
-#include "../PrismCore/SmartExtractor.hpp"  // SmartExtractionPlanner
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/GalleryWindow.hpp"
 #include "../PrismWin/PrismEngineBridge.hpp"
@@ -87,9 +84,6 @@ struct AppContext {
   prism::win::SevenZipLibrary library;
   std::unique_ptr<prism::win::ArchiveReader> reader;
   std::vector<prism::ArchiveItem> items;
-  std::vector<prism::ArchiveItem> catalog;
-  std::atomic<bool> extracting{false};
-  std::wstring archivePath;
 };
 
 }  // namespace
@@ -102,7 +96,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::wstring archive = (argv && argc > 1) ? argv[1] : std::wstring();
   if (argv) LocalFree(argv);
   if (archive.empty()) archive = PickArchive();
-  app->archivePath = archive;
   if (archive.empty()) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 0;  // user closed the picker: not an error
@@ -131,60 +124,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
-  app->catalog = app->reader->ReadCatalog();
-  app->items = app->catalog;
+  app->items = app->reader->ReadCatalog();
 
   prism::win::gallery::GalleryWindow window;
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) return 1;
   window.SetItems(&app->items);
-  // Double-click = smart extract (Bandizip's core interaction). The worker
-  // thread owns the archive handle for the duration; the UI only gets
-  // progress messages and a breadcrumb update.
-  window.SetActivateHandler([&window, app](int) {
-    if (app->extracting.exchange(true)) return;  // one extraction at a time
-    std::thread([app, &window]() {
-      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-      const uint64_t t0 = GalleryWindow::NowMs();
-      window.Hud().OnStart(L"\x667A\x80FD\x89E3\x538B",
-                           GalleryWindow::NowMs());
-      namespace fs = std::filesystem;
-      const std::string outDir = prism::win::WideToUtf8(
-          fs::path(app->archivePath).parent_path().wstring());
-      const auto plan = prism::SmartExtractionPlanner::Build(
-          prism::win::WideToUtf8(app->archivePath), outDir, app->catalog,
-          [](const std::string&) { return false; });
-      prism::win::SmartExtractCallback::Result result;
-      const bool ok = app->reader->ExtractWithPlan(app->catalog, plan,
-                                                   plan.baseTargetDir, nullptr,
-                                                   &result);
-      PostMessageW(window.Hwnd(), GalleryWindow::kProgressMessage,
-                   static_cast<WPARAM>(result.filesWritten),
-                   static_cast<WPARAM>(app->catalog.size()));
-      const wchar_t* done =
-          ok ? (L"\x5DF2\x89E3\x538B \x2192 " + plan.baseTargetDir).c_str()
-             : L"\x89E3\x538B\x5931\x8D25";
-      window.SetBreadcrumb(done);
-      std::fprintf(stderr, "extract ok=%d files=%llu bytes=%llu in %llums\n",
-                   static_cast<int>(ok),
-                   static_cast<unsigned long long>(result.filesWritten),
-                   static_cast<unsigned long long>(result.bytesWritten),
-                   static_cast<unsigned long long>(GalleryWindow::NowMs() - t0));
-      app->extracting = false;
-      CoUninitialize();
-    }).detach();
-  });
-      prism::win::SmartExtractResult result;
-      const bool ok = app->reader->ExtractWithPlan(
-          *catalog, plan, plan.baseTargetDir, nullptr, &result);
-      PostMessageW(window.Hwnd(), GalleryWindow::kProgressMessage,
-                   static_cast<WPARAM>(result.filesWritten),
-                   static_cast<LPARAM>(catalog->size()));
-      window.SetBreadcrumb(ok ? (L"\x5DF2\x89E3\x538B \x2192 " + plan.baseTargetDir)
-                              : L"\x89E3\x538B\x5931\x8D25");
-      app->extracting = false;
-      CoUninitialize();
-    }).detach();
-  });
   window.SetBreadcrumb(FileNameWide(archive) + L"  |  " +
                        std::to_wstring(app->items.size()) + L" items");
 

@@ -36,14 +36,17 @@
 
 ## 三、剩余作战计划（四批次，每批有硬验收）
 
-### 批次 A：装配出 PrismArchive.exe（UI 主线，解锁"能跑"）　**★ 首个增量已落地（2026-10-31 深夜）**
+### 批次 A：装配出 PrismArchive.exe（UI 主线，解锁"能跑"）　**★ 增量 1-4 已落地；事故恢复完成（2026-10-31 凌晨）**
 
 > **PrismArchive.exe 第一次存在**：CI 构建 + 上传 artifact（`PrismArchive-exe`，PE 头验证 x64 GUI 子系统）。GalleryWindow 已改为纯宿主（全部像素走 GalleryRenderer::Scene，双绘制路径 drift 隐患清除）；缩略图经互斥指针交换从扫描线程交接（只有 UI 线程碰可见 store，LRU recency 单线程化 by construction）。装配契约在 Main.cpp 文件头注。
+> **增量 2-4**：单击选择（网格/列表命中测试）+ 双击智能解压真接线（SmartExtractionPlanner → ExtractWithPlan → HUD 进度）+ Quick Look（空格开玻璃卡、Esc 关、流式徽标）+ 键盘导航（方向键按视口几何步进、Home/End、Enter 激活）+ ArchiveTreeView 文件夹导航决策件（6 例 TDD：目录子项/目录先序/面包屑链/UpFrom/名字前缀防误配）。
+> **事故与恢复（CONTRACTS D6-D9）**：过时树推送丢 CMake 注册 + Main.cpp 索引手术切坏 + NowMs 私有访问，main 连红三轮；以远端 tarball 为底重建、B3 密码环头从分支找回、Main.cpp 整文件重写、preflight 新增 B7 门禁（负向控制双向验证）。教训全部入册。
 1. `App/Main.cpp`：WinMain + 消息循环 + COM/WIC/D2D 初始化顺序（已有 GlassIslandHost 模式可复用）
 2. GalleryWindow 换血：删旧 DrawTile，全量消费 GalleryRenderer（Scene 驱动）
 3. 三事件源接线：catalog 载入 → 视口；sweep 进度 → ProgressHud；空格 → QuickLookSession
 4. 鼠标：滚轮弹簧、命中测试选中、双击智能解压；键盘：Ctrl+1/2、方向键、空格/Esc
-**验收**：exe 双击打开 .7z/.zip → 网格/列表切换 → 真缩略图 → 弹簧滚动 → QuickLook 卡片。CI 快照对比无回归。
+5. （进行中）ArchiveTreeView 接窗：当前文件夹状态 + 面包屑点击 + 双击目录钻入 + Backspace 上级
+**验收**：exe 双击打开 .7z/.zip → 网格/列表切换 → 真缩略图 → 弹簧滚动 → QuickLook 卡片 → 文件夹导航。CI 快照对比无回归。
 
 ### 批次 B：引擎执行层补全（并行线 1）
 1. VirtualTree 执行器：UpdateItems 真接线（诚实成本模型：全量拷贝语义，UI 必须显示进度）

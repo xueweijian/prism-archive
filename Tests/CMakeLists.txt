@@ -62,6 +62,16 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties(win.engine_bridge PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL ENGINE-BRIDGE CHECKS PASSED")
 
+  # COM surface contract (B8). Cheap, no 7z.dll: proves a class that inherits
+  # IOutStream actually ANSWERS IID_IOutStream through QueryInterface -- the
+  # exact defect that burned 18 CI rounds on 2026-10-31 (7-Zip QIs, never
+  # static_casts, so a complete vtable can still be invisible to the engine).
+  add_executable(win_com_qi_contract_test test_com_qi_contract.cpp)
+  target_link_libraries(win_com_qi_contract_test PRIVATE prism_win_bridge)
+  add_test(NAME "win.com_qi_contract" COMMAND win_com_qi_contract_test)
+  set_tests_properties(win.com_qi_contract PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL COM-QI CONTRACT CHECKS PASSED")
+
   # Headless design snapshot: renders the gallery scene to PNG artifacts so
   # the Liquid Glass design can be reviewed from the CI run itself.
   add_executable(win_solid_sweep_test win/test_solid_sweep.cpp)
@@ -94,6 +104,32 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
            $ENV{TEMP}/prism_snapshots)
   set_tests_properties(win.gallery_snapshot PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL SNAPSHOT CHECKS PASSED")
+  add_executable(win_vtree_exec_test win/test_vtree_exec.cpp)
+  target_link_libraries(win_vtree_exec_test PRIVATE prism_core prism_win_bridge
+                                                     user32.lib gdi32.lib ole32.lib
+                                                     windowscodecs.lib)
+  target_compile_options(win_vtree_exec_test PRIVATE /WX-)
+  add_test(NAME "win.vtree_exec" COMMAND win_vtree_exec_test)
+  set_tests_properties(win.vtree_exec PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL VTREE-EXEC CHECKS PASSED")
+
+  # mkdir variant MATRIX (batch B1 evidence): eight parameterized "commit a
+  # new empty directory" cells against the real 7z.dll in ONE run, each with
+  # its own fixture + UpdateItems commit + re-open readback. Verified by an
+  # explicit verdict line: REPORT-ONLY ("always exit 1 so the table prints")
+  # made green and red indistinguishable -- exactly the D1 trap. The test now
+  # exits 0 only when no variant failed beyond the deliberate bare control.
+  add_executable(win_mkdir_matrix win/test_mkdir_matrix.cpp)
+  target_link_libraries(win_mkdir_matrix PRIVATE prism_core prism_win_bridge
+                                                 user32.lib gdi32.lib ole32.lib
+                                                 windowscodecs.lib)
+  target_compile_options(win_mkdir_matrix PRIVATE /WX-)
+  add_test(NAME "win.mkdir_matrix" COMMAND win_mkdir_matrix)
+  # The PASS regex is a CONJUNCTION with the exit code, not a replacement for
+  # it: ctest requires exit 0 AND this marker. That is what makes a silent skip
+  # (or a crash after printing) still fail while a real success is provable.
+  set_tests_properties(win.mkdir_matrix PROPERTIES TIMEOUT 300
+      PASS_REGULAR_EXPRESSION "MATRIX VERDICT: OK")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

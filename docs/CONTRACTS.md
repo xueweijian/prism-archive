@@ -52,6 +52,13 @@
 | D7 | **禁止对整文件做索引手术**：python 按 old_start/old_end 切片段必然切错位，留下新旧混杂的孤儿尾巴 | 整文件重写（file_write） | inc-2 的 Main.cpp 切坏，CI 红两轮才修（2026-10-31） |
 | D8 | **Windows TU 无本地编译 → 每类 MSVC 错只犯一次**：犯过的错误形态进 preflight 规则（B7=未限定类静态） | tools/preflight.py B7 | GalleryWindow:: 静态未限定（C2653）→ NowMs 私有（C2248）连咬两轮 |
 | D9 | **subagent 一律用自己的 clone 工作树**，禁止在共享仓 git 操作：共享 /tmp 工作树会被并发 agent 覆盖，未跟踪文件会被清掉 | 任务简报明示 clone 路径 | m4b3 工作树 CMakeLists 被毁 + 本地未跟踪 PasswordRing.hpp 消失（2026-10-31） |
+| D10 | **COM 接口必须 QI 可达，不是"继承就算实现"**：7-Zip 一律走 `Z7_DECL_CMyComPtr_QI_FROM`，从不 static_cast。类可以 vtable 完整、C++ 语法全对，却对引擎不可见 | preflight B8 + win.com_qi_contract | DiskOutStream 继承 IOutStream 且实现 SetSize，但 QI 不答 IID_IOutStream → 7zUpdate 在数据阶段前 `return E_NOTIMPL` → **18 轮 CI**（2026-10-31） |
+| D11 | **拒绝码要沿调用链回溯到唯一出口**：拿到 HRESULT 先枚举该模块全部同码出口并排执行顺序，不要对"最像的那个"下手 | rg 同码出口 + 读执行顺序 | 以为是入口 `CanUpdate()` 守卫，实为下游 QI 失败；两者都返回 E_NOTIMPL |
+| D12 | **日志里的"缺席证据"要先证明它本该出现**：`streamAsks=0` 被我当作"引擎没问过流"的强证据，实际 mkdir 走 newData=0，GetStream 本就不该被调用 | 先查该分支的调用契约 | 该观测误导了 6 轮排查（2026-10-31） |
+| D13 | **卡住三轮以上必须转"权威对拍"**：找官方同功能客户端源码逐行对拍（7-Zip 自带 `Client7z.cpp` / `UI/Common/Update.cpp`），禁止继续单变量试错 | 对拍清单 | 18 轮单变量试错全部打转，官方客户端 + 源码一行锚定真因 |
+| D14 | **外部依赖的仪表化报错要按"栈上有无我方代码"裁决**：`SetCodecs` 的 use-after-free 分配点与释放点都在 `7z.dll` 内部、我方栈帧为 0，属 7-Zip 自身缺陷；**豁免必须绑定精确签名**，不能放宽全局 | 豁免条目须写明 `#0/#1 在 7z.dll` + 我方模块零命中 | Windows lane 的 `win.engine_bridge` 每轮被 `SetCodecs` 的 ASAN 报告打成红（2026-10-31）；该报告来自 runner 镜像里 7z.dll 的**自带** ASAN 构建，我们从未开启 |
+| D15 | **`AddRef` 语义要对齐 COM 出参约定**：出参转移**一个**引用，构造即 refs=1 时不得再加 `AddRef`（会泄漏并被 ASAN 抓）；看到"泄漏"先确认是出参还是持有 | 出参处禁止多余 AddRef | 矩阵 `MemSeqStream` 出参后又 AddRef（2026-10-31） |
+| D16 | **"未声明"≠"不可答"**：能力发现集合只能做诊断，绝不能作为读取的门。7z 的 discovery 表没有 `kpidIsDir`，但 `GetProperty` 会如实回答 | 发现集合不得 gate 读取 | `PropertyId` 用发现集合门控 → **所有目录被读成文件**（2026-10-31） |
 
 ## E. 待登记（下批次会触碰）
 

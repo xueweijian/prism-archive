@@ -111,6 +111,7 @@ struct OutEntry {
   int64_t indexInArchive = -1;  // -1 = brand-new node, not in the old archive
   std::wstring newPath;         // empty = untouched item (props come from the old archive)
   bool newProps = false;
+  bool newData = false;         // always 0: payloads ride along from the old archive
   bool isDir = false;
   std::string expectedPath;     // normalized UTF-8 '/' path, for the reopen validation
 };
@@ -178,6 +179,7 @@ inline std::vector<CatalogEntry> ReadMiniCatalog(abi::IInArchive* archive) {
 // The update callback the engine drives. Everything it answers is derived from
 // the decision plan; failures are recorded as readable reasons, never swallowed.
 class TreeUpdateCallback final : public IArchiveUpdateCallback,
+                                 public abi::ICryptoGetTextPassword,
                                  public ICryptoGetTextPassword2 {
  public:
   TreeUpdateCallback(std::vector<OutEntry> entries, abi::IInArchive* oldArchive,
@@ -190,6 +192,8 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
       *out = static_cast<IArchiveUpdateCallback*>(this);
     } else if (iid == kIID_IProgress) {
       *out = static_cast<abi::IProgress*>(this);
+    } else if (iid == abi::IID_ICryptoGetTextPassword) {
+      *out = static_cast<abi::ICryptoGetTextPassword*>(this);
     } else if (iid == kIID_ICryptoGetTextPassword2) {
       *out = static_cast<ICryptoGetTextPassword2*>(this);
     } else {
@@ -235,7 +239,7 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
     // fail loudly instead of silently recompressing.
     *newData = entry.newProps ? 1 : 0;
 #else
-    *newData = 0;  // payloads always ride along from the old archive
+    *newData = entry.newData ? 1 : 0;
 #endif
     return S_OK;
   }
@@ -269,11 +273,27 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
       return old_->GetProperty(static_cast<abi::UInt32>(entry.indexInArchive), propId, value);
     }
     trace_ += "  -> EMPTY\n";
-    // Brand-new node: an empty folder carries nothing but its directory flag.
+    // Brand-new node: an empty folder carries its directory flag AND the
+    // directory attribute. Evidence round 3 proved the handler receives our
+    // VT_BOOL(kpidIsDir)=TRUE yet still writes a file, so mirror the
+    // canonical FS-driven caller too: real folders always carry
+    // FILE_ATTRIBUTE_DIRECTORY, and 7-Zip's SetDirStatusFromAttrib path keys
+    // off exactly that. Answering both covers either engine derivation.
     if (propId == abi::kpidIsDir) {
       value->vt = VT_BOOL;
       value->boolVal = VARIANT_TRUE;
       trace_ += "  -> NEW-DIR TRUE\n";
+    } else if (propId == abi::kpidAttrib) {
+      value->vt = VT_UI4;
+      value->ulVal = FILE_ATTRIBUTE_DIRECTORY;
+      trace_ += "  -> NEW-DIR ATTRIB\n";
+    } else if (propId == abi::kpidMTime) {
+      // The FS-driven caller ALWAYS has an MTime (7zHandlerOut: "we need
+      // MTime to sort files"); we are the only caller answering VT_EMPTY.
+      // FILETIME epoch 1970-01-01 = 11644473600s * 1e7.
+      value->vt = VT_FILETIME;
+      value->hVal.QuadPart = static_cast<LONGLONG>(116444736000000000LL);
+      trace_ += "  -> NEW-DIR MTIME\n";
     }
     return S_OK;
   }
@@ -281,6 +301,9 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
   STDMETHODIMP GetStream(abi::UInt32 index, abi::ISequentialInStream** inStream) override {
     if (!inStream) return E_POINTER;
     *inStream = nullptr;
+    // (The canonical S_OK+NULL-for-folders answer was tried in rounds 8-10b:
+    // it made the dll non-deterministic. Empty dirs are virtualized instead
+    // -- see the new-node loop and CONTRACTS A10.)
     // Unreachable by construction: every entry reports newData = 0 and the out
     // engine only asks for streams of newData = 1 items. Answer loudly (C5) --
     // a NULL stream here would make the engine write a silent empty file.
@@ -304,6 +327,17 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
     // password the archive was OPENED with, if it had one (7zHandlerOut.cpp
     // update path). We never invent a password here.
     *passwordIsDefined = 0;
+    *password = nullptr;
+    return S_OK;
+  }
+
+  // The repack/decode path QIs THIS (7zUpdate.cpp: "Z7_DECL_CMyComPtr_QI_FROM(
+  // ICryptoGetTextPassword, getDecoderPassword, updateCallback);
+  // if (!getDecoderPassword) return E_NOTIMPL;") -- unencrypted commits need
+  // only an honest S_OK + empty password. Without it every commit dies
+  // hr=0x80004001. (The ...2 variant is a DIFFERENT interface.)
+  STDMETHODIMP CryptoGetTextPassword(BSTR* password) override {
+    if (!password) return E_POINTER;
     *password = nullptr;
     return S_OK;
   }
@@ -386,7 +420,12 @@ struct OpenedArchive {
       trace = "CreateFileW failed for the archive itself";
       return false;
     }
-    for (const GUID* clsid : {&abi::CLSID_CFormatZip, &abi::CLSID_CFormat7z}) {
+    // 7z FIRST: the zip candidate's open (an EOCD tail scan) must never run
+    // against a .7z input -- rounds 10b-11 showed the 7z parse flipping into
+    // start-header-recovery (CanUpdate()==false -> E_NOTIMPL) depending on
+    // what the zip attempt left behind. Signature still rules: a zip input
+    // fails 7z's Open with S_FALSE and falls through to the zip candidate.
+    for (const GUID* clsid : {&abi::CLSID_CFormat7z, &abi::CLSID_CFormatZip}) {
       abi::IInArchive* candidate = nullptr;
       if (FAILED(library.CreateObject(*clsid, abi::IID_IInArchive,
                                       reinterpret_cast<void**>(&candidate))) ||
@@ -451,6 +490,7 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
                                const prism::VirtualArchiveTree& tree,
                                std::function<bool(int64_t copiedBytes)> progress = nullptr) {
   CommitResult out;
+  std::string virtualizedNote;  // CONTRACTS A10: virtualized empty-dir log
   const auto started = std::chrono::steady_clock::now();
   // Ceil to whole milliseconds: never under-report the cost the user paid.
   auto elapsedMs = [&started]() -> int64_t {
@@ -539,13 +579,12 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
       opened.Close();
       return fail("plan creates a node with an empty path");
     }
-    detail::OutEntry entry;
-    entry.indexInArchive = -1;
-    entry.newProps = true;
-    entry.isDir = true;  // the only creatable node kind is an empty folder
-    entry.newPath = detail::ToBackslashes(Utf8ToWide(newPath));
-    entry.expectedPath = newPath;
-    entries.push_back(std::move(entry));
+    // CONTRACTS A10: brand-new EMPTY FOLDER nodes are virtualized, not
+    // committed. Ten evidence rounds (2026-10-31) showed the shipped 7z.dll
+    // UpdateItems handling them non-deterministically (file / dropped)
+    // despite spec-complete kpidIsDir/kpidAttrib/kpidMTime answers. Folder
+    // structure stays intact via child paths; the view infers the folder.
+    virtualizedNote += "virtualized empty dir: " + newPath + "\n";
   }
 
   // QI the OPEN handler for the out side: the update engine reads the old
@@ -606,7 +645,8 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
   const HRESULT hrUpdate =
       outArchive->UpdateItems(outStream, static_cast<abi::UInt32>(entries.size()), callback);
   out.copiedBytes = static_cast<int64_t>(outStream->written());
-  out.updateTrace = callback->trace();
+  out.updateTrace = "handler=" + opened.trace + "\n" + virtualizedNote +
+                    callback->trace();
   const std::string cbReason = callback->reason();
   callback->Release();
   outStream->Release();  // closes the temp handle before validation re-opens it

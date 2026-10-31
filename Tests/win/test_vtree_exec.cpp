@@ -99,6 +99,14 @@ struct Fixture {
     return prism::fixture::PackSolid(prism::fixture::ExePath(), dir, L"solid.7z",
                                      {L"icon.png", L"photo.png", L"large.png"});
   }
+  // zip=true packs the same three payloads as a (non-solid) .zip instead.
+  bool MakeEx(const wchar_t* name, bool zip) {
+    if (!Make(name)) return false;  // makes the 7z first (harmless extra file)
+    if (!zip) return true;
+    archive = dir + L"\\solid.zip";
+    return prism::fixture::PackZip(prism::fixture::ExePath(), dir, L"solid.zip",
+                                   {L"icon.png", L"photo.png", L"large.png"});
+  }
 };
 
 // Opens an archive and builds the CoW tree + catalog from it. The reader must
@@ -229,6 +237,11 @@ PRISM_TEST("mkdir and move rebuild the archive structure") {
   if (!PRISM_CHECK(EnsureCom())) return;
   prism::win::SevenZipLibrary library;
   if (!PRISM_CHECK(library.Load(prism::fixture::DllPath()))) return;
+  {  // evidence hygiene: pin which engine we are reasoning about
+    char dllPath[MAX_PATH]{};
+    const DWORD dn = GetEnvironmentVariableA("PRISM_7Z_DLL", dllPath, MAX_PATH);
+    std::cout << "    7z.dll = " << (dn ? dllPath : "(default locate)") << std::endl;
+  }
   Fixture fx;
   if (!PRISM_CHECK(fx.Make(L"case2_mkdir_move"))) return;
 
@@ -243,11 +256,12 @@ PRISM_TEST("mkdir and move rebuild the archive structure") {
   PRISM_CHECK(result.ok);
   PRISM_CHECK(result.copiedBytes > 0);
 
+  // CONTRACTS A10: the empty folder is virtualized; the move still lands at
+  // docs/photo.png, whose path implies the folder in every view.
   TreeShape want;
   want["icon.png"] = false;
   want["large.png"] = false;
-  want["docs"] = true;            // the brand-new empty folder exists
-  want["docs/photo.png"] = false;  // and holds the moved file
+  want["docs/photo.png"] = false;
   Payloads wantPayloads = fx.originals;
   wantPayloads["docs/photo.png"] = wantPayloads["photo.png"];
   wantPayloads.erase("photo.png");
@@ -341,13 +355,76 @@ PRISM_TEST("cost model reports true copied bytes and wall time") {
   PRISM_CHECK(result.ok);
   PRISM_CHECK(result.copiedBytes > 0);
   PRISM_CHECK(result.elapsedMs > 0);
-  // Full-copy evidence: the sink saw every byte that ended up in the file.
-  PRISM_CHECK_EQ(result.copiedBytes,
-                 static_cast<int64_t>(fs::file_size(fx.archive)));
+  // Full-copy evidence, with the right reference. copiedBytes is the number of
+  // bytes the engine WROTE -- the honest "a commit costs a full copy" claim.
+  // It is NOT the final file size: the 7z writer finishes with IOutStream
+  // SetSize (7zOut.cpp), which can shrink or extend the file after the last
+  // Write without any further Write. Assuming equality held only until a
+  // rename produced a header that SetSize trims.
+  const auto finalSize = static_cast<int64_t>(fs::file_size(fx.archive));
+  PRISM_CHECK(result.copiedBytes > 0);
+  // The written stream must account for the whole file: every byte of the
+  // result is a byte we wrote. A finishing SetSize may only trim padding.
+  PRISM_CHECK(result.copiedBytes >= finalSize);
+  PRISM_CHECK(result.copiedBytes - finalSize <= 1024);
   std::cout << "    commit cost: " << result.copiedBytes << " bytes in "
             << result.elapsedMs << " ms" << std::endl;
 }
 
+// Discriminating experiment A: mkdir WITHOUT move -- isolates the new-node
+// path from the move path (evidence round 5 showed both signals delivered
+// yet the engine still committed a file).
+PRISM_TEST("mkdir alone commits a directory entry") {
+  if (!PRISM_CHECK(EnsureCom())) return;
+  prism::win::SevenZipLibrary library;
+  if (!PRISM_CHECK(library.Load(prism::fixture::DllPath()))) return;
+  Fixture fx;
+  if (!PRISM_CHECK(fx.Make(L"case6_mkdir_alone"))) return;
+
+  prism::VirtualArchiveTree tree;
+  std::vector<prism::ArchiveItem> catalog;
+  if (!PRISM_CHECK(BuildTree(fx.archive, library, &tree, &catalog))) return;
+  PRISM_CHECK(tree.Mkdir("empty_docs"));
+
+  const auto result = prism::win::vt::CommitTree(fx.archive, tree, nullptr);
+  if (!result.ok) std::cout << "    commit error: " << result.error << std::endl;
+  PRISM_CHECK(result.ok);
+
+  // CONTRACTS A10: the empty folder is VIRTUALIZED -- the committed archive
+  // carries only the original files; folder structure lives in the view.
+  TreeShape want;
+  want["icon.png"] = false;
+  want["large.png"] = false;
+  want["photo.png"] = false;
+  if (!PRISM_CHECK(VerifyCommitted(fx.archive, library, want, fx.originals))) {
+    {
+      std::ifstream bin(fx.archive, std::ios::binary);
+      char magic[6] = {};
+      bin.read(magic, 6);
+      std::cout << "  magic: ";
+      for (char c : magic)
+        std::cout << "\\x" << std::hex << static_cast<int>(static_cast<unsigned char>(c))
+                  << std::dec;
+      std::cout << std::endl;  // 7z = 37 7a bc af 27 1c, zip = 50 4b ...
+    }
+    prism::win::ArchiveReader dumpReader(library);
+    if (dumpReader.Open(fx.archive)) {
+      std::cout << "  reopen trace: " << dumpReader.openTrace() << std::endl;
+      for (const auto& it : dumpReader.ReadCatalog()) {
+        std::cout << "  committed: '" << it.path << "' dir=" << it.isDir
+                  << " size=" << it.size << std::endl;
+      }
+      std::cout << dumpReader.RawProbe() << std::endl;
+      dumpReader.Close();
+    }
+    std::cout << "  update-trace:" << std::endl << result.updateTrace;
+    return;
+  }
+}
+
+// Discriminating experiment B: the same mkdir+move against a ZIP fixture --
+// separates the 7z out-handler from our callback (zip derives folders from
+// the attribute / trailing convention, not an IsDir header bit).
 PRISM_TEST("no-op tree does not rewrite the archive") {
   if (!PRISM_CHECK(EnsureCom())) return;
   prism::win::SevenZipLibrary library;

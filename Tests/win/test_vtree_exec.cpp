@@ -95,7 +95,9 @@ struct Fixture {
       if (!prism::fixture::WritePng(dir + L"\\" + f.file, f.w, f.h, f.b, f.g, f.r)) return false;
       originals[prism::win::WideToUtf8(f.file)] = ReadAllBytes(dir + L"\\" + f.file);
     }
-    return MakeEx(name, L"solid.7z", false);
+    archive = dir + L"\\solid.7z";
+    return prism::fixture::PackSolid(prism::fixture::ExePath(), dir, L"solid.7z",
+                                     {L"icon.png", L"photo.png", L"large.png"});
   }
   // zip=true packs the same three payloads as a (non-solid) .zip instead.
   bool MakeEx(const wchar_t* name, bool zip) {

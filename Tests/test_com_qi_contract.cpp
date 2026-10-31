@@ -88,7 +88,7 @@ PRISM_TEST("qi.unknown_iid_rejected_and_nulls_out") {
   void* p = reinterpret_cast<void*>(0x1);
   // A wrong constant must fail AND null the out pointer: a stale non-null out
   // pointer is exactly how a wrong IID "succeeds" silently.
-  prism::win::abi::GUID bogus = IID_IOutStream;
+  ::GUID bogus = IID_IOutStream;
   bogus.Data4[5] = 0x07;  // family 03, member 07 -- not a stream interface
   PRISM_CHECK_EQ(s.QueryInterface(bogus, &p), E_NOINTERFACE);
   PRISM_CHECK(p == nullptr);

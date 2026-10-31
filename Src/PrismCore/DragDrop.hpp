@@ -686,4 +686,109 @@ class StreamPumpPlan {
   std::string message_;
 };
 
+// ---------------------------------------------------------------------------
+// Delayed-extract seek planning (M4: the streaming completion of channel B).
+//
+// A solid 7z block decodes strictly forward: file N's bytes follow files
+// 1..N-1. Explorer holds an IStream and may seek anywhere, so every backward
+// seek over data the decoder has already passed must be paid for somewhere:
+//   CursorOnly     -- forward seek: skip ahead, or land inside the ring.
+//   LookbackHit    -- small backward seek served from the recent-bytes ring
+//                     (no decoder work at all).
+//   RestartDecode  -- rewind the decoder to the block start and re-decode,
+//                     dropping everything before the target (the honest solid
+//                     cost; recorded in the stream diagnostics).
+// A stream that has already spent its restart budget is REFUSED with a reason
+// a user can act on: re-decoding a multi-GB solid block on every back-step is
+// worse than telling them to use the right-click extract once.
+//
+// PlanSeek is a pure function: the caller's mutable state (how many restarts
+// the stream already spent) travels in the SeekPolicy snapshot, so the same
+// inputs always yield the same plan (contract C4's determinism discipline).
+// ---------------------------------------------------------------------------
+namespace mutation {
+#if defined(PRISM_DND_MUTANT_SEEK_FORWARD_ONLY)
+constexpr bool kSeekForwardOnly = true;
+#else
+constexpr bool kSeekForwardOnly = false;
+#endif
+}  // namespace mutation
+
+struct SeekPolicy {
+  bool useLookback = true;
+  size_t lookbackBytes = 4u * 1024 * 1024;  // recent-bytes ring the stream keeps
+  size_t maxRestarts = 2;  // after this many re-decodes, refuse with a reason
+  // State snapshot supplied by the stream owner: restarts already spent on
+  // this stream. Kept here (not as a PlanSeek parameter) so the plan function
+  // stays signature-stable and pure.
+  size_t restartsUsed = 0;
+};
+
+struct SeekPlan {
+  enum Kind : uint8_t { CursorOnly, LookbackHit, RestartDecode };
+  Kind kind = CursorOnly;
+  // CursorOnly: forward bytes to skip before serving.
+  // RestartDecode: bytes to re-decode and drop after rewinding (= target).
+  // LookbackHit: 0 -- nothing is decoded.
+  int64_t discardBytes = 0;
+  bool refused = false;
+  std::string reason;  // mandatory when refused; names the escape for the user
+};
+
+inline const char* ToString(SeekPlan::Kind kind) {
+  switch (kind) {
+    case SeekPlan::CursorOnly: return "CursorOnly";
+    case SeekPlan::LookbackHit: return "LookbackHit";
+    case SeekPlan::RestartDecode: return "RestartDecode";
+  }
+  return "Unknown";
+}
+
+// PRISM_CHECK_EQ prints operands on failure (contract B6).
+inline std::ostream& operator<<(std::ostream& os, SeekPlan::Kind kind) {
+  return os << ToString(kind);
+}
+
+inline SeekPlan PlanSeek(int64_t current, int64_t target, int64_t streamSize,
+                         const SeekPolicy& policy) {
+  SeekPlan plan;
+  if (target < 0) {
+    plan.refused = true;
+    plan.reason = "seek refused: target offset is negative";
+    return plan;
+  }
+  if (streamSize >= 0 && target > streamSize) {
+    plan.refused = true;
+    plan.reason = "seek refused: target offset is beyond the declared stream size";
+    return plan;
+  }
+  // Forward (and in-place) seeks never touch the decoder's past: skip or
+  // no-op. The negative-discard mutant makes backward seeks plan as
+  // CursorOnly with a negative discard -- nonsense the tests must catch.
+  if (mutation::kSeekForwardOnly || target >= current) {
+    plan.kind = SeekPlan::CursorOnly;
+    plan.discardBytes = target - current;
+    return plan;
+  }
+  const int64_t backBytes = current - target;
+  // Inclusive boundary: a rewind of exactly lookbackBytes still hits the ring.
+  if (policy.useLookback && backBytes <= static_cast<int64_t>(policy.lookbackBytes)) {
+    plan.kind = SeekPlan::LookbackHit;
+    plan.discardBytes = 0;
+    return plan;
+  }
+  if (policy.restartsUsed >= policy.maxRestarts) {
+    plan.refused = true;
+    plan.reason = "seek refused: solid-decoder restart budget exhausted (" +
+                  std::to_string(policy.restartsUsed) + "/" +
+                  std::to_string(policy.maxRestarts) +
+                  " restarts spent); re-decoding the whole solid block again is too "
+                  "expensive -- extract this file with the right-click menu instead";
+    return plan;
+  }
+  plan.kind = SeekPlan::RestartDecode;
+  plan.discardBytes = target;  // re-decode from the block start, drop to target
+  return plan;
+}
+
 }  // namespace prism::dnd

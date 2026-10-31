@@ -12,6 +12,7 @@ set(PRISM_CORE_TESTS
     test_spring.cpp
     test_gallery.cpp
     test_sweep.cpp
+    test_pwd_probe_core.cpp
     test_thumb_store.cpp
     test_list_layout.cpp
     test_glass_island.cpp
@@ -25,6 +26,10 @@ foreach(source IN LISTS PRISM_CORE_TESTS)
   target_link_libraries("${name}" PRIVATE prism_core)
   add_test(NAME "core.${name}" COMMAND "${name}")
 endforeach()
+
+# The probe core drives a thread-pool plan; link Threads explicitly.
+find_package(Threads REQUIRED)
+target_link_libraries(test_pwd_probe_core PRIVATE Threads::Threads)
 
 # Deliberate rule mutations are expected to fail the same assertions. WILL_FAIL
 # makes the mutation check itself green only when the test suite catches it;
@@ -40,6 +45,20 @@ foreach(mutant IN ITEMS trust_all ignore_space)
   add_test(NAME "mutation.drag_drop.${mutant}" COMMAND "test_drag_drop_mutant_${mutant}")
   set_tests_properties("mutation.drag_drop.${mutant}" PROPERTIES WILL_FAIL TRUE)
 endforeach()
+
+# M4 dnd-seek batch (appended; existing registrations above are untouched):
+# the delayed-extract seek planner plus its own negative control -- the
+# mutant forces every seek through CursorOnly and must go red.
+add_executable(test_dnd_seek test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek PRIVATE prism_core)
+add_test(NAME "core.test_dnd_seek" COMMAND test_dnd_seek)
+
+add_executable(test_dnd_seek_mutant_forward_only test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek_mutant_forward_only PRIVATE prism_core)
+target_compile_definitions(test_dnd_seek_mutant_forward_only
+                           PRIVATE PRISM_DND_MUTANT_SEEK_FORWARD_ONLY=1)
+add_test(NAME "mutation.dnd_seek.forward_only" COMMAND test_dnd_seek_mutant_forward_only)
+set_tests_properties(mutation.dnd_seek.forward_only PROPERTIES WILL_FAIL TRUE)
 
 # Windows-only integration test: loads the real 7z.dll and round-trips an
 # archive created by the 7-Zip CLI. Skipped (not built) on other platforms.
@@ -89,6 +108,30 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
            $ENV{TEMP}/prism_snapshots)
   set_tests_properties(win.gallery_snapshot PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL SNAPSHOT CHECKS PASSED")
+
+  # Password probe: the executor is COM-glue + the ring decisions; the win
+  # test drives a real AES-encrypted archive through it.
+  add_executable(win_pwd_probe_test win/test_pwd_probe.cpp)
+  target_link_libraries(win_pwd_probe_test PRIVATE prism_core prism_win_bridge
+                                                   user32.lib gdi32.lib ole32.lib
+                                                   windowscodecs.lib)
+  target_compile_options(win_pwd_probe_test PRIVATE /WX-)
+  add_test(NAME "win.pwd_probe" COMMAND win_pwd_probe_test)
+  set_tests_properties(win.pwd_probe PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL PWD-PROBE CHECKS PASSED")
+
+  # M4: delayed-extract stream seek completion. Real 7z.exe-authored solid
+  # archive, real CFSTR_FILECONTENTS IDataObject; byte-exact content across
+  # SET/CUR/END seeks including restart-decode on a kept-open 7z.dll session
+  # and the restart-budget refusal. The stdout marker is part of the verdict.
+  add_executable(win_dnd_seek_test win/test_dnd_seek.cpp)
+  target_link_libraries(win_dnd_seek_test PRIVATE prism_core prism_win_bridge
+                                                   user32.lib gdi32.lib ole32.lib
+                                                   oleaut32.lib windowscodecs.lib)
+  target_compile_options(win_dnd_seek_test PRIVATE /WX-)
+  add_test(NAME "win.dnd_seek" COMMAND win_dnd_seek_test)
+  set_tests_properties(win.dnd_seek PROPERTIES
+      PASS_REGULAR_EXPRESSION "ALL DND-SEEK CHECKS PASSED")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

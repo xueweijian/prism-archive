@@ -15,7 +15,7 @@
 #include <iostream>
 
 #include "mini_test.hpp"
-#include "PrismWin/SevenZipAbi.hpp"
+#include "SevenZipAbi.hpp"
 
 namespace {
 

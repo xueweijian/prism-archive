@@ -52,6 +52,9 @@ endforeach()
 add_executable(test_dnd_seek test_dnd_seek.cpp)
 target_link_libraries(test_dnd_seek PRIVATE prism_core)
 add_test(NAME "core.test_dnd_seek" COMMAND test_dnd_seek)
+# A hanging seek test must die loud, not block the lane forever (the Windows
+# lane hung 50+ min here once); ctest prints the partial output on timeout.
+set_tests_properties(core.test_dnd_seek PROPERTIES TIMEOUT 240)
 
 add_executable(test_dnd_seek_mutant_forward_only test_dnd_seek.cpp)
 target_link_libraries(test_dnd_seek_mutant_forward_only PRIVATE prism_core)

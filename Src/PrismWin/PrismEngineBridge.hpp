@@ -631,6 +631,48 @@ class ArchiveReader {
     return items;
   }
 
+  // Evidence probe: the RAW property truth per entry, VT type included --
+  // ReadCatalog's interpretation (GetBool/GetString) is one hypothesis this
+  // can contradict. One line per entry: i|path|pid6(vt,val)|pid9|pid7.
+  std::string RawProbe() const {
+    std::string out;
+    if (!archive_) return "no archive";
+    abi::UInt32 count = 0;
+    if (FAILED(archive_->GetNumberOfItems(&count))) return "no count";
+    for (abi::UInt32 i = 0; i < count; ++i) {
+      char line[256];
+      std::snprintf(line, sizeof(line), "probe i=%u ", static_cast<unsigned>(i));
+      out += line;
+      const PROPID pids[] = {abi::kpidPath, abi::kpidIsDir, abi::kpidAttrib, abi::kpidSize};
+      for (PROPID pid : pids) {
+        PROPVARIANT v{};
+        PropVariantInit(&v);
+        std::string rendered;
+        if (SUCCEEDED(archive_->GetProperty(i, pid, &v))) {
+          switch (v.vt) {
+            case VT_BOOL: rendered = v.boolVal ? "true" : "false"; break;
+            case VT_UI4: rendered = std::to_string(v.ulVal); break;
+            case VT_UI8: rendered = std::to_string(v.uhVal.QuadPart); break;
+            case VT_BSTR: {
+              std::wstring w(v.bstrVal ? v.bstrVal : L"");
+              rendered.assign(w.begin(), w.end());
+              break;
+            }
+            case VT_FILETIME: rendered = "filetime"; break;
+            case VT_EMPTY: rendered = "EMPTY"; break;
+            default: rendered = "vt=" + std::to_string(v.vt); break;
+          }
+        } else {
+          rendered = "HR_FAIL";
+        }
+        out += " pid" + std::to_string(pid) + "=" + rendered;
+        PropVariantClear(&v);
+      }
+      out += "\n";
+    }
+    return out;
+  }
+
   // Sink 1: thumbnail / preview extraction under a hard memory budget.
   std::optional<std::vector<uint8_t>> ExtractToMemory(
       uint32_t index, size_t maxBytes = 16ull * 1024 * 1024) const {
@@ -804,48 +846,6 @@ class ArchiveReader {
       }
     }
     PropVariantClear(&value);
-    return out;
-  }
-
-  // Evidence probe: the RAW property truth per entry, VT type included --
-  // ReadCatalog's interpretation (GetBool/GetString) is one hypothesis this
-  // can contradict. One line per entry: i|path|pid6(vt,val)|pid9|pid7.
-  std::string RawProbe() const {
-    std::string out;
-    if (!archive_) return "no archive";
-    abi::UInt32 count = 0;
-    if (FAILED(archive_->GetNumberOfItems(&count))) return "no count";
-    for (abi::UInt32 i = 0; i < count; ++i) {
-      char line[256];
-      std::snprintf(line, sizeof(line), "probe i=%u ", static_cast<unsigned>(i));
-      out += line;
-      const PROPID pids[] = {abi::kpidPath, abi::kpidIsDir, abi::kpidAttrib, abi::kpidSize};
-      for (PROPID pid : pids) {
-        PROPVARIANT v{};
-        PropVariantInit(&v);
-        std::string rendered;
-        if (SUCCEEDED(archive_->GetProperty(i, pid, &v))) {
-          switch (v.vt) {
-            case VT_BOOL: rendered = v.boolVal ? "true" : "false"; break;
-            case VT_UI4: rendered = std::to_string(v.ulVal); break;
-            case VT_UI8: rendered = std::to_string(v.uhVal.QuadPart); break;
-            case VT_BSTR: {
-              std::wstring w(v.bstrVal ? v.bstrVal : L"");
-              rendered.assign(w.begin(), w.end());
-              break;
-            }
-            case VT_FILETIME: rendered = "filetime"; break;
-            case VT_EMPTY: rendered = "EMPTY"; break;
-            default: rendered = "vt=" + std::to_string(v.vt); break;
-          }
-        } else {
-          rendered = "HR_FAIL";
-        }
-        out += " pid" + std::to_string(pid) + "=" + rendered;
-        PropVariantClear(&v);
-      }
-      out += "\n";
-    }
     return out;
   }
 

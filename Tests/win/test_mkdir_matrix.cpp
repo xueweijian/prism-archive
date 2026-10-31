@@ -204,6 +204,23 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
     // Brand-new node: each dimension answers per the variant spec; anything
     // the engine invents beyond that stays VT_EMPTY (recorded in the trace).
     ++asked_[propId];
+    // createMode rows author their own nodes: entry.isDir is the truth and the
+    // variant spec does not apply. Without this, create0's two FILES were
+    // announced with the directory variant's kpidIsDir=TRUE and 7z faithfully
+    // wrote them as directories (yes, really -- the matrix caught it).
+    if (spec_.createMode) {
+      if (propId == abi::kpidIsDir) {
+        value->vt = VT_BOOL;
+        value->boolVal = entry.isDir ? VARIANT_TRUE : VARIANT_FALSE;
+      } else if (propId == abi::kpidAttrib) {
+        value->vt = VT_UI4;
+        value->ulVal = entry.isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
+      } else if (propId == abi::kpidMTime) {
+        value->vt = VT_FILETIME;
+        value->hVal.QuadPart = static_cast<LONGLONG>(116444736000000000LL);
+      }
+      return S_OK;
+    }
     if (propId == abi::kpidIsDir) {
       if (spec_.isDirTrue) {
         value->vt = VT_BOOL;

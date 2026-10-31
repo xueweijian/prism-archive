@@ -229,6 +229,16 @@ PRISM_TEST("mkdir and move rebuild the archive structure") {
   if (!PRISM_CHECK(EnsureCom())) return;
   prism::win::SevenZipLibrary library;
   if (!PRISM_CHECK(library.Load(prism::fixture::DllPath()))) return;
+  {  // evidence hygiene: pin which engine we are reasoning about
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    DWORD h = 0;
+    const DWORD n = GetFileVersionInfoSizeW(exe, &h);
+    (void)n;
+    char dllPath[MAX_PATH]{};
+    const DWORD dn = GetEnvironmentVariableA("PRISM_7Z_DLL", dllPath, MAX_PATH);
+    std::cout << "    7z.dll = " << (dn ? dllPath : "(default locate)") << std::endl;
+  }
   Fixture fx;
   if (!PRISM_CHECK(fx.Make(L"case2_mkdir_move"))) return;
 
@@ -342,6 +352,10 @@ PRISM_TEST("cost model reports true copied bytes and wall time") {
   PRISM_CHECK(result.copiedBytes > 0);
   PRISM_CHECK(result.elapsedMs > 0);
   // Full-copy evidence: the sink saw every byte that ended up in the file.
+  // Honest cost model: copiedBytes equals the NEW archive's size (a rename
+  // with a longer name legitimately grows the header); the old size is not
+  // the right reference.
+  PRISM_CHECK(result.copiedBytes > 0);
   PRISM_CHECK_EQ(result.copiedBytes,
                  static_cast<int64_t>(fs::file_size(fx.archive)));
   std::cout << "    commit cost: " << result.copiedBytes << " bytes in "

@@ -269,11 +269,20 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
       return old_->GetProperty(static_cast<abi::UInt32>(entry.indexInArchive), propId, value);
     }
     trace_ += "  -> EMPTY\n";
-    // Brand-new node: an empty folder carries nothing but its directory flag.
+    // Brand-new node: an empty folder carries its directory flag AND the
+    // directory attribute. Evidence round 3 proved the handler receives our
+    // VT_BOOL(kpidIsDir)=TRUE yet still writes a file, so mirror the
+    // canonical FS-driven caller too: real folders always carry
+    // FILE_ATTRIBUTE_DIRECTORY, and 7-Zip's SetDirStatusFromAttrib path keys
+    // off exactly that. Answering both covers either engine derivation.
     if (propId == abi::kpidIsDir) {
       value->vt = VT_BOOL;
       value->boolVal = VARIANT_TRUE;
       trace_ += "  -> NEW-DIR TRUE\n";
+    } else if (propId == abi::kpidAttrib) {
+      value->vt = VT_UI4;
+      value->ulVal = FILE_ATTRIBUTE_DIRECTORY;
+      trace_ += "  -> NEW-DIR ATTRIB\n";
     }
     return S_OK;
   }

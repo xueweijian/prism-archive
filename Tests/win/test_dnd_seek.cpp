@@ -304,7 +304,7 @@ int main() {
       return 1;
     }
     std::string got;
-    if (!PRISM_CHECK(ReadAll(medium.pstm.Get(), &got, kGamma))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK(ReadAll(medium.pstm, &got, kGamma))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ByteEquals(got, contentGamma, 0))) {
       std::cout << "    GetDataHere copy is not byte-exact" << std::endl;
       RemoveDir(dir);

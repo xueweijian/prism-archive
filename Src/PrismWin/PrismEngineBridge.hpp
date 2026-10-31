@@ -506,8 +506,17 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       return E_ABORT;
     }
     currentPath_ = finalPath;
+    // TWO references are needed and they are different things:
+    //   * outStream  -- handed to 7z, which OWNS it and will Release it once
+    //                   the item is written;
+    //   * currentSink_ -- ours, purely so SetOperationResult can read
+    //                   written() before the engine drops the stream.
+    // Handing the same single reference to both (sink refs=1, out param, no
+    // AddRef) meant 7z freed the object and currentSink_ dangled:
+    // AddressSanitizer reported heap-use-after-free on exactly this path.
+    sink->AddRef();          // ours
     currentSink_ = sink;
-    *outStream = sink;
+    *outStream = sink;       // engine's (the one created by operator new)
     return S_OK;
   }
 
@@ -519,6 +528,9 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       result_.writtenPaths.push_back(currentPath_);
       if (currentSink_) result_.bytesWritten += currentSink_->written();
     }
+    // Drop OUR reference (see GetStream); the engine drops its own when it is
+    // done with the stream. Without this the AddRef above would leak.
+    if (currentSink_) currentSink_->Release();
     currentSink_ = nullptr;
     currentPath_.clear();
     return S_OK;

@@ -55,7 +55,16 @@ class SevenZipLibrary {
  public:
   SevenZipLibrary() = default;
   ~SevenZipLibrary() {
-    if (module_) FreeLibrary(module_);
+    // Deliberately NOT FreeLibrary'd. 7z.dll keeps process-wide state
+    // (g_ExternalCodecs in DllExports2.cpp, filled by its SetCodecs export),
+    // and handing the module back frees that state while stale pointers
+    // survive: load/free/load cycles inside one process make the next
+    // SetCodecs read freed memory. AddressSanitizer reports it as
+    // heap-use-after-free inside SetCodecs, which looks like our bug and is
+    // not. A real archive manager loads the engine once and keeps it; the OS
+    // reclaims the image at process exit, so leaking one HMODULE here is the
+    // correct trade. (Repeated cross-DLL unload/reload is a 7-Zip hazard, not
+    // a supported pattern.)
   }
   SevenZipLibrary(const SevenZipLibrary&) = delete;
   SevenZipLibrary& operator=(const SevenZipLibrary&) = delete;

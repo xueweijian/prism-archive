@@ -17,11 +17,11 @@
 #include "mini_test.hpp"
 #include "SevenZipAbi.hpp"
 
-namespace {
-
 using prism::win::abi::IID_IOutStream;
 using prism::win::abi::IID_ISequentialOutStream;
 using prism::win::abi::IID_IStreamGetSize;
+
+namespace {
 
 // A stand-in with the SAME inheritance and QI shape the real DiskOutStream
 // must have. If someone drops the branch from the real class, preflight B8
@@ -68,7 +68,9 @@ PRISM_TEST("qi.ioutstream_is_answerable") {
   // The single fact that cost 18 CI rounds.
   PRISM_CHECK_EQ(s.QueryInterface(IID_IOutStream, &p), S_OK);
   PRISM_CHECK(p != nullptr);
-  // QI must hand back a USABLE IOutStream, not merely a non-null value.
+  if (!p) return;
+  // QI must hand back a USABLE IOutStream, not merely a non-null value:
+  // route the calls through it (that is what 7zUpdate does next).
   auto* as_out = static_cast<prism::win::abi::IOutStream*>(p);
   PRISM_CHECK_EQ(as_out->SetSize(4096), S_OK);
   PRISM_CHECK_EQ(as_out->Seek(0, 0, nullptr), S_OK);
@@ -80,7 +82,7 @@ PRISM_TEST("qi.sequential_still_answerable") {
   void* p = nullptr;
   PRISM_CHECK_EQ(s.QueryInterface(IID_ISequentialOutStream, &p), S_OK);
   PRISM_CHECK(p != nullptr);
-  static_cast<prism::win::abi::ISequentialOutStream*>(p)->Release();
+  if (p) static_cast<prism::win::abi::ISequentialOutStream*>(p)->Release();
 }
 
 PRISM_TEST("qi.unknown_iid_rejected_and_nulls_out") {
@@ -96,11 +98,12 @@ PRISM_TEST("qi.unknown_iid_rejected_and_nulls_out") {
 
 PRISM_TEST("qi.iid_constants_match_guid_txt") {
   // Guid.txt: family 03 = streams. IOutStream is member 04; IStreamGetSize is
-  // member 06. Confusing the two was a real defect (host leak, cmds-written).
-  PRISM_CHECK_EQ(IID_IOutStream.Data4[3], 0x03);
-  PRISM_CHECK_EQ(IID_IOutStream.Data4[5], 0x04);
-  PRISM_CHECK_EQ(IID_IStreamGetSize.Data4[5], 0x06);
-  PRISM_CHECK_EQ(IID_ISequentialOutStream.Data4[5], 0x01);
+  // member 06. Confusing the two was a real defect once.
+  // Data4 is BYTE[] -- cast to int so a failure prints a number, not a glyph.
+  PRISM_CHECK_EQ(int(IID_IOutStream.Data4[3]), 0x03);
+  PRISM_CHECK_EQ(int(IID_IOutStream.Data4[5]), 0x04);
+  PRISM_CHECK_EQ(int(IID_IStreamGetSize.Data4[5]), 0x06);
+  PRISM_CHECK_EQ(int(IID_ISequentialOutStream.Data4[5]), 0x01);
   PRISM_CHECK_EQ(IID_IOutStream.Data1, 0x23170F69u);
 }
 
@@ -110,7 +113,7 @@ int main(int argc, char** argv) {
     std::cout << "    COM-QI CONTRACT FAILURES" << std::endl;
     return 1;
   }
-  // The marker is part of the verdict (L2): a silent skip can never pass.
+  // The marker is part of the verdict (D1/L2): a silent skip can never pass.
   std::cout << "    ALL COM-QI CONTRACT CHECKS PASSED" << std::endl;
   return 0;
 }

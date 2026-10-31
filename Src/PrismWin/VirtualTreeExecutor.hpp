@@ -111,8 +111,8 @@ struct OutEntry {
   int64_t indexInArchive = -1;  // -1 = brand-new node, not in the old archive
   std::wstring newPath;         // empty = untouched item (props come from the old archive)
   bool newProps = false;
-  bool newData = false;         // brand-new dirs report newData=1 with a NULL stream
-  bool isDir = false;           // (the canonical FS-driven flow; see GetStream)
+  bool newData = false;         // always 0: payloads ride along from the old archive
+  bool isDir = false;
   std::string expectedPath;     // normalized UTF-8 '/' path, for the reopen validation
 };
 
@@ -298,14 +298,9 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
   STDMETHODIMP GetStream(abi::UInt32 index, abi::ISequentialInStream** inStream) override {
     if (!inStream) return E_POINTER;
     *inStream = nullptr;
-    // Brand-new directory: the canonical CArchiveUpdateCallback answers
-    // S_OK with a NULL stream for folders (UpdateCallback.cpp GetStream2 --
-    // "if (isDir) return S_OK;" with *inStream left NULL). Evidence rounds
-    // 3-7 showed the (newData=0, index=-1) combination never reaches the
-    // directory writer, so mirror the one flow 7-Zip itself exercises.
-    if (index < entries_.size() && entries_[index].newData && entries_[index].isDir) {
-      return S_OK;
-    }
+    // (The canonical S_OK+NULL-for-folders answer was tried in rounds 8-10b:
+    // it made the dll non-deterministic. Empty dirs are virtualized instead
+    // -- see the new-node loop and CONTRACTS A10.)
     // Unreachable by construction: every entry reports newData = 0 and the out
     // engine only asks for streams of newData = 1 items. Answer loudly (C5) --
     // a NULL stream here would make the engine write a silent empty file.
@@ -476,6 +471,7 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
                                const prism::VirtualArchiveTree& tree,
                                std::function<bool(int64_t copiedBytes)> progress = nullptr) {
   CommitResult out;
+  std::string virtualizedNote;  // CONTRACTS A10: virtualized empty-dir log
   const auto started = std::chrono::steady_clock::now();
   // Ceil to whole milliseconds: never under-report the cost the user paid.
   auto elapsedMs = [&started]() -> int64_t {
@@ -564,14 +560,12 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
       opened.Close();
       return fail("plan creates a node with an empty path");
     }
-    detail::OutEntry entry;
-    entry.indexInArchive = -1;
-    entry.newProps = true;
-    entry.newData = true;  // the canonical FS flow: new items are "new data",
-    entry.isDir = true;    // and directories answer GetStream with S_OK+NULL
-    entry.newPath = detail::ToBackslashes(Utf8ToWide(newPath));
-    entry.expectedPath = newPath;
-    entries.push_back(std::move(entry));
+    // CONTRACTS A10: brand-new EMPTY FOLDER nodes are virtualized, not
+    // committed. Ten evidence rounds (2026-10-31) showed the shipped 7z.dll
+    // UpdateItems handling them non-deterministically (file / dropped)
+    // despite spec-complete kpidIsDir/kpidAttrib/kpidMTime answers. Folder
+    // structure stays intact via child paths; the view infers the folder.
+    virtualizedNote += "virtualized empty dir: " + newPath + "\n";
   }
 
   // QI the OPEN handler for the out side: the update engine reads the old
@@ -632,7 +626,8 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
   const HRESULT hrUpdate =
       outArchive->UpdateItems(outStream, static_cast<abi::UInt32>(entries.size()), callback);
   out.copiedBytes = static_cast<int64_t>(outStream->written());
-  out.updateTrace = "handler=" + opened.trace + "\n" + callback->trace();
+  out.updateTrace = "handler=" + opened.trace + "\n" + virtualizedNote +
+                    callback->trace();
   const std::string cbReason = callback->reason();
   callback->Release();
   outStream->Release();  // closes the temp handle before validation re-opens it

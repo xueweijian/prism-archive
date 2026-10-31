@@ -74,7 +74,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" -DCMAKE_EXE_LINKER_FLAGS="/InferAsanLibraries"
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi /EHsc" -DCMAKE_EXE_LINKER_FLAGS="/InferAsanLibraries"
 
       - name: Probe SDK declaration of the COM entry points
         shell: pwsh

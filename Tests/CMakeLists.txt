@@ -114,6 +114,20 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "win.vtree_exec" COMMAND win_vtree_exec_test)
   set_tests_properties(win.vtree_exec PROPERTIES
       PASS_REGULAR_EXPRESSION "ALL VTREE-EXEC CHECKS PASSED")
+
+  # mkdir variant MATRIX (batch B1 evidence): eight parameterized "commit a
+  # new empty directory" cells against the real 7z.dll in ONE run, each with
+  # its own fixture + UpdateItems commit + re-open readback. REPORT-ONLY by
+  # design: it always exits non-zero so --output-on-failure prints the full
+  # VARIANT table into the job log (a green test's stdout would be swallowed).
+  add_executable(win_mkdir_matrix win/test_mkdir_matrix.cpp)
+  target_link_libraries(win_mkdir_matrix PRIVATE prism_core prism_win_bridge
+                                                 user32.lib gdi32.lib ole32.lib
+                                                 windowscodecs.lib)
+  target_compile_options(win_mkdir_matrix PRIVATE /WX-)
+  add_test(NAME "win.mkdir_matrix" COMMAND win_mkdir_matrix)
+  set_tests_properties(win.mkdir_matrix PROPERTIES
+      PASS_REGULAR_EXPRESSION "MATRIX COMPLETE")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

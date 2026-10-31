@@ -111,7 +111,8 @@ struct OutEntry {
   int64_t indexInArchive = -1;  // -1 = brand-new node, not in the old archive
   std::wstring newPath;         // empty = untouched item (props come from the old archive)
   bool newProps = false;
-  bool isDir = false;
+  bool newData = false;         // brand-new dirs report newData=1 with a NULL stream
+  bool isDir = false;           // (the canonical FS-driven flow; see GetStream)
   std::string expectedPath;     // normalized UTF-8 '/' path, for the reopen validation
 };
 
@@ -235,7 +236,7 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
     // fail loudly instead of silently recompressing.
     *newData = entry.newProps ? 1 : 0;
 #else
-    *newData = 0;  // payloads always ride along from the old archive
+    *newData = entry.newData ? 1 : 0;
 #endif
     return S_OK;
   }
@@ -290,6 +291,14 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
   STDMETHODIMP GetStream(abi::UInt32 index, abi::ISequentialInStream** inStream) override {
     if (!inStream) return E_POINTER;
     *inStream = nullptr;
+    // Brand-new directory: the canonical CArchiveUpdateCallback answers
+    // S_OK with a NULL stream for folders (UpdateCallback.cpp GetStream2 --
+    // "if (isDir) return S_OK;" with *inStream left NULL). Evidence rounds
+    // 3-7 showed the (newData=0, index=-1) combination never reaches the
+    // directory writer, so mirror the one flow 7-Zip itself exercises.
+    if (index < entries_.size() && entries_[index].newData && entries_[index].isDir) {
+      return S_OK;
+    }
     // Unreachable by construction: every entry reports newData = 0 and the out
     // engine only asks for streams of newData = 1 items. Answer loudly (C5) --
     // a NULL stream here would make the engine write a silent empty file.
@@ -551,7 +560,8 @@ inline CommitResult CommitTree(const std::wstring& archivePath,
     detail::OutEntry entry;
     entry.indexInArchive = -1;
     entry.newProps = true;
-    entry.isDir = true;  // the only creatable node kind is an empty folder
+    entry.newData = true;  // the canonical FS flow: new items are "new data",
+    entry.isDir = true;    // and directories answer GetStream with S_OK+NULL
     entry.newPath = detail::ToBackslashes(Utf8ToWide(newPath));
     entry.expectedPath = newPath;
     entries.push_back(std::move(entry));

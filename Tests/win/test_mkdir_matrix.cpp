@@ -201,6 +201,12 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
     return S_OK;
   }
 
+  STDMETHODIMP CryptoGetTextPassword(BSTR* password) override {
+    if (!password) return E_POINTER;
+    *password = nullptr;
+    return S_OK;
+  }
+
   const std::string& reason() const { return reason_; }
   int streamAsks() const { return streamAsks_; }
 

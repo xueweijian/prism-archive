@@ -329,7 +329,9 @@ class GalleryWindow {
       wchar_t sz[40];
       swprintf_s(sz, L"%llu bytes", static_cast<unsigned long long>(item.size));
       scene.quickLookMeta =
-          sz + (quickLook_->streaming() ? L"  \x2022 \x26A1 \x6D41\x5F0F\x52A0\x8F7D" : L"");
+          std::wstring(sz) + (quickLook_->streaming()
+                                  ? L"  \x2022 \x26A1 \x6D41\x5F0F\x52A0\x8F7D"
+                                  : L"");
     } else {
       scene.quickLookOpen = false;
     }

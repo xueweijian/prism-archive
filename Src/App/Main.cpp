@@ -7,18 +7,21 @@
 // ordering and lifetime, not in cleverness.
 //
 // Assembly contract (batch A):
-//   1. COM apartment-threaded for the UI thread; the sweep worker uses MTA.
+//   1. COM apartment-threaded for the UI thread; the workers use MTA.
 //   2. Archive path: argv[1], else a common dialog. No archive -> quiet exit.
 //   3. 7z.dll resolution: PRISM_7Z_DLL env, then the standard install paths.
 //   4. Catalog loads on the UI thread (v1: one seek+header read; directories
 //      load in milliseconds per the blueprint's zero-payload scan).
 //   5. Thumbnails: ONE background sweep over all image entries (single-pass
 //      per solid block) into a worker-owned ThumbStore, handed to the window
-//      by pointer swap; the window is told via kThumbsChanged. The worker owns
-//      the reader reference until it finishes -- the reader outlives the
-//      thread because the app context is kept alive by shared_ptr on both
-//      sides and the thread is joined after the message loop exits.
-#pragma once
+//      by pointer swap; the window repaints via kThumbsChanged. The app
+//      context is kept alive by shared_ptr on both sides; the sweep worker is
+//      joined after the message loop exits.
+//
+// History note: the inc-2 edit of this file was applied by an index-based
+// patch that cut at the wrong offset and left the previous handler's tail
+// dangling below the new one (main CI red twice). Rewritten as one piece;
+// lesson recorded in docs/CONTRACTS.md (D7: no index-surgery on whole files).
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -31,6 +34,7 @@
 #include <shellapi.h>  // CommandLineToArgvW
 #include <shlwapi.h>   // PathFileExistsW
 
+#include <atomic>
 #include <cstdio>      // fprintf (extraction telemetry)
 #include <filesystem>  // parent_path for the default output dir
 #include <memory>
@@ -38,11 +42,11 @@
 #include <thread>
 #include <vector>
 
-#include "../PrismCore/Preview.hpp"    // KindByName
-#include "../PrismCore/SmartExtractor.hpp"  // SmartExtractionPlanner
+#include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
+#include "../PrismCore/SmartExtractor.hpp" // SmartExtractionPlanner
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/GalleryWindow.hpp"
-#include "../PrismWin/PrismEngineBridge.hpp"
+#include "../PrismWin/PrismEngineBridge.hpp"  // WideToUtf8, SmartExtractCallback
 #include "../PrismWin/SolidSweeper.hpp"
 
 #pragma comment(lib, "comdlg32.lib")
@@ -81,8 +85,18 @@ std::wstring FileNameWide(const std::wstring& path) {
   return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
-// Everything the UI thread and the sweep worker share. Kept alive by
-// shared_ptr on both sides; the worker is joined after the message loop.
+std::wstring Utf8ToWide(std::string_view text) {
+  if (text.empty()) return {};
+  const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(),
+                                       static_cast<int>(text.size()), nullptr, 0);
+  std::wstring out(static_cast<size_t>(wide), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                      out.data(), wide);
+  return out;
+}
+
+// Everything the UI thread and the workers share. Kept alive by shared_ptr on
+// both sides; the sweep worker is joined after the message loop.
 struct AppContext {
   prism::win::SevenZipLibrary library;
   std::unique_ptr<prism::win::ArchiveReader> reader;
@@ -102,7 +116,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::wstring archive = (argv && argc > 1) ? argv[1] : std::wstring();
   if (argv) LocalFree(argv);
   if (archive.empty()) archive = PickArchive();
-  app->archivePath = archive;
   if (archive.empty()) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 0;  // user closed the picker: not an error
@@ -117,6 +130,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   }
 
   auto app = std::make_shared<AppContext>();
+  app->archivePath = archive;
   if (!app->library.Load(dll)) {
     MessageBoxW(nullptr, L"Failed to load 7z.dll.", L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
@@ -138,14 +152,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) return 1;
   window.SetItems(&app->items);
   // Double-click = smart extract (Bandizip's core interaction). The worker
-  // thread owns the archive handle for the duration; the UI only gets
-  // progress messages and a breadcrumb update.
+  // thread owns the archive handle for the duration; the UI gets progress
+  // messages and a breadcrumb update. One extraction at a time.
   window.SetActivateHandler([&window, app](int) {
-    if (app->extracting.exchange(true)) return;  // one extraction at a time
+    if (app->extracting.exchange(true)) return;
     std::thread([app, &window]() {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       const uint64_t t0 = GalleryWindow::NowMs();
-      window.Hud().OnStart(L"\x667A\x80FD\x89E3\x538B",
+      window.Hud().OnStart("\xe6\x99\xba\xe8\x83\xbd\xe8\xa7\xa3\xe5\x8e\x8b",
                            GalleryWindow::NowMs());
       namespace fs = std::filesystem;
       const std::string outDir = prism::win::WideToUtf8(
@@ -159,28 +173,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                                    &result);
       PostMessageW(window.Hwnd(), GalleryWindow::kProgressMessage,
                    static_cast<WPARAM>(result.filesWritten),
-                   static_cast<WPARAM>(app->catalog.size()));
-      const wchar_t* done =
-          ok ? (L"\x5DF2\x89E3\x538B \x2192 " + plan.baseTargetDir).c_str()
-             : L"\x89E3\x538B\x5931\x8D25";
+                   static_cast<LPARAM>(app->catalog.size()));
+      // Never hold a c_str() of a temporary: build the wide string first.
+      std::wstring done = ok ? std::wstring(L"\x5DF2\x89E3\x538B")
+                             : std::wstring(L"\x89E3\x538B\x5931\x8D25");
+      if (ok && !plan.baseTargetDir.empty()) {
+        done += L" \x2192 " + Utf8ToWide(plan.baseTargetDir);
+      }
       window.SetBreadcrumb(done);
       std::fprintf(stderr, "extract ok=%d files=%llu bytes=%llu in %llums\n",
                    static_cast<int>(ok),
                    static_cast<unsigned long long>(result.filesWritten),
                    static_cast<unsigned long long>(result.bytesWritten),
                    static_cast<unsigned long long>(GalleryWindow::NowMs() - t0));
-      app->extracting = false;
-      CoUninitialize();
-    }).detach();
-  });
-      prism::win::SmartExtractResult result;
-      const bool ok = app->reader->ExtractWithPlan(
-          *catalog, plan, plan.baseTargetDir, nullptr, &result);
-      PostMessageW(window.Hwnd(), GalleryWindow::kProgressMessage,
-                   static_cast<WPARAM>(result.filesWritten),
-                   static_cast<LPARAM>(catalog->size()));
-      window.SetBreadcrumb(ok ? (L"\x5DF2\x89E3\x538B \x2192 " + plan.baseTargetDir)
-                              : L"\x89E3\x538B\x5931\x8D25");
       app->extracting = false;
       CoUninitialize();
     }).detach();
@@ -197,14 +202,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     sweepIndices.push_back(item.index);
     sweepSizes.push_back(item.size);
   }
-  std::thread worker([app, &window, archive, sweepIndices, sweepSizes]() {
+  std::thread worker([app, &window, sweepIndices, sweepSizes]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     prism::win::sweep::WicThumbDecoder wic;
     if (wic.Initialize()) {
       auto store = std::make_shared<prism::gallery::ThumbStore>(64ull << 20);
-      prism::win::sweep::RunSolidSweep(*app->reader, sweepIndices, sweepSizes, wic, *store);
+      prism::win::sweep::RunSolidSweep(*app->reader, sweepIndices, sweepSizes,
+                                       wic, *store);
       window.SetThumbs(store);
-      PostMessageW(window.Hwnd(), prism::win::gallery::GalleryWindow::kThumbsChanged, 0, 0);
+      PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
     }
     CoUninitialize();
   });

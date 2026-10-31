@@ -7,6 +7,7 @@
 #pragma once
 
 #include "ArchiveCatalog.hpp"
+#include "ArchiveTreeView.hpp"
 #include "CharsetRepair.hpp"
 #include "ContextMenuModel.hpp"
 #include "PasswordVault.hpp"

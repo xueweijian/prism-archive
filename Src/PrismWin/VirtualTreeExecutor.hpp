@@ -179,6 +179,7 @@ inline std::vector<CatalogEntry> ReadMiniCatalog(abi::IInArchive* archive) {
 // The update callback the engine drives. Everything it answers is derived from
 // the decision plan; failures are recorded as readable reasons, never swallowed.
 class TreeUpdateCallback final : public IArchiveUpdateCallback,
+                                 public ICryptoGetTextPassword,
                                  public ICryptoGetTextPassword2 {
  public:
   TreeUpdateCallback(std::vector<OutEntry> entries, abi::IInArchive* oldArchive,
@@ -191,6 +192,8 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
       *out = static_cast<IArchiveUpdateCallback*>(this);
     } else if (iid == kIID_IProgress) {
       *out = static_cast<abi::IProgress*>(this);
+    } else if (iid == abi::IID_ICryptoGetTextPassword) {
+      *out = static_cast<abi::ICryptoGetTextPassword*>(this);
     } else if (iid == kIID_ICryptoGetTextPassword2) {
       *out = static_cast<ICryptoGetTextPassword2*>(this);
     } else {
@@ -324,6 +327,17 @@ class TreeUpdateCallback final : public IArchiveUpdateCallback,
     // password the archive was OPENED with, if it had one (7zHandlerOut.cpp
     // update path). We never invent a password here.
     *passwordIsDefined = 0;
+    *password = nullptr;
+    return S_OK;
+  }
+
+  // The repack/decode path QIs THIS (7zUpdate.cpp: "Z7_DECL_CMyComPtr_QI_FROM(
+  // ICryptoGetTextPassword, getDecoderPassword, updateCallback);
+  // if (!getDecoderPassword) return E_NOTIMPL;") -- unencrypted commits need
+  // only an honest S_OK + empty password. Without it every commit dies
+  // hr=0x80004001. (The ...2 variant is a DIFFERENT interface.)
+  STDMETHODIMP CryptoGetTextPassword(BSTR* password) override {
+    if (!password) return E_POINTER;
     *password = nullptr;
     return S_OK;
   }

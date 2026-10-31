@@ -95,9 +95,15 @@ struct Fixture {
       if (!prism::fixture::WritePng(dir + L"\\" + f.file, f.w, f.h, f.b, f.g, f.r)) return false;
       originals[prism::win::WideToUtf8(f.file)] = ReadAllBytes(dir + L"\\" + f.file);
     }
-    archive = dir + L"\\solid.7z";
-    return prism::fixture::PackSolid(prism::fixture::ExePath(), dir, L"solid.7z",
-                                     {L"icon.png", L"photo.png", L"large.png"});
+    return MakeEx(name, L"solid.7z", false);
+  }
+  // zip=true packs the same three payloads as a (non-solid) .zip instead.
+  bool MakeEx(const wchar_t* name, bool zip) {
+    if (!Make(name)) return false;  // makes the 7z first (harmless extra file)
+    if (!zip) return true;
+    archive = dir + L"\\solid.zip";
+    return prism::fixture::PackZip(prism::fixture::ExePath(), dir, L"solid.zip",
+                                   {L"icon.png", L"photo.png", L"large.png"});
   }
 };
 
@@ -355,6 +361,86 @@ PRISM_TEST("cost model reports true copied bytes and wall time") {
                  static_cast<int64_t>(fs::file_size(fx.archive)));
   std::cout << "    commit cost: " << result.copiedBytes << " bytes in "
             << result.elapsedMs << " ms" << std::endl;
+}
+
+// Discriminating experiment A: mkdir WITHOUT move -- isolates the new-node
+// path from the move path (evidence round 5 showed both signals delivered
+// yet the engine still committed a file).
+PRISM_TEST("mkdir alone commits a directory entry") {
+  if (!PRISM_CHECK(EnsureCom())) return;
+  prism::win::SevenZipLibrary library;
+  if (!PRISM_CHECK(library.Load(prism::fixture::DllPath()))) return;
+  Fixture fx;
+  if (!PRISM_CHECK(fx.Make(L"case6_mkdir_alone"))) return;
+
+  prism::VirtualArchiveTree tree;
+  std::vector<prism::ArchiveItem> catalog;
+  if (!PRISM_CHECK(BuildTree(fx.archive, library, &tree, &catalog))) return;
+  PRISM_CHECK(tree.Mkdir("empty_docs"));
+
+  const auto result = prism::win::vt::CommitTree(fx.archive, tree, nullptr);
+  if (!result.ok) std::cout << "    commit error: " << result.error << std::endl;
+  PRISM_CHECK(result.ok);
+
+  TreeShape want;
+  want["icon.png"] = false;
+  want["large.png"] = false;
+  want["photo.png"] = false;
+  want["empty_docs"] = true;
+  if (!PRISM_CHECK(VerifyCommitted(fx.archive, library, want, fx.originals))) {
+    prism::win::ArchiveReader dumpReader(library);
+    if (dumpReader.Open(fx.archive)) {
+      for (const auto& it : dumpReader.ReadCatalog()) {
+        std::cout << "  committed: '" << it.path << "' dir=" << it.isDir
+                  << " size=" << it.size << std::endl;
+      }
+      dumpReader.Close();
+    }
+    std::cout << "  update-trace:" << std::endl << result.updateTrace;
+    return;
+  }
+}
+
+// Discriminating experiment B: the same mkdir+move against a ZIP fixture --
+// separates the 7z out-handler from our callback (zip derives folders from
+// the attribute / trailing convention, not an IsDir header bit).
+PRISM_TEST("mkdir and move rebuild the archive structure (zip)") {
+  if (!PRISM_CHECK(EnsureCom())) return;
+  prism::win::SevenZipLibrary library;
+  if (!PRISM_CHECK(library.Load(prism::fixture::DllPath()))) return;
+  Fixture fx;
+  if (!PRISM_CHECK(fx.MakeEx(L"case7_zip", true))) return;
+
+  prism::VirtualArchiveTree tree;
+  std::vector<prism::ArchiveItem> catalog;
+  if (!PRISM_CHECK(BuildTree(fx.archive, library, &tree, &catalog))) return;
+  PRISM_CHECK(tree.Mkdir("docs"));
+  PRISM_CHECK(tree.Move("photo.png", "docs"));
+
+  const auto result = prism::win::vt::CommitTree(fx.archive, tree, nullptr);
+  if (!result.ok) std::cout << "    commit error: " << result.error << std::endl;
+  PRISM_CHECK(result.ok);
+
+  TreeShape want;
+  want["icon.png"] = false;
+  want["large.png"] = false;
+  want["docs"] = true;
+  want["docs/photo.png"] = false;
+  Payloads wantPayloads = fx.originals;
+  wantPayloads["docs/photo.png"] = wantPayloads["photo.png"];
+  wantPayloads.erase("photo.png");
+  if (!PRISM_CHECK(VerifyCommitted(fx.archive, library, want, wantPayloads))) {
+    prism::win::ArchiveReader dumpReader(library);
+    if (dumpReader.Open(fx.archive)) {
+      for (const auto& it : dumpReader.ReadCatalog()) {
+        std::cout << "  committed: '" << it.path << "' dir=" << it.isDir
+                  << " size=" << it.size << std::endl;
+      }
+      dumpReader.Close();
+    }
+    std::cout << "  update-trace:" << std::endl << result.updateTrace;
+    return;
+  }
 }
 
 PRISM_TEST("no-op tree does not rewrite the archive") {

@@ -118,4 +118,11 @@ inline bool PackSolid(const std::wstring& exe, const std::wstring& dir, const st
   return RunSevenZip(exe, args);
 }
 
+inline bool PackZip(const std::wstring& exe, const std::wstring& dir, const std::wstring& name,
+                    const std::vector<std::wstring>& files) {
+  std::wstring args = L"a -tzip -ms=off \"" + dir + L"\\" + name + L"\"";
+  for (const auto& f : files) args += L" \"" + dir + L"\\" + f + L"\"";
+  return RunSevenZip(exe, args);
+}
+
 }  // namespace prism::fixture

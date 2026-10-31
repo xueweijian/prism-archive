@@ -193,11 +193,8 @@ class MemoryOutStream final : public abi::ISequentialOutStream {
       AddRef();
       return S_OK;
     }
-    if (iid == abi::IID_IOutStream) {
-      *out = static_cast<abi::IOutStream*>(this);
-      AddRef();
-      return S_OK;
-    }
+    // (No IID_IOutStream here: MemoryOutStream is the in-memory extraction
+    // sink; only DiskOutStream -- the physical file -- is seekable/sizable.)
     *out = nullptr;
     return E_NOINTERFACE;
   }

@@ -27,7 +27,9 @@
 #include <memory>
 #include <chrono>
 #include <functional>
+#include <cstdio>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -73,6 +75,8 @@ class GalleryWindow {
   }
 
   void SetItems(std::vector<prism::ArchiveItem>* items) {
+    if (items) quickLook_.emplace(*items);
+    else quickLook_.reset();
     host_.items = items;
     RebuildListItems();
     RebuildLayout();
@@ -151,13 +155,50 @@ class GalleryWindow {
         return 0;
       }
       case WM_KEYDOWN: {
+        const WPARAM key = wparam;
         // Blueprint ch. 9.1: Ctrl+1 gallery grid, Ctrl+2 file list.
-        if (LOWORD(wparam) == '1' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (LOWORD(key) == '1' && (GetKeyState(VK_CONTROL) & 0x8000)) {
           listMode_ = false;
+          quickLookClose();
           Invalidate();
-        } else if (LOWORD(wparam) == '2' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+          return 0;
+        }
+        if (LOWORD(key) == '2' && (GetKeyState(VK_CONTROL) & 0x8000)) {
           listMode_ = true;
+          quickLookClose();
           Invalidate();
+          return 0;
+        }
+        // Selection movement: list steps rows, grid steps columns/rows by the
+        // viewport geometry. Movement closes the preview -- focus follows
+        // selection and reopening per step would thrash the session.
+        const int count = static_cast<int>(host_.items ? host_.items->size() : 0);
+        const int cols = static_cast<int>(viewport_.Columns());
+        int delta = 0;
+        if (key == VK_RIGHT) delta = listMode_ ? 0 : +1;
+        else if (key == VK_LEFT) delta = listMode_ ? 0 : -1;
+        else if (key == VK_DOWN) delta = listMode_ ? +1 : +cols;
+        else if (key == VK_UP) delta = listMode_ ? -1 : -cols;
+        else if (key == VK_HOME) { quickLookClose(); SetSelection(count ? 0 : -1); return 0; }
+        else if (key == VK_END) { quickLookClose(); SetSelection(count - 1); return 0; }
+        if (delta != 0) {
+          quickLookClose();
+          const int moved = selection_ + delta;
+          if (count && moved >= 0 && moved < count) SetSelection(moved);
+          return 0;
+        }
+        if (key == VK_SPACE && quickLook_ && selection_ >= 0 && selection_ < count) {
+          quickLook_->ToggleAt(static_cast<uint32_t>(selection_));
+          Invalidate();
+          return 0;
+        }
+        if (key == VK_ESCAPE && quickLookClose()) {
+          Invalidate();
+          return 0;
+        }
+        if (key == VK_RETURN && selection_ >= 0 && onActivate_) {
+          onActivate_(selection_);
+          return 0;
         }
         return 0;
       }
@@ -236,11 +277,30 @@ class GalleryWindow {
     return viewport_.IndexAt(x, y);  // -1 outside any tile
   }
 
+  static std::wstring Utf8(std::string_view text) {
+    if (text.empty()) return {};
+    const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(),
+                                         static_cast<int>(text.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(wide), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                        out.data(), wide);
+    return out;
+  }
+
   static uint64_t NowMs() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
+  }
+
+  bool quickLookClose() {
+    if (!quickLook_ || quickLook_->state() ==
+                           prism::gallery::QuickLookSession::State::Closed) {
+      return false;
+    }
+    quickLook_->Close();
+    return true;
   }
 
   void Render() {
@@ -261,6 +321,18 @@ class GalleryWindow {
       scene.thumbs = thumbs_.get();
     scene.selectedItem = selection_;
     scene.selectedRow = listMode_ ? selection_ : -1;
+    if (quickLook_ && selection_ >= 0 && selection_ < static_cast<int>(host_.items->size()) &&
+        quickLook_->state() != prism::gallery::QuickLookSession::State::Closed) {
+      const auto& item = (*host_.items)[static_cast<size_t>(selection_)];
+      scene.quickLookOpen = true;
+      scene.quickLookTitle = Utf8(prism::FileNameOf(item.path));
+      wchar_t sz[40];
+      swprintf_s(sz, L"%llu bytes", static_cast<unsigned long long>(item.size));
+      scene.quickLookMeta =
+          sz + (quickLook_->streaming() ? L"  \x2022 \x26A1 \x6D41\x5F0F\x52A0\x8F7D" : L"");
+    } else {
+      scene.quickLookOpen = false;
+    }
     scene.hud = hud_.Render(NowMs());
     }
     renderer_.Draw(target_.Get(), scene);
@@ -347,6 +419,7 @@ class GalleryWindow {
   std::function<void(int)> onActivate_;
   int selection_ = -1;
   prism::ProgressHud hud_;
+  std::optional<prism::gallery::QuickLookSession> quickLook_;
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<ID2D1HwndRenderTarget> target_;

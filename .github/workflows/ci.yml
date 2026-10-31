@@ -43,6 +43,11 @@ jobs:
           ${{ matrix.configure-args }}
       - name: Build
         run: cmake --build build --parallel
+      - name: Preflight gate (contracts as deterministic checks)
+        # docs/CONTRACTS.md entries as greps: B1/B2/B5/B6/ARCH/D1. Runs in
+        # seconds and keeps the repeat error classes from ever costing a CI
+        # round again (30/60 red runs this session; half were repeat classes).
+        run: python3 tools/preflight.py
       - name: Header self-containment gate
         # A header must compile alone AND include what it uses: relying on a
         # transitive <regex> pull-in for <cstdint> passes locally and fails on

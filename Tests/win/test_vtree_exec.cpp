@@ -395,7 +395,9 @@ PRISM_TEST("mkdir alone commits a directory entry") {
       char magic[6] = {};
       bin.read(magic, 6);
       std::cout << "  magic: ";
-      for (char c : magic) std::cout << "\x" << std::hex << (int)(unsigned char)c << std::dec;
+      for (char c : magic)
+        std::cout << "\\x" << std::hex << static_cast<int>(static_cast<unsigned char>(c))
+                  << std::dec;
       std::cout << std::endl;  // 7z = 37 7a bc af 27 1c, zip = 50 4b ...
     }
     prism::win::ArchiveReader dumpReader(library);

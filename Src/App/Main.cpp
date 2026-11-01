@@ -513,6 +513,28 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   LanguageRuntime language = LoadLanguage(settings.store, &logger);
   const Tr tr{&language.translator};
 
+  // ---- C46: the previous session, read BEFORE anything opens --------------
+  // The session is a SEPARATE document from settings on purpose: settings are
+  // the user's preferences (merge on write, newer documents are read-only),
+  // while a session is a snapshot of one run (rewritten every start and exit).
+  // One corrupt session must therefore never cost the user their settings.
+  prism::app::SessionBootstrap session = prism::app::LoadSession();
+  if (!session.detail.empty()) {
+    logger.Emit(prism::log::Level::kWarn, "session", "session could not be read",
+                {{"detail", session.detail},
+                 {"path", prism::win::WideToUtf8(session.file)}});
+  }
+  // C27's persisted view state is loaded here (not at the window call site) so
+  // C46 can record the same view mode the session opens with.
+  const prism::app::WindowState windowState = prism::app::LoadWindowState(settings.store);
+  for (const std::string& warning : session.report.warnings) {
+    // One warn line per repair/discard. A v99 document from a newer build, a
+    // truncated file and a migrated v1 all say what happened on stderr.
+    logger.Emit(prism::log::Level::kWarn, "session", warning,
+                {{"status", prism::session::SessionLoadStatusName(session.report.status)},
+                 {"path", prism::win::WideToUtf8(session.file)}});
+  }
+
   if (launch.unknownFlag) {
     ReportRefusedVerb(launch, tr);
     if (SUCCEEDED(coInit)) CoUninitialize();
@@ -526,6 +548,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     return code;
   }
   std::wstring archive = launch.archive;
+  // C46: the view a restored archive opens with (only set on the restore path).
+  prism::session::SessionEntry restoredView;
+  bool haveRestoredView = false;
+  std::size_t sessionTried = 0;
+  std::size_t sessionSkipped = 0;
+
   if (archive.empty()) {
     // A verb without a path is a caller bug, not "open the picker".
     if (launch.mode != prism::app::LaunchMode::kGallery) {
@@ -537,11 +565,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       if (SUCCEEDED(coInit)) CoUninitialize();
       return 2;
     }
-    archive = PickArchive();
-  }
-  if (archive.empty()) {
-    if (SUCCEEDED(coInit)) CoUninitialize();
-    return 0;  // user closed the picker: not an error
   }
 
   const prism::win::SevenZipDllLookup lookup = prism::win::Resolve7zDll();
@@ -554,7 +577,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const std::wstring& dll = lookup.path;
 
   auto app = std::make_shared<AppContext>();
-  app->archivePath = archive;
   if (!app->library.Load(dll)) {
     // C40: error.engine.load has shipped since C19 with a {path} placeholder;
     // the English "7z.dll failed to load" literal was the last hardcoded error on
@@ -565,6 +587,90 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     MessageBoxW(nullptr, message.c_str(), L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
+  }
+
+  // ---- C46: arguments win; otherwise the last session decides --------------
+  //
+  // "Arguments win" is not just "ignore the session": the session document is
+  // REBUILT around the paths this launch opened, so a later no-argument start
+  // restores exactly what this one showed. A path that was already remembered
+  // keeps its folder and view mode.
+  if (!launch.archives.empty()) {
+    std::vector<prism::session::SessionEntry> opened;
+    for (const std::wstring& arg : launch.archives) {
+      prism::session::SessionEntry entry;
+      entry.path = prism::win::WideToUtf8(arg);
+      const int known = session.store.IndexOf(entry.path);
+      if (known >= 0) entry = session.store.entries()[static_cast<std::size_t>(known)];
+      opened.push_back(std::move(entry));
+    }
+    session.store.Replace(std::move(opened), 0);
+  } else if (archive.empty() && launch.mode == prism::app::LaunchMode::kGallery) {
+    // No argument: reopen the previous session. Every candidate is validated
+    // with the SAME probe the real open uses -- a missing or damaged archive is
+    // skipped SILENTLY (counted, one stderr line) instead of raising a dialog.
+    // This is the contract that keeps eight stale tabs from eight message boxes.
+    const prism::app::SessionRestorePlan plan = prism::app::PlanSessionRestore(
+        session.store, [&app](const std::wstring& path) {
+          std::error_code ec;
+          if (!std::filesystem::exists(path, ec) || ec) return false;
+          prism::win::ArchiveReader probe(app->library);
+          return probe.Open(path);
+        });
+    sessionTried = plan.tried;
+    sessionSkipped = plan.skipped;
+    // The document's own size, captured BEFORE the pruning below: the log must
+    // say "the file listed 3, the guard allowed 3, 2 were dead" -- not the size
+    // this run already cleaned up.
+    const std::size_t documentEntries = session.store.entries().size();
+    // A missing archive is no longer part of the session: keeping it would only
+    // make the next start skip it again.
+    if (plan.skipped > 0) {
+      for (const prism::session::SessionEntry& entry : session.store.entries()) {
+        bool survived = false;
+        for (const prism::session::SessionEntry& restorable : plan.entries) {
+          if (restorable.path == entry.path) {
+            survived = true;
+            break;
+          }
+        }
+        if (!survived) {
+          logger.Emit(prism::log::Level::kInfo, "session",
+                      "session entry skipped (the archive is gone or unreadable)",
+                      {{"path", entry.path}});
+        }
+      }
+    }
+    if (!plan.entries.empty()) {
+      session.store.Replace(plan.entries, 0);
+      restoredView = plan.entries.front();
+      haveRestoredView = true;
+      archive = prism::win::Utf8ToWide(restoredView.path);
+    }
+    // "entries" is what the DOCUMENT listed; "tried" is what the crash guard let
+    // through. A killed process is entries=2 tried=0 -- the two numbers together
+    // are what makes the guard visible in a log instead of a mystery.
+    std::fprintf(stderr,
+                 "session restore entries=%zu tried=%zu skipped=%zu restored=%zu status=%s clean=%d\n",
+                 documentEntries, sessionTried, sessionSkipped, plan.entries.size(),
+                 prism::session::SessionLoadStatusName(session.report.status),
+                 static_cast<int>(session.report.cleanShutdown));
+    if (archive.empty()) {
+      // First run (or nothing survived): the picker keeps the old behaviour.
+      archive = PickArchive();
+      if (archive.empty()) {
+        if (SUCCEEDED(coInit)) CoUninitialize();
+        return 0;  // user closed the picker: not an error
+      }
+      session.store.Replace(
+          {prism::session::SessionEntry{prism::win::WideToUtf8(archive), std::string(), false}}, 0);
+    }
+  }
+
+  app->archivePath = archive;
+  if (archive.empty()) {  // unreachable, but never open "" silently
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 2;
   }
 
   // The catalog is read ONCE, on the UI thread, from a probe handler that is
@@ -615,6 +721,30 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   }
   app->items = app->catalog;
 
+  // ---- C46: this process now OWNS the session ------------------------------
+  // Arm the crash guard and publish the document BEFORE the window exists. From
+  // here on a killed process leaves "cleanShutdown": false on disk, which is
+  // what makes the next start restore nothing instead of reopening dead tabs.
+  {
+    const int known = session.store.IndexOf(prism::win::WideToUtf8(archive));
+    const bool viewMode =
+        haveRestoredView
+            ? restoredView.listMode
+            : (known >= 0 ? session.store.entries()[static_cast<std::size_t>(known)].listMode
+                          : windowState.listMode);
+    session.store.RecordOpen(prism::win::WideToUtf8(archive),
+                             haveRestoredView ? restoredView.folder : std::string(), viewMode);
+    session.store.MarkCleanShutdown(false);
+    std::string detail;
+    if (!prism::app::SaveSession(&session, &detail)) {
+      logger.Emit(prism::log::Level::kWarn, "session", "session was not saved",
+                  {{"detail", detail},
+                   {"path", prism::win::WideToUtf8(session.file)}});
+    }
+    std::fprintf(stderr, "session armed entries=%zu file=%s\n", session.store.entries().size(),
+                 prism::win::WideToUtf8(session.file).c_str());
+  }
+
   // Two handlers: the solid sweep and the user's extraction are the two
   // operations that can genuinely overlap (large archive + double-click).
   prism::app::OperationHandles::Config opsConfig;
@@ -664,7 +794,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // ---- C27: restored view state, sidebar port, menu bar -------------------
   // The geometry/mode/sort the user closed with is applied BEFORE the first
   // paint, so the window never flashes a layout it is about to replace.
-  const prism::app::WindowState windowState = prism::app::LoadWindowState(settings.store);
   if (windowState.width > 0 && windowState.height > 0) {
     SetWindowPos(window.Hwnd(), nullptr, 0, 0, windowState.width, windowState.height,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -677,7 +806,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   window.SetSidebarRailVisible(true);  // C12's draw commands are painted from here
   if (windowState.hasSort) window.SetSortSpec(windowState.sort);
   if (windowState.hasColumns) window.SetListColumns(windowState.columns);
-  window.SetListMode(windowState.listMode);
+  // C46: a restored archive opens in the view mode the session remembers for
+  // THAT archive; a freshly opened one keeps C27's global last-view setting.
+  window.SetListMode(haveRestoredView ? restoredView.listMode : windowState.listMode);
 
   // ---- C34: the glass layer (C33) now has a call site ---------------------
   // The window owns the composition host; it is OPT-IN so a test-created window
@@ -703,6 +834,21 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // "which level did that click hit?") is answered by PrismCore.
   window.SetItems(&app->items);
   window.SetRootLabel(FileNameWide(archive));
+  // C46: the per-archive place. The walk goes through the window's own
+  // ActivateRow (the double-click path), so navigation stays owned by the
+  // window while GALLERY V2 rewrites it.
+  if (haveRestoredView) {
+    const bool complete = prism::app::ApplySessionView(window, restoredView);
+    if (!complete && !restoredView.folder.empty()) {
+      logger.Emit(prism::log::Level::kInfo, "session",
+                  "the saved folder is gone; restored to the deepest level that still exists",
+                  {{"folder", restoredView.folder}, {"archive", prism::win::WideToUtf8(archive)}});
+    }
+  }
+  std::fprintf(stderr, "session opened archive=%s folder=%s view=%s restored=%d\n",
+               prism::win::WideToUtf8(archive).c_str(), window.Folder().c_str(),
+               prism::session::ViewModeName(window.ListMode()),
+               static_cast<int>(haveRestoredView));
   // C12: the sidebar's telemetry pill needs the engine facts the catalog cannot
   // derive. v1 knows the encryption bit from the catalog itself; the method and
   // dictionary names have no accessor in the bridge yet (kept honest, not faked).
@@ -938,16 +1084,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // is the one operation that can still be running), and prism::app::SwitchArchive
   // does the ordering: open + lease the new file, THEN close the old pool. A
   // failed switch therefore leaves the session on the archive it was showing.
-  window.SetArchiveChangedHandler([&window, app, tr](const std::wstring& newPath) {
+  window.SetArchiveChangedHandler([&window, app, tr, &session, &logger](
+                                     const std::wstring& newPath) {
     if (app->extractReader.load() != nullptr || app->sweepReader.load() != nullptr) {
       // C40: the sentence (and its real-Chinese fallback) lives in AppWiring so
       // the suite can assert its bytes; C38's audit found it double-escaped.
       window.SetStatus(prism::app::RefreshDeferredStatus(tr));
       return;
     }
-    prism::app::ArchiveSession session{&app->library, &app->ops, &app->catalog, &app->items,
-                                       &app->archivePath, 2};
-    const prism::app::ArchiveSwitch switched = prism::app::SwitchArchive(session, newPath);
+    prism::app::ArchiveSession archiveSession{&app->library, &app->ops, &app->catalog, &app->items,
+                                              &app->archivePath, 2};
+    const prism::app::ArchiveSwitch switched = prism::app::SwitchArchive(archiveSession, newPath);
     if (!switched.ok) {
       // C40: error.open is the table's key (it names the file); the engine's own
       // reason stays verbatim after the colon.
@@ -975,6 +1122,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       SetWindowTextW(window.Hwnd(), title.c_str());
     }
     window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
+    // C46: a switch is an OPEN -- the new archive becomes the session's active
+    // entry, so the next launch offers the file the user actually ended up on.
+    session.store.RecordOpen(prism::win::WideToUtf8(app->archivePath), std::string(),
+                             window.ListMode());
+    session.store.MarkCleanShutdown(false);
+    std::string switchDetail;
+    if (!prism::app::SaveSession(&session, &switchDetail)) {
+      logger.Emit(prism::log::Level::kWarn, "session", "session was not saved",
+                  {{"detail", switchDetail}});
+    }
   });
 
   window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
@@ -1099,6 +1256,27 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   finalState.sort = window.SortSpec();
   finalState.columns = window.ListColumns();
   finalState.hasColumns = window.HasListColumns();
+  // ---- C46: the session's last write is the CLEAN one ---------------------
+  // The active archive learns where the user actually finished (folder + view),
+  // then the crash guard is cleared. Order matters: everything that can fail
+  // (frame size, sidebar, settings) has already been read, so "clean" is only
+  // claimed once the state it describes is in hand.
+  session.store.UpdatePosition(prism::win::WideToUtf8(archive), window.Folder(),
+                               window.ListMode());
+  session.store.MarkCleanShutdown(true);
+  {
+    std::string detail;
+    if (!prism::app::SaveSession(&session, &detail)) {
+      logger.Emit(prism::log::Level::kWarn, "session", "session was not saved",
+                  {{"detail", detail},
+                   {"path", prism::win::WideToUtf8(session.file)}});
+    }
+    std::fprintf(stderr, "session saved entries=%zu clean=%d active=%s folder=%s view=%s\n",
+                 session.store.entries().size(),
+                 static_cast<int>(session.store.cleanShutdown()),
+                 prism::win::WideToUtf8(archive).c_str(), window.Folder().c_str(),
+                 prism::session::ViewModeName(window.ListMode()));
+  }
   window.SaveSidebar();  // C12 state through C14's port
   prism::app::SaveWindowState(settings.store, finalState);
   std::string saveDetail;

@@ -932,6 +932,17 @@ inline int& MutantIgnoredOpResultHits() {
 }
 #endif
 
+// C41 negative control (CONTRACTS D3): a build with the one-operation-per-handler
+// guard compiled out. The suite must see the second operation ACCEPTED on a
+// handler that is already busy, and only then print "C41 MUTANT CAUGHT" -- the
+// counter is the proof the injection fired, not just that the checks went red.
+#ifdef PRISM_C41_MUTANT_NO_OPERATION_GUARD
+inline std::atomic<uint64_t>& MutantOperationGuardBypasses() {
+  static std::atomic<uint64_t> bypasses{0};
+  return bypasses;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Extract callback: smart path rewriting + Zip Slip guard + bomb fuse
 // ---------------------------------------------------------------------------
@@ -953,6 +964,13 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     std::vector<uint32_t> failedIndices;
     std::vector<std::string> failedPaths;
     std::string failureReason;  // empty when nothing failed
+    // C41: a second operation was attempted on this handler while one was
+    // already running. Refused, not allowed to corrupt the first one.
+    bool operationConflict = false;
+    // C41: the engine answered S_OK but handed out no stream at all, so the
+    // operation would have "succeeded" by writing 0 bytes. That is the silent
+    // data-loss shape, so ExtractWithPlan reports it as a failure.
+    bool emptyResult = false;
     bool failed() const { return failedItems != 0; }
   };
 
@@ -1553,10 +1571,54 @@ class ArchiveReader {
     return out;
   }
 
+  // -------------------------------------------------------------------------
+  // C41: ONE ENGINE OPERATION PER HANDLER, ENFORCED (D24's invariant).
+  //
+  // The pool already promises "one lease == one handler == one operation".
+  // A promise that only lives in the caller turns a broken invariant into
+  // SILENT DATA LOSS: two IInArchive::Extract calls on one handler share its
+  // decoder and its input stream, so one of them "succeeds" with 0 bytes (the
+  // SHA-256 of the empty string, e3b0c442...) or with the other item's bytes.
+  // Measured 2026-11-02 on the shared-handler mutation: 185 of 200 concurrent
+  // extractions returned ok=false or an empty payload, and 44 returned the
+  // WRONG payload.
+  //
+  // So the last line of defence is here: a second concurrent operation on the
+  // same handler is REFUSED and counted (operationConflicts()), never allowed
+  // to run. The negative control compiles this guard away
+  // (PRISM_C41_MUTANT_NO_OPERATION_GUARD) and the suite then observes the
+  // second operation being accepted -- the exact pre-fix shape.
+  // -------------------------------------------------------------------------
+  class OperationScope {
+   public:
+    explicit OperationScope(const ArchiveReader& reader)
+        : reader_(const_cast<ArchiveReader&>(reader)) {}
+    OperationScope(const OperationScope&) = delete;
+    OperationScope& operator=(const OperationScope&) = delete;
+    ~OperationScope() {
+      if (entered_) reader_.EndOperation();
+    }
+    bool Enter() {
+      entered_ = reader_.BeginOperation();
+      return entered_;
+    }
+
+   private:
+    ArchiveReader& reader_;
+    bool entered_ = false;
+  };
+
+  bool inOperation() const { return operationInFlight_.load(std::memory_order_acquire); }
+  uint64_t operationConflicts() const {
+    return operationConflicts_.load(std::memory_order_relaxed);
+  }
+
   // Sink 1: thumbnail / preview extraction under a hard memory budget.
   std::optional<std::vector<uint8_t>> ExtractToMemory(
       uint32_t index, size_t maxBytes = 16ull * 1024 * 1024) const {
     if (!archive_) return std::nullopt;
+    OperationScope operation(*this);
+    if (!operation.Enter()) return std::nullopt;  // C41: one handler, one operation
     auto* sink = new MemoryOutStream(maxBytes);
     auto* callback = new MemoryExtractCallback(sink);
     const abi::UInt32 idx = index;
@@ -1575,6 +1637,20 @@ class ArchiveReader {
                        const std::string& targetRoot, BombFuse* fuse,
                        SmartExtractCallback::Result* resultOut) const {
     if (!archive_) return false;
+    OperationScope operation(*this);
+    if (!operation.Enter()) {
+      // C41: refusing is the fix. Running anyway is how a handler's decoder and
+      // input stream get shared and one operation silently writes 0 bytes.
+      if (resultOut) {
+        SmartExtractCallback::Result refused;
+        refused.operationConflict = true;
+        refused.failureReason =
+            "refused: another engine operation is already running on this handler "
+            "(one handler == one operation)";
+        *resultOut = refused;
+      }
+      return false;
+    }
     std::vector<abi::UInt32> indices;
     for (const auto& item : catalog) {
       if (item.isDir) continue;
@@ -1590,14 +1666,25 @@ class ArchiveReader {
         std::vector<uint32_t>(indices.begin(), indices.end()));
     const HRESULT hr =
         archive_->Extract(indices.data(), static_cast<abi::UInt32>(indices.size()), 0, callback);
-    if (resultOut) *resultOut = callback->result();
     // C26: SUCCEEDED(hr) is NOT the verdict. The engine reports "this item did
     // not decode" through SetOperationResult while Extract() still answers
     // S_OK -- the exact shape that reported an unsupported method as a
     // successful 0-byte extraction.
-    const bool ok = SUCCEEDED(hr) && !callback->result().guardTripped &&
-                    !callback->result().fuseTripped && !callback->result().failed();
+    SmartExtractCallback::Result result = callback->result();
     callback->Release();
+    bool ok = SUCCEEDED(hr) && !result.guardTripped && !result.fuseTripped && !result.failed();
+    // C41: the OTHER half of the same contract. Every requested index is a file
+    // (directories and ignored entries are skipped above), so a run that wrote
+    // NO file at all did not extract anything -- and "ok with 0 bytes" is
+    // exactly the silent-loss report this card exists for. Never let the
+    // HRESULT alone call that a success.
+    if (ok && result.filesWritten == 0) {
+      ok = false;
+      result.emptyResult = true;
+      result.failureReason = "the engine reported success but wrote no files for " +
+                             std::to_string(indices.size()) + " requested item(s)";
+    }
+    if (resultOut) *resultOut = result;
     return ok;
   }
 
@@ -1621,6 +1708,8 @@ class ArchiveReader {
   bool ExtractBatch(const std::vector<uint32_t>& indices,
                     abi::IArchiveExtractCallback* callback) const {
     if (!archive_ || indices.empty() || !callback) return false;
+    OperationScope operation(*this);
+    if (!operation.Enter()) return false;  // C41: one handler, one operation
     BatchAbortProbe probe(callback, &batchAbort_);
     std::vector<abi::UInt32> idx(indices.begin(), indices.end());
     return SUCCEEDED(
@@ -1846,6 +1935,29 @@ class ArchiveReader {
   // property read, because handlers answer properties they do not advertise.
   std::set<uint32_t> propIdSet_;
   std::string propTrace_;
+  // C41 (D24): at most one engine operation may be inside this handler. Mutable
+  // because the entry points are const and the state is exactly "is a call in
+  // flight", not part of the archive's identity.
+  bool BeginOperation() const {
+#ifdef PRISM_C41_MUTANT_NO_OPERATION_GUARD
+    // Negative control (D3): the guard is gone; the second operation is let in.
+    // The counter proves the injection really fired.
+    MutantOperationGuardBypasses().fetch_add(1, std::memory_order_relaxed);
+    operationInFlight_.store(true, std::memory_order_release);
+    return true;
+#else
+    bool expected = false;
+    if (!operationInFlight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      operationConflicts_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    return true;
+#endif
+  }
+  void EndOperation() const { operationInFlight_.store(false, std::memory_order_release); }
+
+  mutable std::atomic<bool> operationInFlight_{false};
+  mutable std::atomic<uint64_t> operationConflicts_{0};
   // Sticky "stop the thumbnail scan" flag, read by BatchAbortProbe on the sweep
   // thread and written by the UI thread when the window closes (see
   // RequestBatchAbort). Atomic because those are different threads by design.

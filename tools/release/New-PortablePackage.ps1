@@ -89,7 +89,9 @@ function Get-GitCommit {
     param([string]$Root)
     if ($env:PRISM_GIT_COMMIT) { return [string]$env:PRISM_GIT_COMMIT }
     try {
-        $commit = & git -C $Root rev-parse --short=12 2>$null
+        # HEAD is explicit: "rev-parse --short=12" with no revision exits 128
+        # ("Needed a single revision") and the manifest silently said "unknown".
+        $commit = & git -C $Root rev-parse --short=12 HEAD 2>$null
         if ($LASTEXITCODE -eq 0 -and $commit) { return ([string]$commit).Trim() }
     } catch { }
     return 'unknown'

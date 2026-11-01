@@ -45,13 +45,13 @@ jobs:
 
       # ccache across runs: PrismCore is header-only, so almost every TU is a
       # full re-parse of 21 headers. Nothing else about this lane is expensive.
+      # (ubuntu-latest does NOT ship ccache -- the first version of this workflow
+      # assumed it did and every TU died with "/bin/sh: ccache: not found".
+      # This action installs ccache and owns its cache, so nothing is assumed.)
       - name: ccache
-        uses: actions/cache@v4
+        uses: hendrikmuhs/ccache-action@v1.2
         with:
-          path: .ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('Src/**/*.hpp', 'Tests/**', 'CMakeLists.txt', 'CMakePresets.json') }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
+          max-size: 500M
 
       # ---- lane 1: Release (gcc) ------------------------------------------
       - name: Configure (release-gcc preset, ccache launcher)

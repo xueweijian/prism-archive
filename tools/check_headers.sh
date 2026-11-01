@@ -128,7 +128,10 @@ id=0
 while [ "$id" -lt "$count" ]; do
   id=$((id + 1))
   if [ -f "$tmp/out.$id.rc" ] && [ "$(cat "$tmp/out.$id.rc")" != "0" ]; then
-    line=$(sed -n "$id" "$tmp/list")
+    # NOTE: the "p" must stay outside the quotes -- "sed -n $id file" is an
+    # address with no command and dies with "missing command", i.e. a failing
+    # header would kill the gate instead of reporting it (CONTRACTS D3).
+    line=$(sed -n "$id"p "$tmp/list")
     fail=1
     echo "FAIL[standalone]: ${line#*|}"
     head -5 "$tmp/out.$id" | sed 's/^/    /'

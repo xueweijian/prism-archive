@@ -45,7 +45,10 @@ bool HasWarning(const session::SessionLoadReport& report, const char* needle) {
   return false;
 }
 
-const session::SessionEntry* EntryAt(const session::SessionStore& store, std::size_t index) {
+// [[maybe_unused]]: the mutant builds compile parts of this file away, and the
+// GCC lane runs -Werror=unused-function (MSVC does not warn). Keeping the helper
+// for the arms that do use it is cheaper than a per-mutant #ifdef.
+[[maybe_unused]] const session::SessionEntry* EntryAt(const session::SessionStore& store, std::size_t index) {
   if (index >= store.entries().size()) return nullptr;
   return &store.entries()[index];
 }

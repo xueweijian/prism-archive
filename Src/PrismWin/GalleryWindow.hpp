@@ -68,6 +68,7 @@
 #include "../PrismCore/SidebarModel.hpp"    // sidebar state (C12)
 #include "../PrismCore/SpringAnimator.hpp"
 #include "../PrismCore/ThumbStore.hpp"
+#include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
 #include "GalleryRenderer.hpp"
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
@@ -303,14 +304,12 @@ class GalleryWindow {
     return length > 0 ? std::wstring(text, static_cast<size_t>(length)) : std::wstring();
   }
 
-  // The sidebar rail floats OVER the left edge of the content. Until the grid
-  // reflows around it (a separate change: the viewport geometry is C6's), the
-  // rail is OPT-IN: hidden by default, so a window that never asks for it behaves
-  // exactly as it did before C27 -- including its hit-testing, which is what the
-  // older navigation suites drive.
+  // C29: the rail is a COLUMN in list mode (default ON). V1: it RESERVES width
+  // through the layout, so toggling it reflows the list content.
   void SetSidebarRailVisible(bool visible) {
     if (sidebarRailVisible_ == visible) return;
     sidebarRailVisible_ = visible;
+    RecomputeLayout();
     Invalidate();
   }
   bool SidebarRailVisible() const { return sidebarRailVisible_; }
@@ -548,6 +547,7 @@ class GalleryWindow {
     if (listMode_ == listMode) return;
     listMode_ = listMode;
     quickLookClose();
+    RecomputeLayout();  // 32 px list rows vs the grid's tile cells
     Invalidate();
   }
 
@@ -599,7 +599,10 @@ class GalleryWindow {
         }
         clientW_ = static_cast<double>(LOWORD(lparam));
         clientH_ = static_cast<double>(HIWORD(lparam));
-        viewport_.SetViewportSize(clientW_, clientH_);
+        // V1: ONE layout authority. WM_SIZE reflows the grid columns, the list
+        // body and the breadcrumb pill together -- the components no longer
+        // carry their own absolute rectangles.
+        RecomputeLayout();
         barKnown_ = false;  // the island is a fraction of the client width
         sidebarDirty_ = true;  // the sidebar's status pill is bottom-anchored
         UpdateBreadcrumbLayout();
@@ -972,8 +975,12 @@ class GalleryWindow {
   void EnsureSidebar() const {
     if (!sidebarDirty_) return;
     prism::win::sidebar::Metrics metrics;
-    metrics.viewportTop = 0.0f;
-    metrics.viewportBottom = static_cast<float>(clientH_ > 0.0 ? clientH_ : 800.0);
+    // V1: the rail is exactly the layout's sidebar band -- 220 px (DESIGN.md),
+    // starting below the action island and ending above the status bar.
+    metrics.width = static_cast<float>(layout_.sidebarVisible ? layout_.sidebar.Width()
+                                                              : prism::layout::kSidebarWidth);
+    metrics.viewportTop = static_cast<float>(layout_.content.top);
+    metrics.viewportBottom = static_cast<float>(layout_.content.bottom);
     metrics.scrollY = sidebarScroll_;
     sidebarLayout_ = prism::win::sidebar::Build(sidebar_, metrics);
     sidebarDirty_ = false;
@@ -1047,35 +1054,34 @@ class GalleryWindow {
     if (clientW_ <= 0.0 || clientH_ <= 0.0) return -1;  // no WM_SIZE yet
     // C29: in LIST mode the sidebar owns the left column (list rows are inset
     // by it, and their hit test is y-only, so the guard has to be here once).
-    // The grid keeps its full-bleed geometry: the sidebar is not painted there
-    // (GalleryRenderer::SidebarShown), so no tile can be covered by it.
+    // V1: the layout already starts the list body after the rail; this guard is
+    // the belt to that braces (and keeps the C29 contract explicit).
     if (listMode_ && SidebarInset() > 0.0f && x < static_cast<int>(SidebarInset())) {
       return -1;
     }
     if (listMode_) {
       // The list paints the VIEW, not the folder: filter first, then hit-test.
-      const uint32_t count = static_cast<uint32_t>(listItems_.size());
-      if (count == 0) return -1;
-      if (x < 0 || y < 0) return -1;
-      // List rows START BELOW the header: GalleryRenderer::DrawListMode paints
-      // row i at kListContentTop + i*kRowHeight. Hit-testing from y=0 would
-      // answer "row 3" for a click on the header; the +scroll term keeps the
-      // answer aligned with what is painted after the wheel moves.
-      const int local = y - kListContentTop + static_cast<int>(viewport_.Scroll());
-      if (local < 0) return -1;
-      const uint32_t row = prism::list::RowAtClamped(
-          static_cast<uint32_t>(local), 0u, count);
-      // Back to FOLDER space: every caller of ItemAtPoint (select, activate,
-      // quick look) speaks folder rows.
-      if (row >= listRowToFolder_.size()) return -1;
-      return listRowToFolder_[row];
+      const int row = prism::layout::ListRowAt(layout_, x, y,
+                                               static_cast<int>(viewport_.Scroll()));
+      if (row < 0 || row >= static_cast<int>(listRowToFolder_.size())) return -1;
+      return listRowToFolder_[static_cast<size_t>(row)];
     }
-    // ViewportWindow::IndexAt takes CONTENT-space y; the scroll offset lives in
-    // the viewport, so it has to be added back here or every hit test after a
-    // scroll picks the tile that is `scroll` pixels above the cursor.
-    const int index = viewport_.IndexAt(static_cast<double>(x),
-                                        static_cast<double>(y) + viewport_.Scroll());
-    return index >= 0 && index < ItemCount() ? index : -1;
+    // V1: hit-testing and painting consume the SAME rectangles. Asking the
+    // layout (instead of dividing by a column width) is what keeps a click on
+    // a 12 px gap from selecting the neighbouring tile.
+    if (x < layout_.contentInner.left || x >= layout_.contentInner.right ||
+        y < layout_.contentInner.top || y >= layout_.contentInner.bottom) {
+      return -1;
+    }
+    const int scroll = static_cast<int>(viewport_.Scroll());
+    const std::vector<prism::layout::Cell> cells =
+        prism::layout::VisibleCells(layout_, ItemCount(), scroll);
+    for (const prism::layout::Cell& cell : cells) {
+      if (x < cell.rect.left || x >= cell.rect.right) continue;
+      if (y < cell.rect.top || y >= cell.rect.bottom) continue;
+      return cell.index;
+    }
+    return -1;
   }
 
   static std::wstring Utf8ToWide(std::string_view text) {
@@ -1137,13 +1143,21 @@ class GalleryWindow {
       clientH_ = static_cast<double>(rc.bottom);
     }
     int clientWidth = static_cast<int>(clientW_);
-    if (clientWidth <= 0) clientWidth = 1280;  // headless default (pre-Create)
-    const int barWidth = static_cast<int>(static_cast<float>(clientWidth) * 0.62f);
-    const int barLeft = (clientWidth - barWidth) / 2;
-    barTop_ = 16;
-    barBottom_ = 16 + 44;
-    textLeft_ = barLeft + 24;
-    textRight_ = barLeft + barWidth - 24;
+    int clientHeight = static_cast<int>(clientH_);
+    if (clientWidth <= 0) clientWidth = 1280;   // headless default (pre-Create)
+    if (clientHeight <= 0) clientHeight = 800;
+    // V1: the pill and its text run come from the layout, so the clickable span
+    // is by construction the painted span.
+    const bool rail = listMode_ && sidebarRailVisible_ &&
+                      GalleryRenderer::SidebarFits(static_cast<float>(clientWidth));
+    const prism::layout::Layout layout =
+        prism::layout::Compute(clientWidth, clientHeight, rail, listMode_);
+    const prism::layout::Rect pill = prism::layout::NavPillRect(layout);
+    const prism::layout::Rect textRect = prism::layout::NavTextRect(layout);
+    barTop_ = pill.top;
+    barBottom_ = pill.bottom;
+    textLeft_ = textRect.left;
+    textRight_ = textRect.right;
     barKnown_ = true;
   }
 
@@ -1207,6 +1221,7 @@ class GalleryWindow {
     GalleryRenderer::Scene scene;
     scene.items = host_.items;
     scene.viewport = &viewport_;
+    scene.layout = clientW_ > 0.0 ? &layout_ : nullptr;  // ONE geometry authority
     // C29: the rail is LIST-MODE chrome and folds itself below its width
     // threshold. The window owns that POLICY (list mode + the C27 toggle + the
     // width); the renderer paints whatever Scene it is handed, which is what
@@ -1343,8 +1358,28 @@ class GalleryWindow {
   // WM_SIZE), so the size is re-applied here -- otherwise every navigation
   // would zero the column width and the next hit test would divide by it.
   void RebuildLayout() {
-    viewport_ = prism::gallery::ViewportWindow(layout_, ItemsCount());
-    viewport_.SetViewportSize(clientW_, clientH_);
+    RecomputeLayout();
+    viewport_.SetScroll(0.0);
+  }
+
+  // V1: recompute the ONE layout every component reads, and feed the viewport
+  // the grid metrics it needs for scroll clamping. The rail counts only while
+  // it is really painted: list mode + the C27 toggle + C29's width threshold.
+  void RecomputeLayout() {
+    const double scroll = viewport_.Scroll();
+    const bool rail = listMode_ && sidebarRailVisible_ &&
+                      GalleryRenderer::SidebarFits(static_cast<float>(clientW_));
+    layout_ = prism::layout::Compute(static_cast<int>(clientW_),
+                                     static_cast<int>(clientH_), rail, listMode_);
+    const prism::gallery::GridLayout grid{
+        listMode_ ? 1 : layout_.columns,
+        static_cast<double>(listMode_ ? prism::layout::kListRowHeight : layout_.cellHeight)};
+    viewport_ = prism::gallery::ViewportWindow(grid, ItemsCount());
+    viewport_.SetViewportSize(static_cast<double>(layout_.contentInner.Width()),
+                              static_cast<double>(layout_.contentInner.Height()));
+    viewport_.SetScroll(scroll);
+    barKnown_ = false;
+    sidebarDirty_ = true;
   }
 
   int ItemsCount() const { return static_cast<int>(folderItems_.size()); }
@@ -1375,15 +1410,12 @@ class GalleryWindow {
 
   // ---------------------------------------------------------------- state
   static constexpr double kWheelScrollPixels = 120.0 * 3.0;
-  // Mirrors GalleryRenderer::DrawListMode's header band (headerY 68 + 36).
-  // It MUST track the renderer; the de-duplication is to expose the band from
-  // the renderer, which is a separate change to a file this increment does not
-  // own.
-  static constexpr int kListContentTop = 104;
 
   Host host_;
-  prism::gallery::GridLayout layout_{};
-  prism::gallery::ViewportWindow viewport_{layout_, 0};
+  // V1: the layout the window paints AND hit-tests with. Rebuilt on WM_SIZE,
+  // view-mode change and rail toggle -- never by a component on its own.
+  prism::layout::Layout layout_;
+  prism::gallery::ViewportWindow viewport_{prism::gallery::GridLayout{}, 0};
   bool listMode_ = false;  // Ctrl+2: the four-column file list (ch. 3.2)
 
   // ---- card C27: menu, sidebar painting, list geometry, close-time size ----

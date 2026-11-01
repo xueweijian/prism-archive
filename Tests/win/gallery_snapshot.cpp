@@ -527,6 +527,244 @@ int VerifyGlassOptics(IWICImagingFactory* wic, const char* outDir) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// V1 layout pixels (DESIGN.md §2/§5): one catalog, two window widths.
+//
+//   1. RECTANGLES, not pixels: the five bands never overlap, every fully
+//      visible cell sits inside the content, and 1600 px reflows to more
+//      columns than 1200 px (the P0-3 acceptance).
+//   2. PIXELS: a text item (and an image whose thumbnail never arrived) must
+//      NOT show the skeleton highlight -- the P0-2 bug the user photographed.
+//      The detector is calibrated on a control render that forces the tile
+//      path, so "no skeleton" means the rule held, not that the check is blind
+//      (CONTRACTS D4/D18).
+//   3. The same run proves the tile path still paints real thumbnails.
+// ---------------------------------------------------------------------------
+bool ReadBack(IWICBitmap* bitmap, UINT32 width, UINT32 height, std::vector<UINT32>* pixels) {
+  ComPtr<IWICBitmapLock> lock;
+  if (FAILED(bitmap->Lock(nullptr, WICBitmapLockRead, lock.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  UINT stride = 0;
+  UINT lockW = 0;
+  UINT lockH = 0;
+  UINT bytes = 0;
+  BYTE* data = nullptr;
+  if (FAILED(lock->GetStride(&stride)) || FAILED(lock->GetSize(&lockW, &lockH)) ||
+      FAILED(lock->GetDataPointer(&bytes, &data))) {
+    return false;
+  }
+  (void)lockW;
+  (void)lockH;
+  pixels->resize(static_cast<size_t>(width) * height);
+  for (UINT32 y = 0; y < height; ++y) {
+    std::memcpy(pixels->data() + static_cast<size_t>(y) * width,
+                data + static_cast<size_t>(y) * stride, static_cast<size_t>(width) * 4);
+  }
+  return true;
+}
+
+bool RenderToPixels(IWICImagingFactory* wic, const GalleryRenderer::Scene& scene, UINT32 width,
+                    UINT32 height, std::vector<UINT32>* pixels, int* skeletonCells) {
+  GalleryRenderer renderer;
+  if (FAILED(renderer.Initialize())) return false;
+  ComPtr<IWICBitmap> bitmap;
+  if (FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA,
+                               WICBitmapCacheOnDemand,
+                               bitmap.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  ComPtr<ID2D1RenderTarget> target;
+  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+      D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+  if (FAILED(renderer.Factory()->CreateWicBitmapRenderTarget(
+          bitmap.Get(), props, target.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  if (FAILED(renderer.CreateDeviceResources(target.Get()))) return false;
+  target->BeginDraw();
+  renderer.Draw(target.Get(), scene);
+  if (FAILED(target->EndDraw())) return false;
+  *skeletonCells = renderer.dbgSkeletonCells;
+  return ReadBack(bitmap.Get(), width, height, pixels);
+}
+
+
+bool WritePixelsPng(IWICImagingFactory* wic, const char* outDir, const wchar_t* fileName,
+                    UINT32 width, UINT32 height, const std::vector<UINT32>& pixels) {
+  wchar_t path[MAX_PATH];
+  std::swprintf(path, MAX_PATH, L"%hs\\%s", outDir, fileName);
+  ComPtr<IWICStream> stream;
+  ComPtr<IWICBitmapEncoder> encoder;
+  ComPtr<IWICBitmapFrameEncode> frame;
+  ComPtr<IPropertyBag2> bag;
+  ComPtr<IWICBitmap> bitmap;
+  if (FAILED(wic->CreateBitmapFromMemory(
+          width, height, GUID_WICPixelFormat32bppPBGRA, width * 4,
+          static_cast<UINT>(pixels.size() * 4),
+          reinterpret_cast<BYTE*>(const_cast<UINT32*>(pixels.data())),
+          bitmap.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  return SUCCEEDED(wic->CreateStream(stream.ReleaseAndGetAddressOf())) &&
+         SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+         SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr,
+                                      encoder.ReleaseAndGetAddressOf())) &&
+         SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+         SUCCEEDED(encoder->CreateNewFrame(frame.ReleaseAndGetAddressOf(),
+                                           bag.ReleaseAndGetAddressOf())) &&
+         SUCCEEDED(frame->Initialize(bag.Get())) && SUCCEEDED(frame->SetSize(width, height)) &&
+         SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) && SUCCEEDED(frame->Commit()) &&
+         SUCCEEDED(encoder->Commit());
+}
+
+// Is this pixel the skeleton highlight (#FF9500) the renderer reserves for a
+// tile that has no pixels?
+bool IsSkeletonHighlight(UINT32 bgra) {
+  const int b = static_cast<int>(bgra & 0xFF);
+  const int g = static_cast<int>((bgra >> 8) & 0xFF);
+  const int r = static_cast<int>((bgra >> 16) & 0xFF);
+  return std::abs(r - 255) <= 6 && std::abs(g - 149) <= 8 && std::abs(b - 0) <= 6;
+}
+
+int CountSkeleton(const std::vector<UINT32>& pixels, UINT32 width, const prism::layout::Rect& r) {
+  int hits = 0;
+  for (int y = (std::max)(0, r.top); y < r.bottom; ++y) {
+    for (int x = (std::max)(0, r.left); x < r.right; ++x) {
+      const size_t i = static_cast<size_t>(y) * width + static_cast<size_t>(x);
+      if (i < pixels.size() && IsSkeletonHighlight(pixels[i])) ++hits;
+    }
+  }
+  return hits;
+}
+
+int VerifyLayoutPixels(IWICImagingFactory* wic, const char* outDir) {
+  using prism::layout::Cell;
+  using prism::layout::CellKind;
+  int failures = 0;
+
+  // One catalog: a folder, three images WITH thumbnails, one image whose
+  // thumbnail never arrived, and two documents. This is the exact mixture the
+  // user's screenshot showed as "everything is a skeleton".
+  std::vector<ArchiveItem> items;
+  items.push_back(MakeItem("photos/", 0, 0, true));
+  items.push_back(MakeItem("photos/gate.png", 4'812'331, 0));
+  items.push_back(MakeItem("photos/mural.png", 7'220'464, 0));
+  items.push_back(MakeItem("photos/night.png", 3'905'112, 0));
+  items.push_back(MakeItem("photos/pending.png", 2'214'908, 0));  // no thumb yet
+  items.push_back(MakeItem("notes.txt", 8'912, 0));
+  items.push_back(MakeItem("manual.pdf", 214'553, 0));
+  // Stable catalog indices: the ThumbStore is keyed by them, exactly like the
+  // real sweep (MakeItem leaves the field at its default).
+  for (size_t i = 0; i < items.size(); ++i) {
+    items[i].index = static_cast<uint32_t>(i);
+  }
+
+  prism::gallery::ThumbStore store{8u << 20};
+  for (uint32_t i = 1; i <= 3; ++i) {
+    prism::gallery::DecodedThumb thumb;
+    thumb.width = 8;
+    thumb.height = 8;
+    thumb.pixels.assign(8u * 8u * 4u, 0xC0);
+    thumb.pixels[3] = 0xFF;
+    if (!store.OnThumb(i, thumb)) {
+      std::puts("FAIL: thumb store rejected a fixture thumbnail");
+      return 1;
+    }
+  }
+
+  const auto makeScene = [&](const prism::layout::Layout& layout, bool forceSkeleton) {
+    GalleryRenderer::Scene scene;
+    scene.items = &items;
+    scene.thumbs = &store;
+    scene.layout = &layout;
+    scene.debugForceSkeleton = forceSkeleton;
+    scene.breadcrumb = L"Layout_Proof.7z  |  7 items";
+    scene.selectedItem = -1;
+    return scene;
+  };
+
+  // ---------------------------------------------------------- 1. rectangles
+  const prism::layout::Layout wide = prism::layout::Compute(1600, 1000, false, false);
+  const prism::layout::Layout narrow = prism::layout::Compute(1200, 1000, false, false);
+  const prism::layout::Rect* bands[] = {&wide.titleBar, &wide.actionIsland, &wide.sidebar,
+                                        &wide.content, &wide.statusBar};
+  for (int a = 0; a < 5; ++a) {
+    for (int b = a + 1; b < 5; ++b) {
+      if (bands[a]->Intersects(*bands[b])) {
+        std::printf("FAIL: layout bands %d and %d overlap\n", a, b);
+        ++failures;
+      }
+    }
+  }
+  if (!(wide.columns > narrow.columns)) {
+    std::printf("FAIL: 1600 px does not reflow wider than 1200 px (%d vs %d)\n",
+                wide.columns, narrow.columns);
+    ++failures;
+  }
+  const std::vector<Cell> wideCells = prism::layout::VisibleCells(wide, 7, 0);
+  for (const Cell& cell : wideCells) {
+    if (cell.rect.top >= wide.contentInner.top &&
+        cell.rect.bottom <= wide.contentInner.bottom &&
+        !wide.contentInner.Contains(cell.rect)) {
+      std::printf("FAIL: item %d escapes the content area\n", cell.index);
+      ++failures;
+    }
+  }
+  std::printf("LAYOUT: 1600px cols=%d tile=%d cell=%d | 1200px cols=%d\n", wide.columns,
+              wide.tileWidth, wide.cellHeight, narrow.columns);
+
+  // ------------------------------------------------------------- 2. pixels
+  std::vector<UINT32> real;
+  int realSkeletons = 0;
+  const GalleryRenderer::Scene realScene = makeScene(wide, false);
+  if (!RenderToPixels(wic, realScene, 1600, 1000, &real, &realSkeletons)) {
+    std::puts("FAIL: layout pixel render failed");
+    return 1;
+  }
+  std::vector<UINT32> control;
+  int controlSkeletons = 0;
+  const GalleryRenderer::Scene controlScene = makeScene(wide, true);
+  if (!RenderToPixels(wic, controlScene, 1600, 1000, &control, &controlSkeletons)) {
+    std::puts("FAIL: control pixel render failed");
+    return 1;
+  }
+  if (!WritePixelsPng(wic, outDir, L"prism_v1_layout_1600.png", 1600, 1000, real) ||
+      !WritePixelsPng(wic, outDir, L"prism_v1_layout_control.png", 1600, 1000, control)) {
+    std::puts("FAIL: layout PNG write");
+    return 1;
+  }
+
+  const int contentSkeletons = CountSkeleton(real, 1600, wide.contentInner);
+  // The text item's cell: P0-2's literal acceptance ("text region shows no
+  // skeleton highlight"). Its rect comes from the same layout the renderer used.
+  const int textIndex = 5;
+  const prism::layout::Rect textCell = prism::layout::TileRect(wide, textIndex, 0);
+  const int textSkeletons = CountSkeleton(real, 1600, textCell);
+  const int controlTextSkeletons = CountSkeleton(control, 1600, textCell);
+
+  std::printf("LAYOUT PIXELS: realSkeletonCells=%d realContentPx=%d realTextCellPx=%d "
+              "controlSkeletonCells=%d controlTextCellPx=%d\n",
+              realSkeletons, contentSkeletons, textSkeletons, controlSkeletons,
+              controlTextSkeletons);
+
+  // The detector is calibrated: the forced-tile control MUST show the colour.
+  if (controlSkeletons <= 0 || controlTextSkeletons <= 0) {
+    std::puts("FAIL: skeleton detector is blind -- the control render has no highlight");
+    ++failures;
+  }
+  if (realSkeletons != 0 || contentSkeletons != 0 || textSkeletons != 0) {
+    std::printf("FAIL: a skeleton card was painted for an item without a thumbnail "
+                "(cells=%d content=%d text=%d)\n", realSkeletons, contentSkeletons,
+                textSkeletons);
+    ++failures;
+  }
+
+  std::puts(failures == 0 ? "LAYOUT PIXELS: OK" : "LAYOUT PIXELS: FAILED");
+  return failures == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -624,6 +862,22 @@ int main(int argc, char** argv) {
 
   auto items = MockBerlinTrip();
 
+  // Design artifact: the gallery now needs REAL thumbnail availability to draw
+  // a tile (P0-2). These stand-ins keep the photo tiles visible in the PNG
+  // while the .md/.pdf/.csv rows demonstrate the fallback.
+  prism::gallery::ThumbStore demoThumbs{16u << 20};
+  for (const ArchiveItem& item : items) {
+    if (item.isDir || prism::QuickLookPlanner::KindByName(item.path) != prism::PreviewKind::Image) {
+      continue;
+    }
+    prism::gallery::DecodedThumb thumb;
+    thumb.width = 8;
+    thumb.height = 8;
+    thumb.pixels.assign(8u * 8u * 4u, 0x90);
+    thumb.pixels[3] = 0xFF;
+    demoThumbs.OnThumb(item.index, thumb);
+  }
+
   // Scene 1: mid-scroll gallery (fluid-sheet spring gliding, HUD compact 45%).
   gallery::ViewportWindow viewport{{.columns = 5, .cellHeight = 220.0},
                                    static_cast<int>(items.size())};
@@ -632,6 +886,7 @@ int main(int argc, char** argv) {
   GalleryRenderer::Scene scene;
   scene.items = &items;
   scene.viewport = &viewport;
+  scene.thumbs = &demoThumbs;
   scene.breadcrumb = L"Berlin_Trip_2026.zip  |  39 items  |  5 solid blocks";
   prism::ProgressHud hud;
   hud.OnStart("Extracting Kreuzberg/street_09.png", 0);
@@ -790,9 +1045,14 @@ int main(int argc, char** argv) {
     model.SetArchiveInfo(archiveInfo);
     model.SetFocus(prism::sidebar::FocusTarget{prism::sidebar::Section::Tree, 1});
 
+    // V1: the rail is a COLUMN inside the content band, exactly like the
+    // window builds it (220 px, between the action island and the status bar).
+    const prism::layout::Layout sidebarFrame =
+        prism::layout::Compute(static_cast<int>(kW), static_cast<int>(kH), true, true);
     prism::win::sidebar::Metrics sidebarMetrics;
-    sidebarMetrics.viewportTop = 0.0f;
-    sidebarMetrics.viewportBottom = static_cast<float>(kH);
+    sidebarMetrics.width = GalleryRenderer::kSidebarColumnWidth;
+    sidebarMetrics.viewportTop = static_cast<float>(sidebarFrame.content.top);
+    sidebarMetrics.viewportBottom = static_cast<float>(sidebarFrame.content.bottom);
     const prism::win::sidebar::Layout sidebarLayout =
         prism::win::sidebar::Build(model, sidebarMetrics);
 
@@ -843,9 +1103,10 @@ int main(int argc, char** argv) {
     renderScene(sceneFolded, L"prism_sidebar_collapsed.png", &frameFolded);
 
     int sidebarFailures = 0;
-    constexpr int kColumnRight = 236;  // GalleryRenderer::kSidebarColumnWidth
-    const int selectedRowTop = 104 + 4 * 36;
-    const int selectedRowBottom = selectedRowTop + 36;
+    constexpr int kColumnRight = static_cast<int>(GalleryRenderer::kSidebarColumnWidth);
+    const int selectedRowTop = 104 + prism::layout::kListHeaderHeight +
+                               4 * prism::layout::kListRowHeight;
+    const int selectedRowBottom = selectedRowTop + prism::layout::kListRowHeight;
     const auto selectionBox = [](const prism::win::sidebar::Layout& layout,
                                 prism::win::sidebar::Box* out) {
       for (const auto& command : layout.commands) {
@@ -935,7 +1196,7 @@ int main(int argc, char** argv) {
       }
 
       // 3. Folded: the list starts at the 16 px inset instead of after the
-      //    column -- a full 236 px of extra row width, measured in pixels.
+      //    column -- a full 220 px of extra row width, measured in pixels.
       const int accentLeftExpanded =
           CountAccent(frameSidebar, kW, 16, selectedRowTop + 2, kColumnRight + 4,
                       selectedRowBottom - 2);
@@ -978,6 +1239,9 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+
+  // V1 layout: rectangles + skeleton-colour pixels at two window widths.
+  if (const int layout = VerifyLayoutPixels(wic.Get(), outDir); layout != 0) return layout;
 
   // The Liquid Glass optics, pixel-asserted (see VerifyGlassOptics).
   if (const int optics = VerifyGlassOptics(wic.Get(), outDir); optics != 0) return optics;

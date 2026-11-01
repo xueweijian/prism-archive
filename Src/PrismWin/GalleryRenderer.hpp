@@ -38,6 +38,7 @@
 #include "../PrismCore/SidebarModel.hpp"
 #include "../PrismCore/ThemeTokens.hpp"
 #include "../PrismCore/ThumbStore.hpp"
+#include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "SidebarView.hpp"  // C12 draw commands -- painted since C27, refined by C29
 
 namespace prism::win::gallery {
@@ -62,12 +63,24 @@ class GalleryRenderer {
   static constexpr D2D1_COLOR_F kAccent = {0.243f, 0.545f, 1.0f, 1.0f};       // #3E8BFF
   static constexpr D2D1_COLOR_F kTextPrimary = {0.910f, 0.925f, 0.945f, 1.0f};
   static constexpr D2D1_COLOR_F kTextSecondary = {0.604f, 0.655f, 0.706f, 1.0f};
+  // V1 (P0-2): the colour of a LOADING skeleton card. It may only ever appear
+  // when an item is classified as a tile without pixels -- which the rule in
+  // WindowLayout forbids. The snapshot suite calibrates its "no skeleton"
+  // detector on this exact colour (Scene::debugForceSkeleton), so an absent hit
+  // means the rule held, not that the detector was blind.
+  static constexpr D2D1_COLOR_F kSkeletonHighlight = {1.0f, 0.584f, 0.0f, 1.0f};  // #FF9500
+  static constexpr D2D1_COLOR_F kSkeletonShimmer = {1.0f, 0.843f, 0.400f, 1.0f};  // #FFD766
 
   // ------------------------------------------------------------ C29 sidebar
   // The rail is a real COLUMN: when it is shown, list content starts after it.
   // Both numbers below are layout POLICY, not paint, so they live next to the
   // painter that applies them and are pinned by their own unit test.
-  static constexpr float kSidebarColumnWidth = 236.0f;    // SidebarView::Metrics::width
+  // V1: the column width is DESIGN.md's 220, and it is the SAME constant the
+  // layout uses -- one number, one source. (C29 shipped 236 before DESIGN.md
+  // existed; the two pixels suites were updated with this constant, not a
+  // literal, so the next change is a one-line edit.)
+  static constexpr float kSidebarColumnWidth =
+      static_cast<float>(prism::layout::kSidebarWidth);
   static constexpr float kSidebarCollapseBelow = 960.0f;  // 4 list columns + chrome
 
   // Negative-control switch (CONTRACTS D3): the rail is never painted, so the
@@ -135,6 +148,12 @@ class GalleryRenderer {
     // default to the shipping values, so a pre-C29 scene is unchanged.
     bool sidebarCollapsed = false;
     prism::theme::Variant sidebarTheme = prism::theme::Variant::Midnight;
+    // V1: the window hands in the SAME layout it hit-tests with. When absent
+    // (snapshot / bench scenes), the renderer computes it from the target size.
+    const prism::layout::Layout* layout = nullptr;
+    // TEST SEAM (not a feature): forces the tile path for every cell so the
+    // snapshot suite can prove its "skeleton colour" detector actually fires.
+    bool debugForceSkeleton = false;
   };
 
   HRESULT Initialize() {
@@ -219,28 +238,84 @@ class GalleryRenderer {
 
   void Draw(ID2D1RenderTarget* target, const Scene& scene) {
     const D2D1_SIZE_F size = target->GetSize();
+    // V1: ONE layout for the whole frame -- bands, grid metrics, list body and
+    // chrome. A component that wants a rectangle asks this object.
+    // C29: the rail is a COLUMN, so the layout reserves it only while the rail
+    // is actually painted AND the view is the list. The grid keeps its
+    // full-bleed geometry (that is the C29 contract win.tree_nav depends on).
+    const bool railColumn = SidebarShown(scene) && scene.listMode;
+    const prism::layout::Layout layout =
+        scene.layout != nullptr
+            ? *scene.layout
+            : prism::layout::Compute(static_cast<int>(size.width),
+                                     static_cast<int>(size.height), railColumn,
+                                     scene.listMode);
     target->Clear(kBackdrop);
+    DrawBands(target, layout);
 
-    // C29: the rail is part of the LAYOUT. While it is shown the list content
-    // starts AFTER the column, so folding it returns a full column of row width
-    // (asserted in pixels by win.sidebar_paint and the snapshot).
-    const float inset =
-        (SidebarShown(scene) && SidebarFits(size.width)) ? kSidebarColumnWidth : 0.0f;
-    // The grid is only drawn when a viewport AND its items exist: a scene may be
-    // a sidebar-only composition (the C27 glue suite and the C29 suites both
-    // build one), and DrawGrid dereferences the viewport. The pre-C29 version
-    // painted the grid twice in grid mode; the guard makes the call total.
+    // The content is the ONLY region an item may paint into. One clip here
+    // replaces the per-tile guesswork that let cards slide under the rail.
+    target->PushAxisAlignedClip(ToRectF(layout.contentInner),
+                                D2D1_ANTIALIAS_MODE_ALIASED);
     if (scene.listMode) {
-      DrawListMode(target, scene, size, inset);
-    } else if (scene.viewport && scene.items) {
-      DrawGrid(target, scene, size);
+      DrawListMode(target, scene, layout);
+    } else if (scene.items != nullptr) {
+      // A scene may be a sidebar-only composition (the C27 glue suite and the
+      // C29 suites both build one): those carry no items. DrawGrid tolerates a
+      // missing viewport (scroll 0) because V1 scenes are laid out by rect.
+      DrawGrid(target, scene, layout);
     }
+    target->PopAxisAlignedClip();
+
     // NEGATIVE CONTROL (CONTRACTS D3): the rail is never painted, so the suite's
     // "the command list reached pixels" assertion MUST go red.
     if (kPaintSidebar) DrawSidebar(target, scene, size);
-    DrawBreadcrumbIsland(target, scene, size);
-    DrawProgressCapsule(target, scene, size);
-    if (scene.quickLookOpen) DrawQuickLookCard(target, scene, size);
+    DrawBreadcrumbIsland(target, scene, layout);
+    DrawProgressCapsule(target, scene, layout);
+    if (scene.quickLookOpen) DrawQuickLookCard(target, scene, layout);
+  }
+
+  static D2D1_RECT_F ToRectF(const prism::layout::Rect& r) {
+    return D2D1::RectF(static_cast<float>(r.left), static_cast<float>(r.top),
+                       static_cast<float>(r.right), static_cast<float>(r.bottom));
+  }
+
+  // The five bands, painted from the layout (DESIGN.md §2). This is what makes
+  // the structure visible in a snapshot instead of an undifferentiated canvas.
+  void DrawBands(ID2D1RenderTarget* target, const prism::layout::Layout& layout) {
+    if (layout.titleBar.Empty() || layout.statusBar.Empty()) return;
+    D2D1_COLOR_F title = kBackdrop;
+    title.r += 0.012f;
+    title.g += 0.014f;
+    title.b += 0.018f;
+    island_->SetColor(title);
+    target->FillRectangle(ToRectF(layout.titleBar), island_.Get());
+
+    D2D1_COLOR_F actions = kBackdrop;
+    actions.r += 0.020f;
+    actions.g += 0.024f;
+    actions.b += 0.030f;
+    island_->SetColor(actions);
+    target->FillRectangle(ToRectF(layout.actionIsland), island_.Get());
+
+    D2D1_COLOR_F status = kBackdrop;
+    status.r += 0.016f;
+    status.g += 0.018f;
+    status.b += 0.022f;
+    island_->SetColor(status);
+    target->FillRectangle(ToRectF(layout.statusBar), island_.Get());
+
+    // Hairlines between the bands (the 1 px edge of the glass).
+    islandBorder_->SetColor(kIslandBorder);
+    target->FillRectangle(D2D1::RectF(0.0f, static_cast<float>(layout.actionIsland.bottom),
+                                      static_cast<float>(layout.statusBar.right),
+                                      static_cast<float>(layout.actionIsland.bottom) + 1.0f),
+                          islandBorder_.Get());
+    target->FillRectangle(D2D1::RectF(0.0f, static_cast<float>(layout.statusBar.top),
+                                      static_cast<float>(layout.statusBar.right),
+                                      static_cast<float>(layout.statusBar.top) + 1.0f),
+                          islandBorder_.Get());
+    island_->SetColor(kIslandFill);
   }
 
   // -------------------------------------------------------------------------
@@ -687,138 +762,187 @@ class GalleryRenderer {
     return out;
   }
 
-  void DrawGrid(ID2D1RenderTarget* target, const Scene& scene, const D2D1_SIZE_F& size) {
-    const auto range = scene.viewport->Visible(2);
-    if (range.Empty()) return;
-    const int columns = scene.viewport->Columns();
-    const float cellW = static_cast<float>(scene.viewport->ColumnWidth());
-    const float cellH = static_cast<float>(scene.viewport->CellHeight());
-    const float scroll = static_cast<float>(scene.viewport->Scroll());
-    constexpr float kInset = 8.0f;
-    constexpr float kRadius = 16.0f;
-
-    for (int index = range.first; index <= range.last; ++index) {
-      if (index >= static_cast<int>(scene.items->size())) break;
-      const auto& item = (*scene.items)[index];
-      const int col = index % columns;
-      const int row = index / columns;
-      const float left = static_cast<float>(col) * cellW + kInset;
-      const float top = static_cast<float>(row) * cellH - scroll + kInset;
-      const float right = static_cast<float>(col + 1) * cellW - kInset;
-      const float bottom = static_cast<float>(row + 1) * cellH - scroll - kInset;
-      if (bottom < 0 || top > size.height) continue;
-
-      if (item.isDir) {
-        // Folder tile: glass pane + simple vector folder glyph.
-        const D2D1_ROUNDED_RECT pane =
-            D2D1::RoundedRect(D2D1::RectF(left, top, right, bottom), kRadius, kRadius);
-        target->FillRoundedRectangle(pane, tile_.Get());
-        target->DrawRoundedRectangle(pane, tileBorder_.Get(), 1.0f);
-        const float cx = (left + right) / 2.0f;
-        const float cy = (top + bottom) / 2.0f - 14.0f;
-        D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
-            D2D1::RectF(cx - 34.0f, cy - 22.0f, cx + 34.0f, cy + 24.0f), 7.0f, 7.0f);
-        target->FillRoundedRectangle(folder, accent_.Get());
-        folder = D2D1::RoundedRect(D2D1::RectF(cx - 34.0f, cy - 30.0f, cx + 6.0f, cy - 14.0f),
-                                   6.0f, 6.0f);
-        target->FillRoundedRectangle(folder, accent_.Get());
-      } else if (prism::QuickLookPlanner::KindByName(item.path) == prism::PreviewKind::Image) {
-        // Photo tile: REAL thumbnail when the sweep harvested one, the ⚡
-        // streaming badge for over-limit blocks, gradient stand-in otherwise.
-        // Everything is clipped by a squircle layer: DrawBitmap ignores the
-        // rounded rect, so without the mask a wide photo bleeds past the
-        // tile's corners (visible immediately in the snapshot).
-        const D2D1_RECT_F photoRect = D2D1::RectF(left, top, right, bottom - 30.0f);
-        const prism::gallery::DecodedThumb* thumb =
-            scene.thumbs ? scene.thumbs->Lookup(item.index) : nullptr;
-        if (thumb) ++dbgThumbLookupHits;
-
-        ComPtr<ID2D1PathGeometry> clipGeometry;
-        if (SUCCEEDED(CreateSquircleGeometry(target, photoRect, kRadius,
-                                             clipGeometry.ReleaseAndGetAddressOf()))) {
-          D2D1_LAYER_PARAMETERS layer = D2D1::LayerParameters(
-              photoRect, clipGeometry.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-          target->PushLayer(layer, nullptr);
-        }
-
-        if (thumb) {
-          SyncThumbBitmap(target, item.index, *thumb, scene.thumbs->Version());
-          const auto it = thumbBitmaps_.find(item.index);
-          if (it != thumbBitmaps_.end() && it->second) {
-            ++dbgThumbBitmaps;
-            const float areaW = right - left;
-            const float areaH = bottom - 30.0f - top;
-            const float scale = (std::min)(areaW / thumb->width, areaH / thumb->height);
-            const float drawW = thumb->width * scale;
-            const float drawH = thumb->height * scale;
-            const D2D1_RECT_F fit = D2D1::RectF(left + (areaW - drawW) / 2.0f,
-                                                top + (areaH - drawH) / 2.0f,
-                                                left + (areaW + drawW) / 2.0f,
-                                                top + (areaH + drawH) / 2.0f);
-            target->FillRectangle(photoRect, tile_.Get());
-            ++dbgThumbDraws;
-            target->DrawBitmap(it->second.Get(), fit, 1.0f,
-                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-          }
-        } else if (item.size > prism::QuickLookPlanner::kDefaultByteLimit) {
-          // Over-budget solid block: elegant "tap to stream" badge.
-          thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
-          thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
-          target->FillRectangle(photoRect, thumbs_[index % 3].Get());
-          DrawLabel(target, caption_.Get(), L"\x26A1 \x70B9\x51FB\x6D41\x5F0F\x52A0\x8F7D",
-                    D2D1::RectF(left, top + (bottom - top) / 2.0f - 12.0f, right,
-                                top + (bottom - top) / 2.0f + 12.0f),
-                    textPrimary_.Get());
-        } else {
-          thumbs_[index % 3]->SetStartPoint(D2D1::Point2F(left, top));
-          thumbs_[index % 3]->SetEndPoint(D2D1::Point2F(left, bottom - 30.0f));
-          target->FillRectangle(photoRect, thumbs_[index % 3].Get());
-        }
-        if (clipGeometry) target->PopLayer();
-
-        if (static_cast<int>(item.index) == scene.selectedItem) {
-          // Selection ring: 2px accent, squircle-ish corners stay readable.
-          islandBorder_->SetColor(kAccent);
-          D2D1_ROUNDED_RECT ring =
-              D2D1::RoundedRect(D2D1::RectF(left - 1.0f, top - 1.0f, right + 1.0f,
-                                            bottom + 1.0f), kRadius, kRadius);
-          target->DrawRoundedRectangle(ring, islandBorder_.Get(), 2.0f);
-          islandBorder_->SetColor(kIslandBorder);
-        }
-        // Name plate under the photo (the grid is unusable without labels).
-        const D2D1_ROUNDED_RECT plate = D2D1::RoundedRect(
-            D2D1::RectF(left, bottom - 28.0f, right, bottom), 10.0f, 10.0f);
-        target->FillRoundedRectangle(plate, tile_.Get());
-        DrawLabel(target, caption_.Get(), Utf8(FileNameOf(item.path)),
-                  D2D1::RectF(left + 8.0f, bottom - 26.0f, right - 8.0f, bottom - 4.0f),
-                  textPrimary_.Get());
+  // The grid: every rectangle comes from WindowLayout. The renderer decides
+  // NOTHING about position, and it never paints a loading skeleton for an item
+  // the classification rule did not hand it as a tile (P0-2).
+  void DrawGrid(ID2D1RenderTarget* target, const Scene& scene,
+                const prism::layout::Layout& layout) {
+    if (!scene.items) return;
+    const int count = static_cast<int>(scene.items->size());
+    const int rows = layout.columns > 0 ? (count + layout.columns - 1) / layout.columns : 0;
+    const int maxScroll =
+        (std::max)(0, rows * layout.cellHeight - layout.contentInner.Height());
+    const int scroll = (std::min)(
+        scene.viewport ? static_cast<int>(scene.viewport->Scroll()) : 0, maxScroll);
+    const std::vector<prism::layout::Cell> cells =
+        prism::layout::VisibleCells(layout, count, scroll);
+    for (const prism::layout::Cell& cell : cells) {
+      if (cell.index < 0 || cell.index >= count) continue;
+      const prism::ArchiveItem& item = (*scene.items)[static_cast<size_t>(cell.index)];
+      const prism::PreviewKind kind = prism::QuickLookPlanner::KindByName(item.path);
+      // Availability is a FACT read from the store, not a guess from the name.
+      const bool hasThumb = scene.thumbs != nullptr &&
+                            prism::layout::ThumbnailCapable(kind) &&
+                            scene.thumbs->Contains(item.index);
+      const prism::layout::CellKind cellKind =
+          scene.debugForceSkeleton
+              ? prism::layout::CellKind::Tile
+              : prism::layout::CellKindFor(item.isDir, kind, hasThumb);
+      if (cellKind == prism::layout::CellKind::Row) {
+        DrawFallbackRow(target, scene, cell, item);
+      } else if (item.isDir) {
+        DrawFolderTile(target, scene, cell.rect, item);
       } else {
-        // Document tile: paper pane + text lines (the doc quick look reads
-        // exactly this silhouette).
-        D2D1_ROUNDED_RECT paper = D2D1::RoundedRect(
-            D2D1::RectF(left, top, right, bottom - 30.0f), kRadius, kRadius);
-        target->FillRoundedRectangle(paper, island_.Get());
-        target->DrawRoundedRectangle(paper, tileBorder_.Get(), 1.0f);
-        const float lineTop = top + 24.0f;
-        const float lineW[4] = {0.62f, 0.84f, 0.74f, 0.50f};
-        for (int line = 0; line < 4; ++line) {
-          const float w = (right - left - 32.0f) * lineW[line];
-          D2D1_ROUNDED_RECT textLine = D2D1::RoundedRect(
-              D2D1::RectF(left + 16.0f, lineTop + line * 22.0f, left + 16.0f + w,
-                          lineTop + line * 22.0f + 7.0f),
-              3.5f, 3.5f);
-          target->FillRoundedRectangle(textLine, line == 0 ? accent_.Get() : tileBorder_.Get());
-        }
-
-        const D2D1_ROUNDED_RECT pane =
-            D2D1::RoundedRect(D2D1::RectF(left, bottom - 28.0f, right, bottom), 10.0f, 10.0f);
-        target->FillRoundedRectangle(pane, tile_.Get());
-        const std::wstring name = Utf8(FileNameOf(item.path));
-        DrawLabel(target, caption_.Get(), name, D2D1::RectF(left + 8.0f, bottom - 26.0f,
-                                                            right - 8.0f, bottom - 4.0f),
-                  textPrimary_.Get());
+        DrawThumbTile(target, scene, cell.rect, item, hasThumb);
       }
     }
+  }
+
+  static D2D1_RECT_F CellRectF(const prism::layout::Rect& cell) { return ToRectF(cell); }
+
+  // P0-2: a cell with no thumbnail is a 32 px ROW (icon + name + size), never
+  // a skeleton card. The row is anchored to the top of the cell.
+  void DrawFallbackRow(ID2D1RenderTarget* target, const Scene& scene,
+                       const prism::layout::Cell& cell, const prism::ArchiveItem& item) {
+    ++dbgRowCells;
+    const D2D1_RECT_F band = ToRectF(prism::layout::FallbackRowRect(cell.rect));
+    const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(band, 10.0f, 10.0f);
+    target->FillRoundedRectangle(pill, tile_.Get());
+    target->DrawRoundedRectangle(pill, tileBorder_.Get(), 1.0f);
+    // Type glyph: a 16 px token-coloured mark (vector icons are a later pass).
+    const float iconTop = band.top + 8.0f;
+    const float iconBottom = band.bottom - 8.0f;
+    islandBorder_->SetColor(prism::QuickLookPlanner::KindByName(item.path) ==
+                                    prism::PreviewKind::Image
+                                ? kAccent
+                                : kTextSecondary);
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(band.left + 8.0f, iconTop, band.left + 24.0f,
+                                      iconBottom),
+                          3.0f, 3.0f),
+        islandBorder_.Get());
+    islandBorder_->SetColor(kIslandBorder);
+    // A narrow grid cell only has room for the name; the size column is drawn
+    // when the cell is wide enough to hold both without clipping the name.
+    const float width = band.right - band.left;
+    const bool showSize = width >= 220.0f;
+    const float nameRight = showSize ? band.right - 104.0f : band.right - 8.0f;
+    DrawLabel(target, caption_.Get(), Utf8(FileNameOf(item.path)),
+              D2D1::RectF(band.left + 32.0f, band.top + 7.0f, nameRight, band.bottom - 6.0f),
+              textPrimary_.Get());
+    if (showSize) {
+      DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(item.size)),
+                        band.right - 100.0f, band.top + 7.0f, 92.0f, textSecondary_.Get());
+    }
+    DrawSelectionRing(target, scene, prism::layout::FallbackRowRect(cell.rect), item.index,
+                      10.0f);
+  }
+
+  void DrawFolderTile(ID2D1RenderTarget* target, const Scene& scene,
+                      const prism::layout::Rect& cell, const prism::ArchiveItem& item) {
+    ++dbgTileCells;
+    constexpr float kRadius = 16.0f;
+    const D2D1_RECT_F rect = CellRectF(cell);
+    const D2D1_ROUNDED_RECT pane = D2D1::RoundedRect(rect, kRadius, kRadius);
+    target->FillRoundedRectangle(pane, tile_.Get());
+    target->DrawRoundedRectangle(pane, tileBorder_.Get(), 1.0f);
+    const float cx = (rect.left + rect.right) / 2.0f;
+    const float cy = (rect.top + rect.bottom) / 2.0f - 14.0f;
+    D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
+        D2D1::RectF(cx - 34.0f, cy - 22.0f, cx + 34.0f, cy + 24.0f), 7.0f, 7.0f);
+    target->FillRoundedRectangle(folder, accent_.Get());
+    folder = D2D1::RoundedRect(D2D1::RectF(cx - 34.0f, cy - 30.0f, cx + 6.0f, cy - 14.0f),
+                               6.0f, 6.0f);
+    target->FillRoundedRectangle(folder, accent_.Get());
+    DrawNamePlate(target, cell, item);
+    DrawSelectionRing(target, scene, cell, item.index);
+  }
+
+  void DrawThumbTile(ID2D1RenderTarget* target, const Scene& scene,
+                     const prism::layout::Rect& cell, const prism::ArchiveItem& item,
+                     bool hasThumb) {
+    ++dbgTileCells;
+    constexpr float kRadius = 16.0f;
+    const D2D1_RECT_F rect = CellRectF(cell);
+    const D2D1_RECT_F photoRect =
+        D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom - 30.0f);
+    const prism::gallery::DecodedThumb* thumb =
+        (hasThumb && scene.thumbs) ? scene.thumbs->Lookup(item.index) : nullptr;
+    if (thumb) ++dbgThumbLookupHits;
+    if (!thumb) {
+      DrawSkeletonTile(target, photoRect);
+      DrawNamePlate(target, cell, item);
+      DrawSelectionRing(target, scene, cell, item.index);
+      return;
+    }
+    ComPtr<ID2D1PathGeometry> clipGeometry;
+    if (SUCCEEDED(CreateSquircleGeometry(target, photoRect, kRadius,
+                                         clipGeometry.ReleaseAndGetAddressOf()))) {
+      D2D1_LAYER_PARAMETERS layer = D2D1::LayerParameters(
+          photoRect, clipGeometry.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+      target->PushLayer(layer, nullptr);
+    }
+    SyncThumbBitmap(target, item.index, *thumb, scene.thumbs->Version());
+    const auto it = thumbBitmaps_.find(item.index);
+    if (it != thumbBitmaps_.end() && it->second) {
+      ++dbgThumbBitmaps;
+      const float areaW = photoRect.right - photoRect.left;
+      const float areaH = photoRect.bottom - photoRect.top;
+      const float scale = (std::min)(areaW / thumb->width, areaH / thumb->height);
+      const float drawW = thumb->width * scale;
+      const float drawH = thumb->height * scale;
+      const D2D1_RECT_F fit = D2D1::RectF(
+          photoRect.left + (areaW - drawW) / 2.0f, photoRect.top + (areaH - drawH) / 2.0f,
+          photoRect.left + (areaW + drawW) / 2.0f, photoRect.top + (areaH + drawH) / 2.0f);
+      target->FillRectangle(photoRect, tile_.Get());
+      ++dbgThumbDraws;
+      target->DrawBitmap(it->second.Get(), fit, 1.0f,
+                         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    }
+    if (clipGeometry) target->PopLayer();
+    DrawNamePlate(target, cell, item);
+    DrawSelectionRing(target, scene, cell, item.index);
+  }
+
+  // The ONLY place kSkeletonHighlight is painted. Reaching it means the
+  // classification rule failed to hand this cell a thumbnail -- the P0-2 bug.
+  void DrawSkeletonTile(ID2D1RenderTarget* target, const D2D1_RECT_F& rect) {
+    ++dbgSkeletonCells;
+    island_->SetColor(kSkeletonHighlight);
+    target->FillRectangle(rect, island_.Get());
+    island_->SetColor(kSkeletonShimmer);
+    const float cy = (rect.top + rect.bottom) / 2.0f;
+    target->FillRectangle(
+        D2D1::RectF(rect.left + 12.0f, cy - 4.0f, rect.right - 12.0f, cy + 4.0f),
+        island_.Get());
+    island_->SetColor(kIslandFill);
+  }
+
+  void DrawNamePlate(ID2D1RenderTarget* target, const prism::layout::Rect& cell,
+                     const prism::ArchiveItem& item) {
+    const D2D1_RECT_F rect = CellRectF(cell);
+    const D2D1_ROUNDED_RECT plate = D2D1::RoundedRect(
+        D2D1::RectF(rect.left, rect.bottom - 28.0f, rect.right, rect.bottom), 10.0f, 10.0f);
+    target->FillRoundedRectangle(plate, tile_.Get());
+    DrawLabel(target, caption_.Get(), Utf8(FileNameOf(item.path)),
+              D2D1::RectF(rect.left + 8.0f, rect.bottom - 26.0f, rect.right - 8.0f,
+                          rect.bottom - 4.0f),
+              textPrimary_.Get());
+  }
+
+  void DrawSelectionRing(ID2D1RenderTarget* target, const Scene& scene,
+                         const prism::layout::Rect& cell, uint32_t itemIndex,
+                         float radius = 16.0f) {
+    if (scene.selectedItem < 0) return;
+    if (static_cast<int>(itemIndex) != scene.selectedItem) return;
+    const D2D1_RECT_F rect = CellRectF(cell);
+    islandBorder_->SetColor(kAccent);
+    target->DrawRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(rect.left - 1.0f, rect.top - 1.0f, rect.right + 1.0f,
+                                      rect.bottom + 1.0f),
+                          radius, radius),
+        islandBorder_.Get(), 2.0f);
+    islandBorder_->SetColor(kIslandBorder);
   }
 
   // Device-bitmap cache for decoded thumbnails; invalidated exactly when the
@@ -898,9 +1022,11 @@ class GalleryRenderer {
   }
 
   // The main-window file list (blueprint ch. 3.2): 名称 | 原始大小 | 压缩后 |
-  // 压缩率, 36px virtualized rows, semantic micro-capsule bars, folders first.
+  // 压缩率, 32 px virtualized rows from WindowLayout, semantic micro-capsule
+  // bars, folders first. Every rectangle is anchored to the layout's list body,
+  // which is already inset by the rail (C29's column, V1's geometry).
   void DrawListMode(ID2D1RenderTarget* target, const Scene& scene,
-                    const D2D1_SIZE_F& size, float inset) {
+                    const prism::layout::Layout& layout) {
     if (!scene.listItems) return;
     const auto& rows = *scene.listItems;
     // The app persists the user's column geometry (C27); absent means the module
@@ -908,40 +1034,45 @@ class GalleryRenderer {
     const prism::list::ColumnLayout cols =
         scene.hasListColumns && scene.listColumns != nullptr ? *scene.listColumns
                                                              : prism::list::ColumnLayout{};
-    const float headerY = 68.0f;
-    const float footerY = size.height - 56.0f;
-    const float contentTop = headerY + 36.0f;
-    const uint32_t viewportH =
-        static_cast<uint32_t>((std::max)(0.0f, footerY - contentTop));
+    const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
+    const prism::layout::Rect body = prism::layout::ListBodyRect(layout);
+    const int scroll = static_cast<int>(scene.listScroll);
+    const float right = static_cast<float>(body.right);
+    const float nameRight = right - cols.sizeW - cols.packedW - cols.ratioW - 12.0f;
+    const float sizeX = right - cols.sizeW - cols.packedW - cols.ratioW + 6.0f;
+    const float packedX = right - cols.packedW - cols.ratioW + 6.0f;
+    const float ratioX = right - cols.ratioW + 6.0f;
+    const float textTop = static_cast<float>(header.top) + 4.0f;
 
     // Header
-    // `inset` is the rail's column (C29): every LEFT-anchored edge moves with
-    // it while the right-anchored columns stay put, so no column shifts.
-    DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^", D2D1::RectF(24.0f + inset, headerY,
-                                                cols.sizeX(size.width) - 12.0f,
-                                                headerY + 26.0f), textSecondary_.Get());
-    DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
-                      headerY, cols.sizeW - 18, textSecondary_.Get());
-    DrawTrailingLabel(target, L"\x538B\x7F29\x540E", size.width - cols.packedW - cols.ratioW + 6,
-                      headerY, cols.packedW - 18, textSecondary_.Get());
-    DrawTrailingLabel(target, L"\x538B\x7F29\x7387", size.width - cols.ratioW + 6, headerY,
-                      cols.ratioW - 18, textSecondary_.Get());
+    DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^",
+              D2D1::RectF(static_cast<float>(header.left) + prism::layout::kListIndent,
+                          textTop, nameRight, textTop + 24.0f),
+              textSecondary_.Get());
+    DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", sizeX, textTop, cols.sizeW - 18,
+                      textSecondary_.Get());
+    DrawTrailingLabel(target, L"\x538B\x7F29\x540E", packedX, textTop, cols.packedW - 18,
+                      textSecondary_.Get());
+    DrawTrailingLabel(target, L"\x538B\x7F29\x7387", ratioX, textTop, cols.ratioW - 18,
+                      textSecondary_.Get());
 
-    const auto window =
-        prism::list::RowWindow(scene.listScroll, viewportH, static_cast<uint32_t>(rows.size()));
-    for (uint32_t i = window.first; i <= window.last && i < rows.size(); ++i) {
-      const auto& row = rows[i];
-      const float top = contentTop + static_cast<float>(i) * prism::list::kRowHeight -
-                        static_cast<float>(scene.listScroll);
-      const float bottom = top + prism::list::kRowHeight;
-      if (bottom < contentTop || top > footerY) continue;
-
-      if (static_cast<int>(i) == scene.selectedRow) {
+    const prism::layout::RowRange window = prism::layout::VisibleListRows(
+        layout, static_cast<int>(rows.size()), scroll);
+    for (int i = window.first; i <= window.last; ++i) {
+      const auto& row = rows[static_cast<size_t>(i)];
+      const prism::layout::Rect rr = prism::layout::ListRowRect(layout, i, scroll);
+      const float top = static_cast<float>(rr.top);
+      const float bottom = static_cast<float>(rr.bottom);
+      if (bottom <= static_cast<float>(body.top) ||
+          top >= static_cast<float>(body.bottom)) {
+        continue;
+      }
+      const D2D1_RECT_F rowRect = ToRectF(rr);
+      if (i == scene.selectedRow) {
         // Selection highlight: G2 squircle R=10, accent fluid fill.
-        D2D1_ROUNDED_RECT sel =
-            D2D1::RoundedRect(D2D1::RectF(16.0f + inset, top + 3.0f, size.width - 16.0f,
-                                          bottom - 3.0f),
-                              10.0f, 10.0f);
+        D2D1_ROUNDED_RECT sel = D2D1::RoundedRect(
+            D2D1::RectF(rowRect.left + 8.0f, top + 2.0f, rowRect.right - 8.0f, bottom - 2.0f),
+            10.0f, 10.0f);
         D2D1_COLOR_F selColor = kAccent;
         selColor.a = 0.26f;
         accent_->SetColor(selColor);
@@ -950,32 +1081,34 @@ class GalleryRenderer {
       }
 
       const std::wstring name = Utf8(row.name);
+      const float nameLeft = rowRect.left + prism::layout::kListIndent;
       if (row.isDir) {
         const D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
-            D2D1::RectF(28.0f + inset, top + 9.0f, 60.0f + inset, top + 27.0f), 5.0f, 5.0f);
+            D2D1::RectF(nameLeft + 4.0f, top + 9.0f, nameLeft + 20.0f, top + 27.0f), 5.0f,
+            5.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
-        DrawLabel(target, caption_.Get(), name, D2D1::RectF(70.0f + inset, top + 5.0f,
-                      cols.sizeX(size.width) - 80.0f, bottom - 4.0f), textPrimary_.Get());
-        DrawTrailingLabel(target, L"--", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
-                          top + 6.0f, cols.sizeW - 18, textSecondary_.Get());
-        DrawTrailingLabel(target, L"--", size.width - cols.packedW - cols.ratioW + 6,
-                          top + 6.0f, cols.packedW - 18, textSecondary_.Get());
+        DrawLabel(target, caption_.Get(), name,
+                  D2D1::RectF(nameLeft + 28.0f, top + 5.0f, nameRight, bottom - 4.0f),
+                  textPrimary_.Get());
+        DrawTrailingLabel(target, L"--", sizeX, top + 6.0f, cols.sizeW - 18,
+                          textSecondary_.Get());
+        DrawTrailingLabel(target, L"--", packedX, top + 6.0f, cols.packedW - 18,
+                          textSecondary_.Get());
       } else {
-        DrawLabel(target, caption_.Get(), name, D2D1::RectF(44.0f + inset, top + 5.0f,
-                      cols.sizeX(size.width) - 52.0f, bottom - 4.0f), textPrimary_.Get());
-        const std::wstring sizeText = Utf8(prism::list::FormatBytes(row.size));
-        const std::wstring packedText = Utf8(prism::list::FormatBytes(row.packedSize));
-        DrawTrailingLabel(target, sizeText, size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
+        DrawLabel(target, caption_.Get(), name,
+                  D2D1::RectF(nameLeft, top + 5.0f, nameRight, bottom - 4.0f),
+                  textPrimary_.Get());
+        DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.size)), sizeX,
                           top + 6.0f, cols.sizeW - 18, textPrimary_.Get());
-        DrawTrailingLabel(target, packedText, size.width - cols.packedW - cols.ratioW + 6,
+        DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.packedSize)), packedX,
                           top + 6.0f, cols.packedW - 18, textPrimary_.Get());
       }
 
       // Semantic micro-capsule ratio bar (blueprint ch. 3.2.3).
       if (const auto bar = prism::list::RatioBar(row)) {
-        const float trackX = size.width - cols.ratioW + 8.0f;
+        const float trackX = right - cols.ratioW + 8.0f;
         const float trackW = cols.ratioW - 64.0f;
-        const float cy = top + prism::list::kRowHeight / 2.0f;
+        const float cy = top + prism::layout::kListRowHeight / 2.0f;
         D2D1_ROUNDED_RECT track =
             D2D1::RoundedRect(D2D1::RectF(trackX, cy - 3.0f, trackX + trackW, cy + 3.0f),
                               3.0f, 3.0f);
@@ -989,8 +1122,8 @@ class GalleryRenderer {
         tileBorder_->SetColor(kTileBorder);
         wchar_t pct[8];
         swprintf_s(pct, L"%d%%", bar->percent);
-        DrawTrailingLabel(target, pct, size.width - cols.ratioW + 8.0f + trackW + 6.0f, top + 6.0f,
-                          40, textSecondary_.Get());
+        DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + trackW + 6.0f,
+                          top + 6.0f, 40, textSecondary_.Get());
       }
     }
   }
@@ -1003,29 +1136,19 @@ class GalleryRenderer {
     caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
   }
 
+  // The breadcrumb pill: geometry from the action band (DESIGN.md §2), so it
+  // can never overlap the title bar, the status bar or a content card.
   void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,
-                            const D2D1_SIZE_F& size) {
-    float width = size.width * 0.62f;
-    float left = (size.width - width) / 2.0f;
-    float top = 16.0f;
-    float height = 44.0f;
-    if (scene.islands) {
-      // The island model owns the geometry (blueprint ch. 3.2); the renderer
-      // only paints what the scene computed.
-      const auto r = scene.islands->RectOf(prism::glass::IslandId::Nav);
-      left = static_cast<float>(r.x);
-      top = static_cast<float>(r.y);
-      width = static_cast<float>(r.w);
-      height = static_cast<float>(r.h);
-    }
-    const D2D1_ROUNDED_RECT pill =
-        D2D1::RoundedRect(D2D1::RectF(left, top, left + width, top + height),
-                          height / 2.0f, height / 2.0f);
-    target->FillRoundedRectangle(pill, island_.Get());
-    target->DrawRoundedRectangle(pill, islandBorder_.Get(), 1.0f);
+                            const prism::layout::Layout& layout) {
+    const prism::layout::Rect pillRect = prism::layout::NavPillRect(layout);
+    if (pillRect.Empty()) return;
+    const D2D1_RECT_F pill = ToRectF(pillRect);
+    const float height = static_cast<float>(pillRect.Height());
+    const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(pill, height / 2.0f, height / 2.0f);
+    target->FillRoundedRectangle(shape, island_.Get());
+    target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.0f);
     DrawLabel(target, title_.Get(), scene.breadcrumb,
-              D2D1::RectF(left + 24.0f, top + 10.0f, left + width - 24.0f, top + 34.0f),
-              textPrimary_.Get());
+              ToRectF(prism::layout::NavTextRect(layout)), textPrimary_.Get());
     if (scene.islands) {
       // Pointer-tracked specular rim (blueprint ch. 3.1 Layer 5): a bright
       // segment flows along the top edge toward the cursor. In the real
@@ -1033,36 +1156,39 @@ class GalleryRenderer {
       // approximates it from the SAME cbuffer params (pointer xy).
       float cb[20];
       scene.islands->WriteCbuffer(prism::glass::IslandId::Nav,
-                                  static_cast<uint32_t>(size.width),
-                                  static_cast<uint32_t>(size.height), cb);
-      const float px = (std::min)((std::max)(cb[4], left + 70.0f), left + width - 70.0f);
+                                  static_cast<uint32_t>(layout.windowW),
+                                  static_cast<uint32_t>(layout.windowH), cb);
+      const float px = (std::min)((std::max)(cb[4], pill.left + 70.0f), pill.right - 70.0f);
       D2D1_COLOR_F rim = {1.0f, 1.0f, 1.0f, 0.62f};
       islandBorder_->SetColor(rim);
       D2D1_ROUNDED_RECT glow = D2D1::RoundedRect(
-          D2D1::RectF(px - 62.0f, top + 1.0f, px + 62.0f, top + 3.0f), 1.0f, 1.0f);
+          D2D1::RectF(px - 62.0f, pill.top + 1.0f, px + 62.0f, pill.top + 3.0f), 1.0f, 1.0f);
       target->FillRoundedRectangle(glow, islandBorder_.Get());
       islandBorder_->SetColor(kIslandBorder);
     }
   }
 
+  // Progress capsule: bottom-centre of the CONTENT. It used to sit at
+  // size.height - 68, crossing into the 28 px status bar.
   void DrawProgressCapsule(ID2D1RenderTarget* target, const Scene& scene,
-                           const D2D1_SIZE_F& size) {
+                           const prism::layout::Layout& layout) {
     if (scene.hud.phase == prism::HudPhase::Hidden) return;
-    const float width = 260.0f, height = 46.0f;
-    const float left = (size.width - width) / 2.0f;
-    const float top = size.height - height - 22.0f;
-    const D2D1_ROUNDED_RECT pill =
-        D2D1::RoundedRect(D2D1::RectF(left, top, left + width, top + height), height / 2.0f,
-                          height / 2.0f);
-    target->FillRoundedRectangle(pill, island_.Get());
-    target->DrawRoundedRectangle(pill, islandBorder_.Get(), 1.0f);
+    const prism::layout::Rect capsuleRect = prism::layout::ProgressCapsuleRect(layout);
+    if (capsuleRect.Empty()) return;
+    const D2D1_RECT_F pill = ToRectF(capsuleRect);
+    const float width = static_cast<float>(capsuleRect.Width());
+    const float height = static_cast<float>(capsuleRect.Height());
+    const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(pill, height / 2.0f, height / 2.0f);
+    target->FillRoundedRectangle(shape, island_.Get());
+    target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.0f);
 
     // Progress track + fill (the HUD model owns the percent; -1 == spin).
     const float trackInset = 10.0f;
     const float trackW = width - 2.0f * trackInset - 56.0f;
+    const float cy = (pill.top + pill.bottom) / 2.0f;
     D2D1_ROUNDED_RECT track = D2D1::RoundedRect(
-        D2D1::RectF(left + trackInset, top + height / 2.0f - 3.0f,
-                    left + trackInset + trackW, top + height / 2.0f + 3.0f),
+        D2D1::RectF(pill.left + trackInset, cy - 3.0f, pill.left + trackInset + trackW,
+                    cy + 3.0f),
         3.0f, 3.0f);
     target->FillRoundedRectangle(track, tileBorder_.Get());
     if (scene.hud.percent >= 0) {
@@ -1078,38 +1204,42 @@ class GalleryRenderer {
     const std::wstring label =
         scene.hud.percent >= 0 ? std::to_wstring(scene.hud.percent) + L"%" : L"...";
     DrawLabel(target, caption_.Get(), label,
-              D2D1::RectF(left + trackInset + trackW + 8.0f, top + 13.0f,
-                          left + width - trackInset, top + height - 13.0f),
+              D2D1::RectF(pill.left + trackInset + trackW + 8.0f, pill.top + 13.0f,
+                          pill.right - trackInset, pill.bottom - 13.0f),
               textPrimary_.Get());
   }
 
   void DrawQuickLookCard(ID2D1RenderTarget* target, const Scene& scene,
-                         const D2D1_SIZE_F& size) {
-    const float width = 380.0f, height = 500.0f;
-    const float left = size.width - width - 48.0f;
-    const float top = 96.0f;
-    const D2D1_ROUNDED_RECT card =
-        D2D1::RoundedRect(D2D1::RectF(left, top, left + width, top + height), 24.0f, 24.0f);
-    target->FillRoundedRectangle(card, card_.Get());
-    target->DrawRoundedRectangle(card, islandBorder_.Get(), 1.2f);
+                         const prism::layout::Layout& layout) {
+    const prism::layout::Rect cardRect = prism::layout::QuickLookCardRect(layout);
+    if (cardRect.Empty()) return;
+    const D2D1_RECT_F card = ToRectF(cardRect);
+    const float height = static_cast<float>(cardRect.Height());
+    const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(card, 24.0f, 24.0f);
+    target->FillRoundedRectangle(shape, card_.Get());
+    target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.2f);
 
     // Preview area: gradient stand-in for the decoded texture.
-    thumbs_[1]->SetStartPoint(D2D1::Point2F(left, top));
-    thumbs_[1]->SetEndPoint(D2D1::Point2F(left, top + height - 110.0f));
+    thumbs_[1]->SetStartPoint(D2D1::Point2F(card.left, card.top));
+    thumbs_[1]->SetEndPoint(D2D1::Point2F(card.left, card.top + height - 110.0f));
     D2D1_ROUNDED_RECT preview = D2D1::RoundedRect(
-        D2D1::RectF(left + 14.0f, top + 14.0f, left + width - 14.0f, top + height - 110.0f),
+        D2D1::RectF(card.left + 14.0f, card.top + 14.0f, card.right - 14.0f,
+                    card.top + height - 110.0f),
         16.0f, 16.0f);
     target->FillRoundedRectangle(preview, thumbs_[1].Get());
 
     DrawLabel(target, title_.Get(), scene.quickLookTitle,
-              D2D1::RectF(left + 18.0f, top + height - 98.0f, left + width - 18.0f,
-                          top + height - 70.0f), textPrimary_.Get());
+              D2D1::RectF(card.left + 18.0f, card.top + height - 98.0f, card.right - 18.0f,
+                          card.top + height - 70.0f),
+              textPrimary_.Get());
     DrawLabel(target, small_.Get(), scene.quickLookMeta,
-              D2D1::RectF(left + 18.0f, top + height - 64.0f, left + width - 18.0f,
-                          top + height - 42.0f), textSecondary_.Get());
+              D2D1::RectF(card.left + 18.0f, card.top + height - 64.0f, card.right - 18.0f,
+                          card.top + height - 42.0f),
+              textSecondary_.Get());
     DrawLabel(target, small_.Get(), L"Space close  \u00B7  Esc close  \u00B7  arrows browse",
-              D2D1::RectF(left + 18.0f, top + height - 36.0f, left + width - 18.0f,
-                          top + height - 12.0f), textSecondary_.Get());
+              D2D1::RectF(card.left + 18.0f, card.top + height - 36.0f, card.right - 18.0f,
+                          card.top + height - 12.0f),
+              textSecondary_.Get());
   }
 
   static void DrawLabel(ID2D1RenderTarget* target, IDWriteTextFormat* format,
@@ -1137,6 +1267,13 @@ class GalleryRenderer {
   int dbgThumbLookupHits = 0;
   int dbgThumbBitmaps = 0;
   int dbgThumbDraws = 0;
+  // V1: proof that the classification rule reached pixels. dbgRowCells counts
+  // 32 px fallback rows (P0-2), dbgTileCells the real tiles, and
+  // dbgSkeletonCells MUST stay 0 in a correct build -- the snapshot suite
+  // calibrates its skeleton-colour detector on the debug seam.
+  int dbgTileCells = 0;
+  int dbgRowCells = 0;
+  int dbgSkeletonCells = 0;
   // C27: proof that the sidebar command list reached pixels. dbgSidebarCommands
   // counts every non-hit command considered, dbgSidebarPrimitives the ones
   // actually painted, dbgSidebarLabels the text runs, dbgSidebarPanels the

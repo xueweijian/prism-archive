@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../PrismCore/ActionBarModel.hpp"  // C-V2: the action table + band geometry
 #include "../PrismCore/Gallery.hpp"
 #include "../PrismCore/GlassIsland.hpp"
 #include "../PrismCore/ListLayout.hpp"
@@ -39,6 +40,7 @@
 #include "../PrismCore/ThemeTokens.hpp"
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
+#include "ActionBar.hpp"    // C-V2: the action-band painter (DESIGN.md §2)
 #include "SidebarView.hpp"  // C12 draw commands -- painted since C27, refined by C29
 
 namespace prism::win::gallery {
@@ -154,6 +156,15 @@ class GalleryRenderer {
     // TEST SEAM (not a feature): forces the tile path for every cell so the
     // snapshot suite can prove its "skeleton colour" detector actually fires.
     bool debugForceSkeleton = false;
+
+    // C-V2: the action band. nullptr -> no band at all (every pre-V2 scene, so
+    // the older suites and the snapshot keep their exact framing). The band
+    // rectangle itself comes from V1's layout (actionIsland); the model only
+    // decides how that row is shared with the breadcrumb pill.
+    const prism::actionbar::Model* actions = nullptr;
+    int actionHover = -1;    // button index under the pointer (-1: none)
+    int actionPressed = -1;  // button index held down (-1: none)
+    prism::theme::Variant actionTheme = prism::theme::Variant::Midnight;
   };
 
   HRESULT Initialize() {
@@ -233,6 +244,10 @@ class GalleryRenderer {
       sidebarLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     if (sidebarSmall_) sidebarSmall_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    // C-V2: the band's own brush/text formats. A caller that never builds an
+    // action-bar scene pays one brush and two text formats.
+    hr = actionBar_.CreateDeviceResources(target);
+    if (FAILED(hr)) return hr;
     return S_OK;
   }
 
@@ -270,6 +285,9 @@ class GalleryRenderer {
     // NEGATIVE CONTROL (CONTRACTS D3): the rail is never painted, so the suite's
     // "the command list reached pixels" assertion MUST go red.
     if (kPaintSidebar) DrawSidebar(target, scene, size);
+    // C-V2: the action band, between the content and the floating chrome: its
+    // dropdown panel hangs over the grid, and the pill is painted after it.
+    DrawActionBar(target, scene, layout);
     DrawBreadcrumbIsland(target, scene, layout);
     DrawProgressCapsule(target, scene, layout);
     if (scene.quickLookOpen) DrawQuickLookCard(target, scene, layout);
@@ -1136,19 +1154,47 @@ class GalleryRenderer {
     caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
   }
 
+  // C-V2: the band itself. The model decides how V1's actionIsland is shared
+  // with the breadcrumb pill; this only hands those numbers to the painter, so
+  // a click (model Hit) and a pixel (button rect) cannot disagree.
+  void DrawActionBar(ID2D1RenderTarget* target, const Scene& scene,
+                     const prism::layout::Layout& layout) {
+    if (!scene.actions) return;
+    const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+    actionBar_.Draw(target, band, *scene.actions, scene.actionHover, scene.actionPressed,
+                    scene.actionTheme);
+    dbgActionButtons += actionBar_.dbgButtons;
+    dbgActionIcons += actionBar_.dbgIcons;
+    dbgActionDisabled += actionBar_.dbgDisabled;
+    dbgActionHover += actionBar_.dbgHover;
+    dbgActionPressed += actionBar_.dbgPressed;
+    dbgActionDropdowns += actionBar_.dbgDropdowns;
+  }
+
   // The breadcrumb pill: geometry from the action band (DESIGN.md §2), so it
   // can never overlap the title bar, the status bar or a content card.
   void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,
                             const prism::layout::Layout& layout) {
-    const prism::layout::Rect pillRect = prism::layout::NavPillRect(layout);
+    // C-V2: while an action band is present the pill is the SPLIT one -- the
+    // toolbar may have taken width back, and the window hit-tests the same
+    // rectangle (GalleryWindow::WindowLayoutForClient -> Compute -> navPill).
+    // Without a band this is exactly V1's rect, so every pre-V2 scene (and the
+    // snapshot) keeps its framing to the pixel.
+    const prism::actionbar::Layout band =
+        scene.actions != nullptr ? prism::actionbar::Compute(layout)
+                                 : prism::actionbar::Layout{};
+    const prism::layout::Rect pillRect =
+        scene.actions != nullptr ? band.navPill : prism::layout::NavPillRect(layout);
     if (pillRect.Empty()) return;
+    const prism::layout::Rect textRect =
+        scene.actions != nullptr ? prism::actionbar::NavTextRect(band)
+                                 : prism::layout::NavTextRect(layout);
     const D2D1_RECT_F pill = ToRectF(pillRect);
     const float height = static_cast<float>(pillRect.Height());
     const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(pill, height / 2.0f, height / 2.0f);
     target->FillRoundedRectangle(shape, island_.Get());
     target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.0f);
-    DrawLabel(target, title_.Get(), scene.breadcrumb,
-              ToRectF(prism::layout::NavTextRect(layout)), textPrimary_.Get());
+    DrawLabel(target, title_.Get(), scene.breadcrumb, ToRectF(textRect), textPrimary_.Get());
     if (scene.islands) {
       // Pointer-tracked specular rim (blueprint ch. 3.1 Layer 5): a bright
       // segment flows along the top edge toward the cursor. In the real
@@ -1257,6 +1303,8 @@ class GalleryRenderer {
   // C29 sidebar: one recolourable brush + the two single-line text formats.
   ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
   ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
+  // C-V2: the action band's painter (own brush + text formats).
+  prism::win::actionbar::ActionBarPainter actionBar_;
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
   std::unordered_map<uint32_t, ComPtr<ID2D1Bitmap>> thumbBitmaps_;
   uint64_t thumbVersion_ = 0;
@@ -1287,6 +1335,15 @@ class GalleryRenderer {
   int dbgSidebarPainted = 0;
   int dbgSidebarClipped = 0;
   int dbgSidebarCollapsed = 0;
+  // C-V2: proof that the action band reached the device, and that each visual
+  // state was actually painted (the hover/disabled/focus assertions key on
+  // these being non-zero -- a zero would make the pixel diff meaningless).
+  int dbgActionButtons = 0;
+  int dbgActionIcons = 0;
+  int dbgActionDisabled = 0;
+  int dbgActionHover = 0;
+  int dbgActionPressed = 0;
+  int dbgActionDropdowns = 0;
 
  private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;

@@ -797,8 +797,11 @@ try {
     if ($first.ExitCode -ne 0) { throw 'install #1 failed; dependent assertions would only produce noise' }
 
     $installedSnapshot = Get-Snapshot
-    Assert-InstalledState
 
+    # CONTRACTS D27: prove the injection was observed BEFORE the assertion it
+    # breaks. If this ran after Assert-InstalledState, the first failed assertion
+    # could not be attributed to the mutation and the verdict would have to wait
+    # for the tail of the run -- exactly the shape D27 forbids.
     if ($script:Mutation -eq 'UnquotedVerb') {
         $cmd = [string](Get-RegValue ($script:ClassesRoot + '\' + (Get-ProgId $script:ProbeExt) + '\shell\open\command') '')
         $script:MutationObserved = (-not $cmd.Contains('"%1"')) -and $cmd.Contains('%1')
@@ -806,6 +809,8 @@ try {
             Say ('MUTATION FIXTURE: installed command is malformed as injected: ' + $cmd) 'warn'
         }
     }
+
+    Assert-InstalledState
 
     # 2. install again BEFORE anything writes user data (the app stores
     #    settings.json inside the install directory, which legitimately changes

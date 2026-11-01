@@ -17,6 +17,18 @@
 //      by pointer swap; the window repaints via kThumbsChanged. The app
 //      context is kept alive by shared_ptr on both sides; the sweep worker is
 //      joined after the message loop exits.
+//   6. Folder navigation (increment 5) is owned by the window's
+//      prism::tree::Navigator: this file only sets the catalog down and names
+//      the root crumb. The sweep stays ARCHIVE-WIDE on purpose (see below).
+//
+// Thumbnail scope after navigation -- the decision, stated once:
+//   The solid sweep is a whole-archive, single-pass job (7z hands out solid
+//   blocks in one decode stream; re-running it per folder would re-decode the
+//   same dictionary once per folder). Its store is keyed by CATALOG index, and
+//   the navigator's per-folder rows carry those same indices, so entering a
+//   folder is a re-filter, never a rescan, and a thumbnail decoded before the
+//   switch is still a hit after it. The only thing that changes on navigation
+//   is which rows the renderer asks about.
 //
 // History note: the inc-2 edit of this file was applied by an index-based
 // patch that cut at the wrong offset and left the previous handler's tail
@@ -100,8 +112,8 @@ std::wstring Utf8ToWide(std::string_view text) {
 struct AppContext {
   prism::win::SevenZipLibrary library;
   std::unique_ptr<prism::win::ArchiveReader> reader;
-  std::vector<prism::ArchiveItem> items;
-  std::vector<prism::ArchiveItem> catalog;
+  std::vector<prism::ArchiveItem> items;    // full catalog: what the window navigates
+  std::vector<prism::ArchiveItem> catalog;  // full catalog: what extraction plans over
   std::atomic<bool> extracting{false};
   std::wstring archivePath;
 };
@@ -109,6 +121,9 @@ struct AppContext {
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  // B7 (preflight): every GalleryWindow:: static below needs this alias in the
+  // TU -- the class lives in prism::win::gallery and Main.cpp has no local
+  // MSVC compile to catch a bare unqualified reference.
   using GalleryWindow = prism::win::gallery::GalleryWindow;
   const HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -151,11 +166,20 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
   prism::win::gallery::GalleryWindow window;
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) return 1;
+  // The window's navigator owns the current folder from here on: the catalog
+  // goes in once, and every later question ("which rows?", "which crumbs?",
+  // "which level did that click hit?") is answered by PrismCore.
   window.SetItems(&app->items);
-  // Double-click = smart extract (Bandizip's core interaction). The worker
-  // thread owns the archive handle for the duration; the UI gets progress
-  // messages and a breadcrumb update. One extraction at a time.
-  window.SetActivateHandler([&window, app](int) {
+  window.SetRootLabel(FileNameWide(archive));
+
+  // Double-click on a FILE = smart extract (Bandizip's core interaction; the
+  // folder case never reaches this handler -- the navigator drills in first).
+  // The handler receives the CATALOG index of the row that was activated.
+  // v1 keeps the batch-A semantics: the plan covers the whole archive, so the
+  // index is deliberately unused here -- it is the seam for "extract just this
+  // one" later without touching the window again.
+  window.SetActivateHandler([&window, app](int catalogIndex) {
+    (void)catalogIndex;
     if (app->extracting.exchange(true)) return;
     std::thread([app, &window]() {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -181,7 +205,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       if (ok && !plan.baseTargetDir.empty()) {
         done += L" \x2192 " + Utf8ToWide(plan.baseTargetDir);
       }
-      window.SetBreadcrumb(done);
+      // A status line, NOT a crumb: only the crumbs navigate (SetBreadcrumb is
+      // kept as an alias for the batch-A call sites and the API contract).
+      window.SetStatus(done);
       std::fprintf(stderr, "extract ok=%d files=%llu bytes=%llu in %llums\n",
                    static_cast<int>(ok),
                    static_cast<unsigned long long>(result.filesWritten),
@@ -191,10 +217,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       CoUninitialize();
     }).detach();
   });
-  window.SetBreadcrumb(FileNameWide(archive) + L"  |  " +
-                       std::to_wstring(app->items.size()) + L" items");
+  window.SetStatus(L"\x5171 " + std::to_wstring(app->items.size()) + L" \x9879");
 
-  // One background pass: every image entry, single Extract per solid block.
+  // One background pass: every image entry in the WHOLE archive, a single
+  // Extract per solid block. Folder navigation must never re-run this -- the
+  // store is keyed by catalog index, which the per-folder rows preserve.
   std::vector<uint32_t> sweepIndices;
   std::vector<uint64_t> sweepSizes;
   for (const auto& item : app->items) {

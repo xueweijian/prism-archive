@@ -1,4 +1,4 @@
-// PrismArchive -- the runnable application (batch A assembly).
+// PrismArchive -- the runnable application (batch A assembly + card C25 wiring).
 //
 // This is the entry point the project never had: every part below was already
 // proven in isolation (engine bridge against real 7z.dll, single-pass solid
@@ -6,9 +6,28 @@
 // this file is deliberately boring glue, because assembly bugs live in
 // ordering and lifetime, not in cleverness.
 //
-// Assembly contract (batch A):
+// Card C25 (wave 2) changed exactly five things here, and nothing else:
+//   1. HANDLERS PER OPERATION (C11). The sweep and the extract used to share one
+//      ArchiveReader -- a data race inside 7z.dll and one shared file pointer
+//      (docs/PROGRESS known debt). Every operation now leases its own handler
+//      from prism::app::OperationHandles, which pairs ExtractScheduler's slot
+//      with ReaderPool's lease.
+//   2. SECURITY PASS (C5). After a successful extraction, :Zone.Identifier is
+//      inherited from the archive onto every written file, and executable/script
+//      payloads get an AMSI pre-scan whose Unavailable state is reported, never
+//      silently treated as Allow (prism::app::ApplySecurityPass).
+//   3. COMMAND LINE (C4). --smart-extract / --extract-here / --extract-sub /
+//      --test are the four verbs the shell DLLs launch us with; each one builds
+//      its own plan (prism::app::BuildExtractionPlan) and --test runs the
+//      verify-only path instead of opening a window.
+//   4. KEYS/PALETTE/HISTORY (C8), LIST VIEW (C13) and SIDEBAR (C12) are wired in
+//      GalleryWindow (WM_KEYDOWN now goes through PrismCore's key table). This
+//      file only has to hand the window the catalog it already owns.
+//   5. 7z.dll resolution is untouched: C1's cross-drive probe order stays.
+//
+// Assembly contract (batch A, still true):
 //   1. COM apartment-threaded for the UI thread; the workers use MTA.
-//   2. Archive path: argv[1], else a common dialog. No archive -> quiet exit.
+//   2. Archive path: argv, else a common dialog. No archive -> quiet exit.
 //   3. 7z.dll resolution lives in PrismEngineBridge::Resolve7zDll (env ->
 //      app dir -> 7-Zip's own registry InstallDir -> the two Program Files
 //      probes). Not finding it is a diagnosable failure, not a silent one: the
@@ -17,44 +36,27 @@
 //      load in milliseconds per the blueprint's zero-payload scan).
 //   5. Thumbnails: ONE background sweep over all image entries (single-pass
 //      per solid block) into a worker-owned ThumbStore, handed to the window
-//      by pointer swap; the window repaints via kThumbsChanged. The app
-//      context is kept alive by shared_ptr on both sides.
-//   6. Folder navigation (increment 5) is owned by the window's
-//      prism::tree::Navigator: this file only sets the catalog down and names
-//      the root crumb. The sweep stays ARCHIVE-WIDE on purpose (see below).
+//      by pointer swap; the window repaints via kThumbsChanged.
+//   6. Folder navigation is owned by the window's prism::tree::Navigator.
 //
-// Thumbnail scope after navigation -- the decision, stated once:
-//   The solid sweep is a whole-archive, single-pass job (7z hands out solid
-//   blocks in one decode stream; re-running it per folder would re-decode the
-//   same dictionary once per folder). Its store is keyed by CATALOG index, and
-//   the navigator's per-folder rows carry those same indices, so entering a
-//   folder is a re-filter, never a rescan, and a thumbnail decoded before the
-//   switch is still a hit after it. The only thing that changes on navigation
-//   is which rows the renderer asks about.
-//
-// Shutdown contract (card C1: app lifecycle, 2026-11-01):
+// Shutdown contract (card C1, still true with two handlers):
 //   close window -> WM_CLOSE -> WM_DESTROY -> PostQuitMessage -> Run() returns
-//   -> the scan is CANCELLED (ArchiveReader::RequestBatchAbort, which makes the
-//   sweep's extract callback answer E_ABORT and lets 7-Zip stop inside its own
-//   decode loop) -> every worker is JOINED -> the window object leaves scope ->
-//   the process exits with code 0. No detach anywhere: the window is a stack
-//   object and the workers talk to it through Post* only, so a join is what
-//   makes that contract sound.
-//   The measured failure this replaces: closing the window left the process
-//   alive forever. Root cause was not the close path at all -- the gallery
-//   renderer was never Initialize()d, so the first WM_PAINT dereferenced a null
-//   DirectWrite factory, the UI thread took an access violation inside
-//   DispatchMessageW, and the process sat in that fault (with the window
-//   already gone) instead of unwinding to GetMessageW and seeing WM_QUIT. The
-//   fix is in GalleryWindow::Create (it now initializes the renderer before the
-//   first paint) plus this file's cancel-then-join shutdown and a lifecycle
-//   test that drives a REAL window and a REAL WM_CLOSE
-//   (Tests/win/test_app_lifecycle.cpp).
+//   -> every worker's reader is ABORTED (RequestBatchAbort makes the extract
+//   callback answer E_ABORT, so 7-Zip stops inside its own decode loop) -> every
+//   worker is JOINED -> the window object leaves scope -> exit code 0. No detach
+//   anywhere: the window is a stack object and the workers talk to it through
+//   Post* only, so a join is what makes that contract sound.
+//   With the pool, "the reader to abort" is no longer app->reader: each worker
+//   publishes its own handler pointer before it starts decoding, and the UI
+//   thread aborts whichever pointers are published. The publication order (store
+//   pointer, THEN check the shutdown flag; UI sets the flag, THEN reads the
+//   pointer) closes both interleavings without a lock.
 //
-// History note: the inc-2 edit of this file was applied by an index-based
-// patch that cut at the wrong offset and left the previous handler's tail
-// dangling below the new one (main CI red twice). Rewritten as one piece;
-// lesson recorded in docs/CONTRACTS.md (D7: no index-surgery on whole files).
+// History note: the inc-2 edit of this file was applied by an index-based patch
+// that cut at the wrong offset and left the previous handler's tail dangling
+// below the new one (main CI red twice). Rewritten as one piece; lesson recorded
+// in docs/CONTRACTS.md (D7: no index-surgery on whole files). This file was
+// rewritten whole again for C25 for the same reason.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -67,18 +69,18 @@
 #include <shellapi.h>  // CommandLineToArgvW
 
 #include <atomic>
-#include <cstdio>      // fprintf (extraction telemetry)
-#include <filesystem>  // parent_path for the default output dir
+#include <cstdio>      // fprintf (extraction / verification telemetry)
+#include <filesystem>  // parent_path, exists (the plan's collision probe)
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "AppWiring.hpp"
 #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
-#include "../PrismCore/SmartExtractor.hpp" // SmartExtractionPlanner
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/GalleryWindow.hpp"
-#include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8, SmartExtractCallback
+#include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
 #include "../PrismWin/SolidSweeper.hpp"
 
 #pragma comment(lib, "advapi32.lib")  // RegOpenKeyExW in Resolve7zDll
@@ -87,6 +89,11 @@
 #pragma comment(lib, "shlwapi.lib")
 
 namespace {
+
+// B7 (preflight): every GalleryWindow:: static below needs this alias in the
+// TU -- the class lives in prism::win::gallery and Main.cpp has no local MSVC
+// compile to catch a bare unqualified reference.
+using GalleryWindow = prism::win::gallery::GalleryWindow;
 
 std::wstring PickArchive() {
   OPENFILENAMEW ofn{};
@@ -104,16 +111,6 @@ std::wstring PickArchive() {
 std::wstring FileNameWide(const std::wstring& path) {
   const size_t slash = path.find_last_of(L"/\\");
   return slash == std::wstring::npos ? path : path.substr(slash + 1);
-}
-
-std::wstring Utf8ToWide(std::string_view text) {
-  if (text.empty()) return {};
-  const int wide = MultiByteToWideChar(CP_UTF8, 0, text.data(),
-                                       static_cast<int>(text.size()), nullptr, 0);
-  std::wstring out(static_cast<size_t>(wide), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
-                      out.data(), wide);
-  return out;
 }
 
 // "7z.dll not found" is only actionable if it names the paths that were tried
@@ -147,37 +144,124 @@ std::wstring DescribeMissing7zDll(const prism::win::SevenZipDllLookup& lookup) {
 // Everything the UI thread and the workers share. Kept alive by shared_ptr on
 // both sides; every worker is JOINED after the message loop.
 //
-// threading contract: `window` is a stack object in wWinMain, destroyed after
+// threading contract: "window" is a stack object in wWinMain, destroyed after
 // Run() returns. A worker must therefore never hold a reference to it across a
-// window close -- that is why the extract worker is joinable and why it talks
-// to the window only through the POSTING helpers (PostHudStart/PostStatus/
+// window close -- that is why every worker is joinable and why it talks to the
+// window only through the POSTING helpers (PostHudStart/PostStatus/
 // PostProgress), which are no-ops once the HWND is gone.
+//
+// The two "*Reader" slots are the C25 publication points described in the
+// shutdown contract above: a worker stores the handler it is about to decode on
+// and THEN checks "shuttingDown"; the UI thread sets "shuttingDown" and THEN
+// reads the pointers. Neither order can miss the other side.
 struct AppContext {
   prism::win::SevenZipLibrary library;
-  std::unique_ptr<prism::win::ArchiveReader> reader;
+  std::shared_ptr<prism::app::OperationHandles> ops;
   std::vector<prism::ArchiveItem> items;    // full catalog: what the window navigates
-  std::vector<prism::ArchiveItem> catalog;  // full catalog: what extraction plans over
+  std::vector<prism::ArchiveItem> catalog;  // full catalog: what plans are built over
   std::atomic<bool> extracting{false};
-  // Set by a worker that can no longer finish. Read after join: if it is true
-  // the archive may be half-written and the READER must not be used again.
   std::atomic<bool> shuttingDown{false};
+  std::atomic<prism::win::ArchiveReader*> sweepReader{nullptr};
+  std::atomic<prism::win::ArchiveReader*> extractReader{nullptr};
   std::wstring archivePath;
+  prism::app::ExtractionPlan plan;
 };
+
+// A context-menu verb we do not implement yet must SAY so. Falling back to
+// "open the gallery" would look like the command worked (and, for --compress-*,
+// would silently do nothing to the user's archive) -- see TODO(C9) in
+// AppWiring.hpp.
+void ReportRefusedVerb(const prism::app::LaunchRequest& request) {
+  std::wstring text =
+      L"\u672C\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u8FD9\u4E2A\u547D\u4EE4\uFF1A\n\n  ";
+  text += request.unknownText.empty() ? std::wstring(L"(unknown)") : request.unknownText;
+  text +=
+      L"\n\n\u5DF2\u652F\u6301\uFF1A--smart-extract / --extract-here / --extract-sub / --test";
+  MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONWARNING);
+}
+
+// One line of machine-readable telemetry. A GUI app has no console, so this is
+// diagnostic only; the exit code carries the verdict.
+void Telemetry(const char* what, const prism::app::ExtractionOutcome& outcome) {
+  std::fprintf(stderr, "%s ok=%d files=%llu bytes=%llu stamped=%llu amsiBlocked=%llu\n", what,
+               static_cast<int>(outcome.ok),
+               static_cast<unsigned long long>(outcome.filesWritten),
+               static_cast<unsigned long long>(outcome.bytesWritten),
+               static_cast<unsigned long long>(outcome.security.filesStamped),
+               static_cast<unsigned long long>(outcome.security.amsiBlocked));
+}
+
+// Headless path for the three extracting verbs and for --test. Returns the
+// process exit code: 0 on success, 1 on a diagnosable failure (with a message
+// box), 2 when the verb needs an archive it was not given.
+int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app) {
+  if (request.mode == prism::app::LaunchMode::kTest) {
+    const prism::app::VerifyOutcome outcome =
+        prism::app::VerifyIntegrity(*app.ops, app.catalog, app.archivePath);
+    std::fprintf(stderr, "verify ok=%d items=%llu bytes=%llu failedIndex=%d %s\n",
+                 static_cast<int>(outcome.ok),
+                 static_cast<unsigned long long>(outcome.items),
+                 static_cast<unsigned long long>(outcome.bytes),
+                 static_cast<int>(outcome.failedIndex), outcome.error.c_str());
+    if (!outcome.ok) {
+      const std::wstring text =
+          L"\u6821\u9A8C\u5931\u8D25\uFF1A\n" + prism::win::Utf8ToWide(outcome.error);
+      MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONERROR);
+      return 1;
+    }
+    return 0;
+  }
+
+  const prism::app::ExtractionOutcome outcome = prism::app::RunExtraction(
+      *app.ops, app.catalog, app.plan, app.archivePath, /*scanExecutables=*/true);
+  Telemetry("extract", outcome);
+  if (!outcome.ok) {
+    std::wstring text = L"\u89E3\u538B\u5931\u8D25\n\n";
+    text += outcome.error.empty()
+                ? std::wstring(L"(\u5F15\u64CE\u672A\u62A5\u544A\u539F\u56E0)")
+                : prism::win::Utf8ToWide(outcome.error);
+    MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONERROR);
+    return 1;
+  }
+  // A security finding is not a silent success: the user gets told that some
+  // payload could not be scanned or was flagged (C5's Unavailable contract).
+  if (outcome.security.amsiBlocked > 0 || outcome.security.amsiCouldNotScan > 0) {
+    MessageBoxW(nullptr, outcome.status.c_str(), L"PrismArchive", MB_ICONWARNING);
+  }
+  return 0;
+}
 
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
-  // B7 (preflight): every GalleryWindow:: static below needs this alias in the
-  // TU -- the class lives in prism::win::gallery and Main.cpp has no local
-  // MSVC compile to catch a bare unqualified reference.
-  using GalleryWindow = prism::win::gallery::GalleryWindow;
   const HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  std::wstring archive = (argv && argc > 1) ? argv[1] : std::wstring();
-  if (argv) LocalFree(argv);
-  if (archive.empty()) archive = PickArchive();
+  std::vector<std::wstring> args;
+  if (argv) {
+    for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
+    LocalFree(argv);
+  }
+  // C4 contract: the four flags the shell DLLs launch us with are parsed from
+  // the SAME constants the registrar renders, so the two halves cannot drift.
+  prism::app::LaunchRequest launch = prism::app::ParseLaunch(args);
+  if (launch.unknownFlag) {
+    ReportRefusedVerb(launch);
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 2;
+  }
+  std::wstring archive = launch.archive;
+  if (archive.empty()) {
+    // A verb without a path is a caller bug, not "open the picker".
+    if (launch.mode != prism::app::LaunchMode::kGallery) {
+      MessageBoxW(nullptr, L"\u547D\u4EE4\u7F3A\u5C11\u5F52\u6863\u8DEF\u5F84\u3002",
+                  L"PrismArchive", MB_ICONERROR);
+      if (SUCCEEDED(coInit)) CoUninitialize();
+      return 2;
+    }
+    archive = PickArchive();
+  }
   if (archive.empty()) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 0;  // user closed the picker: not an error
@@ -200,20 +284,57 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
-  app->reader = std::make_unique<prism::win::ArchiveReader>(app->library);
-  if (!app->reader->Open(archive)) {
-    const std::wstring trace(app->reader->openTrace().begin(),
-                             app->reader->openTrace().end());
-    MessageBoxW(nullptr, (L"Failed to open:\n" + archive + L"\n\n" + trace).c_str(),
-                L"PrismArchive", MB_ICONERROR);
+
+  // The catalog is read ONCE, on the UI thread, from a probe handler that is
+  // released before the pool opens its own (one seek+header read, blueprint's
+  // zero-payload scan). The pool's handlers are the ones that decode.
+  {
+    prism::win::ArchiveReader probe(app->library);
+    if (!probe.Open(archive)) {
+      const std::wstring trace(probe.openTrace().begin(), probe.openTrace().end());
+      MessageBoxW(nullptr, (L"Failed to open:\n" + archive + L"\n\n" + trace).c_str(),
+                  L"PrismArchive", MB_ICONERROR);
+      if (SUCCEEDED(coInit)) CoUninitialize();
+      return 1;
+    }
+    app->catalog = probe.ReadCatalog();
+  }
+  app->items = app->catalog;
+
+  // Two handlers: the solid sweep and the user's extraction are the two
+  // operations that can genuinely overlap (large archive + double-click).
+  prism::app::OperationHandles::Config opsConfig;
+  opsConfig.archivePath = archive;
+  opsConfig.handlerSlots = 2;
+  std::string opsError;
+  app->ops = prism::app::OperationHandles::Create(app->library, opsConfig, &opsError);
+  if (!app->ops) {
+    const std::wstring text =
+        L"\u6253\u5F00\u5F15\u64CE\u53E5\u67C4\u5931\u8D25\uFF1A\n" +
+        prism::win::Utf8ToWide(opsError);
+    MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
-  app->catalog = app->reader->ReadCatalog();
-  app->items = app->catalog;
+
+  // One plan for the whole session: the verb chose it, and the gallery's
+  // double-click uses the smart plan -- the SAME builder, so a fix lands twice.
+  app->plan = prism::app::BuildExtractionPlan(
+      launch.mode, prism::win::WideToUtf8(archive), app->catalog,
+      [](const std::string& path) {
+        return std::filesystem::exists(prism::win::Utf8ToWide(path));
+      });
+
+  if (launch.mode != prism::app::LaunchMode::kGallery) {
+    const int code = RunHeadless(launch, *app);
+    app->ops->Close();
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return code;
+  }
 
   prism::win::gallery::GalleryWindow window;
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) {
+    app->ops->Close();
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
@@ -222,22 +343,24 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // "which level did that click hit?") is answered by PrismCore.
   window.SetItems(&app->items);
   window.SetRootLabel(FileNameWide(archive));
+  // C12: the sidebar's telemetry pill needs the engine facts the catalog cannot
+  // derive. v1 knows the encryption bit from the catalog itself; the method and
+  // dictionary names have no accessor in the bridge yet (kept honest, not faked).
+  {
+    prism::sidebar::ArchiveInfo info;
+    for (const prism::ArchiveItem& item : app->catalog) {
+      if (item.encrypted) info.encryption = prism::sidebar::Encryption::Unknown;
+    }
+    window.SetArchiveInfo(info);
+  }
 
   // Double-click on a FILE = smart extract (Bandizip's core interaction; the
   // folder case never reaches this handler -- the navigator drills in first).
-  // The handler receives the CATALOG index of the row that was activated.
-  // v1 keeps the batch-A semantics: the plan covers the whole archive, so the
-  // index is deliberately unused here -- it is the seam for "extract just this
-  // one" later without touching the window again.
+  // Ctrl+E reaches the same door with a catalog index (C8 wiring in the window).
   //
   // THREADING: this handler runs on the UI thread but the work is long, so it
-  // hands off to a JOINABLE worker stored in `extractWorker`. It used to be a
-  // detached thread capturing &window by reference: the widget is a stack
-  // object destroyed right after Run(), so closing the app mid-extraction left
-  // that thread writing into freed memory -- and it also raced on hud_ (which
-  // the window feeds from WndProc "single-threaded by rule"). Both are fixed by
-  // (a) the worker reaching the window only through Post* helpers, and (b) the
-  // join below, which is what makes the window's lifetime outlast the worker.
+  // hands off to a JOINABLE worker stored in "extractWorker". The worker reaches
+  // the window only through Post* helpers.
   std::thread extractWorker;
   window.SetActivateHandler([&window, app, &extractWorker](int catalogIndex) {
     (void)catalogIndex;  // the whole-archive plan is v1's behaviour; see above
@@ -248,33 +371,39 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       const uint64_t t0 = GalleryWindow::NowMs();
       window.PostHudStart("\xe6\x99\xba\xe8\x83\xbd\xe8\xa7\xa3\xe5\x8e\x8b");
-      namespace fs = std::filesystem;
-      const std::string outDir = prism::win::WideToUtf8(
-          fs::path(app->archivePath).parent_path().wstring());
-      const auto plan = prism::SmartExtractionPlanner::Build(
-          prism::win::WideToUtf8(app->archivePath), outDir, app->catalog,
-          [](const std::string&) { return false; });
-      prism::win::SmartExtractCallback::Result result;
-      const bool ok = app->reader->ExtractWithPlan(app->catalog, plan,
-                                                   plan.baseTargetDir, nullptr,
-                                                   &result);
-      // Posted, not called: hud_ belongs to the UI thread.
-      window.PostProgress(result.filesWritten, app->catalog.size());
-      // Never hold a c_str() of a temporary: build the wide string first.
-      std::wstring done = ok ? std::wstring(L"\x5DF2\x89E3\x538B")
-                             : std::wstring(L"\x89E3\x538B\x5931\x8D25");
-      if (ok && !plan.baseTargetDir.empty()) {
-        done += L" \x2192 " + Utf8ToWide(plan.baseTargetDir);
+      prism::app::ExtractionOutcome outcome;
+      std::string why;
+      auto task = app->ops->Begin(prism::core::sched::Kind::kExtract,
+                                  prism::core::sched::Priority::kUser,
+                                  "extract:" + prism::win::WideToUtf8(app->archivePath),
+                                  "extract", &why);
+      if (task.has_value()) {
+        app->extractReader.store(task->reader);
+        // Published BEFORE the flag check: see the shutdown contract above.
+        if (app->shuttingDown.load()) task->reader->RequestBatchAbort();
+        prism::win::SmartExtractCallback::Result result;
+        const bool ok = task->reader->ExtractWithPlan(
+            app->catalog, app->plan.plan, app->plan.plan.baseTargetDir, nullptr, &result);
+        app->extractReader.store(nullptr);
+        app->ops->Finish(*task, ok);
+        outcome.ok = ok;
+        outcome.filesWritten = result.filesWritten;
+        outcome.bytesWritten = result.bytesWritten;
+        if (ok) {
+          outcome.security = prism::app::ApplySecurityPass(
+              app->archivePath, result.writtenPaths, /*scanExecutables=*/true);
+        }
+        outcome.status =
+            prism::app::detail::BuildStatusText(outcome, ok, app->plan.plan.baseTargetDir);
+      } else {
+        outcome.status = L"\x89E3\x538B\x88AB\x62D2\x7EDD";
+        if (!why.empty()) outcome.status += L" (" + prism::win::Utf8ToWide(why) + L")";
       }
-      // A status line, NOT a crumb: only the crumbs navigate (SetBreadcrumb is
-      // kept as an alias for the batch-A call sites and the API contract).
-      // Posted for the same reason as the progress above: status_ and the
-      // breadcrumb layout it rebuilds are UI-thread state.
-      window.PostStatus(done);
-      std::fprintf(stderr, "extract ok=%d files=%llu bytes=%llu in %llums\n",
-                   static_cast<int>(ok),
-                   static_cast<unsigned long long>(result.filesWritten),
-                   static_cast<unsigned long long>(result.bytesWritten),
+      // Posted, not called: hud_ / status_ belong to the UI thread.
+      window.PostProgress(outcome.filesWritten, app->catalog.size());
+      window.PostStatus(outcome.status);
+      Telemetry("extract", outcome);
+      std::fprintf(stderr, "extract wall=%llums\n",
                    static_cast<unsigned long long>(GalleryWindow::NowMs() - t0));
       app->extracting = false;
       CoUninitialize();
@@ -293,41 +422,51 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     sweepIndices.push_back(item.index);
     sweepSizes.push_back(item.size);
   }
-  // THREADING: the sweep reads the same ArchiveReader that extraction uses, and
-  // 7z.dll handlers are not thread-safe -- 7-Zip's own guidance is one handler
-  // per concurrent operation. Both workers are joined before the app exits, so
-  // the second statement below is about a REAL interleaving: the sweep is still
-  // running (a large archive takes seconds) when the user double-clicks a file.
-  // Sharing one reader across them is an open defect, recorded as debt in
-  // docs/PROGRESS.md rather than hidden behind a "works on my archive" run;
-  // fixing it needs a second handle/reader, which is a real chunk of work.
+  // THREADING (C25): the sweep gets its OWN handler from the pool -- 7z.dll
+  // handlers are not thread-safe, so the sweep and a double-click extraction now
+  // run on two leases instead of racing on one (docs/PROGRESS known debt).
   std::thread worker([app, &window, sweepIndices, sweepSizes]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     prism::win::sweep::WicThumbDecoder wic;
     if (wic.Initialize() && !sweepIndices.empty()) {
       auto store = std::make_shared<prism::gallery::ThumbStore>(64ull << 20);
-      prism::win::sweep::RunSolidSweep(*app->reader, sweepIndices, sweepSizes,
-                                       wic, *store);
-      window.SetThumbs(store);
-      PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+      std::string why;
+      auto task = app->ops->Begin(prism::core::sched::Kind::kSweep,
+                                  prism::core::sched::Priority::kBackground,
+                                  "sweep:" + prism::win::WideToUtf8(app->archivePath), "sweep",
+                                  &why);
+      if (task.has_value()) {
+        app->sweepReader.store(task->reader);
+        if (app->shuttingDown.load()) task->reader->RequestBatchAbort();
+        prism::win::sweep::RunSolidSweep(*task->reader, sweepIndices, sweepSizes, wic, *store);
+        app->sweepReader.store(nullptr);
+        app->ops->Finish(*task, true);
+        // SetThumbs takes its own mutex and touches nothing else (documented
+        // worker-safe); the repaint is a posted message, never a direct call.
+        window.SetThumbs(store);
+        PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+      } else {
+        std::fprintf(stderr, "sweep refused: %s\n", why.c_str());
+      }
     }
     CoUninitialize();
   });
 
   window.Run();
 
-  // The window is gone: cancel the thumbnail scan BEFORE joining it. The sweep
-  // is one whole-archive Extract inside 7-Zip; without this it would run to
-  // completion (seconds on a large archive) with no window left to hand the
-  // result to, and closing the app would look like a hang. RequestBatchAbort
-  // makes the extract callback answer E_ABORT, 7-Zip stops the decode, and the
-  // join below returns in milliseconds.
-  app->reader->RequestBatchAbort();
+  // The window is gone. Stop both operations BEFORE joining: RequestBatchAbort
+  // makes the extract callback answer E_ABORT, so 7-Zip stops inside its own
+  // decode loop and the joins return in milliseconds instead of "seconds on a
+  // large archive" (C1's close-latency measurement depends on this).
+  app->shuttingDown.store(true);
+  if (auto* reader = app->sweepReader.load()) reader->RequestBatchAbort();
+  if (auto* reader = app->extractReader.load()) reader->RequestBatchAbort();
+  app->ops->Close();  // no new work; queued tasks are cancelled
 
-  // Join EVERY worker before `window` leaves scope: it is a stack object and the
+  // Join EVERY worker before "window" leaves scope: it is a stack object and the
   // workers talk to it. Joining is what makes the posting contract sound -- a
   // Post* that lands after WM_DESTROY simply fails and frees its payload.
-  // Never detach: a detached worker here would outlive `window` and `app`.
+  // Never detach: a detached worker here would outlive "window" and "app".
   worker.join();
   if (extractWorker.joinable()) extractWorker.join();
 

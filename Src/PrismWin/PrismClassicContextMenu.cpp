@@ -28,7 +28,8 @@
 #include <vector>
 
 #include "../PrismCore/ContextMenuModel.hpp"
-#include "PrismEngineBridge.hpp"  // WideToUtf8 / Utf8ToWide
+#include "CompanionPreviewBridge.hpp"  // C30 inline-preview IPC (fire-and-forget)
+#include "PrismEngineBridge.hpp"       // WideToUtf8 / Utf8ToWide
 #include "SparsePackageRegistrar.hpp"
 
 using namespace Microsoft::WRL;
@@ -43,6 +44,27 @@ namespace {
 // "always do this" / telemetry, and our own tests use them to prove that the
 // offset -> verb mapping is right WITHOUT launching a process.
 std::wstring VerbWide(const std::string& verb) { return Utf8ToWide(verb); }
+
+// Blueprint ch. 4.1 trigger: the moment the menu opens, hand the first selected
+// path plus the click position to the companion flyout over the C30 channel.
+//
+// Two rules decide the shape of this function:
+//   * it runs on explorer.exe's UI thread inside QueryContextMenu, so it must be
+//     non-blocking -- ackTimeoutMs=0 means "write, signal, return" with no wait;
+//   * it must not create shell state when the companion is absent.
+//     TryPublishPreview only OPENS an existing section, so "no companion" costs
+//     two failed NtOpenSection calls and the menu opens exactly as before.
+// The shell does NOT enumerate the archive: listing entries belongs to the
+// companion process (PrismCore), never to explorer's UI thread. entries stays
+// empty and kFlagNeedsCatalogScan asks the companion to fill the first N itself.
+void PublishInlinePreview(const std::vector<std::string>& selected) noexcept {
+  if (selected.empty()) return;
+  POINT cursor{};
+  if (!::GetCursorPos(&cursor)) return;  // no anchor: the flyout would be guessed
+  const auto packet =
+      prism::win::companion::MakeShellPacket(Utf8ToWide(selected.front()), cursor);
+  (void)prism::win::companion::TryPublishPreview(packet, /*ackTimeoutMs=*/0);
+}
 
 }  // namespace
 
@@ -121,6 +143,9 @@ class ClassicMenu final
     }
     ::InsertMenuW(menu, indexMenu, MF_BYPOSITION | MF_POPUP,
                   reinterpret_cast<UINT_PTR>(popup), L"PrismArchive");
+    // The menu is on screen from here on: wake the inline preview. This is the
+    // ONLY thing C30 adds to this file -- no state, no window, no blocking call.
+    PublishInlinePreview(selected_);
     return MAKE_HRESULT(SEVERITY_SUCCESS, 0, used);
   }
 

@@ -446,15 +446,18 @@ PRISM_TEST("bare .zst/.lz4/.br decode through their handler CLSIDs") {
     PRISM_CHECK(result.payload == expected);
   }
 
-  // Product gap, measured: ArchiveReader::Open() only tries the Zip and 7z
-  // handler CLSIDs (PrismEngineBridge.hpp), so a bare .zst does NOT open even
-  // though this DLL decodes it perfectly one inch lower. The handler-table work
-  // is on OUR side, not the DLL's.
+  // Product routing, re-measured after card C26 added the extension -> handler
+  // table: a bare .zst now opens through ArchiveReader, because the reader no
+  // longer guesses between Zip and 7z only. C17 originally asserted the
+  // OPPOSITE (a documented product gap); that assertion was correct then and
+  // is wrong now. It is UPDATED here rather than deleted: "the product can open
+  // this" is the property worth keeping locked, and a deleted assertion would
+  // let the routing table regress silently.
   prism::win::ArchiveReader reader(library);
   const bool opened = reader.Open(Fixture(L"note.txt.zst"));
   std::cout << "    ArchiveReader(.zst) opened=" << (opened ? "yes" : "no")
             << " trace: " << reader.openTrace() << std::endl;
-  PRISM_CHECK(!opened);
+  PRISM_CHECK(opened);
   reader.Close();
 }
 

@@ -108,13 +108,22 @@ std::wstring Utf8ToWide(std::string_view text) {
 }
 
 // Everything the UI thread and the workers share. Kept alive by shared_ptr on
-// both sides; the sweep worker is joined after the message loop.
+// both sides; every worker is JOINED after the message loop.
+//
+// threading contract: `window` is a stack object in wWinMain, destroyed after
+// Run() returns. A worker must therefore never hold a reference to it across a
+// window close -- that is why the extract worker is joinable and why it talks
+// to the window only through the POSTING helpers (PostHudStart/PostStatus/
+// PostProgress), which are no-ops once the HWND is gone.
 struct AppContext {
   prism::win::SevenZipLibrary library;
   std::unique_ptr<prism::win::ArchiveReader> reader;
   std::vector<prism::ArchiveItem> items;    // full catalog: what the window navigates
   std::vector<prism::ArchiveItem> catalog;  // full catalog: what extraction plans over
   std::atomic<bool> extracting{false};
+  // Set by a worker that can no longer finish. Read after join: if it is true
+  // the archive may be half-written and the READER must not be used again.
+  std::atomic<bool> shuttingDown{false};
   std::wstring archivePath;
 };
 
@@ -178,14 +187,25 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // v1 keeps the batch-A semantics: the plan covers the whole archive, so the
   // index is deliberately unused here -- it is the seam for "extract just this
   // one" later without touching the window again.
-  window.SetActivateHandler([&window, app](int catalogIndex) {
-    (void)catalogIndex;
+  //
+  // THREADING: this handler runs on the UI thread but the work is long, so it
+  // hands off to a JOINABLE worker stored in `extractWorker`. It used to be a
+  // detached thread capturing &window by reference: the widget is a stack
+  // object destroyed right after Run(), so closing the app mid-extraction left
+  // that thread writing into freed memory -- and it also raced on hud_ (which
+  // the window feeds from WndProc "single-threaded by rule"). Both are fixed by
+  // (a) the worker reaching the window only through Post* helpers, and (b) the
+  // join below, which is what makes the window's lifetime outlast the worker.
+  std::thread extractWorker;
+  window.SetActivateHandler([&window, app, &extractWorker](int catalogIndex) {
+    (void)catalogIndex;  // the whole-archive plan is v1's behaviour; see above
     if (app->extracting.exchange(true)) return;
-    std::thread([app, &window]() {
+    // A previous run must be finished before its std::thread is assigned over.
+    if (extractWorker.joinable()) extractWorker.join();
+    extractWorker = std::thread([app, &window]() {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       const uint64_t t0 = GalleryWindow::NowMs();
-      window.Hud().OnStart("\xe6\x99\xba\xe8\x83\xbd\xe8\xa7\xa3\xe5\x8e\x8b",
-                           GalleryWindow::NowMs());
+      window.PostHudStart("\xe6\x99\xba\xe8\x83\xbd\xe8\xa7\xa3\xe5\x8e\x8b");
       namespace fs = std::filesystem;
       const std::string outDir = prism::win::WideToUtf8(
           fs::path(app->archivePath).parent_path().wstring());
@@ -196,9 +216,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       const bool ok = app->reader->ExtractWithPlan(app->catalog, plan,
                                                    plan.baseTargetDir, nullptr,
                                                    &result);
-      PostMessageW(window.Hwnd(), GalleryWindow::kProgressMessage,
-                   static_cast<WPARAM>(result.filesWritten),
-                   static_cast<LPARAM>(app->catalog.size()));
+      // Posted, not called: hud_ belongs to the UI thread.
+      window.PostProgress(result.filesWritten, app->catalog.size());
       // Never hold a c_str() of a temporary: build the wide string first.
       std::wstring done = ok ? std::wstring(L"\x5DF2\x89E3\x538B")
                              : std::wstring(L"\x89E3\x538B\x5931\x8D25");
@@ -207,7 +226,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       }
       // A status line, NOT a crumb: only the crumbs navigate (SetBreadcrumb is
       // kept as an alias for the batch-A call sites and the API contract).
-      window.SetStatus(done);
+      // Posted for the same reason as the progress above: status_ and the
+      // breadcrumb layout it rebuilds are UI-thread state.
+      window.PostStatus(done);
       std::fprintf(stderr, "extract ok=%d files=%llu bytes=%llu in %llums\n",
                    static_cast<int>(ok),
                    static_cast<unsigned long long>(result.filesWritten),
@@ -215,7 +236,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    static_cast<unsigned long long>(GalleryWindow::NowMs() - t0));
       app->extracting = false;
       CoUninitialize();
-    }).detach();
+    });
   });
   window.SetStatus(L"\x5171 " + std::to_wstring(app->items.size()) + L" \x9879");
 
@@ -230,6 +251,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     sweepIndices.push_back(item.index);
     sweepSizes.push_back(item.size);
   }
+  // THREADING: the sweep reads the same ArchiveReader that extraction uses, and
+  // 7z.dll handlers are not thread-safe -- 7-Zip's own guidance is one handler
+  // per concurrent operation. Both workers are joined before the app exits, so
+  // the second statement below is about a REAL interleaving: the sweep is still
+  // running (a large archive takes seconds) when the user double-clicks a file.
+  // Sharing one reader across them is an open defect, recorded as debt in
+  // docs/PROGRESS.md rather than hidden behind a "works on my archive" run;
+  // fixing it needs a second handle/reader, which is a real chunk of work.
   std::thread worker([app, &window, sweepIndices, sweepSizes]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     prism::win::sweep::WicThumbDecoder wic;
@@ -244,7 +273,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   });
 
   window.Run();
+  // Join EVERY worker before `window` leaves scope: it is a stack object and the
+  // workers talk to it. Joining is what makes the posting contract sound -- a
+  // Post* that lands after WM_DESTROY simply fails and frees its payload.
   worker.join();
+  if (extractWorker.joinable()) extractWorker.join();
 
   if (SUCCEEDED(coInit)) CoUninitialize();
   return 0;

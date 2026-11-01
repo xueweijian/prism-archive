@@ -56,6 +56,13 @@ mkdir -p "$tmp/inc/wrl"
 cp tools/win_stub/wrl_stub.hpp "$tmp/inc/wrl/client.h"
 cp tools/win_stub/wrl_stub.hpp "$tmp/inc/wrl/implements.h"
 
+# Src/App/Main.cpp is deliberately NOT here. It would need a D2D/DWrite
+# vocabulary to reach, and a half-invented COM surface is a gate that can lie --
+# which is exactly what this file's contract forbids. Its compile coverage is the
+# Windows lane (m2/m3 compile-check TUs), and the THREADING invariant that batch
+# A violated is locked instead by preflight's static B9 rule, which needs no SDK
+# vocabulary at all. Do not "fix" this by growing the stub.
+
 for probe in vdragdrop dragbridge; do
   # -Werror matches the project's PRISM_WARNINGS_AS_ERRORS=ON default.
   if ! out=$(g++ -std=c++20 -Wall -Wextra -Wpedantic -Werror \

@@ -84,6 +84,12 @@ class GalleryWindow {
   // Progress: the worker posts kProgressMessage (wparam=done, lparam=total
   // bytes); the UI thread feeds the HUD -- single-threaded by rule.
   static constexpr UINT kProgressMessage = WM_APP + 2;
+  // Worker -> UI hand-off for the two pieces of state a worker used to touch
+  // directly (see PostHudStart): LPARAM is an owned std::string* (HUD headline,
+  // UTF-8) or std::wstring* (status line, wide) that WndProc takes by value and
+  // deletes. A failed PostMessage deletes it at the source.
+  static constexpr UINT kHudStart = WM_APP + 3;
+  static constexpr UINT kStatusText = WM_APP + 4;
 
   struct Host {
     HWND hwnd = nullptr;
@@ -176,8 +182,56 @@ class GalleryWindow {
     nav_.SetSelection(index);
     ApplySelection(nav_.Selection());
   }
+
+  // ---------- worker -> UI hand-off (THREADING CONTRACT) ----------
+  // Every mutable member of this class belongs to the UI thread. A worker may
+  // call ONLY these two functions (and SetThumbs, which takes its own mutex),
+  // because they touch nothing and merely POST: the state change happens in
+  // WndProc on the UI thread.
+  //
+  // This exists because batch A's activate handler ran on a detached thread and
+  // reached into Hud() and SetStatus() directly. Hud() has no lock (it is fed by
+  // kProgressMessage on the UI thread "single-threaded by rule", see kProgress-
+  // Message below), so that was a data race on every extraction, and the
+  // detached thread could outlive the window: Main.cpp's `window` is a stack
+  // object destroyed after Run() returns, so closing the app mid-extraction
+  // left the worker writing into freed memory.
+  // HUD headline is UTF-8 (ProgressHud's convention); the status line is wide
+  // (the window paints it with DirectWrite). Two encodings on purpose -- the
+  // helpers are typed so a wrong one is a compile error, not a mojibake bug.
+  void PostHudStart(std::string headline) {
+    if (!host_.hwnd) return;
+    auto* heap = new std::string(std::move(headline));
+    if (!PostMessageW(host_.hwnd, kHudStart, 0, reinterpret_cast<LPARAM>(heap))) {
+      delete heap;  // the window is gone; nobody will free it for us
+    }
+  }
+  void PostStatus(std::wstring text) {
+    if (!host_.hwnd) return;
+    auto* heap = new std::wstring(std::move(text));
+    if (!PostMessageW(host_.hwnd, kStatusText, 0, reinterpret_cast<LPARAM>(heap))) {
+      delete heap;
+    }
+  }
+  // Top-level progress (the HUD's expanded phase). Posted rather than called for
+  // the same reason: hud_ is UI-thread state.
+  void PostProgress(uint64_t done, uint64_t total) {
+    if (!host_.hwnd) return;
+    PostMessageW(host_.hwnd, kProgressMessage, static_cast<WPARAM>(done),
+                 static_cast<LPARAM>(total));
+  }
+
   // Progress HUD: the worker drives phases; the UI renders.
+  // NOT thread-safe on purpose -- see the hand-off block above. Called from
+  // WndProc and from tests that drive the window on one thread; a worker uses
+  // PostHudStart/PostProgress/PostStatus instead.
   prism::ProgressHud& Hud() { return hud_; }
+
+  // Wakes the message loop so a quit requested by a worker is seen even if the
+  // app is idle. Used after a worker sets AppContext::shuttingDown.
+  void RequestClose() {
+    if (host_.hwnd) PostMessageW(host_.hwnd, WM_CLOSE, 0, 0);
+  }
 
   void Show() {
     if (host_.hwnd) ShowWindow(host_.hwnd, SW_SHOW);
@@ -406,6 +460,19 @@ class GalleryWindow {
         hud_.OnProgress(NowMs(), static_cast<uint64_t>(wparam),
                         static_cast<uint64_t>(lparam));
         Invalidate();
+        return 0;
+      }
+      case kHudStart: {
+        // Ownership transferred with the message: take it and free it. Even on
+        // the discard paths below, the pointer must be deleted exactly once.
+        std::unique_ptr<std::string> headline(reinterpret_cast<std::string*>(lparam));
+        if (headline) hud_.OnStart(*headline, NowMs());
+        Invalidate();
+        return 0;
+      }
+      case kStatusText: {
+        std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lparam));
+        if (text) SetStatus(*text);
         return 0;
       }
       case WM_DESTROY:

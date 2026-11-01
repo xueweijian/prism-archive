@@ -236,6 +236,60 @@ def check_d1_skip_gates():
                             f"is not pinned -- a silent skip would count as a pass")
 
 
+def _balanced_parens(text: str, open_index: int) -> str:
+    """Return the text between `text[open_index]` (a '(') and its match."""
+    depth = 0
+    for i in range(open_index, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_index + 1:i]
+    return text[open_index + 1:]
+
+
+def check_b9_worker_no_ui_state():
+    """B9: a worker thread must not touch GalleryWindow's mutable state.
+
+    Batch A shipped `SetActivateHandler([...]{ std::thread([...]{ ... }).detach();
+    })` and inside that detached body called `window.Hud()` and
+    `window.SetStatus()`. Neither is guarded -- the window feeds hud_ from
+    WndProc, "single-threaded by rule" -- and because `window` is a STACK object
+    in wWinMain that is destroyed as soon as Run() returns, closing the app
+    mid-extraction left the worker writing into freed memory.
+
+    The fix is an API shape, not discipline: workers reach the window only
+    through the Post* helpers, which touch nothing and merely PostMessage. This
+    rule keeps that shape -- it flags a thread body that calls a non-Post member
+    of the window, and it flags `detach()`, because a detached worker can always
+    outlive the window object it captured.
+
+    Static and SDK-free on purpose: inventing a D2D/DWrite vocabulary just to
+    compile Main.cpp would give this project a gate that can lie, which is the
+    one thing tools/win_stub/ forbids.
+    """
+    post_prefixes = ("Post", "RequestClose")
+    for f in sorted((ROOT / "Src" / "App").glob("*.cpp")):
+        text = scan(f)
+        for m in re.finditer(r"std::thread\s*\(", text):
+            body = _balanced_parens(text, m.end() - 1)
+            for call in re.finditer(r"\bwindow\s*\.\s*([A-Za-z_]\w*)\s*\(", body):
+                member = call.group(1)
+                if member.startswith(post_prefixes):
+                    continue
+                failures.append(
+                    f"B9 {f.relative_to(ROOT)}: a worker thread calls "
+                    f"window.{member}(); UI state belongs to the UI thread -- post a "
+                    f"message (see GalleryWindow::PostStatus/PostHudStart)")
+        for m in re.finditer(r"\.\s*detach\s*\(\s*\)", text):
+            line = text[:m.start()].count("\n") + 1
+            failures.append(
+                f"B9 {f.relative_to(ROOT)}:{line} a detached worker can outlive the "
+                f"window it captured -- keep the std::thread and join it before the "
+                f"window leaves scope")
+
+
 def main():
     check_b1_macro_parens()
     check_arch_no_windows()
@@ -243,6 +297,7 @@ def main():
     check_b5_cfstr()
     check_b7_app_qualified_statics()
     check_b8_com_query_iff_impl()
+    check_b9_worker_no_ui_state()
     check_b6_enum_print()
     check_d1_skip_gates()
     if failures:
@@ -252,7 +307,8 @@ def main():
         print("\nEach ID maps to docs/CONTRACTS.md -- fix the code or amend the ledger.")
         return 1
     print("PREFLIGHT: PASSED (B1 parens / ARCH windows.h / B2 cstdint / B5 CFSTR / "
-          "B6 enum print / B7 app statics / B8 QI-iff-impl / D1 skip gates)")
+          "B6 enum print / B7 app statics / B8 QI-iff-impl / B9 worker/UI boundary / "
+          "D1 skip gates)")
     return 0
 
 

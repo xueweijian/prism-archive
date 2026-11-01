@@ -32,18 +32,22 @@ namespace {
 // matrix (tools/mutation/mutant_matrix.py) looks for a "MUTANT ACTIVE" string
 // right after the macro guard as the proof that the injection can build at all.
 // A literal 350 lines below the guard reads as "no banner" and weakens that
-// proof. The arm NAMES also avoid the words clean/control/unarmed: the matrix
-// classifies a test or target whose name contains one of those as a CONTROL, and
-// a control that carries an injection macro is a contradiction it rejects.
+// proof.
+//
+// ARM NAMES are part of the C23 matrix's input, not prose: a test or target name
+// containing clean / unarmed / control ANYWHERE is read as a CONTROL entry, and
+// an armed control is a contradiction the matrix rejects. The arm is therefore
+// "ignore_shutdown_flag"; the MACRO keeps its descriptive name because macro
+// identifiers do not participate in that decision.
 #if defined(PRISM_C46_MUTANT_KEEP_BAD_JSON)
 constexpr const char* kMutant =
     "C46 MUTANT ACTIVE: keep_bad_json (the bad-JSON discard is compiled out)";
 #elif defined(PRISM_C46_MUTANT_IGNORE_SCHEMA_VERSION)
 constexpr const char* kMutant =
     "C46 MUTANT ACTIVE: ignore_schema_version (the schema guard is compiled out)";
-#elif defined(PRISM_C46_MUTANT_IGNORE_SHUTDOWN_MARK)
+#elif defined(PRISM_C46_MUTANT_IGNORE_SHUTDOWN_FLAG)
 constexpr const char* kMutant =
-    "C46 MUTANT ACTIVE: ignore_shutdown_mark (a dirty session stays restorable)";
+    "C46 MUTANT ACTIVE: ignore_shutdown_flag (a dirty session stays restorable)";
 #else
 constexpr const char* kMutant = nullptr;
 #endif

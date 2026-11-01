@@ -359,7 +359,7 @@ class SessionStore {
   // What the next start is allowed to reopen. THE crash guard:
   // an unclean shutdown returns nothing, whatever the document says.
   std::vector<SessionEntry> RestorableEntries() const {
-#if defined(PRISM_C46_MUTANT_IGNORE_SHUTDOWN_MARK)
+#if defined(PRISM_C46_MUTANT_IGNORE_SHUTDOWN_FLAG)
     // NEGATIVE CONTROL: the dirty mark no longer suppresses a restore, so the
     // killed-process case reopens the dead session. The suite MUST go red.
     return entries_;

@@ -58,12 +58,13 @@ namespace {
 
 // The banner literal sits INSIDE the guard block: the C23 matrix looks for a
 // "MUTANT ACTIVE" string right after the macro guard as proof the injection
-// built (the arm's NAME is passed in as PRISM_C46_MUTANT_NAME, and deliberately
-// avoids the words clean/control/unarmed, which the matrix reads as "this is a
-// control" -- a control that is armed is a contradiction it rejects).
+// built. The arm's NAME arrives as PRISM_C46_MUTANT_NAME, and the C23 matrix
+// reads clean / unarmed / control ANYWHERE in a test or target name as "this is
+// a CONTROL entry" -- an armed control is a contradiction it rejects. Hence the
+// arm is "ignore_shutdown_flag"; the injection macro is not part of that rule.
 #if defined(PRISM_C46_MUTANT_NAME)
 constexpr const char* kMutantBanner =
-    "C46 MUTANT ACTIVE: the exe under test has the shutdown-mark guard compiled out";
+    "C46 MUTANT ACTIVE: the exe under test has the shutdown-flag guard compiled out";
 constexpr const char* kMutant = PRISM_C46_MUTANT_NAME;
 #else
 constexpr const char* kMutantBanner = nullptr;

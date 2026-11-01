@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "../PrismCore/PrismCore.hpp"
+#include "FormatSniffer.hpp"
 #include "SevenZipAbi.hpp"
 
 namespace prism::win {
@@ -388,6 +389,34 @@ class SevenZipLibrary {
 };
 
 // ---------------------------------------------------------------------------
+// C28: open-path I/O accounting
+// ---------------------------------------------------------------------------
+// The open benchmark asserts BYTES, not seconds (Tests/win/test_open_perf.cpp):
+// a wall-clock gate on a shared runner measures the machine, while a byte count
+// is reproducible and says exactly what the code did. The counter is
+// process-wide because Open() builds its own stream internally -- the test
+// snapshots it around one Open() call.
+struct OpenIoCounters {
+  std::atomic<uint64_t> bytesRead{0};      // every byte the engine pulled through us
+  std::atomic<uint64_t> reads{0};          // Read() calls
+  std::atomic<uint64_t> sniffBytes{0};     // the part spent identifying the file
+  std::atomic<uint64_t> mutantProbeAll{0}; // injection counter (CONTRACTS D3)
+};
+
+inline OpenIoCounters& IoCounters() {
+  static OpenIoCounters counters;
+  return counters;
+}
+
+inline void ResetIoCounters() {
+  IoCounters().bytesRead.store(0, std::memory_order_relaxed);
+  IoCounters().reads.store(0, std::memory_order_relaxed);
+  IoCounters().sniffBytes.store(0, std::memory_order_relaxed);
+  // mutantProbeAll is NOT reset here: it is the D3 injection counter and must
+  // accumulate across every Open() the run performed.
+}
+
+// ---------------------------------------------------------------------------
 // Input stream over a real file (IInStream + IStreamGetSize)
 // ---------------------------------------------------------------------------
 class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
@@ -434,6 +463,8 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
       return HRESULT_FROM_WIN32(GetLastError());
     }
     if (processed) *processed = read;
+    IoCounters().bytesRead.fetch_add(read, std::memory_order_relaxed);
+    IoCounters().reads.fetch_add(1, std::memory_order_relaxed);
     return S_OK;
   }
 
@@ -461,6 +492,60 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
   uint64_t size_ = 0;
   LONG refs_ = 1;
 };
+
+// ---------------------------------------------------------------------------
+// C28: the sniff window -- 64 head bytes + the last 1 KiB, read through the
+// SAME stream Open() will hand to the engine
+// ---------------------------------------------------------------------------
+// Reading it here (rather than with a second CreateFileW) keeps the accounting
+// honest -- the bytes ARE part of Open's cost -- and guarantees the handler sees
+// an untouched file position: every candidate Open is preceded by Seek(0).
+// 512, not 64: tar keeps its magic ("ustar") at offset 257 of the first block,
+// so a 64-byte head could never see it. One 512-byte block is the natural unit
+// and still a rounding error next to any real archive.
+constexpr std::size_t kSniffHeadBytes = 512;
+constexpr std::size_t kSniffTailBytes = 1024;
+
+inline bool ReadSniffWindow(InFileStream& stream, sniff::Window* window,
+                            std::vector<uint8_t>* head, std::vector<uint8_t>* tail) {
+  if (!window || !head || !tail) return false;
+  abi::UInt64 pos = 0;
+  if (FAILED(stream.Seek(0, /*STREAM_SEEK_SET=*/0, &pos))) return false;
+  head->assign(kSniffHeadBytes, 0);
+  abi::UInt32 got = 0;
+  if (FAILED(stream.Read(head->data(), static_cast<abi::UInt32>(head->size()), &got))) {
+    return false;
+  }
+  head->resize(got);
+  IoCounters().sniffBytes.fetch_add(got, std::memory_order_relaxed);
+
+  const uint64_t size = stream.size();
+  if (size <= kSniffHeadBytes) {
+    // Tiny file: the head IS the whole file, so the tail is the same bytes.
+    *tail = *head;
+  } else {
+    const uint64_t tailBytes =
+        size < kSniffTailBytes ? size : static_cast<uint64_t>(kSniffTailBytes);
+    tail->assign(static_cast<std::size_t>(tailBytes), 0);
+    pos = 0;
+    if (FAILED(stream.Seek(static_cast<abi::Int64>(size - tailBytes), /*SET=*/0, &pos))) {
+      return false;
+    }
+    abi::UInt32 tailGot = 0;
+    if (FAILED(stream.Read(tail->data(), static_cast<abi::UInt32>(tail->size()), &tailGot))) {
+      return false;
+    }
+    tail->resize(tailGot);
+    IoCounters().sniffBytes.fetch_add(tailGot, std::memory_order_relaxed);
+  }
+
+  window->head = head->data();
+  window->headSize = head->size();
+  window->tail = tail->data();
+  window->tailSize = tail->size();
+  window->fileSize = size;
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Sink 1: bounded in-memory sink (thumbnails / inline preview)
@@ -1136,9 +1221,19 @@ class ArchiveReader {
     // worth asking; the engine's own table decides their CLSIDs. The old
     // two-handler probe survives as the fallback below, so a mislabeled file
     // (a .zip named .7z, an archive with no extension at all) still opens.
+    //
+    // C28: the FILE now speaks before the name does. 64 head bytes plus the
+    // last 1 KiB identify the container, and a format proven by its own magic
+    // gets exactly ONE handler -- no candidate walks a 4 GiB archive to
+    // discover it is the wrong one. The extension route and the legacy probe
+    // stay in the list BEHIND the sniffed handler, so a sniff that guessed
+    // wrong costs correctness nothing: the file still opens, just later.
     const std::wstring extension = PathExtensionLower(archivePath);
     const FormatRoute* route = FindFormatRoute(archivePath);
     openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
+    // The C26 trace token stays verbatim ("route=<handler>" / "route=probe"):
+    // win.extract_failure asserts on it, and a diagnostic format is a contract
+    // for every test that reads it. C28's own line is appended separately below.
     openTrace_ += route ? (" route=" + std::string(route->handler) + "; ")
                         : std::string(" route=probe; ");
 
@@ -1156,6 +1251,43 @@ class ArchiveReader {
       }
       candidates.push_back({clsid, label});
     };
+
+    sniff::Window sniffWindow;
+    std::vector<uint8_t> sniffHead;
+    std::vector<uint8_t> sniffTail;
+    sniff::Finding finding;
+    if (ReadSniffWindow(*stream_, &sniffWindow, &sniffHead, &sniffTail)) {
+      sniffWindow.extensionHint = WideToUtf8(extension.substr(1));
+      finding = sniff::Sniff(sniffWindow);
+    }
+#ifdef PRISM_C28_MUTANT_PROBE_ALL
+    // The pre-C28 defect, injected on purpose (CONTRACTS D3): throw the sniff
+    // away, so the extension route and the legacy [Zip, 7z] probe decide again
+    // -- exactly what a file cost before this card. The counter is the proof
+    // the injection FIRED: a mutation that never runs would make its red
+    // verdict meaningless.
+    IoCounters().mutantProbeAll.fetch_add(1, std::memory_order_relaxed);
+    finding = sniff::Finding{};
+    finding.evidence = "mutant: sniff ignored";
+#endif
+    openTrace_ += sniff::DescribeRoute(finding) + " [" + finding.evidence + "]; ";
+
+    if (finding.singleHandler()) {
+      const char* formatExt = sniff::FormatExtension(finding.format);
+      const char* handler = sniff::FormatName(finding.format);
+      const std::vector<GUID> fromEngine =
+          formatExt ? library_.ClsidsForExtension(formatExt) : std::vector<GUID>{};
+      for (const GUID& clsid : fromEngine) addCandidate(clsid, handler);
+      if (fromEngine.empty() && formatExt) {
+        const FormatRoute* sniffRoute = FindFormatRoute(std::wstring(1, L'.') +
+                                                        Utf8ToWide(formatExt));
+        if (sniffRoute && sniffRoute->pinnedClsid) addCandidate(*sniffRoute->pinnedClsid, handler);
+      }
+      if (candidates.empty()) {
+        openTrace_ += "(sniffed format has no handler in this engine) ";
+      }
+    }
+
     if (route) {
       const std::vector<GUID> fromEngine = library_.ClsidsForExtension(WideToUtf8(extension.substr(1)));
       for (const GUID& clsid : fromEngine) addCandidate(clsid, route->handler);

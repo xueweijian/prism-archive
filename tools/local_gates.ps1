@@ -129,21 +129,32 @@ function Add-Result {
 # Environment discovery -- must work on a box where nobody imported env.ps1, and
 # must NOT quietly use a different toolchain than CI's.
 # ---------------------------------------------------------------------------
+function Join-Maybe([string]$root, [string]$child) {
+    # $env:ProgramFiles / $env:ProgramFiles(x86) are EMPTY on Linux, and
+    # "Join-Path $null ..." throws "Cannot bind argument to parameter 'Path'
+    # because it is null" -- which is exactly how the first CI run of this
+    # script died on the ubuntu runner, before any gate ran. Every machine-path
+    # lookup goes through here.
+    if ([string]::IsNullOrEmpty($root)) { return $null }
+    return (Join-Path $root $child)
+}
+
 function Resolve-VcVars {
     if (Get-Command cl.exe -ErrorAction SilentlyContinue) { return $null }
     if ($env:PRISM_VCVARS -and (Test-Path $env:PRISM_VCVARS)) { return $env:PRISM_VCVARS }
 
     $candidates = @()
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path $vswhere) {
+    $vswhere = Join-Maybe ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if ($vswhere -and (Test-Path $vswhere)) {
         $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
         if ($install) { $candidates += $install.Trim() }
     }
     foreach ($edition in 'BuildTools', 'Community', 'Professional', 'Enterprise') {
-        $candidates += (Join-Path $env:ProgramFiles "Microsoft Visual Studio\2022\$edition")
-        $candidates += (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\2022\$edition")
+        $candidates += (Join-Maybe $env:ProgramFiles "Microsoft Visual Studio\2022\$edition")
+        $candidates += (Join-Maybe ${env:ProgramFiles(x86)} "Microsoft Visual Studio\2022\$edition")
     }
     foreach ($root in $candidates) {
+        if (-not $root) { continue }
         $bat = Join-Path $root 'VC\Auxiliary\Build\vcvars64.bat'
         if (Test-Path $bat) { return $bat }
     }
@@ -209,9 +220,9 @@ function Resolve-SevenZip {
     # pass (CONTRACTS D1) -- so find one and say where it came from.
     if ($SevenZipDll -and (Test-Path $SevenZipDll)) { return $SevenZipDll }
     $candidates = @(
-        (Join-Path $env:ProgramFiles '7-Zip\7z.dll'),
-        (Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.dll'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\7-Zip\7z.dll')
+        (Join-Maybe $env:ProgramFiles '7-Zip\7z.dll'),
+        (Join-Maybe ${env:ProgramFiles(x86)} '7-Zip\7z.dll'),
+        (Join-Maybe $env:LOCALAPPDATA 'Programs\7-Zip\7z.dll')
     )
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c)) { return $c }

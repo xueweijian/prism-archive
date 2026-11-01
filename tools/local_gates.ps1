@@ -421,7 +421,10 @@ $steps['build'] = {
 }
 
 $steps['ctest'] = {
-    & ctest --test-dir $BuildDir --output-on-failure --no-tests=error
+    # -j: the suites are independent (each builds its own fixtures under its own
+    # temp dir) and the ones that cannot overlap declare RESOURCE_LOCK, so ctest
+    # serialises those itself. Serial runs spent ~30 s here for no reason.
+    & ctest -j 8 --test-dir $BuildDir --output-on-failure --no-tests=error
     if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
 }
 

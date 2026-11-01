@@ -16,3 +16,6 @@ __pycache__/
 *.exe
 !Tests/**/*.exe
 .DS_Store
+# Release artifacts (tools/release/New-PortablePackage.ps1) are rebuilt, never
+# committed: the zip is reproducible from a build tree + version.json.
+dist/

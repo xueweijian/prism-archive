@@ -1,0 +1,17 @@
+// prism_version.h.in -- rendered into <build>/Src/PrismWin/prism_version.h.
+//
+// WHY: the version lives in ONE place, tools/release/version.json, but the
+// VERSIONINFO block in Src/App/PrismArchive.rc used to hold a second literal
+// copy of it.  Two copies drift, and the drift is invisible until a user opens
+// the exe's properties dialog and reads a version from the previous release.
+// docs/RELEASE.md describes the patch that switches the .rc over to this
+// header; tools/release/ReleaseCommon.ps1 (Get-VersionDrift) accepts either
+// shape, so the repository stays packageable before and after the patch.
+//
+// @PRISM_VERSION_MAJOR@ etc. are substituted by configure_file() from
+// tools/release/version.json -- never edit the generated file.
+#define PRISM_VERSION_MAJOR @PRISM_VERSION_MAJOR@
+#define PRISM_VERSION_MINOR @PRISM_VERSION_MINOR@
+#define PRISM_VERSION_PATCH @PRISM_VERSION_PATCH@
+#define PRISM_VERSION_BUILD @PRISM_VERSION_BUILD@
+#define PRISM_VERSION_STRING "@PRISM_VERSION_STRING@"

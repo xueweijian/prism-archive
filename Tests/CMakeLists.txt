@@ -58,7 +58,12 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                                                       dwrite.lib d3d11.lib dxgi.lib
                                                       dcomp.lib WindowsApp.lib)
   target_compile_options(win_engine_bridge_test PRIVATE /WX-)
-  target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
+  # prism_shell_contract: m2_compile_check.cpp is a LINK contract for the sparse
+  # registrar (it calls IsRegistered on purpose). The registrar became a static
+  # library when its WinRT half moved out of the header (card C4), so the contract
+  # now also proves the library links -- keep this on the same target.
+  target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge
+                                                      prism_shell_contract)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)
   # The stdout marker is part of the verdict: a silent SKIP can never count
   # as a pass (L2 negative control for false greens).

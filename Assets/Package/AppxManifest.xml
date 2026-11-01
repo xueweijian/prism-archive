@@ -1,25 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  PrismArchive MSIX *sparse* package (blueprint ch. 4.1, milestone M2).
+  PrismArchive MSIX *sparse* package (blueprint ch. 4.1, milestone M2 / card C4).
 
-  Registering this package (PackageManager.AddPackageByUriAsync with
-  RegisterSparsePackage) gives PrismShellExt.dll package identity, which is
-  what lets the Win11 IExplorerCommand context menu deploy WITHOUT touching
-  the registry or an installer. See Src/PrismWin/SparsePackageRegistrar.hpp.
+  This package carries ONLY identity + shell registration. It does not ship the
+  app: uap10:AllowExternalContent lets the manifest's Executable resolve against
+  the install directory passed as AddPackageOptions.ExternalLocationUri (that is
+  what "sparse" means). Registering it with PackageManager.AddPackageByUriAsync
+  is what puts PrismArchive in the Windows 11 context menu without writing a
+  single registry key - see Src/PrismWin/SparsePackageRegistrar.hpp.
+
+  Two CLSID references must stay identical (schema form: no braces, unlike the
+  registry form):
+    com:Class/@Id  ==  desktop5:Verb/@Clsid  ==  shell_ids::kExplorerCommandClsid
+  (Src/PrismWin/SparsePackageRegistrar.hpp). Tests/win/test_sparse_registrar.cpp
+  fails the build if the manifest text drifts from the compiled constant, because
+  a mismatch is invisible at runtime: the verb simply never appears.
+
+  Layout matches the package root, so tools/msix/build-sparse.ps1 can stage this
+  directory verbatim.
 -->
 <Package
     xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
     xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+    xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+    xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+    xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+    xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    IgnorableNamespaces="uap uap10 com desktop4 desktop5 rescap">
 
   <Identity Name="PrismArchive.ShellExt"
             Publisher="CN=PrismArchive Contributors"
-            Version="0.2.0.0" />
+            Version="0.3.0.0"
+            ProcessorArchitecture="neutral" />
 
   <Properties>
     <DisplayName>PrismArchive Shell Integration</DisplayName>
     <PublisherDisplayName>PrismArchive contributors</PublisherDisplayName>
-    <Logo>Assets\Square44x44Logo.png</Logo>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <!-- Required for a sparse package: files the manifest references may live
+         outside the package, in the ExternalLocationUri. -->
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
   </Properties>
 
   <Resources>
@@ -27,23 +48,56 @@
   </Resources>
 
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+    <!-- 10.0.19041.0 is the first build with AllowExternalContent; the Win11
+         context-menu extension itself needs 22000, so the registrar refuses to
+         deploy below that instead of installing a package that does nothing. -->
+    <TargetDeviceFamily Name="Windows.Desktop"
+                        MinVersion="10.0.19041.0"
+                        MaxVersionTested="10.0.26100.0" />
   </Dependencies>
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
   </Capabilities>
 
   <Applications>
-    <Application Id="ShellExt"
-                 Executable="PrismShellExt.exe"
-                 EntryPoint="Windows.FullTrustApplication">
+    <Application Id="PrismArchive"
+                 Executable="PrismArchive.exe"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="win32App">
       <uap:VisualElements
-          DisplayName="PrismArchive Shell"
+          AppListEntry="none"
+          DisplayName="PrismArchive"
+          Description="Archive manager with a Liquid Glass shell integration"
+          BackgroundColor="transparent"
           Square150x150Logo="Assets\Square150x150Logo.png"
-          Square44x44Logo="Assets\Square44x44Logo.png"
-          Description="PrismArchive shell integration (Liquid Glass context menus)"
-          BackgroundColor="transparent" />
+          Square44x44Logo="Assets\Square44x44Logo.png" />
+
+      <Extensions>
+        <!-- The COM class Explorer activates to build the menu. STA: the shell
+             calls IExplorerCommand on its UI thread. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="PrismArchive context menu">
+              <com:Class Id="6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F"
+                         Path="PrismShellExt.dll"
+                         ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- Where the command appears. "*" = files; GetState hides us for
+             non-archives so the item is never a dead click. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="PrismArchive"
+                             Clsid="6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
     </Application>
   </Applications>
 </Package>

@@ -106,3 +106,15 @@ C46 的 `mutation.session_restore` 在满载时跑满 600 秒：它**在等一�
    必须补 password 给 `MemoryExtractCallback`，或者在入口拒绝加密条目。
 3. **`ReplaceFileW` 在 `InFileStream`（`FILE_SHARE_READ`）仍持有原包时必失败**（`ERROR_SHARING_VIOLATION`）。
    任何"替换已打开归档"的路径（编辑、追加、重新压缩）**必须先关 reader**，再替换。
+### D31 新测试代码必须在 g++ -Werror 下干净（MSVC 不报的三种错）
+
+CI 的 Linux lane 用 `-Wall -Wextra -Wpedantic -Werror` 编 PrismCore 测试，MSVC 不报的三类错误会在这里翻车：
+
+1. **`-Werror=sign-compare`**：`std::vector::size()` 是 `size_t`，与字面量 `3` 比较即错。
+   写法：`PRISM_CHECK_EQ(v.size(), static_cast<std::size_t>(3));`
+2. **`-Werror=unused-function`**：变异构建会把只在该臂使用的辅助函数编译掉，干净构建里它们就成了未使用。
+   写法：`[[maybe_unused]] bool InjectionFired() { ... }`
+3. **`-Werror=unused-variable`**：同上，变异分支里的计数器/字符串。
+
+**不要靠下调警告解决**——这三条都是真实的可移植性问题。合并前自查：
+`wsl bash -c "cd /mnt/e/wg/<card> && for f in Tests/*.cpp; do g++ -std=c++20 -I Src -I Src/PrismCore -I Tests -Wall -Wextra -Wpedantic -Werror -fsyntax-only $f || echo BAD $f; done"`

@@ -56,7 +56,9 @@ int main(int argc, char** argv) {
   g_dllPath = prism::fixture::DllPath();
   g_exePath = prism::fixture::ExePath();
   if (g_dllPath.empty() || g_exePath.empty()) {
-    std::cout << "    FAIL: 7z.exe not found beside 7z.dll (windows-latest ships it)" << std::endl;
+    // C37: name the missing half (a 7z.dll with no 7z.exe beside it is a
+    // partial 7-Zip, not a missing one).
+    std::cout << "    FAIL: " << prism::fixture::ExePathWhy() << std::endl;
     return 1;
   }
 

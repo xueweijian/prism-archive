@@ -1082,7 +1082,12 @@ try {
         throw '-Verify needs the real scope (HKCU:\Software); it asks the shell resolver, which only sees real associations'
     }
 
-    $exts = if ($Extensions.Count -gt 0) { $Extensions } else { $script:DefaultExtensions }
+    # A one-element -Extensions reaches this file as a scalar string, and an
+    # if-expression UNROLLS a one-element array back to a scalar. Assign first,
+    # then fill the default: $exts stays an array so $exts.Count is valid
+    # under Set-StrictMode (C39 found this with -Extensions .7z).
+    $exts = @($Extensions)
+    if ($exts.Count -eq 0) { $exts = @($script:DefaultExtensions) }
     foreach ($e in $exts) {
         if (-not $e.StartsWith('.')) { throw ('extension must start with a dot: ' + $e) }
     }

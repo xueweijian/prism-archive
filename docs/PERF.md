@@ -294,6 +294,100 @@ Verdicts:
   block-buffering mutant proves the predicate is sharp, not that the item
   streamed.
 
+### 2.1 C33: where the 58.4 MB goes, one stage at a time (measured 2026-11-01, `feat/c33-memory`)
+
+**How**: `win.c33.glass_memory` (`Tests/win/bench_glass_mem.cpp`) builds the
+graphics stack one layer at a time through the same API sequence
+`GlassIslandHost::Initialize` performs, and prints the working-set delta of
+each stage (`GetProcessMemoryInfo`, median of nine reads after a settle). The
+device is **WARP on purpose**: `GetProcessMemoryInfo` only sees system memory,
+so a hardware device would park the D3D/DComp/effect allocations in VRAM and
+the table would be empty. These digits are therefore the **upper bound of what
+the glass layer can cost in *process* memory** — which is exactly the number
+that matters on any machine that falls back to WARP, and the app does fall back.
+
+| Stage | Working set | Delta | Note |
+|---|---|---|---|
+| baseline (COM only) | 8.51 MB | — | |
+| + `7z.dll` mapped, no handler yet | 9.24 MB | **+0.71 MB** | image itself is 1.88 MB (`SizeOfImage`) |
+| + D3D11 device (WARP) | 12.92 MB | **+3.68 MB** | |
+| + D2D1 factory / device / context | 13.69 MB | **+0.77 MB** | |
+| + DWrite factory | 13.81 MB | **+0.12 MB** | DWrite is *not* a big fixed cost |
+| + DComp device | 13.99 MB | **+0.18 MB** | |
+| + 1600x1000 x2 composition buffers (12.8 MB nominal) | 14.32 MB | **+0.33 MB** | DXGI commits flip buffers lazily: allocating is cheap, presenting is not |
+| + `GlassIslandHost` device stack (same stack + 2 HLSL compiles + 2 effect registrations) | 27.51 MB | **+14.06 MB** | the product object, created all at once |
+| + glass graph live, 3 passes @1600x1000 | 67.84 MB | **+40.33 MB** | 18.31 MB is the three intermediate passes; the rest is the two 1600x1000 device bitmaps + D2D pool padding |
+| graph released (nothing visible, incl. `IDXGIDevice3::Trim`) | 68.00 MB | **+0.16 MB** | see finding 2 |
+| graph re-acquired (drawn again) | 68.01 MB | +0.01 MB | |
+
+**Findings (each one a number, not an adjective):**
+
+1. **The glass layer can cost 40 MB, not 11 MB.** One full-window island
+   (1600x1000) with the two-pass Kawase + LiquidGlass graph adds **+40.33 MB**
+   of process memory on WARP. C7 attributed +11 MB to the glass UI on the real
+   machine; on hardware most of this is VRAM, but the *shape* is the same — and
+   the layer was allocating at window size when a pill only ever needs its own
+   rect.
+2. **Releasing the effect instances returns 0 bytes.** Dropping the three
+   `ID2D1Effect` instances leaves the working set unchanged (67.85 -> 67.85 MB):
+   D2D keeps the intermediate surfaces in the device context's own target pool.
+   `IDXGIDevice3::Trim()` — the documented "this process is idle, you may drop
+   its cached surfaces" call — is what turns the release into memory, and even
+   then the yield depends on what else still references the pool: **0.16 MB**
+   right after a fresh full-window draw, **17.81 MB** one cycle later (Trim on an
+   otherwise idle graph). The lazy path in
+   `GlassIslandHost::ReleaseTransient` therefore calls both, and the *assertion*
+   is on the accounting (derived from live COM state), not on this digit.
+3. **`AddIsland` is not where the memory is.** Two composition buffers at
+   1600x1000 (12.8 MB nominal) cost +0.33 MB until painted.
+4. **The engine is 0.71 MB.** 7z.dll is 1.88 MB on disk and costs +0.71 MB
+   resident with no handler created — it is not the 58 MB story.
+5. **ThumbStore's 64 MiB budget saturates exactly and an idle `Trim` returns
+   the pixels** (D17, both halves):
+
+| ThumbStore (64 MiB budget, 300 KiB thumbs) | Measured |
+|---|---|
+| resident after a 218-thumb sweep | **63.87 MB** (cap reachable: 139 264 B slack < one thumb) |
+| resident after `Trim(1/8 budget)` | **7.91 MB**, returned **55.96 MB** exactly |
+| resident after `ReleaseAll()` | **0 B**, 0 entries |
+| resident > budget after any op of a 1000-op seeded sequence | **0 times** (`core.test_thumb_budget`) |
+
+Before this card nothing ever *returned* those pixels: the budget was a cap that
+only pressure could move, so a gallery that once filled 64 MiB kept 64 MiB for
+the rest of the session. `ThumbStore::Trim`/`ReleaseAll` are the idle path; the
+call site (minimise / hide) lives in the window, not in this card.
+
+**The frame budget (120 FPS), decomposed.** 100 000 rows, 120 frames,
+1200x800 software target, the real `GalleryRenderer`:
+
+| 100k-row list frame | median | p95 |
+|---|---|---|
+| record (`Draw`) | **4.149 ms** | **11.345 ms** |
+| rasterise/flush (`EndDraw` — the only presentation reachable headlessly) | **5.211 ms** | **14.335 ms** |
+| total | **11.565 ms** (86.5 FPS) | **20.081 ms** (49.8 FPS) |
+
+**Verdict: 120 FPS 未达标 at p95** — four runs of this card read p95
+**11.6 / 20.1 / 45.3 / 127.7 ms** (median 7.4 / 11.6 / 14.6 / 19.3 ms) against
+the 8.33 ms budget: the median met it in 3 of the 4 runs, the p95 in **none**.
+Where it sticks: the **flush half is 45-71 % of the p95 frame** (14.34 of
+20.08 ms on the run above, 7.38 of 16.51 ms on the clean one) and it is the
+half the renderer cannot tune — D2D rasterising a full 1200x800
+surface, because this harness (like C7's) has no window to present to
+(`Present` belongs to C1). Cutting it needs a GPU target, where `EndDraw`
+submits rather than rasterises; the recorder itself (3.8-6.6 ms) is already
+inside the budget. The run-to-run spread is machine load — seven sibling
+worktrees were compiling during the 45.3/127.7 ms runs — and is recorded rather
+than smoothed.
+
+**Negative controls** (CONTRACTS D3, registered without `WILL_FAIL` per D26 —
+the marker is the conjunction "the run went red **and** the injected branch was
+observed at runtime"; see `Tests/suites/c33-memory.cmake`):
+
+| Mutant | What it injects | What went red / evidence |
+|---|---|---|
+| `mutation.c33.lazy_release` | `PRISM_GLASS_MUTANT_NO_RELEASE`: `ReleaseInstances()` returns 0 and keeps the graph | `expected true: !glass.liveAfterRelease`, `transientAfterRelease == 0`; runtime sign: the graph is still live after `SetVisible(false)` -> `LAZY-RELEASE MUTATION CAUGHT` |
+| `mutation.c33.thumb_trim` | `PRISM_THUMB_MUTANT_NO_TRIM`: `Trim()` returns 0 and drops nothing | `expected true: idle trim brings resident down to the target`, `trim reports exactly the bytes it returned`; runtime sign: `Trim` returned 0 with resident > target -> `THUMBSTORE-TRIM MUTATION CAUGHT` |
+
 ### 3. Scale
 
 | Metric | Measured | Note |

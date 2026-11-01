@@ -4,7 +4,124 @@
 > 因此期望清单来自 `cmake --install» 落盘的目录树，而不是打包脚本自己走了哪几条复制语句
 > （CONTRACTS D3：只复述写入方的检查不算检查）。
 
+## 零、从零到发布（TL;DR）
+
+> 下面的命令在仓库根目录执行；Windows 下用 PowerShell 7（`pwsh`）。每一步都有可观察的成功标记，
+> 不要只看最后一步的绿灯。
+
+### 0. 准备
+
+- Windows 11 x64；VS 2022 Build Tools（MSVC v143）+ Windows SDK；
+- CMake ≥ 3.20 + Ninja；PowerShell 7；Git；GitHub CLI（`gh auth status` 通过）；
+- 7-Zip x64（提供 `7z.dll`，不入库）；
+- 可选：OV/EV Authenticode 证书（`-CertificateThumbprint`，或
+  `PRISM_SIGN_PFX` + `PRISM_SIGN_PFX_PASSWORD`）。
+
+### 1. 取源码并确认版本
+
+    git clone https://github.com/xueweijian/prism-archive.git
+    cd prism-archive
+    git fetch --tags
+    git checkout <release-commit-or-tag>
+    git status --short
+    pwsh -NoProfile -Command "(Get-Content tools/release/version.json -Raw | ConvertFrom-Json).version"
+
+版本唯一真源是 `tools/release/version.json`；`CMakeLists.txt` 和
+`Src/App/PrismArchive.rc` 的漂移会在打包时直接失败。
+
+### 2. 配置 + 构建
+
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build build --parallel 2
+
+期望得到 `build/Src/PrismWin/PrismArchive.exe`、两个 shell DLL 和 `Assets/`。
+没有 `7z.dll` 也能构建；测试和运行时才需要它。
+
+### 3. 跑闸门（本机）
+
+    ctest --test-dir build --output-on-failure
+    python tools/preflight.py
+
+期望 `100% tests passed`（或带原因的 `Skipped`，不能有静默跳过），
+preflight 最后一行 PASS。CI 是最终权威；本机至少跑与改动相关的 suite。
+
+### 4. 端到端安装验证（干净用户视角）
+
+    # 安全模式：只写唯一的 HKCU 临时键和 %TEMP%，ctest 也跑这个
+    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin -Sandbox
+
+    # 真实模式：备份 HKCU 关联 -> 安装 -> --test 打开 -> 卸载 -> 逐键比对恢复
+    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin
+
+    # 两个否定对照（只允许在 -Sandbox 下）
+    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin -Sandbox -Mutate UnquotedVerb
+    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin -Sandbox -Mutate NoRestore
+
+真实模式遇到已有安装会拒绝；先跑 `tools\uninstall.ps1`，或加 `-CleanFirst`。
+期望最后一行 `VERIFY-INSTALL: PASS (...)`；否定对照期望
+`VERIFY-INSTALL(MUTATION ...): CAUGHT (...)`。
+若 `.7z` 被 Windows UserChoice 锁定到别的程序，脚本打印 `SKIP ...` 和 ProgID，
+不会把平台限制伪装成通过。
+
+### 5. 选签（公开分发必须）
+
+顺序不能反：**先签名，后打包**。签名会改写 PE 字节。
+
+    pwsh -File tools\release\Sign-ReleaseArtifacts.ps1 -Path build\Src\PrismWin
+    # 或指定证书
+    pwsh -File tools\release\Sign-ReleaseArtifacts.ps1 -Path build\Src\PrismWin -CertificateThumbprint <SHA1>
+
+无证书时脚本打印 `SIGN: SKIP (...)` 并 `exit 77`；这是明确的发布阻断，
+不是绿色通过。个人自签只能内部验证，公开发布要用签给发布主体的 OV/EV 证书 + 时间戳。
+
+### 6. 打包
+
+    pwsh -File tools\release\New-PortablePackage.ps1 -BuildDir build
+
+产物：
+
+    dist/PrismArchive-0.1.0-win-x64.zip
+    dist/SHA256SUMS.txt
+
+期望最后 `RELEASE PACKAGE: PASS`。脚本会 `cmake --install` 到临时前缀、
+从落盘布局派生期望清单、重开 zip 逐条重新哈希；少一个文件会红。
+
+### 7. 独立校验（模拟下载者）
+
+    pwsh -File tools\release\Test-ReleasePackage.ps1 -ZipPath dist\PrismArchive-0.1.0-win-x64.zip
+
+    # 发布方还应与安装布局精确对拍（CI 的做法）
+    pwsh -File tools\release\Test-ReleasePackage.ps1 -ZipPath dist\PrismArchive-0.1.0-win-x64.zip -InstallRoot <cmake --install 前缀>
+
+期望 `VERIFY: PASS`。不带 `-InstallRoot` 只能证明包自洽，
+发现不了"整个包一致地少一个文件"。
+
+### 8. 打 tag + 草稿 release
+
+    git tag -a v0.1.0 -m "PrismArchive 0.1.0"
+    git push origin v0.1.0
+    gh release create v0.1.0 dist\PrismArchive-0.1.0-win-x64.zip dist\SHA256SUMS.txt --draft --title "PrismArchive 0.1.0" --generate-notes
+
+### 9. 从远端抓回资产再验一次
+
+    gh release download v0.1.0 --pattern "*.zip" -D "$env:TEMP\rel-check"
+    gh release download v0.1.0 --pattern "SHA256SUMS.txt" -D "$env:TEMP\rel-check"
+    pwsh -File tools\release\Test-ReleasePackage.ps1 -ZipPath "$env:TEMP\rel-check\PrismArchive-0.1.0-win-x64.zip"
+
+期望 `VERIFY: PASS`。失败就删草稿、修、重打 tag
+（`git tag -d v0.1.0` + `gh release delete v0.1.0 --yes`），
+不要覆盖已发布资产。
+
+### 10. 转正
+
+    gh release view v0.1.0 --json assets --jq '.assets[] | "\(.name) \(.size)"'
+    gh release edit v0.1.0 --draft=false
+
+最后在发布页贴整包哈希；下载者用 `sha256sum -c` 或 PowerShell
+`Get-FileHash` 复核。
+
 ## 一、一条命令
+
 
     . E:\wg\env.ps1 -Card c24
     pwsh -File tools\release\New-PortablePackage.ps1 -BuildDir E:\build\wt-c24
@@ -131,7 +248,7 @@ CI 的 `win.release_package» 就是那个外部真值。
     git push origin v0.1.0
 
     # 2. 先建草稿并上传资产（PowerShell 下换行用反引号续行）
-    gh release create v0.1.0 dist/PrismArchive-0.1.0-win-x64.zip dist/SHA256SUMS.txt --draft --title "PrismArchive 0.1.0" --notes-file docs/RELEASE-NOTES-0.1.0.md
+    gh release create v0.1.0 dist/PrismArchive-0.1.0-win-x64.zip dist/SHA256SUMS.txt --draft --title "PrismArchive 0.1.0" --generate-notes
 
     # 3. 从远端把资产抓回来校验（信远端字节，不信本地目录）
     gh release download v0.1.0 --pattern "*.zip" -D %TEMP%\rel-check

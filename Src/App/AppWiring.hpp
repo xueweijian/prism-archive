@@ -26,6 +26,18 @@
 //     shapes the app uses -- a missing key returns itself and is logged once.
 //   * C12 draw commands into pixels: GalleryRenderer::DrawSidebar (PrismWin).
 //
+// WHAT CARD C34 ADDED (wave 3 -- the last three joins):
+//   * section 9: switching the OPEN archive after a re-pack. The compression
+//     entry used to finish into a new file while the window kept showing the
+//     old one; with C11's ReaderPool it is now safe to close the old pool and
+//     open the new file (the order below is what makes a failed switch
+//     non-destructive).
+//   * section 10: the companion preview's HOST side. C30 shipped the channel
+//     and the window; without a process that creates the section, every
+//     right-click in Explorer took the NoReader fast path. CompanionHost is
+//     that process half: hidden window + wake poll + "first 12 entries" scan +
+//     ack + flyout.
+//
 // WHAT IS STILL *NOT* WIRED (deliberate, and stated in the PR):
 //   * The shell's --compress-7z / --compress-zip verbs. C25's suite PINS the
 //     refusal of those two flags; flipping them here would turn another card's
@@ -83,6 +95,8 @@
 #include "../PrismWin/MotwGuard.hpp"
 #include "../PrismWin/PrismEngineBridge.hpp"
 #include "../PrismWin/ReaderPool.hpp"
+#include "../PrismWin/CompanionPreviewBridge.hpp"  // C30: the shell <-> companion channel
+#include "../PrismWin/CompanionWindow.hpp"            // C30: the focus-free flyout (C34 hosts it)
 #include "../PrismWin/SettingsFile.hpp"       // C14 file layer (%LOCALAPPDATA%, atomic)
 #include "../PrismWin/SparsePackageRegistrar.hpp"  // shell_launch flag constants (C4)
 
@@ -1332,5 +1346,352 @@ inline void SaveWindowState(prism::settings::SettingsStore& store, const WindowS
     store.SetInt("window.columns.ratio", static_cast<int>(state.columns.ratioW));
   }
 }
+
+// ---------------------------------------------------------------------------
+// 9. Switching the open archive (card C34).
+//
+// THE PROBLEM THIS SOLVES
+//   C27's compression entry extracts the visible payload into %TEMP% and writes
+//   a NEW archive. The refresh that followed re-read the archive the session
+//   had opened -- not the file it had just produced -- because switching means
+//   replacing every handler that holds the old file, and the sweep may still be
+//   running. The user "compressed x.7z" and kept looking at the old bytes, with
+//   the old handler pool still serving them.
+//
+// WHY IT WAS DEFERRED, AND WHY IT IS SAFE NOW
+//   C11's ReaderPool made the handlers explicit (one lease per operation), so
+//   the app can answer the only question that matters -- "is any lease still
+//   live?" -- before it closes anything (Main.cpp asks it; this function is
+//   only the ORDER).
+//
+// THE ORDER (each step prevents a failure)
+//   1. OPEN the new file and read its catalogue. A broken new archive changes
+//      nothing: the session keeps working on the old one.
+//   2. LEASE a NEW pool against it. A pool that cannot open the new file is
+//      reported while the old one is still alive and serving.
+//   3. Only then CLOSE the old pool and publish the new state (path, catalog,
+//      rows, pool). Closing first would leave the app with no handler at all if
+//      (1) or (2) failed.
+//
+// NEGATIVE CONTROL (CONTRACTS D3): PRISM_C34_MUTANT_NO_ARCHIVE_SWITCH restores
+// the pre-C34 shape -- the refresh succeeds but the session keeps the archive it
+// opened. The suite's "the current archive path and entry count are the new
+// ones" assertion must go red.
+// ---------------------------------------------------------------------------
+struct ArchiveSession {
+  prism::win::SevenZipLibrary* library = nullptr;
+  std::shared_ptr<OperationHandles>* ops = nullptr;   // the lease behind the view
+  std::vector<ArchiveItem>* catalog = nullptr;        // full catalogue (plans/search)
+  std::vector<ArchiveItem>* items = nullptr;          // what the window navigates
+  std::wstring* archivePath = nullptr;                // the file the session shows
+  size_t handlerSlots = 2;
+};
+
+struct ArchiveSwitch {
+  bool ok = false;            // the request was served (see switched)
+  bool switched = false;      // the session really moved to the new file
+  bool poolRebuilt = false;   // a new handler pool now owns the file
+  std::string error;
+  std::wstring archivePath;   // what the session shows AFTER the call
+  size_t items = 0;
+};
+
+// Must run on the UI thread with NO live lease (see the order above). A caller
+// that has a lease in flight either waits for it or defers the switch; this
+// function does not guess.
+inline ArchiveSwitch SwitchArchive(const ArchiveSession& session, const std::wstring& newPath) {
+  ArchiveSwitch out;
+  if (session.library == nullptr || session.ops == nullptr || session.catalog == nullptr ||
+      session.items == nullptr || session.archivePath == nullptr) {
+    out.error = "archive switch: incomplete session";
+    return out;
+  }
+  if (newPath.empty()) {
+    out.error = "archive switch: no target path";
+    return out;
+  }
+  // (1) The new file, on its own handler, before anything is torn down.
+  std::vector<ArchiveItem> next;
+  {
+    prism::win::ArchiveReader probe(*session.library);
+    if (!probe.Open(newPath)) {
+      out.error = "cannot open the new archive: " + probe.openTrace();
+      return out;
+    }
+    next = probe.ReadCatalog();
+  }
+  if (next.empty()) {
+    out.error = "the new archive has an empty catalogue";
+    return out;
+  }
+  // (2) A pool that can serve it, still without touching the old one.
+  OperationHandles::Config config;
+  config.archivePath = newPath;
+  config.handlerSlots = session.handlerSlots;
+  std::string why;
+  std::shared_ptr<OperationHandles> nextOps =
+      OperationHandles::Create(*session.library, config, &why);
+  if (!nextOps) {
+    out.error = "handler pool for the new archive: " + why;
+    return out;
+  }
+#if defined(PRISM_C34_MUTANT_NO_ARCHIVE_SWITCH)
+  // MUTATION (D3): the refresh succeeds, the session does not move. The old
+  // pool stays (it is still what the window is showing) and the freshly leased
+  // one is closed so the mutant leaks no handler.
+  nextOps->Close();
+  out.ok = true;
+  out.switched = false;
+  out.poolRebuilt = false;
+  out.archivePath = *session.archivePath;
+  out.items = session.items->size();
+  return out;
+#else
+  // (3) Publish. The old pool is closed FIRST so no new task can lease a
+  // handler against a file the session no longer shows.
+  if (*session.ops) (*session.ops)->Close();
+  *session.ops = nextOps;
+  *session.archivePath = newPath;
+  *session.catalog = std::move(next);
+  *session.items = *session.catalog;
+  out.ok = true;
+  out.switched = true;
+  out.poolRebuilt = true;
+  out.archivePath = *session.archivePath;
+  out.items = session.items->size();
+  return out;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// 10. The inline-preview companion's HOST half (card C34, C30's missing piece).
+//
+// C30 shipped the shared section, the wake/ack events and the focus-free flyout
+// window, but nothing in PrismArchive ever CREATED the section -- so the shell's
+// TryPublishPreview always answered NoReader and every right-click fell back to
+// "launch the app". The channel is half a feature without a process that owns
+// it, and that process is the running gallery.
+//
+// What this class is: the owner of the section/events (so CompanionPreviewPresent
+// answers true while the app runs), the hidden flyout window, and the wake
+// handling -- read the shell's packet, list the archive's FIRST N entries (12:
+// one screenful, C30's kMaxPreviewEntries), acknowledge, place next to the click
+// and show WITHOUT activation (C30's ExStylePolicy + SWP_NOACTIVATE are what make
+// that true; nothing here may call SetForegroundWindow).
+//
+// Threading: everything runs on the UI thread (the window's idle timer calls
+// Pump). The channel is two kernel objects, the scan is a header read, and the
+// flyout is a window -- none of it needs a worker, and a worker would have to
+// post everything back anyway.
+//
+// BOUNDS (why this cannot hang a right-click): the shell publishes
+// fire-and-forget, so an abandoned companion stalls nobody; the reading side
+// polls with a ZERO timeout (Pump is called from a timer) and only opens an
+// archive the app does NOT have open when it is smaller than maxScanBytes -- a
+// header scan of a 4 GiB archive is 78 s (docs/PERF.md), and a peek must never
+// be that.
+// ---------------------------------------------------------------------------
+inline constexpr size_t kCompanionMaxEntries = prism::win::companion::kMaxPreviewEntries;
+inline constexpr uint64_t kCompanionScanBudgetBytes = 256ull << 20;
+
+class CompanionHost {
+ public:
+  struct Config {
+    // The archive the window has open, and its catalogue. When the shell's
+    // packet names THIS file the flyout needs no I/O at all (the common case:
+    // the user right-clicks the archive they are looking at).
+    const std::wstring* openArchive = nullptr;
+    const std::vector<ArchiveItem>* catalog = nullptr;
+    // The engine, for the foreign-archive case (a right-click on a file the
+    // window is not showing). Without it, that case says "needs scan".
+    prism::win::SevenZipLibrary* library = nullptr;
+    // Test seam: replaces the real header read.
+    std::function<bool(const std::wstring&, std::vector<ArchiveItem>*)> scanArchive;
+    size_t maxScanBytes = static_cast<size_t>(kCompanionScanBudgetBytes);
+  };
+
+  CompanionHost() = default;
+  ~CompanionHost() { Stop(); }
+  CompanionHost(const CompanionHost&) = delete;
+  CompanionHost& operator=(const CompanionHost&) = delete;
+
+  static constexpr int kFlyoutWidth = 360;
+  static constexpr int kFlyoutHeight = 300;
+
+  // Creates the channel (the OWNER side: this is what makes the shell's presence
+  // probe answer true) and the hidden flyout. False + *why is a diagnosable
+  // degradation: the app runs, the shell takes its NoReader path.
+  bool Start(HINSTANCE instance, const Config& config, std::string* why = nullptr) {
+    Stop();
+    config_ = config;
+    if (!config_.scanArchive && config_.library != nullptr) {
+      prism::win::SevenZipLibrary* library = config_.library;
+      config_.scanArchive = [library](const std::wstring& path,
+                                      std::vector<ArchiveItem>* out) {
+        prism::win::ArchiveReader probe(*library);
+        if (!probe.Open(path)) return false;
+        *out = probe.ReadCatalog();
+        return !out->empty();
+      };
+    }
+    if (!channel_.CreateAsOwner()) {
+      if (why != nullptr) {
+        *why = "preview channel (section + wake/ack events) could not be created, win32 " +
+               std::to_string(static_cast<unsigned long>(::GetLastError()));
+      }
+      return false;
+    }
+    if (!window_.RegisterClass(instance) && ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+      if (why != nullptr) *why = "companion window class could not be registered";
+      channel_.Close();
+      return false;
+    }
+    // Created HIDDEN (WS_POPUP, never shown): a flyout visible before the user
+    // asked for it is the bug this shape prevents.
+    if (!window_.Create(instance, kFlyoutWidth, kFlyoutHeight)) {
+      if (why != nullptr) *why = "companion window could not be created";
+      channel_.Close();
+      return false;
+    }
+    return true;
+  }
+
+  void Stop() {
+    if (window_.Hwnd() != nullptr && ::IsWindow(window_.Hwnd())) ::DestroyWindow(window_.Hwnd());
+    channel_.Close();
+    scanned_.clear();
+    shownPath_.clear();
+    shownEntries_ = 0;
+    wakes_ = handled_ = refused_ = oversized_ = 0;
+  }
+
+  // One non-blocking poll. True when a wake was consumed.
+  bool HandleWake() {
+    if (!channel_.IsOpen() || window_.Hwnd() == nullptr || !::IsWindow(window_.Hwnd())) {
+      return false;
+    }
+    if (!channel_.WaitForWake(0)) return false;  // the timer's tick, never a wait
+    ++wakes_;
+    prism::win::companion::PreviewPacket incoming{};
+    if (!channel_.Read(incoming)) {
+      // Torn or foreign layout: keep whatever the flyout shows instead of
+      // painting half a list (C30's coherency contract).
+      ++refused_;
+      return false;
+    }
+    const std::wstring path = prism::win::companion::ArchivePathOf(incoming);
+    const std::vector<ArchiveItem>* rows = nullptr;
+    if (config_.catalog != nullptr && config_.openArchive != nullptr &&
+        *config_.openArchive == path) {
+      rows = config_.catalog;
+    } else if (ScanForeign(path)) {
+      rows = &scanned_;
+    }
+
+    prism::win::companion::PreviewPacket outgoing{};
+    prism::win::companion::ResetPacket(outgoing);
+    prism::win::companion::SetArchivePath(outgoing, path);
+    outgoing.cursorX = incoming.cursorX;
+    outgoing.cursorY = incoming.cursorY;
+    size_t listed = 0;
+    if (rows != nullptr) {
+      for (const ArchiveItem& item : *rows) {
+        if (listed == kCompanionMaxEntries) break;
+        if (!prism::win::companion::AddEntry(outgoing, prism::win::Utf8ToWide(item.path), item.size,
+                                            item.isDir)) {
+          break;
+        }
+        ++listed;
+      }
+    } else {
+      // Nothing to show is SAID, not faked: the flyout keeps its header and the
+      // shell's own flag tells it why the list is empty.
+      outgoing.flags |= prism::win::companion::kFlagNeedsCatalogScan;
+    }
+    window_.ApplyPreview(outgoing);
+    channel_.Acknowledge();  // the ack is the writer's (bounded) proof of receipt
+    ++handled_;
+    shownPath_ = path;
+    shownEntries_ = listed;
+    ShowAtCursor(incoming.cursorX, incoming.cursorY);
+    return true;
+  }
+
+  // The idle tick: drain what the shell published since the last one.
+  void Pump(int maxWakes = 8) {
+    for (int i = 0; i < maxWakes; ++i) {
+      if (!HandleWake()) break;
+    }
+  }
+
+  // ---- read-back (the suite asserts against these, not against internals) --
+  prism::win::companion::CompanionWindow& Window() { return window_; }
+  const prism::win::companion::CompanionWindow& Window() const { return window_; }
+  bool ChannelOpen() const { return channel_.IsOpen(); }
+  bool ChannelOwner() const { return channel_.IsOwner(); }
+  bool Visible() const { return window_.IsVisible(); }
+  const std::wstring& ShownPath() const { return shownPath_; }
+  size_t ShownEntries() const { return shownEntries_; }
+  size_t Wakes() const { return wakes_; }
+  size_t Handled() const { return handled_; }
+  size_t Refused() const { return refused_; }
+  size_t Oversized() const { return oversized_; }
+
+ private:
+  // An archive the window is not showing: header read, bounded by size.
+  bool ScanForeign(const std::wstring& path) {
+    if (!config_.scanArchive) return false;
+    if (config_.maxScanBytes > 0) {
+      WIN32_FILE_ATTRIBUTE_DATA data{};
+      if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+        ULARGE_INTEGER bytes{};
+        bytes.LowPart = data.nFileSizeLow;
+        bytes.HighPart = data.nFileSizeHigh;
+        if (bytes.QuadPart > config_.maxScanBytes) {
+          ++oversized_;
+          return false;
+        }
+      }
+    }
+    scanned_.clear();
+    if (!config_.scanArchive(path, &scanned_)) return false;
+    return !scanned_.empty();
+  }
+
+  // Off the click, inside the monitor's work area, WITHOUT activation: C30's
+  // flyout owns that policy (SWP_NOACTIVATE / SW_SHOWNOACTIVATE); this only
+  // supplies the cursor and the work area.
+  void ShowAtCursor(int cursorX, int cursorY) {
+    const POINT cursor{cursorX, cursorY};
+    RECT work{};
+    bool haveWork = false;
+    if (const HMONITOR monitor = ::MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)) {
+      MONITORINFO info{};
+      info.cbSize = sizeof(info);
+      if (::GetMonitorInfoW(monitor, &info)) {
+        work = info.rcWork;
+        haveWork = true;
+      }
+    }
+    if (!haveWork) {
+      work.left = 0;
+      work.top = 0;
+      work.right = ::GetSystemMetrics(SM_CXSCREEN);
+      work.bottom = ::GetSystemMetrics(SM_CYSCREEN);
+    }
+    window_.PlaceForCursor(cursor, work);
+  }
+
+  Config config_;
+  prism::win::companion::PreviewChannel channel_;
+  prism::win::companion::CompanionWindow window_;
+  std::vector<ArchiveItem> scanned_;  // the foreign archive's rows (reused)
+  std::wstring shownPath_;
+  size_t shownEntries_ = 0;
+  size_t wakes_ = 0;
+  size_t handled_ = 0;
+  size_t refused_ = 0;
+  size_t oversized_ = 0;
+};
 
 }  // namespace prism::app

@@ -51,7 +51,36 @@ class ThumbStore final : public IThumbSink {
   // Recency-free probe (renderer cache warm-up checks).
   bool Contains(uint32_t itemIndex) const { return index_.find(itemIndex) != index_.end(); }
 
+  // Idle return (C33). The budget is a CAP, not an allocation: nothing is
+  // reserved up front, but nothing is handed back either until pressure forces
+  // eviction -- so a gallery that once filled 64 MiB keeps 64 MiB resident for
+  // the rest of the session. This is the only path that moves resident DOWN
+  // without pressure, and it is what a minimised / hidden gallery calls.
+  //
+  // Returns the bytes actually returned. Trimming to a target that is already
+  // satisfied returns 0 and touches nothing (no version bump: the renderer's
+  // device-bitmap cache stays valid).
+  size_t Trim(size_t targetBytes) {
+#ifdef PRISM_THUMB_MUTANT_NO_TRIM
+    // Negative control (c33-memory.cmake): the "give the pixels back" step is
+    // skipped, so the resident accounting stays where pressure left it and the
+    // idle-return assertion must go red. The caller sees the injection at
+    // runtime: the return value is 0 while resident exceeds the target.
+    (void)targetBytes;
+    return 0;
+#else
+    if (targetBytes >= size_) return 0;
+    const size_t before = size_;
+    while (size_ > targetBytes && !entries_.empty()) EvictOldest();
+    return before - size_;
+#endif
+  }
+
+  // Drop every pixel: the "no island visible / window minimised" state.
+  size_t ReleaseAll() { return Trim(0); }
+
   size_t Count() const { return entries_.size(); }
+  // Resident payload bytes (the D17 quantity: what the budget actually holds).
   size_t SizeBytes() const { return size_; }
   size_t BudgetBytes() const { return budget_; }
   uint64_t Version() const { return version_; }

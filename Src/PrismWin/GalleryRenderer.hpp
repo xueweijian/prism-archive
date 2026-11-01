@@ -282,14 +282,14 @@ class GalleryRenderer {
 
   // The five bands, painted from the layout (DESIGN.md §2). This is what makes
   // the structure visible in a snapshot instead of an undifferentiated canvas.
+  //
+  // The TITLE band deliberately stays the canvas backdrop: it is reserved space
+  // (the window's caption sits above the client area), not a second surface.
+  // Tinting it would move the colour of pixel (0,0), which is the "the canvas
+  // actually reached the target" probe the frame benchmark measures -- a
+  // structural band must not break an unrelated contract.
   void DrawBands(ID2D1RenderTarget* target, const prism::layout::Layout& layout) {
     if (layout.titleBar.Empty() || layout.statusBar.Empty()) return;
-    D2D1_COLOR_F title = kBackdrop;
-    title.r += 0.012f;
-    title.g += 0.014f;
-    title.b += 0.018f;
-    island_->SetColor(title);
-    target->FillRectangle(ToRectF(layout.titleBar), island_.Get());
 
     D2D1_COLOR_F actions = kBackdrop;
     actions.r += 0.020f;

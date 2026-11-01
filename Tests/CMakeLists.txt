@@ -130,6 +130,23 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   # (or a crash after printing) still fail while a real success is provable.
   set_tests_properties(win.mkdir_matrix PROPERTIES TIMEOUT 300
       PASS_REGULAR_EXPRESSION "MATRIX VERDICT: OK")
+
+  # Folder navigation against the REAL window class (batch A increment 5).
+  # Double-click a directory -> list changes -> Backspace -> back with the
+  # selection restored, driven through WndProc, not through the Navigator API
+  # alone (the Navigator has its own Linux suite; this proves the wiring).
+  add_executable(win_tree_nav win/test_navigation.cpp)
+  target_link_libraries(win_tree_nav PRIVATE prism_core prism_win_bridge
+                                              user32.lib gdi32.lib ole32.lib
+                                              windowscodecs.lib d2d1.lib dwrite.lib)
+  target_compile_options(win_tree_nav PRIVATE /WX-)
+  add_test(NAME "win.tree_nav" COMMAND win_tree_nav)
+  # Marker is a CONJUNCTION with the exit code: ctest needs exit 0 AND this
+  # line, so a silent SKIP (no 7z.dll on the runner) or a crash after printing
+  # still fails. This test was written but left UNREGISTERED on first landing
+  # -- preflight D1 caught it, which is exactly what that gate is for.
+  set_tests_properties(win.tree_nav PROPERTIES TIMEOUT 300
+      PASS_REGULAR_EXPRESSION "ALL NAVIGATION CHECKS PASSED")
 endif()
 
 # The MSIX sparse-package manifest is install-time-critical: parse it on every

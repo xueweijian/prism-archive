@@ -215,10 +215,19 @@ jobs:
           #      serialises exactly that group and leaves every other suite
           #      running in parallel.
           #
-          # Local measurement, this repo, -E "bench|fuzz", 168 tests:
-          #   serial 286 s  ->  -j 8 150 s (1.9x)
-          # and "ctest -j 8 --repeat until-fail:3" is green on every repetition.
-          ctest -j 8 --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          # NOT -j yet, and that is a measured statement again (card C36):
+          #   serial 286 s  ->  -j 8 150 s (1.9x), so the win is real and the
+          #   fixture work above is what unlocked it -- but -j 8 is still red on
+          #   ONE suite, for a reason that is not a fixture path:
+          #   win.companion_preview ("degradation: no companion") asserts that a
+          #   named IPC object is ABSENT 0.8 s after its own two-process case;
+          #   under -j 8 the child's teardown lags and the object is still there
+          #   (FAIL at test_companion_preview.cpp:374). It is green serially and
+          #   green in the first -j 8 run, i.e. a scheduling race inside that
+          #   suite, not a shared directory -- a RESOURCE_LOCK cannot fix it
+          #   (only one instance runs) and the fix belongs to c30.
+          # Restore "-j 8" the moment that case waits for its child to exit.
+          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
       # The Windows half of the same local gate: proves CMakePresets.json parses

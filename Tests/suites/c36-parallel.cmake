@@ -89,6 +89,22 @@ function(prism_c36_lock_external_cli)
       mutation.app_wiring.shared_reader
       mutation.app_wiring.no_motw)
 
+  # The installer round-trip suite (c3-installer) writes ONE per-user scratch
+  # registry key (HKCU:\Software\PrismArchiveSelfTest) and resets it between
+  # cases. Two of those processes at once undo each other's staging, and the
+  # mutation controls then report "not caught" for a reason that has nothing to
+  # do with the guard under test -- measured here on the first -j 8 run
+  # (mutation.installer.rebackup / envundersoftware went red under -j 8 and pass
+  # serially). One lock for the group, same mechanism as the 7z.exe group.
+  list(APPEND _cli_tests
+       win.installer_selftest
+       mutation.installer.skipdefaulticon
+       mutation.installer.nobackup
+       mutation.installer.norestore
+       mutation.installer.unquotedverb
+       mutation.installer.rebackup
+       mutation.installer.envundersoftware)
+
   set(_locked 0)
   set(_missing "")
   foreach(_test IN LISTS _cli_tests)

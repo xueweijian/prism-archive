@@ -17,8 +17,18 @@
 //   * WM_MOUSEACTIVATE answers MA_NOACTIVATE, so a click into the flyout cannot
 //     pull focus out of the Explorer window that owns the menu.
 // NOREDIRECTIONBITMAP is deliberate: the window has no redirection surface by
-// design (its pixels come from the M3 DirectComposition visual). Until then the
-// flyout is a lifecycle/hit-test shell -- which is exactly the part under test.
+// design -- its pixels come from a DirectComposition island. Card C48 supplies
+// that island (FlyoutSurface.hpp): Create() attaches one, WM_PAINT paints the
+// glass through it, and the GDI body below survives as the documented fallback
+// for a machine where composition is unavailable (remote sessions, composition
+// disabled). The window is therefore a lifecycle shell PLUS real pixels, and
+// Tests/win/test_flyout_paint.cpp proves the pixels offscreen.
+//
+// GEOMETRY: the row model is FlyoutSurface's Metrics (DPI-scaled), not a second
+// set of constants. At 96 dpi the metrics reproduce kHeaderHeight/kRowHeight
+// exactly, which is what lets C30's hit-test expectations keep holding on any
+// machine: SetDpi() is an explicit OPT-IN the host performs, never something
+// Create() infers, so a HiDPI desktop cannot silently move another card's rows.
 #pragma once
 
 #include <windows.h>
@@ -32,6 +42,7 @@
 #include "../PrismCore/Preview.hpp"
 #include "../PrismCore/ProgressHud.hpp"
 #include "CompanionPreviewBridge.hpp"
+#include "FlyoutSurface.hpp"  // C48: the DComp island + the D2D content painter
 
 namespace prism::win::companion {
 
@@ -39,10 +50,13 @@ class CompanionWindow {
  public:
   static constexpr wchar_t kClassName[] = L"PrismArchiveCompanionPreview";
 
-  // Flyout metrics (also the row model the hover hit-test uses).
-  static constexpr int kHeaderHeight = 24;
-  static constexpr int kRowHeight = 18;
-  static constexpr int kMaxVisibleRows = 10;
+  // The 96-dpi DESIGN values (also the row model the hover hit-test uses). The
+  // live numbers come from flyout::MetricsForDpi(dpi_) -- these constants are
+  // what that function returns at 96 dpi, and what C30's suite pins.
+  static constexpr int kHeaderHeight = flyout::kBaseHeaderHeight;  // 24
+  static constexpr int kRowHeight = flyout::kBaseRowHeight;        // 18
+  // One screenful, exactly the packet's entry budget (ch. 4.1: "first 12").
+  static constexpr int kMaxVisibleRows = flyout::kMaxRows;  // 12
 
   // The focus policy in ONE place: the window creation, the test assertion and
   // the negative-control mutant all read this function, so "created without
@@ -73,7 +87,45 @@ class CompanionWindow {
     hwnd_ = CreateWindowExW(
         ExStylePolicy(), kClassName, L"PrismArchive Preview", WS_POPUP, CW_USEDEFAULT,
         CW_USEDEFAULT, width, height, nullptr, nullptr, instance, this);
-    return hwnd_ != nullptr;
+    if (hwnd_ == nullptr) return false;
+    // C48: attach the DirectComposition island. Failure is a supported outcome
+    // (remote session / composition disabled): surfaceReady_ stays false and
+    // WM_PAINT keeps its GDI body, so the flyout degrades instead of vanishing.
+    surfaceReady_ = SUCCEEDED(surface_.Initialize()) &&
+                    surface_.InitializeComposition(hwnd_, dpi_);
+    return true;
+  }
+
+  // ---- DPI (C48) --------------------------------------------------------
+  // Explicit opt-in, deliberately NOT inferred in Create(): the host knows when
+  // the flyout is per-monitor DPI aware, and a test that pins 96-dpi rows must
+  // not turn red on a 125% desktop.
+  void SetDpi(int dpi) {
+    dpi_ = dpi < 48 ? 48 : (dpi > 480 ? 480 : dpi);
+    ApplyContentSize();
+  }
+  void SetDpiFromWindow() {
+    if (hwnd_ != nullptr) SetDpi(static_cast<int>(::GetDpiForWindow(hwnd_)));
+  }
+  int Dpi() const noexcept { return dpi_; }
+  flyout::Metrics Metrics() const { return flyout::MetricsForDpi(dpi_); }
+
+  // The theme whose C15 tokens the island resolves (the app runs dark glass).
+  void SetVariant(prism::theme::Variant variant) noexcept { variant_ = variant; }
+  prism::theme::Variant Variant() const noexcept { return variant_; }
+
+  bool UsesComposition() const noexcept { return surfaceReady_; }
+  const flyout::FlyoutSurface& Surface() const noexcept { return surface_; }
+
+  // The window is exactly as tall as the rows it shows (header + N * pitch) and
+  // always 360 wide: the peek never grows past one screenful.
+  void ApplyContentSize() {
+    if (hwnd_ == nullptr) return;
+    const flyout::Metrics m = Metrics();
+    const int height = m.HeightForRows(static_cast<int>(entries_.size()));
+    SetWindowPos(hwnd_, nullptr, 0, 0, m.width, height,
+                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER);
+    if (surfaceReady_) surface_.Resize(m.width, height);
   }
 
   // ---- model inputs -----------------------------------------------------
@@ -96,6 +148,9 @@ class CompanionWindow {
     needsScan_ = (packet.flags & kFlagNeedsCatalogScan) != 0;
     scroll_ = 0;
     hover_ = -1;
+    // C48: the island's height is the payload's height (clamped to 12 rows), so
+    // the window and its pixels agree about what "one screenful" means.
+    ApplyContentSize();
     InvalidateRect(hwnd_, nullptr, TRUE);
     return true;
   }
@@ -163,8 +218,9 @@ class CompanionWindow {
   // Row under a client-space y, in ENTRIES_ index space (scroll offset applied).
   // -1 for the header, an empty list, or past the last row.
   int HitTestRow(int clientY) const noexcept {
-    if (clientY < kHeaderHeight) return -1;
-    const int row = (clientY - kHeaderHeight) / kRowHeight;
+    const flyout::Metrics m = Metrics();
+    if (clientY < m.headerHeight) return -1;
+    const int row = (clientY - m.headerHeight) / m.rowHeight;
     if (row < 0 || row >= kMaxVisibleRows) return -1;
     const int index = scroll_ + row;
     if (index < 0 || index >= static_cast<int>(entries_.size())) return -1;
@@ -250,12 +306,50 @@ class CompanionWindow {
     return DefWindowProcW(hwnd, msg, wparam, lparam);
   }
 
-  void OnPaint() const {
+  // The scene the island paints: the payload's rows, in the flyout's own model.
+  // Building it here (not inside FlyoutSurface) keeps the surface free of the
+  // IPC contract and keeps the conversion -- bounded name reads, the 12-row
+  // budget, the scroll offset -- in the one place that owns the packet.
+  flyout::Scene BuildScene() const {
+    flyout::Scene scene;
+    scene.variant = variant_;
+    scene.dpi = dpi_;
+    scene.title = archivePath_.empty() ? kindLine_ : archivePath_;
+    scene.rows.reserve(static_cast<size_t>(kMaxVisibleRows));
+    for (int row = 0; row < kMaxVisibleRows; ++row) {
+      const int index = scroll_ + row;
+      if (index < 0 || index >= static_cast<int>(entries_.size())) break;
+      const PreviewEntry& entry = entries_[static_cast<size_t>(index)];
+      flyout::Row out;
+      out.name = EntryName(entry);  // bounded: never a raw C-string read
+      out.sizeBytes = entry.sizeBytes;
+      out.directory = entry.kind == static_cast<uint32_t>(PreviewEntryKind::Directory);
+      scene.rows.push_back(std::move(out));
+    }
+    if (!scene.rows.empty()) {
+      scene.subtitle = std::to_wstring(scene.rows.size()) + L" items";
+    } else if (needsScan_) {
+      scene.subtitle = L"scanning";
+    }
+    // The hover index is in ENTRY space; the scene wants the visible row.
+    const int hoverRow = hover_ >= 0 ? hover_ - scroll_ : -1;
+    scene.hover = hoverRow >= 0 && hoverRow < static_cast<int>(scene.rows.size()) ? hoverRow : -1;
+    return scene;
+  }
+
+  void OnPaint() {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd_, &ps);
     RECT rc{};
     GetClientRect(hwnd_, &rc);
-    // M3 swaps this for the D2D Liquid Glass pipeline; the text contract stays.
+    // C48: the real pixels. The island is composited by DWM (the window has no
+    // redirection bitmap), so this only has to hand the painter the scene --
+    // BeginPaint/EndPaint still validate the update region.
+    if (surfaceReady_ && surface_.Paint(BuildScene())) {
+      EndPaint(hwnd_, &ps);
+      return;
+    }
+    // Fallback: no composition on this machine. Legible GDI text, no glass.
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0x20, 0x24, 0x2E));
     const std::wstring header = archivePath_.empty() ? kindLine_ : archivePath_;
@@ -325,6 +419,10 @@ class CompanionWindow {
   int32_t cursorY_ = 0;
   int scroll_ = 0;
   int hover_ = -1;
+  int dpi_ = 96;  // 96 until the host opts in (see SetDpi)
+  prism::theme::Variant variant_ = prism::theme::Variant::Midnight;
+  flyout::FlyoutSurface surface_;
+  bool surfaceReady_ = false;
   FlyoutRect placement_{};
 };
 

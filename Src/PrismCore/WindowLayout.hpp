@@ -77,6 +77,7 @@ inline constexpr bool kRailInGridMode = false;
 inline constexpr bool kRailInGridMode = true;
 #endif
 
+
 // The runtime proof each mutant is REALLY armed (D3: a macro that stopped
 // matching would leave the mutant green and its WILL_FAIL entry red forever).
 inline constexpr std::string_view ActiveMutation() {
@@ -114,6 +115,14 @@ inline constexpr int kQuickLookHeight = 500;
 // right -- the exact defect the v2 screenshot showed.
 inline constexpr int kFlowRowHeight = kListRowHeight;
 inline constexpr int kFlowTileGap = kIslandGap;  // alias: the grid's gap
+// The hit test's row pitch. Off by one in the CONTROL build only: a click on
+// the last pixel of row N-1 must then land on row N (the neighbour), which is
+// what the polish suite's boundary assertions are written to catch.
+#if defined(PRISM_V4_MUTANT_HIT_PITCH)
+inline constexpr int kFlowHitPitch = kFlowRowHeight + 1;
+#else
+inline constexpr int kFlowHitPitch = kFlowRowHeight;
+#endif
 
 // ------------------------------------------------------------------ Rect
 struct Rect {
@@ -433,7 +442,9 @@ inline int FlowItemAt(const Layout& layout, std::span<const FlowItem> items, int
                       int scrollPx) {
   if (x < layout.content.left || x >= layout.content.right) return -1;
   const int scroll = (std::max)(0, scrollPx);
-  const int local = y + scroll;
+  // kFlowHitPitch == kFlowRowHeight in every shipping build (the control adds
+  // one pixel, so the boundaries move and the suite's boundary checks go red).
+  const int local = y + scroll + (kFlowHitPitch - kFlowRowHeight);
   const std::vector<FlowCell> cells = FlowCells(layout, items);
   for (const FlowCell& cell : cells) {
     if (local < cell.rect.top || local >= cell.rect.bottom) continue;

@@ -293,6 +293,10 @@ class GalleryWindow {
   // rail is part of the grid, not list-mode chrome.
   const prism::layout::Layout& LayoutForTest() const { return layout_; }
 
+  // V4: the window's own hit test, exposed so a suite can compare a point IT
+  // computed from the definition with the item the window resolves there.
+  int HitTestForTest(int x, int y) { return ItemAtPoint(x, y); }
+
   // V4: the status band's readout. The app sets it from the engine's archive
   // properties; until it does, every field honestly reads "unknown".
   void SetArchiveStatus(const prism::layout::StatusInfo& status) {

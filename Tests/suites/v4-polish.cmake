@@ -60,10 +60,14 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   #   grid-no-sidebar -- the rail is list-mode chrome again; a grid frame
   #                      reserves 0 px. The "the grid reserves the rail"
   #                      assertions (model AND real window) must go red.
+  #   hit-pitch       -- the hit test's row pitch is one pixel off, so a click on
+  #                      the LAST pixel of row N-1 lands on row N. The boundary
+  #                      assertions (expected tops computed in the test from the
+  #                      spec's 32 px pitch) must go red.
   # The binary prints the dashed id, so the marker below is the proof the FAIL
   # came from the injection (D27) and not from an unrelated break.
   # ---------------------------------------------------------------------------
-  foreach(mutant IN ITEMS CELL_ROW GRID_NO_SIDEBAR)
+  foreach(mutant IN ITEMS CELL_ROW GRID_NO_SIDEBAR HIT_PITCH)
     string(TOLOWER "${mutant}" mutant_lc)
     string(REPLACE "_" "-" mutant_id "${mutant_lc}")
     add_executable("win_visual_polish_mutant_${mutant_lc}" win/test_visual_polish.cpp)

@@ -479,6 +479,39 @@ PRISM_TEST("v4.actionbar: the rendered icon and label really line up") {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. the hit test follows the SAME 32 px pitch, boundary by boundary
+// ---------------------------------------------------------------------------
+PRISM_TEST("v4.hit: a click on the 32 px pitch lands on the band it names") {
+  prism::win::gallery::GalleryWindow window;
+  if (!PRISM_CHECK(window.Create(L"PrismArchive v4 hit", GetModuleHandleW(nullptr)))) return;
+  std::vector<prism::ArchiveItem> archive = TextCatalog();
+  window.SetItems(&archive);
+  window.Dispatch(WM_SIZE, 0, MAKELPARAM(kWidth, kHeight));
+  const Layout layout = window.LayoutForTest();
+  PRISM_CHECK_EQ(window.ItemCount(), 3);
+  // EXPECTED values come from the definition, not from the window: three
+  // tile-less items are three contiguous 32 px bands starting at the padded
+  // content top (DESIGN.md §2). The literal 32 is the pitch the spec names.
+  const int firstTop = layout.contentInner.top;
+  const int x = layout.content.left + 40;
+  for (int i = 0; i < 3; ++i) {
+    const int bandTop = firstTop + i * 32;
+    PRISM_CHECK_EQ(window.HitTestForTest(x, bandTop), i);          // first pixel
+    PRISM_CHECK_EQ(window.HitTestForTest(x, bandTop + 31), i);     // last pixel
+    if (i > 0) {
+      // One pixel ABOVE the boundary still belongs to the previous row: this is
+      // the assertion that a pitch that is off by one cannot survive.
+      PRISM_CHECK_EQ(window.HitTestForTest(x, bandTop - 1), i - 1);
+    }
+  }
+  // Above the first band there is no item, and the rail is not the grid.
+  PRISM_CHECK_EQ(window.HitTestForTest(x, firstTop - 1), -1);
+  PRISM_CHECK_EQ(window.HitTestForTest(x, firstTop + 3 * 32), -1);
+  PRISM_CHECK_EQ(window.HitTestForTest(layout.content.left - 40, firstTop + 4), -1);
+  window.Dispatch(WM_DESTROY, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
 // 3. the sidebar is chrome: present in grid mode, 220 px, collapse -> 0
 // ---------------------------------------------------------------------------
 PRISM_TEST("v4.sidebar: the grid reserves the rail, collapse gives it back") {
@@ -656,6 +689,11 @@ int main(int argc, char** argv) {
   std::printf("V4 MUTANT ACTIVE: grid-no-sidebar (the rail is list-mode chrome)\n");
   prism::test::SetMutationVerdict("V4 MUTATION CAUGHT: grid-no-sidebar",
                                   [] { return !prism::layout::kRailInGridMode; });
+#elif defined(PRISM_V4_MUTANT_HIT_PITCH)
+  std::printf("V4 MUTANT ACTIVE: hit-pitch (the hit test's row pitch is off by one)\n");
+  prism::test::SetMutationVerdict(
+      "V4 MUTATION CAUGHT: hit-pitch",
+      [] { return prism::layout::kFlowHitPitch != prism::layout::kFlowRowHeight; });
 #endif
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::puts("SKIP: COM init failed");

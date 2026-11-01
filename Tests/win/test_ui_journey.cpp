@@ -129,19 +129,54 @@ int main() {
     return (row >= 0 && row < static_cast<int>(rows.size())) ? rows[row].path
                                                             : std::string("<none>");
   };
-  // V4: the grid is a FLOW (tile-less items are full-width bands), so the item's
-  // painted rectangle is asked for directly instead of re-deriving a cell grid.
+  // V4: the grid is a FLOW, so the click point is computed HERE, from the
+  // definition (DESIGN.md §2/§3): a directory is a tile of tileWidth x
+  // cellHeight inside the padded content; anything without a thumbnail is a
+  // 32 px band spanning the content. The window's rectangles are the INPUTS
+  // (content inner, tile width, columns, gaps) -- never the answer -- so a
+  // layout bug cannot make the expectation and the hit test agree by accident.
   auto tileCentre = [&window](int row, int* px, int* py) {
-    const prism::layout::Rect rect = window.ItemRect(row);
-    if (rect.Empty()) return false;
-    *px = (rect.left + rect.right) / 2;
-    *py = (rect.top + rect.bottom) / 2;
-    return true;
+    const prism::layout::Layout layout = window.LayoutForTest();
+    const auto& items = window.Items();
+    if (row < 0 || row >= static_cast<int>(items.size())) return false;
+    int bandTop = layout.contentInner.top;
+    int column = 0;
+    for (int i = 0; i <= row; ++i) {
+      if (items[static_cast<size_t>(i)].isDir) {  // a tile
+        if (i == row) {
+          *px = layout.contentInner.left + column * (layout.tileWidth + layout.gap) +
+                layout.tileWidth / 2;
+          *py = bandTop + layout.cellHeight / 2;
+          return true;
+        }
+        if (++column == layout.columns) {
+          bandTop += layout.cellHeight;
+          column = 0;
+        }
+      } else {  // a 32 px band, the pitch DESIGN.md §2 gives the list
+        // A tile run always occupies a full cell row, even when it ends early:
+        // the band that follows starts UNDER it (definition, not implementation).
+        if (column > 0) {
+          bandTop += layout.cellHeight;
+          column = 0;
+        }
+        if (i == row) {
+          *px = (layout.content.left + layout.content.right) / 2;
+          *py = bandTop + 16;
+          return true;
+        }
+        bandTop += 32;
+      }
+    }
+    return false;
   };
   auto postDoubleClick = [&window, &tileCentre](int row) {
     int x = 0;
     int y = 0;
     if (!tileCentre(row, &x, &y)) return false;
+    // The point comes from the definition; the window must resolve it to the
+    // SAME item (independent expectation vs. the product's hit test).
+    if (!PRISM_CHECK_EQ(window.HitTestForTest(x, y), row)) return false;
     PostMessageW(window.Hwnd(), WM_LBUTTONDBLCLK, 0, MAKELPARAM(x, y));
     Pump();
     return true;

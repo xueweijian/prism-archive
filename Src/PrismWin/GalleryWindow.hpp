@@ -138,6 +138,10 @@ class GalleryWindow {
     // posted, and the process hung forever with no window. That was the whole
     // "closing does not exit" bug (card C1, 2026-11-01).
     rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
+    // The bar exists from the first frame: a window without a menu, later
+    // growing one, is a visible flicker AND a different client rect, which would
+    // move every tile after the user opened it.
+    RebuildMenu();
     return rendererInitialized_ && EnsureDeviceResources();
   }
 
@@ -251,6 +255,112 @@ class GalleryWindow {
     Invalidate();
   }
 
+  // ---------- card C27 seams: window menu, sidebar painting, list columns -----
+  //
+  // MENU. The window owns the bar (it is chrome on its own HWND) but never owns
+  // the WORDS: the app hands in translated labels, and every change rebuilds the
+  // real HMENU, so a language switch is visible to GetMenuStringW -- a string in
+  // a member field would look translated in a test and stay English on screen.
+  static constexpr UINT kMenuCompress = 0xE001;  // "compress..." (C9 + C18)
+  static constexpr UINT kMenuExit = 0xE002;
+
+  void SetMenuLabels(std::wstring fileTitle, std::wstring compressText, std::wstring exitText) {
+    fileMenuLabel_ = std::move(fileTitle);
+    compressMenuLabel_ = std::move(compressText);
+    exitMenuLabel_ = std::move(exitText);
+    RebuildMenu();
+  }
+  // WM_COMMAND -> here. The window decides nothing about what "compress" means.
+  void SetMenuCommandHandler(std::function<void(UINT)> handler) {
+    onMenuCommand_ = std::move(handler);
+  }
+  // Read-back of what the bar ACTUALLY says (see the note above).
+  std::wstring MenuItemText(UINT command) const {
+    HMENU bar = host_.hwnd ? GetMenu(host_.hwnd) : nullptr;
+    if (!bar) return {};
+    const int count = GetMenuItemCount(bar);
+    for (int i = 0; i < count; ++i) {
+      HMENU popup = GetSubMenu(bar, i);
+      if (!popup) continue;
+      wchar_t text[256] = {};
+      const int length = GetMenuStringW(popup, command, text, 256, MF_BYCOMMAND);
+      if (length > 0) return std::wstring(text, static_cast<size_t>(length));
+    }
+    return {};
+  }
+  std::wstring MenuTitle() const {
+    HMENU bar = host_.hwnd ? GetMenu(host_.hwnd) : nullptr;
+    if (!bar) return {};
+    wchar_t text[256] = {};
+    const int length = GetMenuStringW(bar, 0, text, 256, MF_BYPOSITION);
+    return length > 0 ? std::wstring(text, static_cast<size_t>(length)) : std::wstring();
+  }
+
+  // The sidebar rail floats OVER the left edge of the content. Until the grid
+  // reflows around it (a separate change: the viewport geometry is C6's), the
+  // rail is OPT-IN: hidden by default, so a window that never asks for it behaves
+  // exactly as it did before C27 -- including its hit-testing, which is what the
+  // older navigation suites drive.
+  void SetSidebarRailVisible(bool visible) {
+    if (sidebarRailVisible_ == visible) return;
+    sidebarRailVisible_ = visible;
+    Invalidate();
+  }
+  bool SidebarRailVisible() const { return sidebarRailVisible_; }
+
+  // C13 columns are geometry, not policy: the app persists what the user had and
+  // hands it back here; the renderer paints exactly this.
+  void SetListColumns(const prism::list::ColumnLayout& columns) {
+    listColumns_ = columns;
+    hasListColumns_ = true;
+    Invalidate();
+  }
+  const prism::list::ColumnLayout& ListColumns() const { return listColumns_; }
+  bool HasListColumns() const { return hasListColumns_; }
+
+  // The frame size the window had when it closed -- read AFTER Run() returns, so
+  // the app can persist the geometry of the window the user actually closed
+  // (the HWND is gone by then; this is captured in WM_CLOSE, before the
+  // DestroyWindow that ends the message loop).
+  bool ClosedFrameSize(int* width, int* height) const {
+    if (width) *width = closedWidth_;
+    if (height) *height = closedHeight_;
+    return closedWidth_ > 0 && closedHeight_ > 0;
+  }
+
+  // Last sidebar row a click landed on (diagnostics/tests). section None means
+  // "no sidebar click since the last reset".
+  prism::sidebar::FocusTarget LastSidebarHit() const { return lastSidebarHit_; }
+
+  // C27: C14's persistence port for the sidebar state (favourites, recent,
+  // collapsed folders). Restore runs here so the lists survive a restart; Save
+  // runs at exit, after Run() returned and before the window dies.
+  void AttachSidebarStore(prism::sidebar::SidebarStore* store) {
+    sidebarStore_ = store;
+    if (sidebarStore_ != nullptr && sidebar_.Restore(sidebarStore_)) {
+      sidebarRestored_ = true;
+      sidebarDirty_ = true;
+      Invalidate();
+    }
+  }
+  bool SaveSidebar() {
+    if (sidebarStore_ == nullptr) return false;
+    sidebar_.Save(sidebarStore_);
+    return true;
+  }
+  bool SidebarRestored() const { return sidebarRestored_; }
+
+  // The archive the window shows changed on disk (a re-pack finished). Posted by
+  // a worker -- the handler runs on the UI thread, where a catalog reload is
+  // legal (a worker must never touch the catalog the window navigates).
+  static constexpr UINT kArchiveChanged = WM_APP + 5;
+  void PostArchiveChanged() {
+    if (host_.hwnd) PostMessageW(host_.hwnd, kArchiveChanged, 0, 0);
+  }
+  void SetArchiveChangedHandler(std::function<void()> handler) {
+    onArchiveChanged_ = std::move(handler);
+  }
+
   // C13: list-mode rows are a SORTED, FILTERED VIEW of the current folder.
   // Defaults (name ascending, empty filter) reproduce the navigator's order, so
   // wiring them changes no pixels until someone asks for a different order.
@@ -355,8 +465,13 @@ class GalleryWindow {
   // them callable also lets the Windows integration test drive the REAL
   // window class without a mouse (L2: the object under test is not a mock).
 
-  // Returns true when the click was consumed (breadcrumb hit or item hit).
+  // Returns true when the click was consumed (sidebar, breadcrumb or item).
   bool ClickAt(int x, int y) {
+    // The sidebar rail is painted OVER the left edge of the content (C27), so a
+    // click inside it belongs to the sidebar -- never to a tile hidden under it.
+    // RowHit commands are the same boxes the renderer fills, which is what keeps
+    // "what I see" and "what I hit" one list.
+    if (sidebarRailVisible_ && SidebarClick(x, y)) return true;
     if (CrumbClick(x, y)) return true;
     // A click inside the breadcrumb bar that misses every crumb is NOT "click
     // on empty list space" -- swallowing it into SetSelection(-1) silently
@@ -507,6 +622,10 @@ class GalleryWindow {
       case kThumbsChanged:
         Invalidate();
         return 0;
+      case kArchiveChanged:
+        // UI thread: the app re-reads the archive and rebuilds the view.
+        if (onArchiveChanged_) onArchiveChanged_();
+        return 0;
       case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(host_.hwnd, &ps);
@@ -544,15 +663,32 @@ class GalleryWindow {
         if (text) SetStatus(*text);
         return 0;
       }
+      case WM_COMMAND: {
+        // Menu items only (the gallery owns no child controls). The command id is
+        // forwarded verbatim: mapping an id to an ACTION is the app's job.
+        const UINT command = LOWORD(wparam);
+        if (onMenuCommand_) onMenuCommand_(command);
+        return 0;
+      }
       case WM_CLOSE:
         // Closing is a two-step contract, and both steps belong in one place:
-        //   1. DestroyWindow -> WM_DESTROY -> PostQuitMessage, which is what
+        //   1. capture the frame size the user chose, so the app can persist it
+        //      (the HWND is gone after step 2, and Main.cpp reads this only
+        //      after Run() returns);
+        //   2. DestroyWindow -> WM_DESTROY -> PostQuitMessage, which is what
         //      makes Run() return (default DefWindowProc does the same thing;
         //      naming it keeps the contract readable and testable).
-        //   2. Main.cpp then cancels the scan and joins the workers.
-        // The HWND is destroyed here and NOT again in the destructor, which
-        // checks IsWindow first for exactly that reason.
-        if (host_.hwnd && IsWindow(host_.hwnd)) DestroyWindow(host_.hwnd);
+        // Main.cpp then cancels the scan and joins the workers. The HWND is
+        // destroyed here and NOT again in the destructor, which checks IsWindow
+        // first for exactly that reason.
+        if (host_.hwnd && IsWindow(host_.hwnd)) {
+          RECT frame{};
+          if (GetWindowRect(host_.hwnd, &frame)) {
+            closedWidth_ = frame.right - frame.left;
+            closedHeight_ = frame.bottom - frame.top;
+          }
+          DestroyWindow(host_.hwnd);
+        }
         return 0;
       case WM_DESTROY:
         PostQuitMessage(0);
@@ -770,7 +906,60 @@ class GalleryWindow {
     return true;
   }
 
-  // ---------- sidebar (C12) ----------
+  // ---------- sidebar (C12 + C27) ----------
+  // A click inside the painted rail. Returns true when the rail consumed it,
+  // including the "inside the rail but between rows" case: letting that fall
+  // through would deselect the grid row behind the panel.
+  bool SidebarClick(int x, int y) {
+    EnsureSidebar();
+    const prism::win::sidebar::Box& panel = sidebarLayout_.panel;
+    if (panel.Empty()) return false;
+    const float fx = static_cast<float>(x);
+    const float fy = static_cast<float>(y);
+    if (fx < panel.left || fx >= panel.right) return false;
+    if (fy < panel.top || fy >= panel.bottom) return false;
+    for (const prism::win::sidebar::Command& command : sidebarLayout_.commands) {
+      if (command.kind != prism::win::sidebar::PrimKind::RowHit) continue;
+      if (fx < command.box.left || fx >= command.box.right) continue;
+      if (fy < command.box.top || fy >= command.box.bottom) continue;
+      const prism::sidebar::FocusTarget target{command.section, command.payload};
+      lastSidebarHit_ = target;
+      sidebar_.SetFocus(target);
+      sidebarDirty_ = true;
+      // Activating a favorite/recent row means "open this path": the app owns
+      // what that means, so it goes through the same door as Enter on a row.
+      if (command.section != prism::sidebar::Section::Tree) {
+        sidebar_.SetFocus(target);
+      }
+      Invalidate();
+      return true;
+    }
+    return true;  // inside the chrome: consumed, nothing to focus
+  }
+
+  // The real Windows menu bar, rebuilt from the labels the app supplied.
+  void RebuildMenu() {
+    if (!host_.hwnd) return;  // Create() installs it once the HWND exists
+    HMENU bar = CreateMenu();
+    HMENU file = CreatePopupMenu();
+    if (!bar || !file) {
+      if (bar) DestroyMenu(bar);
+      if (file) DestroyMenu(file);
+      return;
+    }
+    AppendMenuW(file, MF_STRING, kMenuCompress, compressMenuLabel_.c_str());
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, kMenuExit, exitMenuLabel_.c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileMenuLabel_.c_str());
+    HMENU previous = GetMenu(host_.hwnd);
+    if (!SetMenu(host_.hwnd, bar)) {
+      DestroyMenu(bar);
+      return;
+    }
+    if (previous) DestroyMenu(previous);
+    DrawMenuBar(host_.hwnd);
+  }
+
   void EnsureSidebar() const {
     if (!sidebarDirty_) return;
     prism::win::sidebar::Metrics metrics;
@@ -998,10 +1187,14 @@ class GalleryWindow {
       if (!rendererReady_) return;
     }
     target_->BeginDraw();
+    EnsureSidebar();  // the commands are painted, not computed by the renderer
     GalleryRenderer::Scene scene;
     scene.items = host_.items;
     scene.viewport = &viewport_;
+    scene.sidebar = sidebarRailVisible_ ? &sidebarLayout_ : nullptr;
     scene.listMode = listMode_;
+    scene.listColumns = &listColumns_;
+    scene.hasListColumns = hasListColumns_;
     scene.listItems = listMode_ ? &listItems_ : nullptr;
     // One scroll source for both painting and hit-testing: the renderer used
     // to read scene.listScroll (always 0) while clicks used the viewport.
@@ -1164,6 +1357,26 @@ class GalleryWindow {
   prism::gallery::GridLayout layout_{};
   prism::gallery::ViewportWindow viewport_{layout_, 0};
   bool listMode_ = false;  // Ctrl+2: the four-column file list (ch. 3.2)
+
+  // ---- card C27: menu, sidebar painting, list geometry, close-time size ----
+  // English defaults so a window created by a test (which never calls
+  // SetMenuLabels) still has a usable bar; the app replaces them with the
+  // translated strings at startup.
+  std::wstring fileMenuLabel_ = L"&File";
+  std::wstring compressMenuLabel_ = L"&Compress...";
+  std::wstring exitMenuLabel_ = L"E&xit";
+  std::function<void(UINT)> onMenuCommand_;
+  // The app's persisted column geometry; the renderer paints it verbatim.
+  prism::list::ColumnLayout listColumns_;
+  bool hasListColumns_ = false;
+  // Captured in WM_CLOSE (the only moment the real frame still exists).
+  int closedWidth_ = 0;
+  int closedHeight_ = 0;
+  prism::sidebar::FocusTarget lastSidebarHit_;
+  bool sidebarRailVisible_ = false;  // C27: opt-in until the grid reflows
+  prism::sidebar::SidebarStore* sidebarStore_ = nullptr;  // C14 port (not owned)
+  bool sidebarRestored_ = false;
+  std::function<void()> onArchiveChanged_;
   prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint budget
   std::vector<prism::list::SortItem> listItems_;  // what list mode PAINTS
   // C13: the view behind list mode. listRows_ is the sorted/filtered model row

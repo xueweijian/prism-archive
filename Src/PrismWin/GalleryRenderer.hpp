@@ -36,10 +36,17 @@
 #include "../PrismCore/Preview.hpp"
 #include "../PrismCore/ProgressHud.hpp"
 #include "../PrismCore/ThumbStore.hpp"
+#include "SidebarView.hpp"  // C12 draw commands -- painted here since C27
 
 namespace prism::win::gallery {
 
 using Microsoft::WRL::ComPtr;
+
+#if defined(PRISM_C27_MUTANT_NO_SIDEBAR_PAINT)
+inline constexpr bool kPaintSidebar = false;
+#else
+inline constexpr bool kPaintSidebar = true;
+#endif
 
 class GalleryRenderer {
  public:
@@ -70,10 +77,17 @@ class GalleryRenderer {
 
     prism::gallery::ThumbStore* thumbs = nullptr;
     prism::glass::GlassIslandScene* islands = nullptr;
+    // C27: the sidebar is a LIST OF DRAW COMMANDS (C12's Layout). The renderer
+    // paints them; it never derives one. nullptr -> no rail (the pre-C27 scene,
+    // which the snapshot tool and older tests still build).
+    const prism::win::sidebar::Layout* sidebar = nullptr;
     bool listMode = false;
     std::vector<prism::list::SortItem>* listItems = nullptr;
     uint32_t listScroll = 0;
     int selectedRow = -1;
+    // C13 columns, persisted by the app (C27): 0/absent -> the module default.
+    const prism::list::ColumnLayout* listColumns = nullptr;
+    bool hasListColumns = false;
   };
 
   HRESULT Initialize() {
@@ -150,9 +164,168 @@ class GalleryRenderer {
     } else {
       DrawGrid(target, scene, size);
     }
+    // NEGATIVE CONTROL (CONTRACTS D3): the rail is never painted, so the suite's
+    // "the command list reached pixels" assertion MUST go red.
+    if (kPaintSidebar) DrawSidebar(target, scene, size);
     DrawBreadcrumbIsland(target, scene, size);
     DrawProgressCapsule(target, scene, size);
     if (scene.quickLookOpen) DrawQuickLookCard(target, scene, size);
+  }
+
+  // -------------------------------------------------------------------------
+  // The sidebar rail (card C12's commands, painted since C27).
+  //
+  // Every primitive below consumes ONE command: nothing here decides where a row
+  // goes, which row is focused, or what the telemetry capsule says -- that is
+  // SidebarView::Build's job and its suite already proves it. What this function
+  // adds is the proof that the command list reaches PIXELS: the counters below
+  // are incremented per painted primitive, and the test asserts both them and a
+  // sampled pixel inside the panel.
+  // -------------------------------------------------------------------------
+  void DrawSidebar(ID2D1RenderTarget* target, const Scene& scene, const D2D1_SIZE_F& size) {
+    if (scene.sidebar == nullptr) return;
+    const prism::win::sidebar::Layout& layout = *scene.sidebar;
+    if (layout.panel.Empty()) return;
+    const float panelLeft = layout.panel.left;
+    const float panelTop = layout.panel.top;
+    const float panelRight = layout.panel.right;
+    const float panelBottom = (std::min)(layout.panel.bottom, size.height);
+
+    for (const prism::win::sidebar::Command& command : layout.commands) {
+      if (command.kind == prism::win::sidebar::PrimKind::RowHit) continue;  // hit only
+      if (command.box.Empty()) continue;
+      // The rail is clipped to the client area: a pill anchored below a resized
+      // window must not paint over the title bar.
+      if (command.box.top >= panelBottom || command.box.bottom <= panelTop) continue;
+      const D2D1_RECT_F box = D2D1::RectF(command.box.left, command.box.top,
+                                         (std::min)(command.box.right, panelRight),
+                                         (std::min)(command.box.bottom, panelBottom));
+      ++dbgSidebarCommands;
+      switch (command.kind) {
+        case prism::win::sidebar::PrimKind::Panel: {
+          // Glass rail: a touch lighter than the backdrop, with a hairline edge
+          // on the side the content starts.
+          D2D1_COLOR_F rail = kBackdrop;
+          rail.r += 0.035f;
+          rail.g += 0.040f;
+          rail.b += 0.050f;
+          rail.a = 1.0f;
+          island_->SetColor(rail);
+          target->FillRectangle(box, island_.Get());
+          island_->SetColor(kIslandBorder);
+          target->FillRectangle(D2D1::RectF(panelRight - 1.0f, panelTop, panelRight, panelBottom),
+                                island_.Get());
+          island_->SetColor(kIslandFill);  // restore: the next primitive expects it
+          break;
+        }
+        case prism::win::sidebar::PrimKind::Selection: {
+          D2D1_COLOR_F fill = kAccent;
+          fill.a = 0.26f;
+          accent_->SetColor(fill);
+          target->FillRoundedRectangle(
+              D2D1::RoundedRect(box, 8.0f, 8.0f), accent_.Get());
+          accent_->SetColor(kAccent);
+          break;
+        }
+        case prism::win::sidebar::PrimKind::Separator: {
+          D2D1_COLOR_F line = kTextSecondary;
+          line.a = 0.35f;
+          islandBorder_->SetColor(line);
+          target->FillRectangle(D2D1::RectF(box.left, box.top, box.right, box.top + 1.0f),
+                                islandBorder_.Get());
+          islandBorder_->SetColor(kIslandBorder);
+          break;
+        }
+        case prism::win::sidebar::PrimKind::Glyph:
+        case prism::win::sidebar::PrimKind::Chevron:
+        case prism::win::sidebar::PrimKind::StatusIcon: {
+          // Vector icons are a later pass; the command id is drawn as a 2 px
+          // rounded mark in its token colour so a missing icon is visible in a
+          // snapshot instead of silently absent.
+          ID2D1Brush* brush = BrushFor(command.color, command.opacity);
+          if (brush == nullptr) break;
+          const float inset = 4.0f;
+          target->FillRoundedRectangle(
+              D2D1::RoundedRect(D2D1::RectF(box.left + inset, box.top + inset,
+                                            box.right - inset, box.bottom - inset),
+                                2.0f, 2.0f),
+              brush);
+          break;
+        }
+        case prism::win::sidebar::PrimKind::StatusPill: {
+          D2D1_COLOR_F fill = kCardFill;
+          fill.a = 0.85f;
+          card_->SetColor(fill);
+          target->FillRoundedRectangle(D2D1::RoundedRect(box, 12.0f, 12.0f), card_.Get());
+          card_->SetColor(kCardFill);
+          islandBorder_->SetColor(kIslandBorder);
+          target->DrawRoundedRectangle(D2D1::RoundedRect(box, 12.0f, 12.0f), islandBorder_.Get(),
+                                       1.0f);
+          break;
+        }
+        case prism::win::sidebar::PrimKind::RatioBar: {
+          ID2D1Brush* brush = BrushFor(command.color, command.opacity);
+          if (brush == nullptr) break;
+          target->FillRoundedRectangle(D2D1::RoundedRect(box, 1.5f, 1.5f), brush);
+          break;
+        }
+        case prism::win::sidebar::PrimKind::SectionLabel:
+        case prism::win::sidebar::PrimKind::EmptyState:
+        case prism::win::sidebar::PrimKind::Label:
+        case prism::win::sidebar::PrimKind::StatusText: {
+          if (command.text.empty()) break;
+          // Section labels are caps (design token 3.3) and ride the small
+          // format; everything else is a caption run inside its own box.
+          IDWriteTextFormat* format = command.kind == prism::win::sidebar::PrimKind::SectionLabel
+                                          ? small_.Get()
+                                          : caption_.Get();
+          ID2D1Brush* brush = BrushFor(command.color, command.opacity);
+          if (brush == nullptr) break;
+          ++dbgSidebarLabels;
+          DrawLabel(target, format, Utf8(command.text), box, brush);
+          break;
+        }
+        default:
+          break;
+      }
+      accent_->SetColor(kAccent);  // see BrushFor: no colour leaks between runs
+      // The rail's Own counters are what the negative control reads.
+      ++dbgSidebarPrimitives;
+    }
+    ++dbgSidebarPanels;
+  }
+
+  // Token -> brush. The accent brush is restored after every command (see the
+  // loop), so a "locked" amber mark cannot leak into the next primitive.
+  ID2D1Brush* BrushFor(prism::win::sidebar::ColorToken token, float opacity) {
+    const float alpha = (std::max)(0.0f, (std::min)(1.0f, opacity));
+    switch (token) {
+      case prism::win::sidebar::ColorToken::Panel: return island_.Get();
+      case prism::win::sidebar::ColorToken::SectionLabel:
+      case prism::win::sidebar::ColorToken::SecondaryText:
+      case prism::win::sidebar::ColorToken::Muted: {
+        D2D1_COLOR_F color = kTextSecondary;
+        color.a = alpha;
+        textSecondary_->SetColor(color);
+        return textSecondary_.Get();
+      }
+      case prism::win::sidebar::ColorToken::PrimaryText: return textPrimary_.Get();
+      case prism::win::sidebar::ColorToken::SelectedBackground: {
+        D2D1_COLOR_F color = kAccent;
+        color.a = 0.26f * alpha;
+        accent_->SetColor(color);
+        return accent_.Get();
+      }
+      case prism::win::sidebar::ColorToken::Accent:
+        accent_->SetColor(kAccent);
+        return accent_.Get();
+      case prism::win::sidebar::ColorToken::Locked: {
+        const D2D1_COLOR_F amber = {1.0f, 0.584f, 0.0f, 1.0f};
+        accent_->SetColor(amber);
+        return accent_.Get();
+      }
+    }
+    return nullptr;
   }
 
  private:
@@ -381,7 +554,11 @@ class GalleryRenderer {
                     const D2D1_SIZE_F& size) {
     if (!scene.listItems) return;
     const auto& rows = *scene.listItems;
-    const prism::list::ColumnLayout cols;
+    // The app persists the user's column geometry (C27); absent means the module
+    // default, which is what every pre-C27 call site gets.
+    const prism::list::ColumnLayout cols =
+        scene.hasListColumns && scene.listColumns != nullptr ? *scene.listColumns
+                                                             : prism::list::ColumnLayout{};
     const float headerY = 68.0f;
     const float footerY = size.height - 56.0f;
     const float contentTop = headerY + 36.0f;
@@ -605,6 +782,14 @@ class GalleryRenderer {
   int dbgThumbLookupHits = 0;
   int dbgThumbBitmaps = 0;
   int dbgThumbDraws = 0;
+  // C27: proof that the sidebar command list reached pixels. dbgSidebarCommands
+  // counts every non-hit command considered, dbgSidebarPrimitives the ones
+  // actually painted, dbgSidebarLabels the text runs, dbgSidebarPanels the
+  // frames that painted a rail at all.
+  int dbgSidebarCommands = 0;
+  int dbgSidebarPrimitives = 0;
+  int dbgSidebarLabels = 0;
+  int dbgSidebarPanels = 0;
 
  private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;

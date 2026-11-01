@@ -232,6 +232,11 @@ inline uint64_t ResolveDictionary(ArchiveFormat format, int clampedLevel, uint64
   const uint64_t ladder = LevelDictionaryBytes(clampedLevel);
 #if defined(PRISM_CP_MUTANT_NO_INPUT_CLAMP)
   // MUTANT: ignore how much data there is; always pay for the ladder value.
+  // The cast is not decoration: the mutation makes the parameter unused and
+  // this tree builds with -Werror -Wextra, so without it the mutant TU stops
+  // COMPILING on the Linux lane -- a mutation that fails to build proves
+  // nothing (C2's CI is the authority that caught this).
+  (void)inputBytes;
   return ladder;
 #else
   const uint64_t useful = NextPowerOfTwo(inputBytes == 0 ? 1 : inputBytes);
@@ -248,6 +253,7 @@ inline bool ResolveSolid(ArchiveFormat format, SolidMode mode) {
   // MUTANT: honour SolidMode::On for every format, including zip and tar --
   // neither can be solid, so a plan that claims otherwise is a lie the UI
   // would print ("solid" on a zip).
+  (void)format;  // see ResolveDictionary: unused parameter under -Werror
   return mode != SolidMode::Off;
 #else
   // zip is a per-file container by design, tar is a raw concatenation: neither

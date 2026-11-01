@@ -77,8 +77,12 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   target_compile_options(win_session_restore_test PRIVATE /WX-)
   target_compile_definitions(win_session_restore_test
                              PRIVATE "PRISM_C46_EXE=\"${PRISM_C46_EXE}\"")
+  # TIMEOUT 120: the suite's own waits are bounded (15 s per phase, 5 s per
+  # kill), so a healthy run finishes in seconds. This ceiling exists to turn a
+  # future HANG into a RED that names the test -- ctest's default 1500 s would let
+  # one stuck case hold the whole night lane for 10+ minutes (2026-11-02).
   add_test(NAME "win.session_restore" COMMAND win_session_restore_test)
-  set_tests_properties(win.session_restore PROPERTIES TIMEOUT 600
+  set_tests_properties(win.session_restore PROPERTIES TIMEOUT 120
       PASS_REGULAR_EXPRESSION "ALL SESSION-RESTORE CHECKS PASSED")
 
   # Same suite, pointed at the mutant exe. Its cases fail (the crash restore is
@@ -95,6 +99,8 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                    prism_archive_mutant_ignore_shutdown_flag)
   add_test(NAME "mutation.session_restore.ignore_shutdown_flag"
            COMMAND win_session_restore_mutant_ignore_shutdown_flag)
-  set_tests_properties(mutation.session_restore.ignore_shutdown_flag PROPERTIES TIMEOUT 600
+  # Same ceiling for the mutant: its verdict is the CAUGHT marker, and a hang is
+  # a red by timeout rather than a stalled lane.
+  set_tests_properties(mutation.session_restore.ignore_shutdown_flag PROPERTIES TIMEOUT 120
                        PASS_REGULAR_EXPRESSION "C46 MUTATION CAUGHT")
 endif()

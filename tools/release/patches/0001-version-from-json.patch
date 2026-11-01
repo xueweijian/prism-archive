@@ -1,0 +1,73 @@
+diff --git a/Src/App/PrismArchive.rc b/Src/App/PrismArchive.rc
+index 2dcf73c..5f4cb67 100644
+--- a/Src/App/PrismArchive.rc
++++ b/Src/App/PrismArchive.rc
+@@ -6,8 +6,8 @@
+ //     (LoadIconW/LoadImageW) and for the file associations, whose DefaultIcon
+ //     value points at "<install>\PrismArchive.exe,0".
+ //   * VS_VERSION_INFO -- what the installer reads back as DisplayVersion and
+-//     what the shell shows in properties. Keep it in step with
+-//     project(PrismArchive VERSION ...) in the top-level CMakeLists.txt.
++//     what the shell shows in properties. Rendered from tools/release/version.json
++//     (card C24), the same file that names the release artifact.
+ //
+ // Association type names ("7z Archive", ...) are NOT resources: they are written
+ // into HKCU\Software\Classes\PrismArchive.<ext> by tools/install.ps1, so the
+@@ -19,11 +19,11 @@
+ // the id Src/App/Main.cpp asks for when it sets the window class icon.
+ #define IDI_APP_ICON 101
+ 
+-#define PRISM_VERSION_MAJOR 0
+-#define PRISM_VERSION_MINOR 1
+-#define PRISM_VERSION_PATCH 0
+-#define PRISM_VERSION_BUILD 0
+-#define PRISM_VERSION_STRING "0.1.0.0"
++// Version (card C24): ONE source of truth, tools/release/version.json.
++// configure_file() renders prism_version.h into the build tree; this file must
++// not carry a literal copy, because a second copy drifts silently and nobody
++// notices until the exe's properties dialog shows the previous release.
++#include "prism_version.h"
+ 
+ IDI_APP_ICON ICON "../../Assets/Icon/prism.ico"
+ 
+diff --git a/Src/PrismWin/CMakeLists.txt b/Src/PrismWin/CMakeLists.txt
+index b2cf91b..beb520a 100644
+--- a/Src/PrismWin/CMakeLists.txt
++++ b/Src/PrismWin/CMakeLists.txt
+@@ -12,8 +12,35 @@ enable_language(RC)
+ # The runnable application (batch A): thin glue over proven parts. The entry
+ # point lives in Src/App; the include root is Src so it reaches both layers.
+ # PrismArchive.rc carries the icon + VERSIONINFO (installer/Explorer read both).
++# ---------------------------------------------------------------------------
++# Version single source (card C24, APPENDED). tools/release/version.json is the
++# only place the shipped version is written down; this block renders it into
++# prism_version.h, which ../App/PrismArchive.rc includes instead of keeping a
++# literal copy. tools/release/New-PortablePackage.ps1 refuses to cut a package
++# when that file and the project() VERSION disagree.
++# ---------------------------------------------------------------------------
++file(READ "${CMAKE_SOURCE_DIR}/tools/release/version.json" PRISM_VERSION_JSON)
++string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _prism_version_match "${PRISM_VERSION_JSON}")
++if(NOT _prism_version_match)
++  message(FATAL_ERROR "tools/release/version.json: no \"version\": \"x.y.z\"")
++endif()
++set(PRISM_VERSION "${CMAKE_MATCH_1}")
++string(REGEX MATCH "\"build\"[ \t]*:[ \t]*([0-9]+)" _prism_build_match "${PRISM_VERSION_JSON}")
++if(NOT _prism_build_match)
++  message(FATAL_ERROR "tools/release/version.json: no \"build\": <n>")
++endif()
++set(PRISM_VERSION_BUILD "${CMAKE_MATCH_1}")
++string(REPLACE "." ";" _prism_version_parts "${PRISM_VERSION}")
++list(GET _prism_version_parts 0 PRISM_VERSION_MAJOR)
++list(GET _prism_version_parts 1 PRISM_VERSION_MINOR)
++list(GET _prism_version_parts 2 PRISM_VERSION_PATCH)
++set(PRISM_VERSION_STRING "${PRISM_VERSION}.${PRISM_VERSION_BUILD}")
++configure_file("${CMAKE_SOURCE_DIR}/tools/release/prism_version.h.in"
++               "${CMAKE_CURRENT_BINARY_DIR}/prism_version.h" @ONLY)
++
+ add_executable(PrismArchive ../App/Main.cpp ../App/PrismArchive.rc)
+-target_include_directories(PrismArchive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
++target_include_directories(PrismArchive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
++                                            "${CMAKE_CURRENT_BINARY_DIR}")
+ target_link_libraries(PrismArchive PRIVATE prism_win_bridge
+                       user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
+                       ole32.lib comdlg32.lib shell32.lib shlwapi.lib)

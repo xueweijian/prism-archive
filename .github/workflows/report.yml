@@ -1,0 +1,66 @@
+name: Report (benchmarks + fuzz corpus)
+
+# Report-only lane: these suites publish numbers (blueprint ch. 7.2) or sweep a
+# 10 000-sample malformed corpus (Phase 1 exit criteria). They are deliberately
+# OUT of the merge gate -- a shared runner cannot gate a stopwatch, and a 64 s
+# 4 GiB fixture plus a 10k corpus turned every PR into an 8-minute wait.
+#
+# They still run: nightly, and on demand from the Actions tab.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"   # 03:17 UTC nightly
+
+permissions:
+  contents: read
+
+jobs:
+  windows-report:
+    name: Windows report lane
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Locate 7z.dll
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\7-Zip\7z.dll",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.dll")
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($found) { "PRISM_7Z_DLL=$found" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+
+      - name: "Benchmarks + fuzz (report only)"
+        working-directory: build
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --output-on-failure -R "bench|fuzz" 2>&1 | tee "$RUNNER_TEMP/prism_report.log"
+
+      - name: Publish bench lines to the run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Benchmarks (report lane)"
+            echo '```json'
+            grep -hE '^BENCH \{' "$RUNNER_TEMP/prism_report.log" || echo "(no BENCH lines)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-logs
+          path: ${{ runner.temp }}/prism_report.log

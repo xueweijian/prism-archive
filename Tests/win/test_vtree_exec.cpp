@@ -20,6 +20,7 @@
 #include "../mini_test.hpp"
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 #include "VirtualTreeExecutor.hpp"
 
 #pragma comment(lib, "windowscodecs.lib")
@@ -72,12 +73,17 @@ size_t CountTempLitter(const std::wstring& dir) {
 }
 
 struct Fixture {
+  // Unique per Fixture instance = per case (card C36, Tests/win/UniqueTempDir.hpp).
+  // The old "%TEMP%\prism_vtree_exec\<name>" was a constant path shared by
+  // every parallel copy of this binary.
+  prism::testtmp::UniqueDir scratch{L"c36", L"vtree"};
   std::wstring dir;
   std::wstring archive;
   Payloads originals;  // the three source files, byte-exact
 
   bool Make(const wchar_t* name) {
-    dir = (fs::temp_directory_path() / "prism_vtree_exec" / name).wstring();
+    if (!scratch.ok()) return false;
+    dir = (scratch.path() / name).wstring();
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);

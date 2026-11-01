@@ -18,12 +18,14 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "PrismEngineBridge.hpp"
 #include "SevenZipAbi.hpp"
 #include "VolumePlan.hpp"
+#include "UniqueTempDir.hpp"
 #include "VolumeStream.hpp"
 #include "../mini_test.hpp"
 
@@ -52,13 +54,13 @@ std::wstring Locate7zDll() {
 }
 
 std::wstring MakeTempDir() {
-  wchar_t tmp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, tmp);
-  const std::wstring dir = std::wstring(tmp) + L"prism_vol_" +
-                           std::to_wstring(GetCurrentProcessId());
-  fs::remove_all(dir);
-  fs::create_directories(dir);
-  return dir;
+  // Card C36 (Tests/win/UniqueTempDir.hpp): card + pid + per-call COUNTER, and
+  // the tree is owned by a process-lifetime list, so a case that returns early
+  // still gets its directory removed at exit instead of poisoning the next run.
+  static std::vector<std::unique_ptr<prism::testtmp::UniqueDir>> kept;
+  kept.push_back(std::make_unique<prism::testtmp::UniqueDir>(L"c36", nullptr));
+  const prism::testtmp::UniqueDir& dir = *kept.back();
+  return dir.ok() ? dir.wstr() : std::wstring();
 }
 
 bool RunSevenZip(const std::wstring& args) {

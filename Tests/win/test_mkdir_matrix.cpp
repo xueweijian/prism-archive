@@ -47,6 +47,7 @@
 
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 #include "VirtualTreeExecutor.hpp"
 
 namespace {
@@ -326,9 +327,16 @@ class MatrixUpdateCallback final : public vt::IArchiveUpdateCallback,
 // it decided "docs" means -- dir, file, or dropped is the DATA we came for),
 // 1 when evidence could not be produced at all.
 int RunOne(const VariantSpec& spec, prism::win::SevenZipLibrary& library) {
-  const std::wstring dir = (fs::temp_directory_path() / L"prism_mkdir_matrix" /
-                            prism::win::Utf8ToWide(spec.name))
-                               .wstring();
+  // Unique per process AND per variant (card C36, Tests/win/UniqueTempDir.hpp):
+  // the constant "%TEMP%\prism_mkdir_matrix\<variant>" was shared by every
+  // parallel copy of this binary. The tree dies with RunOne, so a red variant
+  // cannot poison the next one either.
+  prism::testtmp::UniqueDir scratch(L"c36", L"mkdir");
+  if (!scratch.ok()) {
+    Emit(std::string("VARIANT ") + spec.name + ": committed=[FIXTURE-FAILED(dir)]");
+    return 1;
+  }
+  const std::wstring dir = (scratch.path() / prism::win::Utf8ToWide(spec.name)).wstring();
   std::error_code ec;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);

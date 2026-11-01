@@ -34,6 +34,7 @@
 #include "../../Src/PrismWin/PrismEngineBridge.hpp"
 #include "../../Src/PrismWin/SolidSweeper.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 #pragma comment(lib, "windowscodecs.lib")
 // The optics section renders through a WARP D3D11 device; linking here keeps
@@ -658,11 +659,15 @@ int main(int argc, char** argv) {
       std::puts("FAIL: 7z.exe not found beside 7z.dll -- real-thumbnail snapshot cannot run");
       return 1;
     }
-    namespace fs = std::filesystem;
-    const fs::path work = fs::temp_directory_path() / L"prism_snapshot_solid";
-    fs::remove_all(work);
-    fs::create_directories(work);
-    const std::wstring dir = work.wstring();
+    // Unique per process (card C36, Tests/win/UniqueTempDir.hpp). The OUTPUT
+    // directory is shared on purpose (ctest passes $ENV{TEMP}/prism_snapshots and
+    // CI uploads it as an artifact); the packed FIXTURE must not be.
+    prism::testtmp::UniqueDir scratch(L"c36", L"snapshot_solid");
+    if (!scratch.ok()) {
+      std::puts("FAIL: cannot create the solid fixture directory");
+      return 1;
+    }
+    const std::wstring dir = scratch.wstr();
     if (!prism::fixture::WritePng(dir + L"\\gate_front.png", 320, 200, 40, 60, 90)) return 1;
     if (!prism::fixture::WritePng(dir + L"\\quadriga.png", 640, 400, 180, 60, 30)) return 1;
     if (!prism::fixture::WritePng(dir + L"\\mural.png", 900, 600, 30, 120, 160)) return 1;

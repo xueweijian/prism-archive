@@ -10,12 +10,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "../mini_test.hpp"
 #include "DpapiVault.hpp"
 #include "PrismEngineBridge.hpp"
+#include "UniqueTempDir.hpp"
 #include "Win32Transcoder.hpp"
 
 namespace {
@@ -124,12 +126,13 @@ std::string FromHex(const std::string& hex) {
 // Fixture helpers
 // ---------------------------------------------------------------------------
 std::wstring MakeTempDir() {
-  wchar_t tmp[MAX_PATH]{};
-  GetTempPathW(MAX_PATH, tmp);
-  std::wstring dir = std::wstring(tmp) + L"prism_it_" + std::to_wstring(GetCurrentProcessId());
-  std::filesystem::remove_all(dir);
-  std::filesystem::create_directories(dir);
-  return dir;
+  // Card C36 (Tests/win/UniqueTempDir.hpp): card + pid + per-call COUNTER. Every
+  // case gets its own tree, and the process owns them all, so an early return
+  // removes them at exit instead of leaving debris for the next run.
+  static std::vector<std::unique_ptr<prism::testtmp::UniqueDir>> kept;
+  kept.push_back(std::make_unique<prism::testtmp::UniqueDir>(L"c36", nullptr));
+  const prism::testtmp::UniqueDir& dir = *kept.back();
+  return dir.ok() ? dir.wstr() : std::wstring();
 }
 
 std::wstring Locate7zDll() {

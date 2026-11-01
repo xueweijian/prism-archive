@@ -44,6 +44,7 @@
 #include "../../Src/PrismWin/PrismEngineBridge.hpp"
 #include "../../Src/PrismWin/SolidSweeper.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 using prism::ArchiveItem;
 using prism::win::gallery::GalleryWindow;
@@ -324,12 +325,15 @@ PRISM_TEST("closing cancels the whole-archive scan on the real 7z.dll") {
     return;
   }
 
-  namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "prism_app_lifecycle";
-  std::error_code ec;
-  fs::remove_all(dir, ec);
-  fs::create_directories(dir, ec);
-  if (!PRISM_CHECK(!ec)) return;
+  // Unique per process (card C36, Tests/win/UniqueTempDir.hpp): the constant
+  // "%TEMP%\prism_app_lifecycle" was shared by every parallel copy of this
+  // binary, so one run could wipe another run's shots.7z mid-pack.
+  prism::testtmp::UniqueDir scratch(L"c36", L"lifecycle");
+  if (!PRISM_CHECK(scratch.ok())) {
+    std::puts("    cannot create the fixture directory");
+    return;
+  }
+  const std::filesystem::path& dir = scratch.path();
 
   constexpr int kImages = 6;
   std::vector<std::wstring> names;
@@ -402,7 +406,9 @@ PRISM_TEST("closing cancels the whole-archive scan on the real 7z.dll") {
   }
 
   reader.Close();
-  fs::remove_all(dir, ec);  // the handle is closed: unlink must succeed
+  // The scratch tree is removed by UniqueDir's destructor, which runs here --
+  // after the reader is closed, the same ordering this line used to hand-roll
+  // (7-Zip opens archives without FILE_SHARE_DELETE).
 }
 
 }  // namespace

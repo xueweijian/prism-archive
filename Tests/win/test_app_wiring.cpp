@@ -50,6 +50,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -58,6 +59,7 @@
 #include "../../Src/App/AppWiring.hpp"
 #include "../../Src/PrismWin/GalleryWindow.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "ole32.lib")
@@ -195,6 +197,9 @@ bool Run7z(const std::wstring& exe, const std::wstring& args, const std::wstring
 }
 
 struct Fixture {
+  // First member = destroyed last: the reader and the library are closed before
+  // the fixture tree goes away (card C36, Tests/win/UniqueTempDir.hpp).
+  std::unique_ptr<prism::testtmp::UniqueDir> scratch;
   std::wstring dllPath;
   std::wstring exePath;
   std::wstring root;
@@ -225,9 +230,15 @@ bool SetupFixture() {
     fx.why = "7z.dll/7z.exe not available";  // main() turns this into a SKIP
     return false;
   }
-  const fs::path root = fs::temp_directory_path() / "prism_c25_wiring";
+  // Unique per process (card C36): "%TEMP%\prism_c25_wiring" was a constant, so
+  // two parallel ctest processes packed and wiped the same directory.
+  fx.scratch = std::make_unique<prism::testtmp::UniqueDir>(L"c36", L"wiring");
+  if (!fx.scratch->ok()) {
+    fx.why = "cannot create the fixture directory: " + fx.scratch->error();
+    return false;
+  }
+  const fs::path& root = fx.scratch->path();
   std::error_code ec;
-  fs::remove_all(root, ec);
   fs::create_directories(root / "pkg", ec);
   fx.root = root.wstring();
   fx.archivePath = (root / "pool.7z").wstring();
@@ -288,7 +299,10 @@ std::shared_ptr<app::OperationHandles> MakeOps(size_t slots) {
 }
 
 std::wstring FreshDir(const wchar_t* name) {
-  const fs::path dir = fs::temp_directory_path() / "prism_c25_wiring" / name;
+  // A per-case subdirectory of a SHARED constant is still a shared path; hang
+  // the case directory off this process's own fixture root instead (card C36).
+  if (World().root.empty()) return {};
+  const fs::path dir = fs::path(World().root) / name;
   std::error_code ec;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);
@@ -466,7 +480,8 @@ DecodeOutcome DecodeAll(win::ArchiveReader& reader, const std::vector<ArchiveIte
 // of its own, so an extraction's on-disk layout can be read without the
 // fixture's own payload files confusing it.
 std::wstring ArchiveCopyIn(const std::wstring& dirName) {
-  const fs::path dir = fs::temp_directory_path() / "prism_c25_wiring" / dirName;
+  if (World().root.empty()) return {};
+  const fs::path dir = fs::path(World().root) / dirName;
   std::error_code ec;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);

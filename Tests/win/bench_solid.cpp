@@ -27,6 +27,7 @@
 
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 #include "SolidSweeper.hpp"
 
 #pragma comment(lib, "ole32.lib")
@@ -103,11 +104,12 @@ int main() {
     return 1;
   }
 
-  namespace fs = std::filesystem;
-  const fs::path work = fs::temp_directory_path() / "prism_bench_solid";
-  fs::remove_all(work);
-  fs::create_directories(work);
-  const std::wstring dir = work.wstring();
+  // Unique per process (card C36, Tests/win/UniqueTempDir.hpp): "%TEMP%\
+  // prism_bench_solid" was a constant, and a benchmark that reads another run's
+  // directory is not measuring anything.
+  prism::testtmp::UniqueDir scratch(L"c36", L"bench_solid");
+  if (!BENCH_CHECK(scratch.ok())) return 1;
+  const std::wstring dir = scratch.wstr();
 
   // 20 real PNGs, five size classes cycled so the solid block carries a mix
   // like a real gallery folder (icons up to wall-paper-ish photos).

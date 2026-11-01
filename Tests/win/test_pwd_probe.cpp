@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #include "PasswordRing.hpp"
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 namespace {
 
@@ -32,13 +34,13 @@ std::wstring g_exePath;
 // exists (an open 7z handle would make remove_all throw, so keep readers
 // scoped tightly).
 std::wstring MakeTempDir(const wchar_t* tag) {
-  wchar_t temp[MAX_PATH];
-  DWORD n = GetTempPathW(MAX_PATH, temp);
-  if (n == 0 || n >= MAX_PATH) return {};
-  std::wstring dir = std::wstring(temp) + L"prism_pwd_" + std::wstring(tag) +
-                     L"_" + std::to_wstring(GetCurrentProcessId());
-  CreateDirectoryW(dir.c_str(), nullptr);
-  return dir;
+  // Card C36 (Tests/win/UniqueTempDir.hpp): card + pid + per-call COUNTER, and
+  // the tree is owned by a process-lifetime list, so a case that returns early
+  // still gets its directory removed at exit instead of poisoning the next run.
+  static std::vector<std::unique_ptr<prism::testtmp::UniqueDir>> kept;
+  kept.push_back(std::make_unique<prism::testtmp::UniqueDir>(L"c36", tag));
+  const prism::testtmp::UniqueDir& dir = *kept.back();
+  return dir.ok() ? dir.wstr() : std::wstring();
 }
 
 bool WriteSmallFile(const std::wstring& dir, const std::wstring& name,

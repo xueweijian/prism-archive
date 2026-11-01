@@ -371,6 +371,13 @@ PRISM_TEST("IPC: two processes -- the child is the companion, the parent is the 
 // ---------------------------------------------------------------------------
 PRISM_TEST("degradation: no companion -> NoReader in microseconds, nothing created") {
   // Precondition, asserted instead of assumed: no channel exists right now.
+  //
+  // BOUNDED wait added for card C36: under `ctest -j` the child process from the
+  // previous case exits a little after its assertions finish, so the named
+  // objects outlived the handle we closed. This suite still runs one instance at
+  // a time (a RESOURCE_LOCK cannot fix an in-test ordering), so the fix belongs
+  // here: wait for the leftovers to go away, then assert.
+  for (int attempt = 0; attempt < 300 && CompanionPreviewPresent(); ++attempt) ::Sleep(10);
   PRISM_CHECK(!CompanionPreviewPresent());
   {
     PreviewChannel probe;

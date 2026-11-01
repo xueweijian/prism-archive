@@ -476,4 +476,48 @@ inline BOOL QueryPerformanceCounter(LARGE_INTEGER* c) {
   return 1;
 }
 
+// ---- file attribute + registry vocabulary (card C1: 7z.dll discovery) ------
+// PrismEngineBridge::Resolve7zDll asks the machine where 7-Zip is installed and
+// whether a candidate file exists. Those are plain Win32 calls, so this stub
+// needs their NAMES (declarations only, like everything else here) -- the
+// alternative would be to keep that code out of the Windows-TU gate, which is
+// exactly the gate that catches MSVC-facing mistakes. Nothing below implements
+// anything: every query reports "not found", which is also why no test may
+// conclude anything behavioural from the stub.
+#ifndef INVALID_FILE_ATTRIBUTES
+#define INVALID_FILE_ATTRIBUTES ((DWORD)0xFFFFFFFFu)
+#endif
+#ifndef FILE_ATTRIBUTE_DIRECTORY
+#define FILE_ATTRIBUTE_DIRECTORY 0x00000010u
+#endif
+#ifndef ERROR_SUCCESS
+#define ERROR_SUCCESS 0L
+#endif
+#ifndef KEY_QUERY_VALUE
+#define KEY_QUERY_VALUE 0x0001u
+#endif
+#ifndef REG_SZ
+#define REG_SZ 1u
+#endif
+#ifndef REG_EXPAND_SZ
+#define REG_EXPAND_SZ 2u
+#endif
+#ifndef HKEY_LOCAL_MACHINE
+#define HKEY_LOCAL_MACHINE ((HKEY)(ULONG_PTR)0x80000002u)
+#endif
+#ifndef HKEY_CURRENT_USER
+#define HKEY_CURRENT_USER ((HKEY)(ULONG_PTR)0x80000001u)
+#endif
+using REGSAM = unsigned long;
+using PHKEY = HKEY*;
+using LPDWORD = DWORD*;
+using LPBYTE = unsigned char*;
+inline DWORD GetModuleFileNameW(HMODULE, wchar_t*, DWORD) { return 0; }
+inline DWORD GetEnvironmentVariableW(const wchar_t*, wchar_t*, DWORD) { return 0; }
+inline LONG RegOpenKeyExW(HKEY, const wchar_t*, DWORD, REGSAM, PHKEY) { return 1; }
+inline LONG RegQueryValueExW(HKEY, const wchar_t*, LPDWORD, LPDWORD, LPBYTE, LPDWORD) {
+  return 1;
+}
+inline LONG RegCloseKey(HKEY) { return 0; }
+
 #endif  // PRISM_WIN_STUB_INCLUDED

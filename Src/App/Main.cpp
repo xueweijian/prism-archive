@@ -264,6 +264,11 @@ struct AppContext {
   std::atomic<bool> shuttingDown{false};
   std::atomic<prism::win::ArchiveReader*> sweepReader{nullptr};
   std::atomic<prism::win::ArchiveReader*> extractReader{nullptr};
+  // C34: bumped every time the session switches archives. The one-shot sweep
+  // captured CATALOG INDICES from the archive it started on; a result that lands
+  // after a switch belongs to a different file and must be discarded, not
+  // painted (the window's rows are the new archive's).
+  std::atomic<uint64_t> archiveGeneration{0};
   std::wstring archivePath;
   prism::app::ExtractionPlan plan;
 };
@@ -541,6 +546,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (windowState.hasColumns) window.SetListColumns(windowState.columns);
   window.SetListMode(windowState.listMode);
 
+  // ---- C34: the glass layer (C33) now has a call site ---------------------
+  // The window owns the composition host; it is OPT-IN so a test-created window
+  // never grows a DirectComposition target. A machine without composition says
+  // so through the return value and the app keeps the pre-DComp paint path --
+  // no glass memory is ever allocated there, so there is nothing to release.
+  if (!window.EnableGlassLayer()) {
+    logger.Emit(prism::log::Level::kInfo, "glass",
+                "DirectComposition unavailable, glass layer stays off", {});
+  }
+
   // C19: the menu bar is the app's, painted by the window. The keys exist in
   // both shipped tables, so a language switch is visible here (the window's
   // read-back in the suite asserts exactly that).
@@ -757,7 +772,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                               : prism::win::Utf8ToWide(outcome.error);
             }
             window.PostStatus(status);
-            if (outcome.ok) window.PostArchiveChanged();  // refresh on the UI thread
+            // The re-pack wrote a NEW file: the UI thread switches the session
+            // to it (C34). Passing the path is what makes that possible without a
+            // second member a worker would have to touch.
+            if (outcome.ok) window.PostArchiveChanged(outcome.archivePath);
             std::fprintf(stderr, "compress ok=%d items=%llu bytes=%llu verified=%llu ms=%lld\n",
                          static_cast<int>(outcome.ok),
                          static_cast<unsigned long long>(outcome.itemsWritten),
@@ -775,31 +793,79 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
   });
 
-  // A finished re-pack refreshes the view ON THE UI THREAD. The catalog is only
-  // re-read when no engine operation holds a lease (the sweep may still be
-  // running): swapping the snapshot under a live handler would be a data race,
-  // and the honest answer is to say the refresh waits instead of racing.
-  window.SetArchiveChangedHandler([&window, app, tr]() {
+  // A finished re-pack lands in a NEW file, so "refresh" means "switch": replace
+  // the catalogue, the rows and the handler pool. C11's pool is what makes that
+  // safe at all -- the app only has to guarantee that no lease is live (the sweep
+  // is the one operation that can still be running), and prism::app::SwitchArchive
+  // does the ordering: open + lease the new file, THEN close the old pool. A
+  // failed switch therefore leaves the session on the archive it was showing.
+  window.SetArchiveChangedHandler([&window, app, tr](const std::wstring& newPath) {
     if (app->extractReader.load() != nullptr || app->sweepReader.load() != nullptr) {
       window.SetStatus(tr.Or("status.refreshDeferred",
-                             L"\\u5DF2\\u5199\\u5165\\uFF1B\\u5F53\\u524D\\u64CD\\u4F5C\\u7ED3\\u675F"
-                             L"\\u540E\\u5237\\u65B0"));
+                             L"\u5DF2\u5199\u5165\uFF1B\u5F53\u524D\u64CD\u4F5C\u7ED3\u675F"
+                             L"\u540E\u5237\u65B0"));
       return;
     }
-    prism::win::ArchiveReader probe(app->library);
-    if (!probe.Open(app->archivePath)) {
-      window.SetStatus(tr.Or("error.open", L"\\u6253\\u5F00\\u5931\\u8D25") + L" " +
-                           FileNameWide(app->archivePath));
+    prism::app::ArchiveSession session{&app->library, &app->ops, &app->catalog, &app->items,
+                                       &app->archivePath, 2};
+    const prism::app::ArchiveSwitch switched = prism::app::SwitchArchive(session, newPath);
+    if (!switched.ok) {
+      window.SetStatus(tr.Or("error.open", L"\u6253\u5F00\u5931\u8D25") + L" " +
+                           FileNameWide(newPath) + L"\uFF1A" +
+                           prism::win::Utf8ToWide(switched.error));
       return;
     }
-    app->catalog = probe.ReadCatalog();
-    app->items = app->catalog;
+    // The plan is derived from the catalogue and the archive's own folder, so it
+    // is rebuilt against the file the session now shows instead of the old one.
+    app->plan = prism::app::BuildExtractionPlan(
+        prism::app::LaunchMode::kGallery, prism::win::WideToUtf8(app->archivePath), app->catalog,
+        [](const std::string& path) {
+          return std::filesystem::exists(prism::win::Utf8ToWide(path));
+        });
+    // Thumbnails are keyed by CATALOG INDEX and the new catalogue belongs to a
+    // different file: the old store would paint the previous archive's pixels into
+    // the new rows. Drop it; sweeping the new archive is the follow-up this card
+    // does not pretend to do.
+    ++app->archiveGeneration;
+    window.SetThumbs(nullptr);
     window.SetItems(&app->items);
     window.SetRootLabel(FileNameWide(app->archivePath));
-    window.SetStatus(L"\\x5171 " + std::to_wstring(app->items.size()) + L" \\x9879");
+    if (window.Hwnd() != nullptr) {
+      const std::wstring title = L"PrismArchive -- " + FileNameWide(app->archivePath);
+      SetWindowTextW(window.Hwnd(), title.c_str());
+    }
+    window.SetStatus(L"\x5171 " + std::to_wstring(app->items.size()) + L" \x9879");
   });
 
   window.SetStatus(L"\x5171 " + std::to_wstring(app->items.size()) + L" \x9879");
+
+  // ---- C34: the inline-preview companion (C30) is hosted HERE --------------
+  //
+  // The shell's right-click publishes a wake and expects a running OWNER of the
+  // preview section; without one it takes the NoReader fast path and launches
+  // the app instead (C30 measured that path at microseconds -- the reason it
+  // silently won every time is that nothing on this side ever created the
+  // section). This is that owner: the channel, a hidden flyout, and the window's
+  // idle tick as the wake poll. The catalogue is handed by POINTER, so a later
+  // archive switch is picked up here without touching this code.
+  //
+  // A failure to start is logged, never fatal: the app is still a gallery, and
+  // the shell still has its launch path.
+  prism::app::CompanionHost companion;
+  {
+    prism::app::CompanionHost::Config companionConfig;
+    companionConfig.openArchive = &app->archivePath;
+    companionConfig.catalog = &app->items;
+    companionConfig.library = &app->library;
+    std::string why;
+    if (companion.Start(instance, companionConfig, &why)) {
+      window.SetIdleHandler([&companion]() { companion.Pump(); });
+    } else {
+      logger.Emit(prism::log::Level::kWarn, "companion",
+                  "inline preview companion not started (the shell keeps its NoReader path)",
+                  {{"detail", why}});
+    }
+  }
 
   // One background pass: every image entry in the WHOLE archive, a single
   // Extract per solid block. Folder navigation must never re-run this -- the
@@ -817,6 +883,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // run on two leases instead of racing on one (docs/PROGRESS known debt).
   std::thread worker([app, &window, sweepIndices, sweepSizes]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // The indices below belong to the archive that was open when this thread
+    // started; a switch while we decode makes them meaningless (C34).
+    const uint64_t generation = app->archiveGeneration.load();
     prism::win::sweep::WicThumbDecoder wic;
     if (wic.Initialize() && !sweepIndices.empty()) {
       auto store = std::make_shared<prism::gallery::ThumbStore>(64ull << 20);
@@ -833,8 +902,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         app->ops->Finish(*task, true);
         // SetThumbs takes its own mutex and touches nothing else (documented
         // worker-safe); the repaint is a posted message, never a direct call.
-        window.SetThumbs(store);
-        PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+        // A generation bump means the session switched archives while we were
+        // decoding: these pixels are indexed against a file nobody is showing.
+        if (app->archiveGeneration.load() == generation) {
+          window.SetThumbs(store);
+          PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+        } else {
+          std::fprintf(stderr, "sweep discarded: the session switched archives\n");
+        }
       } else {
         std::fprintf(stderr, "sweep refused: %s\n", why.c_str());
       }
@@ -843,6 +918,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   });
 
   window.Run();
+
+  // C34: the flyout is a second top-level window of this thread and the channel
+  // owns a section the shell can see. Both go away here, before the workers are
+  // joined and before the stack objects below leave scope.
+  companion.Stop();
 
   // The window is gone. Stop both operations BEFORE joining: RequestBatchAbort
   // makes the extract callback answer E_ABORT, so 7-Zip stops inside its own

@@ -20,6 +20,11 @@
 # "C41 MUTANT CAUGHT" only when the injection provably fired -- the marker is
 # the conjunction, so a dead injection turns this test red instead of green.
 # No WILL_FAIL is stacked on the marker (D26).
+#
+# C36 owns the lane-wide rule "every suite that shells out to 7z.exe holds the
+# named RESOURCE_LOCK prism-7z-cli". Both binaries here author their solid
+# fixture with 7z.exe, so they take the same lock from their own suite file --
+# C36's list is explicit and does not know about C41's targets.
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_executable(win_pool_race_test win/test_pool_race.cpp)
   target_link_libraries(win_pool_race_test PRIVATE prism_core prism_win_bridge
@@ -27,6 +32,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   target_compile_options(win_pool_race_test PRIVATE /WX-)
   add_test(NAME "win.pool_race" COMMAND win_pool_race_test)
   set_tests_properties(win.pool_race PROPERTIES TIMEOUT 600
+      RESOURCE_LOCK "prism-7z-cli"
       PASS_REGULAR_EXPRESSION "ALL POOL-RACE CHECKS PASSED")
 
   add_executable(win_pool_race_mutant_no_guard win/test_pool_race.cpp)
@@ -38,5 +44,6 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "mutation.pool_race.no_operation_guard"
            COMMAND win_pool_race_mutant_no_guard)
   set_tests_properties(mutation.pool_race.no_operation_guard PROPERTIES TIMEOUT 600
+      RESOURCE_LOCK "prism-7z-cli"
       PASS_REGULAR_EXPRESSION "C41 MUTANT CAUGHT")
 endif()

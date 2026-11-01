@@ -266,9 +266,9 @@ void CheckManifestText(const std::string& raw, bool mutationApplied) {
   PRISM_CHECK(Contains(text, "category=\"windows.comserver\""));
   PRISM_CHECK(Contains(text, "path=\"" + dll + "\""));
   PRISM_CHECK(Contains(text, "threadingmodel=\"sta\""));
-  PRISM_CHECK(Contains(text, "id=\"{" + clsid + "}\""));
+  PRISM_CHECK(Contains(text, "id=\"" + clsid + "\""));
   PRISM_CHECK(Contains(text, "category=\"windows.fileexplorercontextmenus\""));
-  PRISM_CHECK(Contains(text, "clsid=\"{" + clsid + "}\""));
+  PRISM_CHECK(Contains(text, "clsid=\"" + clsid + "\""));
   PRISM_CHECK(Contains(text, "itemtype type=\"*\""));
   // Capabilities the registrar relies on (runFullTrust for the out-of-process
   // launcher, unvirtualizedResources so the install dir stays a real path).
@@ -630,6 +630,24 @@ fs::path BuiltDll(const wchar_t* name) {
   return {};
 }
 
+// A closed set of HRESULTs that mean "this machine's trust/policy state refused
+// the package", not "our code is wrong". They are classified as SKIP (exit 77),
+// never as a pass -- the deploy path WAS exercised and the platform said no.
+// Everything outside this list stays a hard FAIL.
+bool IsEnvironmentTrustRefusal(std::int32_t hresult) {
+  switch (static_cast<std::uint32_t>(hresult)) {
+    case 0x800B0100u:  // TRUST_E_NOSIGNATURE   -- package is not signed
+    case 0x800B0101u:  // CERT_E_EXPIRED
+    case 0x800B0109u:  // CERT_E_UNTRUSTEDROOT  -- observed on a non-admin box
+    case 0x800B010Au:  // CERT_E_CHAINING
+    case 0x800B0110u:  // CERT_E_WRONG_USAGE
+    case 0x80073CFFu:  // developer mode / sideloading policy
+      return true;
+    default:
+      return false;
+  }
+}
+
 void RunSparseSection() {
   using namespace prism::win::sparse;
   const std::wstring packagePath = EnvOr(L"PRISM_SPARSE_MSIX");
@@ -651,6 +669,17 @@ void RunSparseSection() {
   if (!deploy.ok) {
     std::printf("    DEPLOY FAILED  hr=0x%08X verdict=%d  %s\n", deploy.hresult,
                 static_cast<int>(deploy.verdict), deploy.message.c_str());
+    if (IsEnvironmentTrustRefusal(deploy.hresult)) {
+      char reason[320]{};
+      sprintf_s(reason,
+                "sparse:package-not-trusted hr=0x%08X (deploy path exercised; the "
+                "certificate must be trusted in a ROOT store -- CurrentUser\Root "
+                "import needs an interactive consent dialog, LocalMachine\Root "
+                "needs admin; neither exists in a headless non-admin session)",
+                deploy.hresult);
+      g_skips.push_back(reason);
+      return;
+    }
   }
   PRISM_CHECK(deploy.ok);
   PRISM_CHECK(IsRegistered(name) == RegistrationState::Registered);

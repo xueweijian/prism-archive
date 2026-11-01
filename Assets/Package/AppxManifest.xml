@@ -9,7 +9,8 @@
   is what puts PrismArchive in the Windows 11 context menu without writing a
   single registry key - see Src/PrismWin/SparsePackageRegistrar.hpp.
 
-  Two CLSID references must stay identical:
+  Two CLSID references must stay identical (schema form: no braces, unlike the
+  registry form):
     com:Class/@Id  ==  desktop5:Verb/@Clsid  ==  shell_ids::kExplorerCommandClsid
   (Src/PrismWin/SparsePackageRegistrar.hpp). Tests/win/test_sparse_registrar.cpp
   fails the build if the manifest text drifts from the compiled constant, because
@@ -79,7 +80,7 @@
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="PrismArchive context menu">
-              <com:Class Id="{6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F}"
+              <com:Class Id="6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F"
                          Path="PrismShellExt.dll"
                          ThreadingModel="STA" />
             </com:SurrogateServer>
@@ -92,7 +93,7 @@
           <desktop4:FileExplorerContextMenus>
             <desktop5:ItemType Type="*">
               <desktop5:Verb Id="PrismArchive"
-                             Clsid="{6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F}" />
+                             Clsid="6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F" />
             </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>

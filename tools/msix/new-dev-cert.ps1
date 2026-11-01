@@ -43,8 +43,25 @@ Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure | Out-Null
 Export-Certificate -Cert $cert -FilePath $cer | Out-Null
 
 $store = 'Cert:\CurrentUser\TrustedPeople'
-if ($Machine) { $store = 'Cert:\LocalMachine\TrustedPeople' }
+$rootStore = 'Cert:\CurrentUser\Root'
+if ($Machine) {
+  $store = 'Cert:\LocalMachine\TrustedPeople'
+  $rootStore = 'Cert:\LocalMachine\Root'
+}
 Import-Certificate -FilePath $cer -CertStoreLocation $store | Out-Null
+
+# A self-signed package certificate IS its own root, so AppX chain validation
+# still fails with CERT_E_UNTRUSTEDROOT (0x800B0109) unless that root is trusted.
+# Measured on 2026-11-01 (Win11 26200, non-admin, developer mode off):
+# TrustedPeople alone is NOT enough for AddPackageByUriAsync.
+try {
+  Import-Certificate -FilePath $cer -CertStoreLocation $rootStore | Out-Null
+  Write-Host "TRUSTED $rootStore"
+} catch {
+  Write-Warning ("could not trust the root in " + $rootStore + ": " + $_.Exception.Message)
+  Write-Warning 'Package registration will fail with 0x800B0109. Run this script from an'
+  Write-Warning 'interactive session (the Root store asks for consent) or elevated with -Machine.'
+}
 
 Write-Host "PFX     $pfx"
 Write-Host "CER     $cer"

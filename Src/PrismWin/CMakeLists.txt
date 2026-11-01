@@ -4,9 +4,15 @@ target_include_directories(prism_win_bridge INTERFACE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(prism_win_bridge INTERFACE prism_core)
 target_link_libraries(prism_win_bridge INTERFACE shlwapi.lib)
 
+# The RC language has to be enabled explicitly: project() declares CXX only, and
+# the Ninja generator has no rule for .rc without it. Windows-only file, so this
+# lives here rather than in the top-level CMakeLists.txt.
+enable_language(RC)
+
 # The runnable application (batch A): thin glue over proven parts. The entry
 # point lives in Src/App; the include root is Src so it reaches both layers.
-add_executable(PrismArchive ../App/Main.cpp)
+# PrismArchive.rc carries the icon + VERSIONINFO (installer/Explorer read both).
+add_executable(PrismArchive ../App/Main.cpp ../App/PrismArchive.rc)
 target_include_directories(PrismArchive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(PrismArchive PRIVATE prism_win_bridge
                       user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
@@ -42,3 +48,28 @@ if(MSVC)
   set_target_properties(PrismShellExtClassic PROPERTIES
     LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/PrismClassic.def")
 endif()
+
+# ---------------------------------------------------------------------------
+# Install layout: a flat per-user folder, the shape tools/install.ps1 deploys and
+# Installer/prism.iss packages. "cmake --install" therefore produces exactly the
+# same tree the installers copy, which is what makes the payload reviewable
+# without running either of them.
+#    <prefix>/PrismArchive.exe
+#    <prefix>/PrismShellExt.dll
+#    <prefix>/PrismShellExtClassic.dll
+#    <prefix>/Assets/**            (shaders + icon; the generator .py stays source)
+#    <prefix>/install.ps1
+#    <prefix>/uninstall.ps1
+# ---------------------------------------------------------------------------
+set(PRISM_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../Assets")
+set(PRISM_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../tools")
+
+install(TARGETS PrismArchive RUNTIME DESTINATION .)
+install(TARGETS PrismShellExt PrismShellExtClassic
+        RUNTIME DESTINATION . LIBRARY DESTINATION .)
+# 7z.dll is deliberately absent: LGPL engine, discovered at runtime (blueprint ch.2).
+install(DIRECTORY "${PRISM_ASSETS_DIR}/" DESTINATION Assets
+        PATTERN "*.py" EXCLUDE)
+install(FILES "${PRISM_TOOLS_DIR}/install.ps1"
+              "${PRISM_TOOLS_DIR}/uninstall.ps1"
+        DESTINATION .)

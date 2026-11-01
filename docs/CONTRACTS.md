@@ -97,3 +97,12 @@ C46 的 `mutation.session_restore` 在满载时跑满 600 秒：它**在等一�
 - 等"某一侧会变的状态"时，**同时观察失败条件**（子进程已退出、输出已闭合），不要傻等满预算。
 - 每个会起子进程/有外部依赖的 ctest，`TIMEOUT` 设成真实预算（如 120s），而不是默认的 1500s：
   挂死要变成"带测试名的红"，而不是拖住整条 lane 十分钟。
+### D30 已被实测钉死的三条引擎事实（C51 交付时记录）
+
+1. **固实不能读 `kpidSolid`。** 这个 7z.dll 对"单 folder 固实包"也逐条回 `kpidSolid=false`。
+   判定固实只能按 `kpidBlock` 分组：文件数 > 块数 即视为固实。
+2. **`ArchiveReader::ExtractToMemory` 不答 `ICryptoGetTextPassword`**（C9 已记录过一次）。
+   对加密包它会"成功"返回 **0 字节**。任何经它读载荷的路径（预览、编辑）都会静默拿到空内容，
+   必须补 password 给 `MemoryExtractCallback`，或者在入口拒绝加密条目。
+3. **`ReplaceFileW` 在 `InFileStream`（`FILE_SHARE_READ`）仍持有原包时必失败**（`ERROR_SHARING_VIOLATION`）。
+   任何"替换已打开归档"的路径（编辑、追加、重新压缩）**必须先关 reader**，再替换。

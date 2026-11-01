@@ -29,6 +29,7 @@
 #include "../mini_test.hpp"
 #include "PreviewProviders.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 namespace fs = std::filesystem;
 namespace pv = prism::win::preview;
@@ -321,13 +322,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  wchar_t tempRoot[MAX_PATH] = {};
-  const DWORD written = GetTempPathW(MAX_PATH, tempRoot);
-  if (written == 0) {
-    std::cout << "FAIL: GetTempPathW failed" << std::endl;
+  // Unique per process (card C36, Tests/win/UniqueTempDir.hpp): the constant
+  // "%TEMP%\prism_c21_preview" was shared by every parallel copy of this binary.
+  static prism::testtmp::UniqueDir scratch(L"c36", L"preview");
+  if (!scratch.ok()) {
+    std::cout << "FAIL: cannot create the fixture directory: " << scratch.error() << std::endl;
     return 1;
   }
-  g_work = fs::path(std::wstring(tempRoot, written)) / L"prism_c21_preview";
+  g_work = scratch.path();
   if (!MakeFixtures()) {
     std::cout << "FAIL: fixture creation / 7z packing failed" << std::endl;
     return 1;

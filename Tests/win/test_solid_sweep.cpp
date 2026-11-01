@@ -20,6 +20,7 @@
 #include "../mini_test.hpp"
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 #include "SolidSweeper.hpp"
 
 #pragma comment(lib, "windowscodecs.lib")
@@ -59,11 +60,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  namespace fs = std::filesystem;
-  const fs::path work = fs::temp_directory_path() / "prism_solid_sweep";
-  fs::remove_all(work);
-  fs::create_directories(work);
-  const std::wstring dir = work.wstring();
+  // Unique per process (card C36, Tests/win/UniqueTempDir.hpp): the fixture used
+  // to live at the constant "%TEMP%\prism_solid_sweep", which a parallel ctest
+  // run shared with every other copy of this binary.
+  prism::testtmp::UniqueDir scratch(L"c36", L"solid_sweep");
+  if (!PRISM_CHECK(scratch.ok())) {
+    std::cout << "    FAIL: cannot create the fixture dir: " << scratch.error() << std::endl;
+    return 1;
+  }
+  const std::wstring dir = scratch.wstr();
 
   // A small icon (never upscaled), a mid photo, and one larger than the box.
   if (!PRISM_CHECK(prism::fixture::WritePng(dir + L"\\icon.png", 64, 64, 0, 0, 255)))

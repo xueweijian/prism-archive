@@ -109,7 +109,11 @@ std::filesystem::path BenchRoot() {
   // really outside %TEMP% (the zero-%TEMP% cell depends on that).
   std::filesystem::path tmp = std::filesystem::temp_directory_path();
   if (tmp.filename().empty()) tmp = tmp.parent_path();
-  return tmp.parent_path() / L"prism_bench";
+  // Card C36: the leaf carries the pid. Three benchmark binaries share this
+  // helper, and with "ctest -j" they run at the same time -- a constant
+  // "prism_bench" meant one benchmark deleting another's 4 GiB archive while it
+  // was being packed. (Deliberately still a literal sibling of %TEMP%, see above.)
+  return tmp.parent_path() / (L"prism_bench_p" + std::to_wstring(GetCurrentProcessId()));
 }
 
 // Zero-filled payload: 4 GiB of it is authored in a few seconds and packs with

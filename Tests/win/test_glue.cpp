@@ -49,6 +49,7 @@
 #include "../../Src/PrismCore/I18n.hpp"
 #include "../../Src/PrismWin/ArchiveWriter.hpp"
 #include "../../Src/PrismWin/GalleryWindow.hpp"
+#include "UniqueTempDir.hpp"
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
@@ -110,10 +111,13 @@ std::wstring SelfPath() {
   return std::wstring(buffer, static_cast<size_t>(length));
 }
 
-// Fresh, empty directory under %TEMP%.
+// Fresh, empty directory under %TEMP%, unique to THIS process (card C36).
+// "%TEMP%\prism_c27_glue\<leaf>" was a constant path, so two parallel ctest
+// processes shared -- and wiped -- one another's fixtures.
 fs::path FreshDir(const wchar_t* leaf) {
+  static prism::testtmp::UniqueDir root(L"c36", L"glue");
   std::error_code ec;
-  const fs::path dir = fs::temp_directory_path(ec) / "prism_c27_glue" / leaf;
+  const fs::path dir = root.path() / leaf;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);
   return dir;

@@ -199,13 +199,26 @@ jobs:
           # actually go wrong in shipped code.
           PRISM_CTEST_EXCLUDE: "bench|fuzz"
         run: |
-          # SERIAL on purpose, and this is a measured statement, not a default:
-          # the first -j 8 run made win.reader_pool fail with "7z.exe could not
-          # author the solid fixture archive" -- eight suites shelling out to
-          # 7z.exe at once while they share %TEMP% is not safe yet. The Linux
-          # lanes keep -j (they only run pure PrismCore suites). Making the win
-          # suites parallel-safe is a real card, not a flag change.
-          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          # -j 8 is back, and it is measured, not assumed (card C36). The first
+          # -j 8 run failed win.reader_pool with "7z.exe could not author the
+          # solid fixture archive": eight suites authored fixtures in the SAME
+          # hard-coded %TEMP% directory. Two things changed:
+          #
+          #   1. every Windows suite now builds its fixtures in a UNIQUE
+          #      directory -- prism_<card>[_<tag>]_p<pid>_<counter>, see
+          #      Tests/win/UniqueTempDir.hpp -- removed by RAII even when the
+          #      case fails, so two ctest processes can neither pack into nor
+          #      wipe one path, and debris from a crash can never be adopted by
+          #      the next run (that would be a false green).
+          #   2. the suites that SHELL OUT to 7z.exe hold the named RESOURCE_LOCK
+          #      "prism-7z-cli" (Tests/suites/c36-parallel.cmake). CTest
+          #      serialises exactly that group and leaves every other suite
+          #      running in parallel.
+          #
+          # Local measurement, this repo, -E "bench|fuzz", 168 tests:
+          #   serial 286 s  ->  -j 8 150 s (1.9x)
+          # and "ctest -j 8 --repeat until-fail:3" is green on every repetition.
+          ctest -j 8 --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
       # The Windows half of the same local gate: proves CMakePresets.json parses

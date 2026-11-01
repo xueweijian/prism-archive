@@ -31,6 +31,7 @@
 #include "ArchiveWriter.hpp"
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 #include "../mini_test.hpp"
 
 namespace fs = std::filesystem;
@@ -572,14 +573,16 @@ int main(int argc, char** argv) {
     CoUninitialize();
     return 77;
   }
-  wchar_t temp[MAX_PATH]{};
-  const DWORD n = GetTempPathW(MAX_PATH, temp);
-  if (n == 0) {
-    Emit("WRITE-ARCHIVE SKIPPED: GetTempPathW failed");
+  // Unique per process (card C36, Tests/win/UniqueTempDir.hpp): the constant
+  // "%TEMP%\prism_write_archive" is what made parallel runs wipe each other's
+  // src/out trees mid-authoring.
+  static prism::testtmp::UniqueDir scratch(L"c36", L"write_archive");
+  if (!scratch.ok()) {
+    Emit("WRITE-ARCHIVE FAILED: cannot create the fixture directory: " + scratch.error());
     CoUninitialize();
-    return 77;
+    return 1;
   }
-  gRoot = Join(std::wstring(temp), L"prism_write_archive");
+  gRoot = scratch.wstr();
   gSource = Join(gRoot, L"src");
   gOut = Join(gRoot, L"out");
   Emit("FIXTURE root=" + ToUtf8(gRoot) + " dll=" + ToUtf8(dll));

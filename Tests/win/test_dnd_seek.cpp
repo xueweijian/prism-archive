@@ -30,6 +30,7 @@
 #include "PrismDragDecisionBridge.hpp"
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 namespace {
 
@@ -37,13 +38,13 @@ std::wstring g_dllPath;
 std::wstring g_exePath;
 
 std::wstring MakeTempDir(const wchar_t* tag) {
-  wchar_t temp[MAX_PATH];
-  DWORD n = GetTempPathW(MAX_PATH, temp);
-  if (n == 0 || n >= MAX_PATH) return {};
-  std::wstring dir = std::wstring(temp) + L"prism_dnd_" + std::wstring(tag) + L"_" +
-                     std::to_wstring(GetCurrentProcessId());
-  CreateDirectoryW(dir.c_str(), nullptr);
-  return dir;
+  // Card C36 (Tests/win/UniqueTempDir.hpp): card + pid + per-call COUNTER, and
+  // the tree is owned by a process-lifetime list, so a case that returns early
+  // still gets its directory removed at exit instead of poisoning the next run.
+  static std::vector<std::unique_ptr<prism::testtmp::UniqueDir>> kept;
+  kept.push_back(std::make_unique<prism::testtmp::UniqueDir>(L"c36", tag));
+  const prism::testtmp::UniqueDir& dir = *kept.back();
+  return dir.ok() ? dir.wstr() : std::wstring();
 }
 
 bool RemoveDir(const std::wstring& dir) {

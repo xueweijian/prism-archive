@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,7 @@
 #include "PrismEngineBridge.hpp"
 #include "ReaderPool.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "ole32.lib")
@@ -257,6 +259,10 @@ SweepOutcome SweepAll(win::ArchiveReader& reader, const std::vector<ArchiveItem>
 }
 
 struct Fixture {
+  // Declared FIRST so it is destroyed LAST: every reader/handle is closed
+  // before the tree is removed (slow filesystems still give remove_all its
+  // retry budget, but nothing should be holding pool.7z).
+  std::unique_ptr<prism::testtmp::UniqueDir> scratch;
   std::wstring dllPath;
   std::wstring exePath;
   std::wstring dir;
@@ -294,9 +300,17 @@ bool SetupFixture() {
     std::cout << "    FAIL: " << fx.why << std::endl;
     return false;
   }
-  const fs::path work = fs::temp_directory_path() / "prism_c11_reader_pool";
-  fs::remove_all(work);
-  fs::create_directories(work);
+  // Unique per process AND per allocation (card C36, Tests/win/UniqueTempDir.hpp).
+  // The old constant "%TEMP%\prism_c11_reader_pool" is why the first parallel
+  // run failed with "7z.exe could not author the solid fixture archive": another
+  // ctest process was wiping the directory this one was packing into.
+  fx.scratch = std::make_unique<prism::testtmp::UniqueDir>(L"c36", L"reader_pool");
+  if (!fx.scratch->ok()) {
+    fx.why = "cannot create the fixture directory: " + fx.scratch->error();
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  const fs::path& work = fx.scratch->path();
   fx.dir = work.wstring();
   fx.archivePath = (work / "pool.7z").wstring();
 

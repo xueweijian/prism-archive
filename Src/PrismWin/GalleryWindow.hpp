@@ -53,15 +53,24 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "../PrismCore/ArchiveTreeView.hpp"
+#include "../PrismCore/CommandPalette.hpp"  // palette ranker (C8 decision layer)
+#include "../PrismCore/FilterModel.hpp"     // list view filter (C13)
 #include "../PrismCore/Gallery.hpp"
+#include "../PrismCore/HistoryStack.hpp"    // Alt+Left / Alt+Right (C8)
 #include "../PrismCore/ListLayout.hpp"
+#include "../PrismCore/ListSortModel.hpp"   // list view order (C13)
 #include "../PrismCore/Preview.hpp"
+#include "../PrismCore/Shortcuts.hpp"       // the ONE key table (C8)
+#include "../PrismCore/SidebarModel.hpp"    // sidebar state (C12)
 #include "../PrismCore/SpringAnimator.hpp"
 #include "../PrismCore/ThumbStore.hpp"
+#include "CommandPalette.hpp"               // palette shell: geometry + text buffer
 #include "GalleryRenderer.hpp"
+#include "SidebarView.hpp"                  // sidebar draw commands (C12)
 
 namespace prism::win::gallery {
 
@@ -134,9 +143,22 @@ class GalleryWindow {
 
   // Attach the archive catalog (the app owns the snapshot; it outlives the
   // window). The navigator resets to the archive root.
+  //
+  // The SAME snapshot also feeds the two C12/C13 authorities: the sidebar model
+  // (which builds the archive tree and the telemetry totals from it) and the
+  // palette ranker (which searches the whole archive, not just this folder).
+  // One catalog, three readers -- never a second copy that could drift.
   void SetItems(std::vector<prism::ArchiveItem>* items) {
+    catalog_ = items;
     nav_.Attach(items);
     selection_ = nav_.Selection();
+    sidebar_.AttachCatalog(items);
+    sidebar_.SetArchiveName(WideToUtf8(rootLabel_));
+    sidebarDirty_ = true;
+    palette_.SetCommands(prism::palette::DefaultCommands());
+    if (catalog_) palette_.SetCatalog(*catalog_);
+    history_.Clear();
+    history_.Visit(nav_.Folder());  // the root is a real level (de-duped to no-op)
     RebuildFolderView();
   }
 
@@ -172,6 +194,8 @@ class GalleryWindow {
   // name; the window only paints it (and it is clickable as the root level).
   void SetRootLabel(const std::wstring& label) {
     rootLabel_ = label;
+    sidebar_.SetArchiveName(WideToUtf8(label));
+    sidebarDirty_ = true;
     RebuildBreadcrumbText();
     Invalidate();
   }
@@ -198,6 +222,61 @@ class GalleryWindow {
   void SetSelection(int index) {
     nav_.SetSelection(index);
     ApplySelection(nav_.Selection());
+  }
+
+  // ---------- card C25 assembly seams ---------------------------------------
+  // The key route. WM_KEYDOWN builds a Stroke from the thread's real modifier
+  // state and calls HandleKey; this door exists because a headless window
+  // station cannot always synthesise a chord, and because a test that
+  // re-implements the routing would prove nothing about the window.
+  LRESULT DispatchKeyStroke(const prism::keys::Stroke& stroke) { return HandleKey(stroke); }
+  bool PaletteOpen() const { return palette_.IsOpen(); }
+  const prism::win::palette::PaletteShell& Palette() const { return palette_; }
+  size_t HistoryBackCount() const { return history_.BackCount(); }
+  size_t HistoryForwardCount() const { return history_.ForwardCount(); }
+
+  // C12: the sidebar is a Model (state) + a Layout (draw commands). The window
+  // owns both; painting them is the renderer's job and is NOT wired yet -- see
+  // the TODO in AppWiring.hpp / the PR (GalleryRenderer.hpp is another card's
+  // file). Everything up to the command list is live and assertable.
+  const prism::sidebar::Model& SidebarState() const { return sidebar_; }
+  const prism::win::sidebar::Layout& SidebarLayout() const {
+    EnsureSidebar();
+    return sidebarLayout_;
+  }
+  // Engine facts the catalog cannot derive (method / dictionary / cipher).
+  void SetArchiveInfo(const prism::sidebar::ArchiveInfo& info) {
+    sidebar_.SetArchiveInfo(info);
+    sidebarDirty_ = true;
+    Invalidate();
+  }
+
+  // C13: list-mode rows are a SORTED, FILTERED VIEW of the current folder.
+  // Defaults (name ascending, empty filter) reproduce the navigator's order, so
+  // wiring them changes no pixels until someone asks for a different order.
+  void SetSortSpec(const prism::list::MultiSortSpec& spec) {
+    sortSpec_ = spec;
+    RebuildListItems();
+    Invalidate();
+  }
+  const prism::list::MultiSortSpec& SortSpec() const { return sortSpec_; }
+  void SetFilter(const prism::list::FilterSpec& spec) {
+    filter_ = spec;
+    RebuildListItems();
+    Invalidate();
+  }
+  const prism::list::FilterSpec& Filter() const { return filter_; }
+  const std::vector<prism::list::Row>& ListRows() const { return listRows_; }
+  int ListRowCount() const { return static_cast<int>(listItems_.size()); }
+  // The view row <-> folder row glue, exposed so the suite can prove the two
+  // orders cannot hand the selection to the wrong entry.
+  int FolderRowForListRow(int row) const {
+    if (row < 0 || row >= static_cast<int>(listRowToFolder_.size())) return -1;
+    return listRowToFolder_[static_cast<size_t>(row)];
+  }
+  int ListRowForFolderRow(int row) const {
+    if (row < 0 || row >= static_cast<int>(folderToListRow_.size())) return -1;
+    return folderToListRow_[static_cast<size_t>(row)];
   }
 
   // ---------- worker -> UI hand-off (THREADING CONTRACT) ----------
@@ -398,56 +477,22 @@ class GalleryWindow {
         clientH_ = static_cast<double>(HIWORD(lparam));
         viewport_.SetViewportSize(clientW_, clientH_);
         barKnown_ = false;  // the island is a fraction of the client width
+        sidebarDirty_ = true;  // the sidebar's status pill is bottom-anchored
         UpdateBreadcrumbLayout();
         Invalidate();
         return 0;
       }
       case WM_KEYDOWN: {
-        const WPARAM key = wparam;
-        // Blueprint ch. 9.1: Ctrl+1 gallery grid, Ctrl+2 file list.
-        if (LOWORD(key) == '1' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-          SetListMode(false);
-          return 0;
-        }
-        if (LOWORD(key) == '2' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-          SetListMode(true);
-          return 0;
-        }
-        // Backspace = up one level (7-Zip PanelKey.cpp:261). At the root it is
-        // a no-op -- the guard lives in the navigator, not here.
-        if (key == VK_BACK) {
-          Back();
-          return 0;
-        }
-        const int count = ItemCount();
-        const int cols = static_cast<int>(viewport_.Columns());
-        int delta = 0;
-        if (key == VK_RIGHT) delta = listMode_ ? 0 : +1;
-        else if (key == VK_LEFT) delta = listMode_ ? 0 : -1;
-        else if (key == VK_DOWN) delta = listMode_ ? +1 : +cols;
-        else if (key == VK_UP) delta = listMode_ ? -1 : -cols;
-        else if (key == VK_HOME) { quickLookClose(); SetSelection(count ? 0 : -1); return 0; }
-        else if (key == VK_END) { quickLookClose(); SetSelection(count - 1); return 0; }
-        if (delta != 0) {
-          quickLookClose();
-          const int moved = selection_ + delta;
-          if (count && moved >= 0 && moved < count) SetSelection(moved);
-          return 0;
-        }
-        if (key == VK_SPACE && quickLook_ && selection_ >= 0 && selection_ < count) {
-          quickLook_->ToggleAt(static_cast<uint32_t>(selection_));
-          Invalidate();
-          return 0;
-        }
-        if (key == VK_ESCAPE && quickLookClose()) {
-          Invalidate();
-          return 0;
-        }
-        if (key == VK_RETURN && selection_ >= 0) {
-          ActivateRow(selection_);
-          return 0;
-        }
-        return 0;
+        // CARD C25: the key chain that used to live here (a dozen ifs next to
+        // the pixel work) is now PrismCore's table. This case does ONE thing:
+        // read the thread's modifier state, describe the stroke, and hand it to
+        // the single router that also serves DispatchKeyStroke.
+        prism::keys::Stroke stroke;
+        stroke.key = static_cast<uint32_t>(wparam);
+        stroke.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        stroke.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        stroke.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        return HandleKey(stroke);
       }
       case WM_MOUSEWHEEL: {
         // Target scroll follows the wheel; the spring makes the motion fluid.
@@ -527,6 +572,215 @@ class GalleryWindow {
     Invalidate();
   }
 
+  // ---------- key routing (card C25) ----------
+  // ONE router for everything: WM_KEYDOWN and DispatchKeyStroke both land here,
+  // so the table cannot mean one thing to the app and another to the tests.
+  prism::keys::Scope KeyScope() const {
+    if (palette_.IsOpen()) return prism::keys::Scope::Palette;
+    if (QuickLookOpen()) return prism::keys::Scope::QuickLook;
+    return prism::keys::Scope::Gallery;
+  }
+
+  LRESULT HandleKey(const prism::keys::Stroke& stroke) {
+    // The palette owns the keyboard while it is open: it gets the stroke first
+    // (that is how typing reaches the query field) and only a stroke it declines
+    // is re-resolved against the gallery table.
+    if (palette_.IsOpen()) {
+      const prism::win::palette::PaletteShell::KeyOutcome outcome = palette_.OnKey(stroke);
+      if (outcome.consumed) {
+        if (outcome.command == prism::keys::Command::ActivateSelection) RunPalette();
+        Invalidate();
+        return 0;
+      }
+    }
+    ExecuteCommand(prism::keys::Resolve(stroke, KeyScope()));
+    return 0;
+  }
+
+  // Mapping a Command to the window's own state. Nothing here decides policy:
+  // the label, the order and the modifiers all came from PrismCore.
+  void ExecuteCommand(prism::keys::Command command) {
+    const int count = ItemCount();
+    switch (command) {
+      case prism::keys::Command::None:
+        return;
+      case prism::keys::Command::QuickLookToggle:
+        if (quickLook_ && selection_ >= 0 && selection_ < count) {
+          quickLook_->ToggleAt(static_cast<uint32_t>(selection_));
+          Invalidate();
+        }
+        return;
+      case prism::keys::Command::QuickLookClose:
+        if (quickLookClose()) Invalidate();
+        return;
+      case prism::keys::Command::OpenPalette:
+        OpenPalette();
+        return;
+      case prism::keys::Command::ClosePalette:
+        palette_.Close();
+        Invalidate();
+        return;
+      case prism::keys::Command::SmartExtract:
+        // Ctrl+E (blueprint 9.1 row 4). The window still does not know what
+        // extraction means: it hands the CATALOG index to the app, exactly like
+        // Enter on a file. Same door, same plan, one code path.
+        if (selection_ >= 0 && selection_ < count && onActivate_) {
+          onActivate_(static_cast<int>(folderItems_[static_cast<size_t>(selection_)].index));
+        }
+        return;
+      case prism::keys::Command::NewFolder:
+        // TODO(C9): the CoW virtual folder is card C9. Say it out loud instead
+        // of silently swallowing the chord.
+        SetStatus(L"\u65B0\u5EFA\u6587\u4EF6\u5939\uFF1AC9 \u672A\u63A5\u5165");
+        return;
+      case prism::keys::Command::ZoomNext:
+        // The ladder's arithmetic is C8's; the renderer has no tile-size input
+        // yet, so the stop is computed and reported, not painted.
+        zoomPx_ = prism::keys::zoom::NextPreset(zoomPx_);
+        SetStatus(L"\u56FE\u6807 " + std::to_wstring(zoomPx_) + L" px");
+        return;
+      case prism::keys::Command::HistoryBack: {
+        std::string target;
+        if (history_.Back(&target)) GoToFolder(target);
+        return;
+      }
+      case prism::keys::Command::HistoryForward: {
+        std::string target;
+        if (history_.Forward(&target)) GoToFolder(target);
+        return;
+      }
+      case prism::keys::Command::ToggleGrid:
+        SetListMode(false);
+        return;
+      case prism::keys::Command::ToggleList:
+        SetListMode(true);
+        return;
+      case prism::keys::Command::ActivateSelection:
+        if (selection_ >= 0) ActivateRow(selection_);
+        return;
+      case prism::keys::Command::GoUp:
+        Back();
+        return;
+      case prism::keys::Command::SelectFirst:
+        quickLookClose();
+        SetSelection(count ? 0 : -1);
+        return;
+      case prism::keys::Command::SelectLast:
+        quickLookClose();
+        SetSelection(count - 1);
+        return;
+      case prism::keys::Command::SelectLeft:
+        MoveSelection(listMode_ ? 0 : -1);
+        return;
+      case prism::keys::Command::SelectRight:
+        MoveSelection(listMode_ ? 0 : +1);
+        return;
+      case prism::keys::Command::SelectUp:
+        MoveSelection(listMode_ ? -1 : -static_cast<int>(viewport_.Columns()));
+        return;
+      case prism::keys::Command::SelectDown:
+        MoveSelection(listMode_ ? +1 : +static_cast<int>(viewport_.Columns()));
+        return;
+    }
+  }
+
+  // Grid mode steps in folder space (one row per tile). List mode steps in VIEW
+  // space, because the view is sorted/filtered; the selection itself stays a
+  // folder row everywhere else, so the step is mapped there and back.
+  void MoveSelection(int delta) {
+    if (delta == 0) return;
+    const int count = ItemCount();
+    if (count <= 0) return;
+    int next = selection_;
+    if (listMode_) {
+      int row = -1;
+      if (selection_ >= 0 && selection_ < static_cast<int>(folderToListRow_.size())) {
+        row = folderToListRow_[static_cast<size_t>(selection_)];
+      }
+      row = (row < 0) ? 0 : row + delta;
+      if (row < 0 || row >= static_cast<int>(listRowToFolder_.size())) return;
+      next = listRowToFolder_[static_cast<size_t>(row)];
+    } else {
+      next = selection_ + delta;
+    }
+    if (next < 0 || next >= count) return;
+    quickLookClose();
+    SetSelection(next);
+  }
+
+  // ---------- command palette (C8) ----------
+  void OpenPalette() {
+    palette_.Open();
+    Invalidate();
+  }
+
+  // Enter inside the palette. A COMMAND runs through the same ExecuteCommand
+  // switch the keyboard uses; a FILE is navigated to (its folder + selection),
+  // never extracted -- opening a payload is the app's decision, not the list's.
+  void RunPalette() {
+    const prism::palette::Entry* entry = palette_.Highlighted();
+    if (!entry) {
+      palette_.Close();
+      Invalidate();
+      return;
+    }
+    if (entry->kind == prism::palette::Kind::Command) {
+      const prism::keys::Command command = entry->command;
+      palette_.Close();
+      ExecuteCommand(command);
+      Invalidate();
+      return;
+    }
+    const uint32_t index = entry->index;
+    palette_.Close();
+    if (!catalog_) {
+      Invalidate();
+      return;
+    }
+    std::string folder;
+    for (const prism::ArchiveItem& item : *catalog_) {
+      if (item.index != index) continue;
+      folder = item.isDir ? item.path : FolderOf(item.path);
+      break;
+    }
+    if (!GoToFolder(folder)) {
+      Invalidate();
+      return;
+    }
+    for (size_t i = 0; i < folderItems_.size(); ++i) {
+      if (folderItems_[i].index != index) continue;
+      SetSelection(static_cast<int>(i));
+      break;
+    }
+    Invalidate();
+  }
+
+  // "a/b.txt" -> "a" (the folder a hit lives in). Root entries yield "".
+  static std::string FolderOf(std::string_view path) {
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string_view::npos ? std::string() : std::string(path.substr(0, slash));
+  }
+
+  // Navigate to a folder. The history entry is recorded by the caller path
+  // (AfterFolderChange) so a jump does not manufacture a new one.
+  bool GoToFolder(const std::string& folder) {
+    const prism::tree::NavResult result = nav_.GoTo(folder);
+    if (result.action != prism::tree::NavAction::FolderChanged) return false;
+    ApplyFolderChange();
+    return true;
+  }
+
+  // ---------- sidebar (C12) ----------
+  void EnsureSidebar() const {
+    if (!sidebarDirty_) return;
+    prism::win::sidebar::Metrics metrics;
+    metrics.viewportTop = 0.0f;
+    metrics.viewportBottom = static_cast<float>(clientH_ > 0.0 ? clientH_ : 800.0);
+    metrics.scrollY = sidebarScroll_;
+    sidebarLayout_ = prism::win::sidebar::Build(sidebar_, metrics);
+    sidebarDirty_ = false;
+  }
+
   bool CrumbClick(int x, int y) {
     const int level = CrumbLevelAt(x, y);
     if (level == prism::tree::kNoLevel) return false;
@@ -540,7 +794,18 @@ class GalleryWindow {
   }
 
   // One place where a folder transition lands, whatever caused it.
+  //
+  // Two steps on purpose (C8): every USER navigation is recorded in the history
+  // stack, while a history jump itself must not create a new entry (it would
+  // make Alt+Right unreachable). HistoryStack de-dupes adjacent repeats, so the
+  // record call is harmless on the jump path too.
   void AfterFolderChange() {
+    ApplyFolderChange();
+    history_.Visit(nav_.Folder());
+  }
+
+  // Refresh what a folder transition changes, WITHOUT recording history.
+  void ApplyFolderChange() {
     quickLookClose();          // the preview belongs to the old folder
     RebuildFolderView();
   }
@@ -553,6 +818,14 @@ class GalleryWindow {
     host_.items = &folderItems_;
     quickLook_.reset();
     quickLook_.emplace(folderItems_);
+    // Index the folder rows by CATALOG index: the list view is a sorted subset,
+    // and the selection is a folder row, so this is the one place the two
+    // numberings are joined.
+    folderRowOfCatalog_.clear();
+    folderRowOfCatalog_.reserve(folderItems_.size());
+    for (size_t i = 0; i < folderItems_.size(); ++i) {
+      folderRowOfCatalog_.emplace(folderItems_[i].index, static_cast<int>(i));
+    }
     RebuildListItems();
     RebuildLayout();
     selection_ = nav_.Selection();
@@ -575,7 +848,8 @@ class GalleryWindow {
   int ItemAtPoint(int x, int y) const {
     if (clientW_ <= 0.0 || clientH_ <= 0.0) return -1;  // no WM_SIZE yet
     if (listMode_) {
-      const uint32_t count = static_cast<uint32_t>(ItemCount());
+      // The list paints the VIEW, not the folder: filter first, then hit-test.
+      const uint32_t count = static_cast<uint32_t>(listItems_.size());
       if (count == 0) return -1;
       if (x < 0 || y < 0) return -1;
       // List rows START BELOW the header: GalleryRenderer::DrawListMode paints
@@ -586,7 +860,10 @@ class GalleryWindow {
       if (local < 0) return -1;
       const uint32_t row = prism::list::RowAtClamped(
           static_cast<uint32_t>(local), 0u, count);
-      return static_cast<int>(row);
+      // Back to FOLDER space: every caller of ItemAtPoint (select, activate,
+      // quick look) speaks folder rows.
+      if (row >= listRowToFolder_.size()) return -1;
+      return listRowToFolder_[row];
     }
     // ViewportWindow::IndexAt takes CONTENT-space y; the scroll offset lives in
     // the viewport, so it has to be added back here or every hit test after a
@@ -733,8 +1010,14 @@ class GalleryWindow {
     {
       std::lock_guard<std::mutex> lock(thumbMutex_);
       scene.thumbs = thumbs_.get();
+      // The selection is a FOLDER row; in list mode the renderer needs the VIEW
+      // row that shows it (a filtered-out entry simply has no pill).
+      const int selectedView =
+          (selection_ >= 0 && selection_ < static_cast<int>(folderToListRow_.size()))
+              ? folderToListRow_[static_cast<size_t>(selection_)]
+              : -1;
       scene.selectedItem = listMode_ ? -1 : selection_;
-      scene.selectedRow = listMode_ ? selection_ : -1;
+      scene.selectedRow = listMode_ ? selectedView : -1;
       if (quickLook_ && selection_ >= 0 && selection_ < ItemCount() &&
           quickLook_->state() != prism::gallery::QuickLookSession::State::Closed) {
         const auto& item = folderItems_[static_cast<size_t>(selection_)];
@@ -784,21 +1067,54 @@ class GalleryWindow {
     return true;
   }
 
-  // List mode rows come from the CURRENT FOLDER rows in the navigator's order
-  // (folders first, then 7-Zip's natural name order). Re-sorting here would
-  // put the list and the grid in different orders -- one model, one order.
+  // List mode rows are a SORTED, FILTERED VIEW over the current folder (C13).
+  //
+  // The folder rows keep the navigator's order because the GRID paints those;
+  // the view is the authority for list-mode painting AND hit-testing. The two
+  // numberings are glued by listRowToFolder_/folderToListRow_, so the selection
+  // -- a FOLDER row everywhere else in this class -- can never point at the
+  // wrong entry just because the view was re-ordered (the exact class of bug
+  // that makes "sort by size" activate a random file).
   void RebuildListItems() {
-    listItems_.clear();
-    listItems_.reserve(folderItems_.size());
-    for (const auto& item : folderItems_) {
-      prism::list::SortItem row;
+    listRows_.clear();
+    listRows_.reserve(folderItems_.size());
+    for (const prism::ArchiveItem& item : folderItems_) {
+      prism::list::Row row;
+      row.catalogIndex = item.index;
       row.name = item.path;
+      row.typeTag = prism::list::TypeTagOf(item.path);
       row.size = item.size;
-      row.packedSize = item.packSize;
+      row.packSize = item.packSize;
+      row.mtime = item.mtime;
       row.isDir = item.isDir;
-      row.encrypted = item.encrypted;
-      row.kind = prism::QuickLookPlanner::KindByName(item.path);
-      listItems_.push_back(row);
+      listRows_.push_back(std::move(row));
+    }
+    prism::list::SortRows(listRows_, sortSpec_);
+
+    listItems_.clear();
+    listRowToFolder_.clear();
+    folderToListRow_.assign(folderItems_.size(), -1);
+    const std::vector<uint32_t> noSelection;
+    const prism::list::FilterResult filtered =
+        prism::list::ApplyFilter(listRows_, noSelection, filter_);
+    listItems_.reserve(filtered.visible.size());
+    listRowToFolder_.reserve(filtered.visible.size());
+    for (const uint32_t catalogIndex : filtered.visible) {
+      const auto it = folderRowOfCatalog_.find(catalogIndex);
+      if (it == folderRowOfCatalog_.end()) continue;
+      const int folderRow = it->second;
+      const prism::ArchiveItem& item = folderItems_[static_cast<size_t>(folderRow)];
+      prism::list::SortItem paint;
+      paint.name = item.path;
+      paint.size = item.size;
+      paint.packedSize = item.packSize;
+      paint.isDir = item.isDir;
+      paint.encrypted = item.encrypted;
+      paint.kind = prism::QuickLookPlanner::KindByName(item.path);
+      listItems_.push_back(paint);
+      listRowToFolder_.push_back(folderRow);
+      folderToListRow_[static_cast<size_t>(folderRow)] =
+          static_cast<int>(listRowToFolder_.size()) - 1;
     }
   }
 
@@ -849,7 +1165,24 @@ class GalleryWindow {
   prism::gallery::ViewportWindow viewport_{layout_, 0};
   bool listMode_ = false;  // Ctrl+2: the four-column file list (ch. 3.2)
   prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint budget
-  std::vector<prism::list::SortItem> listItems_;  // list-mode rows (current folder)
+  std::vector<prism::list::SortItem> listItems_;  // what list mode PAINTS
+  // C13: the view behind list mode. listRows_ is the sorted/filtered model row
+  // set; the two index vectors join it to the folder rows (see RebuildListItems).
+  std::vector<prism::list::Row> listRows_;
+  std::vector<int> listRowToFolder_;   // view row -> folder row
+  std::vector<int> folderToListRow_;   // folder row -> view row (-1: filtered out)
+  prism::list::FilterSpec filter_;     // "" / nullopt everywhere == show everything
+  prism::list::MultiSortSpec sortSpec_{
+      {{prism::list::SortKey::kName, prism::list::SortDirection::kAscending}}, true};
+  // C8: the two authorities the window asks instead of deciding for itself.
+  prism::win::palette::PaletteShell palette_;
+  prism::history::Stack history_;
+  int zoomPx_ = 256;  // Ctrl+Shift+P stop; the renderer has no tile-size input yet
+  // C12: sidebar state + its draw-command list (painting is not wired yet).
+  prism::sidebar::Model sidebar_;
+  mutable prism::win::sidebar::Layout sidebarLayout_;
+  mutable bool sidebarDirty_ = true;
+  float sidebarScroll_ = 0.0f;
   SpringAnimator scrollSpring_{kScrollSpring, 0.0};
   double scrollTarget_ = 0.0;
 
@@ -857,6 +1190,8 @@ class GalleryWindow {
   // renderer and the thumbnail lookup share; its ArchiveItem::index values are
   // CATALOG indices, which is what keeps the whole-archive sweep valid.
   prism::tree::Navigator nav_;
+  const std::vector<prism::ArchiveItem>* catalog_ = nullptr;  // full snapshot (borrowed)
+  std::unordered_map<uint32_t, int> folderRowOfCatalog_;      // catalog index -> folder row
   std::vector<prism::ArchiveItem> folderItems_;
   int selection_ = -1;
   std::wstring rootLabel_ = L"Archive";

@@ -78,3 +78,22 @@
 - MSIX 注册在 runner 上的可重现证据格式
 
 > 使用方式：改动跨边界的代码前，把触到的契约编号写进 PR 描述。新增契约走 PR 改本文件。
+
+### D28 测试名是工具的输入，不是文案
+
+变异矩阵把名字里出现 `clean` / `unarmed` / `control` 的 test/target 判成 **CONTROL** 条目
+（"控制不许带注入宏"）。C46 的 `ignore_clean_shutdown` 因此被判成"控制条目带了宏"，红在矩阵而不是红在产品。
+
+- **臂名（test 与 target）一律避开 `clean` / `unarmed` / `control` 这三个词**；宏名不参与判定，可以保留。
+- `MUTANT ACTIVE` banner 必须**贴着 `#if defined(...)` 守卫**写：矩阵在守卫后 800 字节内找它，
+  写在 `main()` 末尾会被判"无 banner"（WARN，证据变弱）。
+
+### D29 一切等待都要有界，且 ctest 的 TIMEOUT 要写成真实预算
+
+C46 的 `mutation.session_restore` 在满载时跑满 600 秒：它**在等一条永远不会出现的输出行**
+（注入后是 `restored=2`，它等 `restored=0`），于是每轮等满 60 秒预算才失败。修完 62.3s → 4.4–7.5s。
+
+- 任何等待（`WaitForSingleObject`、轮询、读子进程输出）**不得出现 `INFINITE`**；每段等待给明确上限。
+- 等"某一侧会变的状态"时，**同时观察失败条件**（子进程已退出、输出已闭合），不要傻等满预算。
+- 每个会起子进程/有外部依赖的 ctest，`TIMEOUT` 设成真实预算（如 120s），而不是默认的 1500s：
+  挂死要变成"带测试名的红"，而不是拖住整条 lane 十分钟。

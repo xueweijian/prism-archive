@@ -418,13 +418,27 @@ class GlassChain {
                      const KawaseConstants& second) {
     if (!context) return E_INVALIDARG;
     context_ = context;
+    first_ = first;
+    second_ = second;
+    return EnsureInstances();
+  }
+
+  // Lazily (re)creates the three effect instances after a ReleaseInstances().
+  // Idempotent, so a caller may call it every frame and pay nothing while the
+  // graph is live. This is what makes the graph "on demand" (C33): the moment
+  // no island is visible the instances go away, and the next visible frame
+  // rebuilds them exactly as Initialize would have.
+  HRESULT EnsureInstances() {
+    if (!context_) return E_UNEXPECTED;
+    if (Live()) return S_OK;
+    ReleaseInstances();  // partial state from a failed create cannot be reused
     HRESULT hr = Create(Kind::KawaseEffect, blurA_.GetAddressOf());
     if (FAILED(hr)) return hr;
     hr = Create(Kind::KawaseEffect, blurB_.GetAddressOf());
     if (FAILED(hr)) return hr;
     hr = Create(Kind::LiquidEffect, liquid_.GetAddressOf());
     if (FAILED(hr)) return hr;
-    SetKawaseConstants(first, second);
+    SetKawaseConstants(first_, second_);
     // backdrop -> blurA -> blurB -> glass. Every node needs its input, or D2D
     // reports D2DERR_INVALID_GRAPH_CONFIGURATION at EndDraw (not at DrawImage).
     blurB_->SetInputEffect(0, blurA_.Get());
@@ -432,9 +446,69 @@ class GlassChain {
     return S_OK;
   }
 
+  // Drops the graph and, with it, the intermediate render targets D2D allocated
+  // for these nodes (the two Kawase passes + the glass pass at island
+  // resolution -- see IntermediateBytesFor). Returns how many instances were
+  // really released, so a caller (and the negative-control test) can tell a
+  // release that happened from one that was optimised away.
+  //
+  // Scope, stated honestly: this returns the *graph*; the device, the factory
+  // and D2D's own target cache stay alive. GPU-resident memory is not visible
+  // to GetProcessMemoryInfo, which is why the test asserts on this accounting
+  // (derived from live COM pointers, never from a parallel counter) and only
+  // reports the process delta.
+  size_t ReleaseInstances() {
+#ifdef PRISM_GLASS_MUTANT_NO_RELEASE
+    // Negative control (c33-memory.cmake): "release when nothing is visible"
+    // is optimised away -- the instances stay alive, so the transient
+    // accounting stays non-zero and the laziness assertion must go red. The
+    // caller sees the injection at runtime: this returns 0 while the graph is
+    // demonstrably live.
+    return 0;
+#else
+    size_t released = 0;
+    if (blurA_) ++released;
+    if (blurB_) ++released;
+    if (liquid_) ++released;
+    blurA_.Reset();
+    blurB_.Reset();
+    liquid_.Reset();
+    blurAImpl_ = nullptr;
+    blurBImpl_ = nullptr;
+    liquidImpl_ = nullptr;
+    return released;
+#endif
+  }
+
+  bool Live() const { return blurA_ && blurB_ && liquid_; }
+
+  // The intermediate surfaces one island costs while the graph is live: pass 1
+  // and pass 2 at island size, plus the glass pass output. 4 B/px (BGRA8).
+  static size_t IntermediateBytesFor(UINT width, UINT height) {
+    return static_cast<size_t>(width) * height * 4u * 3u;
+  }
+
+  // What the live graph costs right now, from the last backdrop it drew (the
+  // same size D2D allocated the passes at). 0 while released -- the number is
+  // derived from live state, so a release that did not happen cannot fake it.
+  size_t IntermediateBytes() const {
+    if (!Live() || lastW_ == 0 || lastH_ == 0) return 0;
+    return IntermediateBytesFor(lastW_, lastH_);
+  }
+
   // constants == the island's GlassIslandScene::WriteCbuffer output.
   HRESULT Draw(ID2D1Bitmap* backdrop, const GlassConstants& constants) {
-    if (!blurA_ || !blurB_) return E_UNEXPECTED;
+    // Rebuild on demand: the graph may have been released while the window was
+    // minimised / no island was visible (C33 laziness), and a visible frame must
+    // come back pixel-identical -- nothing below this line depends on how long
+    // the instances were gone.
+    const HRESULT ensured = EnsureInstances();
+    if (FAILED(ensured)) return ensured;
+    if (backdrop) {
+      const D2D1_SIZE_U size = backdrop->GetPixelSize();
+      lastW_ = size.width;
+      lastH_ = size.height;
+    }
     blurA_->SetInput(0, backdrop);
 
     // Rebuild the glass node for this frame. D2D only re-uploads a custom
@@ -466,7 +540,7 @@ class GlassChain {
   }
 
   ID2D1Effect* Output() const { return liquid_.Get(); }
-  bool Ready() const { return liquid_ && blurA_ && blurB_; }
+  bool Ready() const { return Live(); }
 
   // The chain holds the effect instances, so it also holds their constant
   // buffers: Kawase registers are fixed at build time, the glass block is
@@ -498,12 +572,16 @@ class GlassChain {
   }
 
   ComPtr<ID2D1DeviceContext> context_;
+  KawaseConstants first_{};
+  KawaseConstants second_{};
   ComPtr<ID2D1Effect> blurA_;
   ComPtr<ID2D1Effect> blurB_;
   ComPtr<ID2D1Effect> liquid_;
   detail::GlassEffectImpl* blurAImpl_ = nullptr;
   detail::GlassEffectImpl* blurBImpl_ = nullptr;
   detail::GlassEffectImpl* liquidImpl_ = nullptr;
+  UINT lastW_ = 0;  // last backdrop the graph drew: the passes' real size
+  UINT lastH_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -577,44 +655,97 @@ class GlassIslandHost {
     IslandSurface surface;
     surface.width = width;
     surface.height = height;
-    ComPtr<IDXGIFactory2> factory;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory2),
-                                  reinterpret_cast<void**>(factory.ReleaseAndGetAddressOf())))) {
-      return false;
-    }
-    DXGI_SWAP_CHAIN_DESC1 desc = {};
-    desc.Width = width;
-    desc.Height = height;
-    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    desc.Stereo = FALSE;
-    desc.SampleDesc.Count = 1;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.BufferCount = 2;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;  // ADR-001
-    if (FAILED(factory->CreateSwapChainForComposition(
-            d3d_.Get(), &desc, nullptr, surface.swapchain.ReleaseAndGetAddressOf()))) {
-      return false;
-    }
-    ComPtr<IDXGISurface> dxgiSurface;
-    if (FAILED(surface.swapchain->GetBuffer(
-            0, __uuidof(IDXGISurface),
-            reinterpret_cast<void**>(dxgiSurface.ReleaseAndGetAddressOf())))) {
-      return false;
-    }
-    D2D1_BITMAP_PROPERTIES1 props = {};
-    props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-    props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
-    if (FAILED(d2dContext_->CreateBitmapFromDxgiSurface(
-            dxgiSurface.Get(), props, surface.d2dBitmap.ReleaseAndGetAddressOf()))) {
-      return false;
-    }
+    if (FAILED(CreateSurfaceResources(&surface))) return false;
     if (FAILED(dcomp_->CreateVisual(surface.visual.ReleaseAndGetAddressOf()))) return false;
     if (FAILED(surface.visual->SetContent(surface.swapchain.Get()))) return false;
     if (FAILED(root_->AddVisual(surface.visual.Get(), FALSE, nullptr))) return false;
     surfaces_.push_back(std::move(surface));
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Laziness (C33). The 58.4 MB resident figure includes the glass layer's
+  // per-island composition buffers and the effect graph's intermediate
+  // surfaces. None of that is needed while nothing is on screen: a minimised
+  // window, an all-hidden island set, or a gallery scrolled past every pill.
+  //
+  // Two rules make this safe to call from the frame loop:
+  //   * releasing is idempotent and returns how many bytes it really gave back
+  //     (derived from live pointers, never from a parallel counter);
+  //   * painting after a release rebuilds exactly the same graph, so the frame
+  //     is pixel-identical (asserted by the c33 suite, which re-renders the
+  //     gallery_snapshot optics scene across a release/re-acquire cycle).
+  // -------------------------------------------------------------------------
+
+  // Visible == false releases every transient byte immediately; true is lazy
+  // (the next paint re-acquires). Returns the bytes given back.
+  size_t SetVisible(bool visible) {
+    if (visible == visible_) return 0;
+    visible_ = visible;
+    return visible ? 0 : ReleaseTransient();
+  }
+  bool Visible() const { return visible_; }
+
+  // What the transient layer currently owns, in bytes:
+  //   * each live island surface: its composition swapchain back buffers;
+  //   * the effect graph, if live: three intermediate surfaces at the largest
+  //     island's resolution (the graph is shared by every island).
+  size_t TransientBytes() const {
+    size_t bytes = 0;
+    UINT maxPixels = 0;
+    for (const IslandSurface& surface : surfaces_) {
+      if (!surface.swapchain) continue;
+      bytes += static_cast<size_t>(surface.width) * surface.height * 4u * kSwapChainBuffers;
+      const UINT pixels = surface.width * surface.height;
+      if (pixels > maxPixels) maxPixels = pixels;
+    }
+    const size_t graph = chain_.IntermediateBytes();
+    bytes += graph > 0 ? graph : (chain_.Live() && maxPixels > 0
+                                      ? static_cast<size_t>(maxPixels) * 4u * 3u
+                                      : 0);
+    return bytes;
+  }
+
+  bool TransientLive() const { return chain_.Live() || AnySurfaceLive(); }
+
+  // Gives back everything transient. Safe to call repeatedly; returns the bytes
+  // that were actually freed (0 the second time -- which is how the negative
+  // control proves the injection ran instead of guessing).
+  size_t ReleaseTransient() {
+    const size_t before = TransientBytes();
+    if (d2dContext_) d2dContext_->SetTarget(nullptr);
+    chain_.ReleaseInstances();
+    for (IslandSurface& surface : surfaces_) {
+      if (surface.visual) surface.visual->SetContent(nullptr);
+      surface.d2dBitmap.Reset();
+      surface.swapchain.Reset();
+    }
+    // Dropping the effects is NOT enough: D2D keeps the intermediate surfaces
+    // in the device context's own target pool, so a release that only calls
+    // Reset() on the effects returns 0 bytes of working set (measured: 67.85 ->
+    // 67.85 MB, C33). IDXGIDevice3::Trim is the documented way to tell the
+    // driver this process is idle and that its cached surfaces may be dropped;
+    // it is what turns the release into real memory.
+    ComPtr<IDXGIDevice3> dxgiDevice;
+    if (SUCCEEDED(d3d_.As(&dxgiDevice)) && dxgiDevice) dxgiDevice->Trim();
+    if (dcomp_ && compositionReady_) dcomp_->Commit();
+    return before;
+  }
+
+  // Rebuilds what ReleaseTransient dropped, at the recorded island sizes. The
+  // effect graph is rebuilt on the next Draw (EnsureInstances), so this only
+  // pays for the surfaces.
+  HRESULT EnsureTransient() {
+    if (!compositionReady_) return E_FAIL;
+    for (IslandSurface& surface : surfaces_) {
+      if (surface.swapchain) continue;
+      if (FAILED(CreateSurfaceResources(&surface))) return E_FAIL;
+      if (!surface.visual && FAILED(dcomp_->CreateVisual(surface.visual.GetAddressOf()))) {
+        return E_FAIL;
+      }
+      if (FAILED(surface.visual->SetContent(surface.swapchain.Get()))) return E_FAIL;
+    }
+    return SUCCEEDED(dcomp_->Commit()) ? S_OK : E_FAIL;
   }
 
   // Positions an island and draws it. The paint callback draws the island
@@ -626,7 +757,9 @@ class GlassIslandHost {
                    const GlassConstants& constants,
                    ID2D1Bitmap* backdrop, Paint&& paint) {
     if (islandIndex >= surfaces_.size()) return false;
+    if (!visible_) return false;  // nothing on screen: nothing to paint (C33)
     IslandSurface& surface = surfaces_[islandIndex];
+    if (!surface.swapchain && FAILED(EnsureTransient())) return false;
     if (FAILED(surface.visual->SetOffsetX(static_cast<float>(rect.x))) ||
         FAILED(surface.visual->SetOffsetY(static_cast<float>(rect.y)))) {
       return false;
@@ -663,6 +796,54 @@ class GlassIslandHost {
   ID2D1Factory1* Factory() const { return d2dFactory_.Get(); }
 
  private:
+  static constexpr UINT kSwapChainBuffers = 2;  // DXGI flip model: front + back
+
+  bool AnySurfaceLive() const {
+    for (const IslandSurface& surface : surfaces_) {
+      if (surface.swapchain) return true;
+    }
+    return false;
+  }
+
+  // Swapchain + bound D2D target for one island. Split out of AddIsland so the
+  // laziness path (ReleaseTransient -> EnsureTransient) recreates exactly the
+  // same resources, at the same size, instead of a second copy of this code
+  // drifting from the first.
+  HRESULT CreateSurfaceResources(IslandSurface* surface) {
+    if (!surface || surface->width == 0 || surface->height == 0) return E_INVALIDARG;
+    ComPtr<IDXGIFactory2> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory2),
+                                  reinterpret_cast<void**>(factory.ReleaseAndGetAddressOf())))) {
+      return E_FAIL;
+    }
+    DXGI_SWAP_CHAIN_DESC1 desc = {};
+    desc.Width = surface->width;
+    desc.Height = surface->height;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.Stereo = FALSE;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = kSwapChainBuffers;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;  // ADR-001
+    if (FAILED(factory->CreateSwapChainForComposition(
+            d3d_.Get(), &desc, nullptr, surface->swapchain.ReleaseAndGetAddressOf()))) {
+      return E_FAIL;
+    }
+    ComPtr<IDXGISurface> dxgiSurface;
+    if (FAILED(surface->swapchain->GetBuffer(
+            0, __uuidof(IDXGISurface),
+            reinterpret_cast<void**>(dxgiSurface.ReleaseAndGetAddressOf())))) {
+      return E_FAIL;
+    }
+    D2D1_BITMAP_PROPERTIES1 props = {};
+    props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    return d2dContext_->CreateBitmapFromDxgiSurface(dxgiSurface.Get(), props,
+                                                    surface->d2dBitmap.ReleaseAndGetAddressOf());
+  }
+
   HWND hwnd_ = nullptr;
   ComPtr<ID3D11Device> d3d_;
   ComPtr<ID2D1Factory1> d2dFactory_;
@@ -676,6 +857,7 @@ class GlassIslandHost {
   GlassChain chain_;
   bool compositionReady_ = false;
   bool opticsReady_ = false;
+  bool visible_ = true;
 };
 
 // Spring-driven island morph (blueprint ch. 3.4): the pill's width and the blur

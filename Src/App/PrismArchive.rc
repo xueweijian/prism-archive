@@ -1,0 +1,58 @@
+// PrismArchive.rc -- Windows resources for the application executable.
+//
+// Two resources, both load-bearing:
+//   * IDI_APP_ICON -- the multi-size icon from Assets/Icon/prism.ico. It is the
+//     icon Explorer shows for PrismArchive.exe, for the window class
+//     (LoadIconW/LoadImageW) and for the file associations, whose DefaultIcon
+//     value points at "<install>\PrismArchive.exe,0".
+//   * VS_VERSION_INFO -- what the installer reads back as DisplayVersion and
+//     what the shell shows in properties. Keep it in step with
+//     project(PrismArchive VERSION ...) in the top-level CMakeLists.txt.
+//
+// Association type names ("7z Archive", ...) are NOT resources: they are written
+// into HKCU\Software\Classes\PrismArchive.<ext> by tools/install.ps1, so the
+// registry and the installer can never disagree about them.
+#include <windows.h>
+
+// Explicit numeric ID: an undefined identifier in a resource statement becomes a
+// *named* resource, which LoadIconW(MAKEINTRESOURCE(...)) cannot reach. 101 is
+// the id Src/App/Main.cpp asks for when it sets the window class icon.
+#define IDI_APP_ICON 101
+
+#define PRISM_VERSION_MAJOR 0
+#define PRISM_VERSION_MINOR 1
+#define PRISM_VERSION_PATCH 0
+#define PRISM_VERSION_BUILD 0
+#define PRISM_VERSION_STRING "0.1.0.0"
+
+IDI_APP_ICON ICON "../../Assets/Icon/prism.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION PRISM_VERSION_MAJOR,PRISM_VERSION_MINOR,PRISM_VERSION_PATCH,PRISM_VERSION_BUILD
+ PRODUCTVERSION PRISM_VERSION_MAJOR,PRISM_VERSION_MINOR,PRISM_VERSION_PATCH,PRISM_VERSION_BUILD
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "PrismArchive contributors"
+            VALUE "FileDescription", "PrismArchive - 7-Zip engine, Liquid Glass interaction"
+            VALUE "FileVersion", PRISM_VERSION_STRING
+            VALUE "InternalName", "PrismArchive"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "PrismArchive.exe"
+            VALUE "ProductName", "PrismArchive"
+            VALUE "ProductVersion", PRISM_VERSION_STRING
+            VALUE "Comments", "https://github.com/xueweijian/prism-archive"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

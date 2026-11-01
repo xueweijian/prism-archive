@@ -9,14 +9,16 @@
 // Assembly contract (batch A):
 //   1. COM apartment-threaded for the UI thread; the workers use MTA.
 //   2. Archive path: argv[1], else a common dialog. No archive -> quiet exit.
-//   3. 7z.dll resolution: PRISM_7Z_DLL env, then the standard install paths.
+//   3. 7z.dll resolution lives in PrismEngineBridge::Resolve7zDll (env ->
+//      app dir -> 7-Zip's own registry InstallDir -> the two Program Files
+//      probes). Not finding it is a diagnosable failure, not a silent one: the
+//      message box lists every path that was tried.
 //   4. Catalog loads on the UI thread (v1: one seek+header read; directories
 //      load in milliseconds per the blueprint's zero-payload scan).
 //   5. Thumbnails: ONE background sweep over all image entries (single-pass
 //      per solid block) into a worker-owned ThumbStore, handed to the window
 //      by pointer swap; the window repaints via kThumbsChanged. The app
-//      context is kept alive by shared_ptr on both sides; the sweep worker is
-//      joined after the message loop exits.
+//      context is kept alive by shared_ptr on both sides.
 //   6. Folder navigation (increment 5) is owned by the window's
 //      prism::tree::Navigator: this file only sets the catalog down and names
 //      the root crumb. The sweep stays ARCHIVE-WIDE on purpose (see below).
@@ -29,6 +31,25 @@
 //   folder is a re-filter, never a rescan, and a thumbnail decoded before the
 //   switch is still a hit after it. The only thing that changes on navigation
 //   is which rows the renderer asks about.
+//
+// Shutdown contract (card C1: app lifecycle, 2026-11-01):
+//   close window -> WM_CLOSE -> WM_DESTROY -> PostQuitMessage -> Run() returns
+//   -> the scan is CANCELLED (ArchiveReader::RequestBatchAbort, which makes the
+//   sweep's extract callback answer E_ABORT and lets 7-Zip stop inside its own
+//   decode loop) -> every worker is JOINED -> the window object leaves scope ->
+//   the process exits with code 0. No detach anywhere: the window is a stack
+//   object and the workers talk to it through Post* only, so a join is what
+//   makes that contract sound.
+//   The measured failure this replaces: closing the window left the process
+//   alive forever. Root cause was not the close path at all -- the gallery
+//   renderer was never Initialize()d, so the first WM_PAINT dereferenced a null
+//   DirectWrite factory, the UI thread took an access violation inside
+//   DispatchMessageW, and the process sat in that fault (with the window
+//   already gone) instead of unwinding to GetMessageW and seeing WM_QUIT. The
+//   fix is in GalleryWindow::Create (it now initializes the renderer before the
+//   first paint) plus this file's cancel-then-join shutdown and a lifecycle
+//   test that drives a REAL window and a REAL WM_CLOSE
+//   (Tests/win/test_app_lifecycle.cpp).
 //
 // History note: the inc-2 edit of this file was applied by an index-based
 // patch that cut at the wrong offset and left the previous handler's tail
@@ -44,7 +65,6 @@
 #include <windows.h>
 #include <commdlg.h>   // GetOpenFileNameW
 #include <shellapi.h>  // CommandLineToArgvW
-#include <shlwapi.h>   // PathFileExistsW
 
 #include <atomic>
 #include <cstdio>      // fprintf (extraction telemetry)
@@ -58,26 +78,15 @@
 #include "../PrismCore/SmartExtractor.hpp" // SmartExtractionPlanner
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/GalleryWindow.hpp"
-#include "../PrismWin/PrismEngineBridge.hpp"  // WideToUtf8, SmartExtractCallback
+#include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8, SmartExtractCallback
 #include "../PrismWin/SolidSweeper.hpp"
 
+#pragma comment(lib, "advapi32.lib")  // RegOpenKeyExW in Resolve7zDll
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
 
 namespace {
-
-std::wstring Locate7zDll() {
-  wchar_t buf[MAX_PATH]{};
-  if (GetEnvironmentVariableW(L"PRISM_7Z_DLL", buf, MAX_PATH) > 0 && PathFileExistsW(buf)) {
-    return buf;
-  }
-  for (const wchar_t* candidate : {L"C:\\Program Files\\7-Zip\\7z.dll",
-                                   L"C:\\Program Files (x86)\\7-Zip\\7z.dll"}) {
-    if (PathFileExistsW(candidate)) return candidate;
-  }
-  return {};
-}
 
 std::wstring PickArchive() {
   OPENFILENAMEW ofn{};
@@ -105,6 +114,34 @@ std::wstring Utf8ToWide(std::string_view text) {
   MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
                       out.data(), wide);
   return out;
+}
+
+// "7z.dll not found" is only actionable if it names the paths that were tried
+// (D12: an absence has to say what should have been there). Chinese, like the
+// rest of the user-facing strings in this app.
+std::wstring DescribeMissing7zDll(const prism::win::SevenZipDllLookup& lookup) {
+  std::wstring text =
+      L"\u672A\u627E\u5230 7z.dll\uFF0CPrismArchive \u9700\u8981 7-Zip "
+      L"\u5F15\u64CE\u624D\u80FD\u6253\u5F00\u5F52\u6863\u3002\n\n"
+      L"\u5DF2\u4F9D\u6B21\u5C1D\u8BD5\u4EE5\u4E0B\u8DEF\u5F84\uFF1A\n";
+  if (lookup.candidates.empty()) {
+    text += L"  (\u65E0\uFF1A\u73AF\u5883\u53D8\u91CF PRISM_7Z_DLL "
+            L"\u672A\u8BBE\u7F6E\uFF0C\u4E14\u6CE8\u518C\u8868\u4E0E"
+            L"\u9ED8\u8BA4\u5B89\u88C5\u76EE\u5F55\u5747\u65E0 7z.dll)\n";
+  }
+  for (const std::wstring& candidate : lookup.candidates) {
+    text += L"  " + candidate + L"\n";
+  }
+  text +=
+      L"\n\u4FEE\u590D\u65B9\u6CD5\uFF08\u4EFB\u9009\u4E00\uFF09\uFF1A\n"
+      L"  1. \u5B89\u88C5 7-Zip\uFF08https://www.7-zip.org/\uFF09\uFF1B\n"
+      L"  2. \u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF PRISM_7Z_DLL "
+      L"\u6307\u5411 7z.dll \u7684\u5B8C\u6574\u8DEF\u5F84\uFF1B\n"
+      L"  3. \u628A 7z.dll \u653E\u5230\u672C\u7A0B\u5E8F\u540C\u76EE"
+      L"\u5F55\u3002\n\n";
+  const std::wstring appDir = prism::win::ExecutableDirectory();
+  if (!appDir.empty()) text += L"\u7A0B\u5E8F\u76EE\u5F55\uFF1A" + appDir + L"\n";
+  return text;
 }
 
 // Everything the UI thread and the workers share. Kept alive by shared_ptr on
@@ -146,18 +183,20 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     return 0;  // user closed the picker: not an error
   }
 
-  const std::wstring dll = Locate7zDll();
-  if (dll.empty()) {
-    MessageBoxW(nullptr, L"7z.dll not found.\nInstall 7-Zip or set PRISM_7Z_DLL.",
-                L"PrismArchive", MB_ICONERROR);
+  const prism::win::SevenZipDllLookup lookup = prism::win::Resolve7zDll();
+  if (lookup.path.empty()) {
+    const std::wstring message = DescribeMissing7zDll(lookup);
+    MessageBoxW(nullptr, message.c_str(), L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
+  const std::wstring& dll = lookup.path;
 
   auto app = std::make_shared<AppContext>();
   app->archivePath = archive;
   if (!app->library.Load(dll)) {
-    MessageBoxW(nullptr, L"Failed to load 7z.dll.", L"PrismArchive", MB_ICONERROR);
+    MessageBoxW(nullptr, (L"7z.dll \u52A0\u8F7D\u5931\u8D25\uFF1A\n" + dll).c_str(),
+                L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
@@ -174,7 +213,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   app->items = app->catalog;
 
   prism::win::gallery::GalleryWindow window;
-  if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) return 1;
+  if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) {
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return 1;
+  }
   // The window's navigator owns the current folder from here on: the catalog
   // goes in once, and every later question ("which rows?", "which crumbs?",
   // "which level did that click hit?") is answered by PrismCore.
@@ -262,7 +304,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::thread worker([app, &window, sweepIndices, sweepSizes]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     prism::win::sweep::WicThumbDecoder wic;
-    if (wic.Initialize()) {
+    if (wic.Initialize() && !sweepIndices.empty()) {
       auto store = std::make_shared<prism::gallery::ThumbStore>(64ull << 20);
       prism::win::sweep::RunSolidSweep(*app->reader, sweepIndices, sweepSizes,
                                        wic, *store);
@@ -273,9 +315,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   });
 
   window.Run();
+
+  // The window is gone: cancel the thumbnail scan BEFORE joining it. The sweep
+  // is one whole-archive Extract inside 7-Zip; without this it would run to
+  // completion (seconds on a large archive) with no window left to hand the
+  // result to, and closing the app would look like a hang. RequestBatchAbort
+  // makes the extract callback answer E_ABORT, 7-Zip stops the decode, and the
+  // join below returns in milliseconds.
+  app->reader->RequestBatchAbort();
+
   // Join EVERY worker before `window` leaves scope: it is a stack object and the
   // workers talk to it. Joining is what makes the posting contract sound -- a
   // Post* that lands after WM_DESTROY simply fails and frees its payload.
+  // Never detach: a detached worker here would outlive `window` and `app`.
   worker.join();
   if (extractWorker.joinable()) extractWorker.join();
 

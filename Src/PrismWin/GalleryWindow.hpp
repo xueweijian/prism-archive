@@ -91,6 +91,13 @@ class GalleryWindow {
   static constexpr UINT kHudStart = WM_APP + 3;
   static constexpr UINT kStatusText = WM_APP + 4;
 
+  // The window owns an HWND and a device-dependent renderer; both are released
+  // in the destructor, in that order. Main.cpp's `window` is a stack object, so
+  // this runs on the UI thread after Run() returned and after every worker was
+  // joined -- the only point where the HWND and the renderer are guaranteed to
+  // be quiescent.
+  ~GalleryWindow() { DestroyHostWindow(); }
+
   struct Host {
     HWND hwnd = nullptr;
     std::vector<prism::ArchiveItem>* items = nullptr;  // CURRENT FOLDER rows (not owned)
@@ -112,7 +119,17 @@ class GalleryWindow {
     host_.hwnd = CreateWindowExW(0, wc.lpszClassName, title.c_str(),
                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                  1280, 800, nullptr, nullptr, instance, this);
-    return host_.hwnd != nullptr && EnsureDeviceResources();
+    if (!host_.hwnd) return false;
+    // The renderer's device-independent resources (D2D factory + the DirectWrite
+    // factory its CreateTextFormat calls go through) must exist BEFORE the first
+    // WM_PAINT. Skipping this left renderer_.writeFactory_ null, so the very
+    // first paint called a virtual function through a null vtable slot: an
+    // access violation inside DispatchMessageW, after which the UI thread never
+    // returned to GetMessageW, ignored the WM_QUIT that closing the window had
+    // posted, and the process hung forever with no window. That was the whole
+    // "closing does not exit" bug (card C1, 2026-11-01).
+    rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
+    return rendererInitialized_ && EnsureDeviceResources();
   }
 
   // Attach the archive catalog (the app owns the snapshot; it outlives the
@@ -230,13 +247,20 @@ class GalleryWindow {
   // Wakes the message loop so a quit requested by a worker is seen even if the
   // app is idle. Used after a worker sets AppContext::shuttingDown.
   void RequestClose() {
-    if (host_.hwnd) PostMessageW(host_.hwnd, WM_CLOSE, 0, 0);
+    // IsWindow, not just "hwnd != nullptr": after WM_DESTROY the handle value is
+    // stale, and posting to a recycled handle would be closing somebody else's
+    // window. A failed post is the expected outcome once the app is going down.
+    if (host_.hwnd && IsWindow(host_.hwnd)) PostMessageW(host_.hwnd, WM_CLOSE, 0, 0);
   }
 
   void Show() {
     if (host_.hwnd) ShowWindow(host_.hwnd, SW_SHOW);
   }
 
+  // The message loop. It returns after WM_QUIT, which WM_DESTROY posts (see
+  // Proc) -- i.e. as soon as the last top-level window of this thread is gone.
+  // GetMessageW returning -1 (a failure, not a quit) also leaves the loop: a
+  // thread that cannot read its own queue must not spin in it forever.
   void Run() {
     Show();
     MSG msg{};
@@ -475,6 +499,16 @@ class GalleryWindow {
         if (text) SetStatus(*text);
         return 0;
       }
+      case WM_CLOSE:
+        // Closing is a two-step contract, and both steps belong in one place:
+        //   1. DestroyWindow -> WM_DESTROY -> PostQuitMessage, which is what
+        //      makes Run() return (default DefWindowProc does the same thing;
+        //      naming it keeps the contract readable and testable).
+        //   2. Main.cpp then cancels the scan and joins the workers.
+        // The HWND is destroyed here and NOT again in the destructor, which
+        // checks IsWindow first for exactly that reason.
+        if (host_.hwnd && IsWindow(host_.hwnd)) DestroyWindow(host_.hwnd);
+        return 0;
       case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -677,6 +711,12 @@ class GalleryWindow {
   void Render() {
     if (!EnsureDeviceResources()) return;
     if (!rendererReady_) {
+      // Belt and braces for the crash this card fixed: a renderer that was
+      // never initialized has a null DirectWrite factory, and the first
+      // CreateTextFormat through it faults the UI thread. Create() initializes
+      // it up front; this keeps a future call site from resurrecting the bug.
+      if (!rendererInitialized_) rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
+      if (!rendererInitialized_) return;
       rendererReady_ = SUCCEEDED(renderer_.CreateDeviceResources(target_.Get()));
       if (!rendererReady_) return;
     }
@@ -774,6 +814,21 @@ class GalleryWindow {
 
   void Invalidate() { if (host_.hwnd) InvalidateRect(host_.hwnd, nullptr, FALSE); }
 
+  // Destroy the HWND if it is still alive. Idempotent on purpose: the normal
+  // path destroys it in the WM_CLOSE handler, and the destructor must not
+  // destroy it a second time (the handle value would be stale or -- worse --
+  // recycled by an unrelated window). Device-dependent resources are released
+  // BEFORE the HWND disappears on the abandon path, because an
+  // ID2D1HwndRenderTarget that outlives its window still has to unbind from it.
+  void DestroyHostWindow() {
+    if (!host_.hwnd) return;
+    if (IsWindow(host_.hwnd)) {
+      target_.Reset();
+      DestroyWindow(host_.hwnd);
+    }
+    host_.hwnd = nullptr;
+  }
+
   static double NowSeconds() {
     LARGE_INTEGER freq{}, counter{};
     QueryPerformanceFrequency(&freq);
@@ -818,6 +873,10 @@ class GalleryWindow {
   bool barKnown_ = false;
 
   GalleryRenderer renderer_;
+  // Set when renderer_.Initialize() succeeded. Both the renderer's D2D factory
+  // and its DirectWrite factory come from that call; a paint that runs without
+  // it dereferences a null factory (the card-C1 crash, see Create()).
+  bool rendererInitialized_ = false;
   bool rendererReady_ = false;
   std::mutex thumbMutex_;
   std::shared_ptr<prism::gallery::ThumbStore> thumbs_;

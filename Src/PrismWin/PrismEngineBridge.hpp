@@ -12,6 +12,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -46,6 +47,122 @@ inline std::string WideToUtf8(std::wstring_view wide) {
   WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), needed,
                       nullptr, nullptr);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// 7z.dll discovery (card C1: app lifecycle / startup)
+// ---------------------------------------------------------------------------
+// The order below is a product decision, not a guess:
+//   1. PRISM_7Z_DLL            -- explicit override, wins over everything;
+//   2. <exe dir>\7z.dll        -- a copy shipped beside the app (portable install);
+//   3. HKLM / HKLM(WOW64) / HKCU  SOFTWARE\7-Zip "InstallDir" -- the machine's
+//      own answer to "where am I installed", so 7-Zip on D: or E: is found;
+//   4. C:\Program Files\7-Zip / C:\Program Files (x86)\7-Zip -- last-resort
+//      probes for a registry-less (or copied) install.
+// Discovery reports EVERY path it tried: a "7z.dll not found" box without the
+// candidate list is undiagnosable, and the machine this shipped from keeps
+// 7-Zip on E: (D12: the absence of evidence has to name what was expected).
+struct SevenZipDllLookup {
+  std::wstring path;                     // first candidate that exists (empty: none)
+  std::wstring source;                   // "env" | "app-dir" | "registry:HKLM" | "probe"
+  std::vector<std::wstring> candidates;  // every path tried, in probe order
+};
+
+inline bool ExistsAsFile(const std::wstring& path) {
+  if (path.empty()) return false;
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+// <dir>\<name> without std::filesystem so this header stays usable from TUs
+// that only link the Win32 side.
+inline std::wstring JoinFsPath(const std::wstring& dir, const wchar_t* name) {
+  if (dir.empty()) return {};
+  const wchar_t last = dir.back();
+  std::wstring out = dir;
+  if (last != L'\\' && last != L'/') out.push_back(L'\\');
+  out += name;
+  return out;
+}
+
+// The directory the running image lives in. Empty when the query fails (then
+// the "copy beside the exe" candidate is skipped rather than guessed).
+inline std::wstring ExecutableDirectory() {
+  std::wstring buffer(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD written =
+        GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (written == 0) return {};
+    if (written < buffer.size()) {  // not truncated
+      buffer.resize(written);
+      const size_t slash = buffer.find_last_of(L"\\/");
+      return slash == std::wstring::npos ? std::wstring() : buffer.substr(0, slash);
+    }
+    buffer.resize(buffer.size() * 2);  // a long path: grow and ask again
+  }
+}
+
+// 7-Zip's own "where am I" value. InstallDir is a REG_SZ that ends with '\'.
+inline bool RegistryInstallDir(HKEY root, const wchar_t* subkey, std::wstring* out) {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(root, subkey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+  wchar_t value[MAX_PATH * 2]{};
+  DWORD bytes = sizeof(value) - sizeof(wchar_t);
+  DWORD type = 0;
+  const LONG rc = RegQueryValueExW(key, L"InstallDir", nullptr, &type,
+                                   reinterpret_cast<LPBYTE>(value), &bytes);
+  RegCloseKey(key);
+  if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return false;
+  value[(sizeof(value) / sizeof(value[0])) - 1] = L'\0';
+  if (value[0] == L'\0') return false;
+  *out = value;
+  return true;
+}
+
+inline SevenZipDllLookup Resolve7zDll() {
+  SevenZipDllLookup lookup;
+  auto accept = [&lookup](const std::wstring& path, const wchar_t* source) {
+    if (path.empty()) return false;
+    lookup.candidates.push_back(path);
+    if (lookup.path.empty() && ExistsAsFile(path)) {
+      lookup.path = path;
+      lookup.source = source;
+    }
+    return !lookup.path.empty();
+  };
+
+  wchar_t envDll[MAX_PATH * 2]{};
+  if (GetEnvironmentVariableW(L"PRISM_7Z_DLL", envDll, ARRAYSIZE(envDll)) > 0) {
+    accept(envDll, L"env");
+  }
+  if (!lookup.path.empty()) return lookup;
+
+  accept(JoinFsPath(ExecutableDirectory(), L"7z.dll"), L"app-dir");
+  if (!lookup.path.empty()) return lookup;
+
+  // Registry before the Program Files probes: this is the only source that
+  // knows about a non-default install drive.
+  struct RegProbe {
+    HKEY root;
+    const wchar_t* subkey;
+    const wchar_t* source;
+  };
+  const RegProbe probes[] = {
+      {HKEY_LOCAL_MACHINE, L"SOFTWARE\\7-Zip", L"registry:HKLM"},
+      {HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\7-Zip", L"registry:HKLM32"},
+      {HKEY_CURRENT_USER, L"SOFTWARE\\7-Zip", L"registry:HKCU"},
+  };
+  for (const RegProbe& probe : probes) {
+    std::wstring installDir;
+    if (!RegistryInstallDir(probe.root, probe.subkey, &installDir)) continue;
+    accept(JoinFsPath(installDir, L"7z.dll"), probe.source);
+    if (!lookup.path.empty()) return lookup;
+  }
+
+  accept(L"C:\\Program Files\\7-Zip\\7z.dll", L"probe");
+  if (!lookup.path.empty()) return lookup;
+  accept(L"C:\\Program Files (x86)\\7-Zip\\7z.dll", L"probe");
+  return lookup;
 }
 
 // ---------------------------------------------------------------------------
@@ -780,12 +897,28 @@ class ArchiveReader {
 
   // Sink 3: the solid sweep (blueprint ch. 4.3) -- ONE Extract call over a
   // whole solid block; the callback demuxes per-item bytes as they stream by.
+  //
+  // Scan abort (card C1 lifecycle): a whole-archive sweep takes seconds on a
+  // large archive, and closing the window must not wait for it. 7-Zip stops an
+  // Extract as soon as the extract callback answers with a failure HRESULT, so
+  // the sweep's callback is wrapped in BatchAbortProbe and every entry point it
+  // has returns E_ABORT once RequestBatchAbort() has been called.
+  //
+  // The scope is deliberately ExtractBatch-only (the read-only thumbnail scan).
+  // ExtractWithPlan is the extraction the USER started; cutting that in half on
+  // window close would leave half-written files on disk, so it is never aborted
+  // from here -- it is joined instead.
+  void RequestBatchAbort() { batchAbort_.store(true, std::memory_order_release); }
+  void ClearBatchAbort() { batchAbort_.store(false, std::memory_order_release); }
+  bool BatchAbortRequested() const { return batchAbort_.load(std::memory_order_acquire); }
+
   bool ExtractBatch(const std::vector<uint32_t>& indices,
                     abi::IArchiveExtractCallback* callback) const {
     if (!archive_ || indices.empty() || !callback) return false;
+    BatchAbortProbe probe(callback, &batchAbort_);
     std::vector<abi::UInt32> idx(indices.begin(), indices.end());
     return SUCCEEDED(
-        archive_->Extract(idx.data(), static_cast<abi::UInt32>(idx.size()), 0, callback));
+        archive_->Extract(idx.data(), static_cast<abi::UInt32>(idx.size()), 0, &probe));
   }
 
   // Property ids are discovered by name (authoritative, read out of the DLL
@@ -814,6 +947,68 @@ class ArchiveReader {
   const std::set<uint32_t>& discoveredProperties() const { return propIdSet_; }
 
  private:
+  // One flag, five entry points: whatever 7-Zip polls next, the answer is
+  // E_ABORT. A stack object owned by ExtractBatch -- 7-Zip's AddRef/Release is
+  // balanced around the call (the same contract SweepExtractCallback in
+  // SolidSweeper.hpp depends on), so a zero count is a programming error here,
+  // never a delete.
+  class BatchAbortProbe final : public abi::IArchiveExtractCallback {
+   public:
+    BatchAbortProbe(abi::IArchiveExtractCallback* inner, const std::atomic<bool>* flag)
+        : inner_(inner), flag_(flag) {}
+
+    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+      if (!out) return E_POINTER;
+      if (iid == IID_IUnknown || iid == abi::IID_IArchiveExtractCallback) {
+        *out = static_cast<abi::IArchiveExtractCallback*>(this);
+        AddRef();
+        return S_OK;
+      }
+      // Not ours: forward instead of hiding a capability the inner callback may
+      // answer (D10 -- QueryInterface must not lie in either direction).
+      return inner_->QueryInterface(iid, out);
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }
+    STDMETHODIMP_(ULONG) Release() override { return InterlockedDecrement(&refs_); }
+
+    STDMETHODIMP SetTotal(abi::UInt64 total) override {
+      if (Aborted()) return E_ABORT;
+      return inner_->SetTotal(total);
+    }
+    STDMETHODIMP SetCompleted(const abi::UInt64* completeValue) override {
+      if (Aborted()) return E_ABORT;
+      return inner_->SetCompleted(completeValue);
+    }
+    STDMETHODIMP GetStream(abi::UInt32 index, abi::ISequentialOutStream** outStream,
+                          abi::Int32 askExtractMode) override {
+      if (Aborted()) return E_ABORT;
+      return inner_->GetStream(index, outStream, askExtractMode);
+    }
+    STDMETHODIMP PrepareOperation(abi::Int32 askExtractMode) override {
+      if (Aborted()) return E_ABORT;
+      return inner_->PrepareOperation(askExtractMode);
+    }
+    STDMETHODIMP SetOperationResult(abi::Int32 operationResult) override {
+      if (Aborted()) return E_ABORT;
+      return inner_->SetOperationResult(operationResult);
+    }
+
+   private:
+    bool Aborted() const {
+#ifdef PRISM_MUTANT_SCAN_ABORT_IGNORED
+      // Negative control (D3): the flag exists and is set, the check is gone.
+      // The lifecycle suite must go red on this build.
+      return false;
+#else
+      return flag_ != nullptr && flag_->load(std::memory_order_acquire);
+#endif
+    }
+
+    abi::IArchiveExtractCallback* inner_;
+    const std::atomic<bool>* flag_;
+    LONG refs_ = 1;
+  };
+
   class MemoryExtractCallback final : public abi::IArchiveExtractCallback {
    public:
     explicit MemoryExtractCallback(MemoryOutStream* sink) : sink_(sink) { sink_->AddRef(); }
@@ -945,6 +1140,10 @@ class ArchiveReader {
   // property read, because handlers answer properties they do not advertise.
   std::set<uint32_t> propIdSet_;
   std::string propTrace_;
+  // Sticky "stop the thumbnail scan" flag, read by BatchAbortProbe on the sweep
+  // thread and written by the UI thread when the window closes (see
+  // RequestBatchAbort). Atomic because those are different threads by design.
+  std::atomic<bool> batchAbort_{false};
 };
 
 }  // namespace prism::win

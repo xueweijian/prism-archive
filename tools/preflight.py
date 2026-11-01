@@ -201,27 +201,29 @@ def check_b6_enum_print():
                                         f"PRISM_CHECK_EQ argument but has no operator<<")
 
 
-def tests_cmake_text() -> str:
-    """Tests/CMakeLists.txt PLUS the per-card registration files it glob-includes.
+def test_cmake_text() -> str:
+    """Every CMake fragment that can register a test executable.
 
-    Since 2026-11-01 (Tests/suites/README.md) each parallel card drops ONE file in
-    Tests/suites/<card>.cmake instead of appending to the shared list -- 20+
-    branches all conflicted on the same tail. A scanner that reads only the shared
-    list then reports phantom D1 failures ("can SKIP but is not in any
-    add_executable") for a registration that exists, is pinned with
-    PASS_REGULAR_EXPRESSION and is registered with CTest. Scan both; the gate
-    keeps its teeth either way.
+    Parallel development puts each card's registration in its own
+    Tests/suites/<card>-*.cmake (see Tests/suites/README.md). A gate that reads
+    only Tests/CMakeLists.txt therefore reports a FALSE red for every card that
+    follows the convention -- exactly what happened to card C4 on 2026-11-01
+    ("can SKIP but is not in any add_executable", with the registration sitting
+    in its suite file). Concatenating the fragments keeps D1 honest in both
+    layouts.
     """
-    text = scan(ROOT / "Tests" / "CMakeLists.txt")
-    for suite in sorted((ROOT / "Tests" / "suites").glob("*.cmake")):
-        text = text + chr(10) + scan(suite)
-    return text
+    parts = [scan(ROOT / "Tests" / "CMakeLists.txt")]
+    suites = ROOT / "Tests" / "suites"
+    if suites.is_dir():
+        for suite in sorted(suites.glob("*.cmake")):
+            parts.append(scan(suite))
+    return "\n".join(parts)
 
 
 def exe_source_map():
     """Map every test executable to the sources it compiles (from add_executable)."""
     mapping = {}
-    cmake = tests_cmake_text()
+    cmake = test_cmake_text()
     for m in re.finditer(r"add_executable\((\w+)\s+([^)]+)\)", cmake):
         exe, sources = m.group(1), m.group(2)
         for src in re.findall(r"[\w/.]+\.cpp", sources):
@@ -232,7 +234,7 @@ def exe_source_map():
 def check_d1_skip_gates():
     """D1: any Windows test that can SKIP must have its stdout marker REQUIRED
     via PASS_REGULAR_EXPRESSION, or a silent skip counts as a pass."""
-    cmake = tests_cmake_text()
+    cmake = test_cmake_text()
     src_to_exe = exe_source_map()
     for f in sorted((TESTS / "win").glob("test_*.cpp")):
         if "SKIP" not in scan(f):

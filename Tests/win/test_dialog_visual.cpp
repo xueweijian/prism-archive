@@ -200,15 +200,26 @@ PRISM_TEST("dpi: 96/144/192 are three real metric buckets") {
   const chrome::Metrics m96 = chrome::MetricsForDpi(96);
   const chrome::Metrics m144 = chrome::MetricsForDpi(144);
   const chrome::Metrics m192 = chrome::MetricsForDpi(192);
-  PRISM_CHECK_EQ(m96.titleBarHeight, 44);
-  PRISM_CHECK_EQ(m144.titleBarHeight, 66);
-  PRISM_CHECK_EQ(m192.titleBarHeight, 88);
-  PRISM_CHECK_EQ(m96.cardRadius, 22);
-  PRISM_CHECK_EQ(m144.cardRadius, 33);
-  PRISM_CHECK_EQ(m192.cardRadius, 44);
+  // DESIGN.md section 2: title 32; section 4: island radius 20.
+  PRISM_CHECK_EQ(m96.titleBarHeight, 32);
+  PRISM_CHECK_EQ(m144.titleBarHeight, 48);
+  PRISM_CHECK_EQ(m192.titleBarHeight, 64);
+  PRISM_CHECK_EQ(m96.cardRadius, 20);
+  PRISM_CHECK_EQ(m144.cardRadius, 30);
+  PRISM_CHECK_EQ(m192.cardRadius, 40);
   PRISM_CHECK_EQ(m96.fontSize, 13);
   PRISM_CHECK_EQ(m144.fontSize, 20);  // 19.5 rounded
   PRISM_CHECK_EQ(m192.fontSize, 26);
+  // DESIGN.md section 2/4 pins: action bar 56, pad 16, row radius 10, type
+  // scale 11/13/15/20.
+  PRISM_CHECK_EQ(m96.actionBarHeight, 56);
+  PRISM_CHECK_EQ(m144.actionBarHeight, 84);
+  PRISM_CHECK_EQ(m192.actionBarHeight, 112);
+  PRISM_CHECK_EQ(m96.padding, 16);
+  PRISM_CHECK_EQ(m96.buttonRadius, 10);
+  PRISM_CHECK_EQ(m96.comboRadius, 10);
+  PRISM_CHECK_EQ(m96.smallFontSize, 11);
+  PRISM_CHECK_EQ(m96.titleFontSize, 15);
   PRISM_CHECK(m144.scale > m96.scale && m192.scale > m144.scale);
   PRISM_CHECK_EQ(m192.knobSize, 32);
   // The padded hit target scales too: the slider fill width must grow with DPI.

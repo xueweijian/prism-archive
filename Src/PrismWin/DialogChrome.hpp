@@ -106,15 +106,19 @@ inline VisualState ResolveState(bool enabled, bool hovered, bool pressed, bool e
 // Metrics::scale. The test pins 96/144/192 (1.0 / 1.5 / 2.0).
 struct Metrics {
   float scale = 1.0f;
-  int titleBarHeight = 44;
-  int cardRadius = 22;
-  int padding = 20;
-  int buttonHeight = 30;
-  int buttonRadius = 15;
-  int sliderHeight = 26;
+  // DESIGN.md section 2/4: title 32, content pad 16, island radius 20, row
+  // radius 10, type scale 11/13/15/20. The action bar is 56 high; its buttons
+  // are 32 and sit 12 above the bottom edge.
+  int titleBarHeight = 32;
+  int cardRadius = 20;
+  int padding = 16;
+  int actionBarHeight = 56;
+  int buttonHeight = 32;
+  int buttonRadius = 10;
+  int sliderHeight = 32;
   int sliderTrack = 6;
   int knobSize = 16;
-  int comboHeight = 30;
+  int comboHeight = 32;
   int comboRadius = 10;
   int checkBox = 18;
   int rowGap = 12;
@@ -122,7 +126,7 @@ struct Metrics {
   int fontSize = 13;
   int titleFontSize = 15;
   int smallFontSize = 11;
-  int closeButton = 28;
+  int closeButton = 24;
 
   float S(float value) const { return value * scale; }
 };
@@ -136,15 +140,16 @@ inline Metrics MetricsForDpi(int dpi) {
   if (dpi < 48) dpi = 48;
   if (dpi > 480) dpi = 480;
   m.scale = static_cast<float>(dpi) / 96.0f;
-  m.titleBarHeight = static_cast<int>(std::lround(44.0f * m.scale));
-  m.cardRadius = static_cast<int>(std::lround(22.0f * m.scale));
-  m.padding = static_cast<int>(std::lround(20.0f * m.scale));
-  m.buttonHeight = static_cast<int>(std::lround(30.0f * m.scale));
-  m.buttonRadius = static_cast<int>(std::lround(15.0f * m.scale));
-  m.sliderHeight = static_cast<int>(std::lround(26.0f * m.scale));
+  m.titleBarHeight = static_cast<int>(std::lround(32.0f * m.scale));
+  m.cardRadius = static_cast<int>(std::lround(20.0f * m.scale));
+  m.padding = static_cast<int>(std::lround(16.0f * m.scale));
+  m.actionBarHeight = static_cast<int>(std::lround(56.0f * m.scale));
+  m.buttonHeight = static_cast<int>(std::lround(32.0f * m.scale));
+  m.buttonRadius = static_cast<int>(std::lround(10.0f * m.scale));
+  m.sliderHeight = static_cast<int>(std::lround(32.0f * m.scale));
   m.sliderTrack = static_cast<int>(std::lround(6.0f * m.scale));
   m.knobSize = static_cast<int>(std::lround(16.0f * m.scale));
-  m.comboHeight = static_cast<int>(std::lround(30.0f * m.scale));
+  m.comboHeight = static_cast<int>(std::lround(32.0f * m.scale));
   m.comboRadius = static_cast<int>(std::lround(10.0f * m.scale));
   m.checkBox = static_cast<int>(std::lround(18.0f * m.scale));
   m.rowGap = static_cast<int>(std::lround(12.0f * m.scale));
@@ -152,7 +157,7 @@ inline Metrics MetricsForDpi(int dpi) {
   m.fontSize = static_cast<int>(std::lround(13.0f * m.scale));
   m.titleFontSize = static_cast<int>(std::lround(15.0f * m.scale));
   m.smallFontSize = static_cast<int>(std::lround(11.0f * m.scale));
-  m.closeButton = static_cast<int>(std::lround(28.0f * m.scale));
+  m.closeButton = static_cast<int>(std::lround(24.0f * m.scale));
   return m;
 }
 
@@ -560,7 +565,9 @@ class ChromePainter {
     const Metrics m = model.metrics();
     const float s = m.scale;
     if (FAILED(CreateDeviceResources(target, m.fontSize))) return;
-    target->Clear(ToD2D(Backdrop(model.variant)));
+    // DESIGN.md section 4: the dialog sits on surface-canvas-base. The
+    // backdrop reference is only the opaque surface contrast is measured over.
+    target->Clear(ToD2D(Canvas(model.variant)));
     ComPtr<ID2D1SolidColorBrush> cardBrush;
     ComPtr<ID2D1SolidColorBrush> titleBrush;
     ComPtr<ID2D1SolidColorBrush> primaryBrush;

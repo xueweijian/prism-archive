@@ -944,10 +944,12 @@ class SettingsDialog {
     };
     auto add = [&model](chrome::Widget widget) { model.widgets.push_back(std::move(widget)); };
 
-    constexpr float kLabelX = 20.0f;
-    constexpr float kControlX = 190.0f;
-    constexpr float kRow = 62.0f;
-    constexpr float kTop = 64.0f;
+    // DESIGN.md section 2/4: title 32 + pad 16; row pitch 56 = 32 control +
+    // 8 gap + 16 hint; content pad 16; action bar 56.
+    constexpr float kLabelX = 16.0f;
+    constexpr float kControlX = 176.0f;
+    constexpr float kRow = 56.0f;
+    constexpr float kTop = 48.0f;
     const auto rowY = [](int row) { return kTop + kRow * row; };
 
     label(L"Language", kLabelX, rowY(0) + 8.0f, 160.0f, 22.0f);
@@ -960,7 +962,7 @@ class SettingsDialog {
     chrome::Widget language;
     language.id = ids::kLanguage;
     language.kind = WidgetKind::Combo;
-    language.rect = D2D1::RectF(kControlX, rowY(0), kControlX + 240.0f, rowY(0) + 30.0f);
+    language.rect = D2D1::RectF(kControlX, rowY(0), kControlX + 240.0f, rowY(0) + 32.0f);
     language.value = WideFromUtf8(state_.languageTag());
     language.enabled = true;
     language.state = visual(ids::kLanguage, true);
@@ -969,7 +971,7 @@ class SettingsDialog {
     chrome::Widget theme;
     theme.id = ids::kTheme;
     theme.kind = WidgetKind::Combo;
-    theme.rect = D2D1::RectF(kControlX, rowY(1), kControlX + 240.0f, rowY(1) + 30.0f);
+    theme.rect = D2D1::RectF(kControlX, rowY(1), kControlX + 240.0f, rowY(1) + 32.0f);
     theme.value = WideFromUtf8(ThemeName(state_.theme()));
     theme.enabled = true;
     theme.state = visual(ids::kTheme, true);
@@ -978,7 +980,7 @@ class SettingsDialog {
     chrome::Widget extract;
     extract.id = ids::kExtractDir;
     extract.kind = WidgetKind::TextField;
-    extract.rect = D2D1::RectF(kControlX, rowY(2), kControlX + 330.0f, rowY(2) + 30.0f);
+    extract.rect = D2D1::RectF(kControlX, rowY(2), kControlX + 330.0f, rowY(2) + 32.0f);
     extract.label = L"C:\\Users\\you\\Extracted";
     extract.value = WideFromUtf8(state_.extractDirText());
     extract.enabled = true;
@@ -988,7 +990,7 @@ class SettingsDialog {
     chrome::Widget browse;
     browse.id = ids::kBrowse;
     browse.kind = WidgetKind::Button;
-    browse.rect = D2D1::RectF(kControlX + 340.0f, rowY(2), kControlX + 430.0f, rowY(2) + 30.0f);
+    browse.rect = D2D1::RectF(kControlX + 340.0f, rowY(2), kControlX + 430.0f, rowY(2) + 32.0f);
     browse.label = L"Browse...";
     browse.enabled = true;
     browse.state = visual(ids::kBrowse, true);
@@ -997,7 +999,7 @@ class SettingsDialog {
     chrome::Widget thumbnail;
     thumbnail.id = ids::kThumbnail;
     thumbnail.kind = WidgetKind::TextField;
-    thumbnail.rect = D2D1::RectF(kControlX, rowY(3), kControlX + 110.0f, rowY(3) + 30.0f);
+    thumbnail.rect = D2D1::RectF(kControlX, rowY(3), kControlX + 110.0f, rowY(3) + 32.0f);
     thumbnail.label = L"512";
     thumbnail.value = WideFromUtf8(state_.thumbnailText());
     thumbnail.enabled = true;
@@ -1007,7 +1009,7 @@ class SettingsDialog {
     chrome::Widget unit;
     unit.id = ids::kUnit;
     unit.kind = WidgetKind::Combo;
-    unit.rect = D2D1::RectF(kControlX + 122.0f, rowY(3), kControlX + 202.0f, rowY(3) + 30.0f);
+    unit.rect = D2D1::RectF(kControlX + 122.0f, rowY(3), kControlX + 202.0f, rowY(3) + 32.0f);
     unit.value = WideFromUtf8(SizeUnitName(state_.thumbnailUnit()));
     unit.enabled = true;
     unit.state = visual(ids::kUnit, true);
@@ -1016,7 +1018,7 @@ class SettingsDialog {
     chrome::Widget logLevel;
     logLevel.id = ids::kLogLevel;
     logLevel.kind = WidgetKind::Combo;
-    logLevel.rect = D2D1::RectF(kControlX, rowY(4), kControlX + 240.0f, rowY(4) + 30.0f);
+    logLevel.rect = D2D1::RectF(kControlX, rowY(4), kControlX + 240.0f, rowY(4) + 32.0f);
     logLevel.value = WideFromUtf8(LogLevelLabel(state_.logLevel()));
     logLevel.enabled = true;
     logLevel.state = visual(ids::kLogLevel, true);
@@ -1025,7 +1027,7 @@ class SettingsDialog {
     chrome::Widget motw;
     motw.id = ids::kMotw;
     motw.kind = WidgetKind::CheckBox;
-    motw.rect = D2D1::RectF(kControlX, rowY(5), kControlX + 420.0f, rowY(5) + 28.0f);
+    motw.rect = D2D1::RectF(kControlX, rowY(5), kControlX + 420.0f, rowY(5) + 32.0f);
     motw.label = L"Inherit Mark-of-the-Web from the archive";
     motw.checked = state_.inheritMotw();
     motw.enabled = true;
@@ -1037,22 +1039,22 @@ class SettingsDialog {
     for (int row = 0; row < 6; ++row) {
       const std::string issue = state_.IssueFor(fields[row]);
       if (!issue.empty()) {
-        hint(WideFromUtf8(issue), kControlX, rowY(row) + 31.0f,
-             static_cast<float>(kClientWidth) - kControlX - 20.0f, 18.0f, true);
+        hint(WideFromUtf8(issue), kControlX, rowY(row) + 32.0f,
+             static_cast<float>(kClientWidth) - kControlX - 16.0f, 16.0f, true);
       }
     }
 
     const std::string summary = SummaryLine();
-    hint(WideFromUtf8(summary), kLabelX, rowY(6), static_cast<float>(kClientWidth) - 40.0f,
-         36.0f, !state_.Valid() || !loadError_.empty());
+    hint(WideFromUtf8(summary), kLabelX, rowY(6), static_cast<float>(kClientWidth) - 32.0f,
+         28.0f, !state_.Valid() || !loadError_.empty());
 
     chrome::Widget save;
     save.id = ids::kSave;
     save.kind = WidgetKind::Button;
     save.rect = D2D1::RectF(static_cast<float>(kClientWidth) - 200.0f,
-                           static_cast<float>(kClientHeight) - 52.0f,
+                           static_cast<float>(kClientHeight) - 44.0f,
                            static_cast<float>(kClientWidth) - 116.0f,
-                           static_cast<float>(kClientHeight) - 22.0f);
+                           static_cast<float>(kClientHeight) - 12.0f);
     save.label = L"Save";
     save.primary = true;
     save.enabled = state_.SaveEnabled();
@@ -1063,9 +1065,9 @@ class SettingsDialog {
     cancel.id = ids::kCancel;
     cancel.kind = WidgetKind::Button;
     cancel.rect = D2D1::RectF(static_cast<float>(kClientWidth) - 104.0f,
-                             static_cast<float>(kClientHeight) - 52.0f,
+                             static_cast<float>(kClientHeight) - 44.0f,
                              static_cast<float>(kClientWidth) - 20.0f,
-                             static_cast<float>(kClientHeight) - 22.0f);
+                             static_cast<float>(kClientHeight) - 12.0f);
     cancel.label = L"Cancel";
     cancel.enabled = true;
     cancel.state = visual(ids::kCancel, true);

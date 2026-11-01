@@ -969,10 +969,12 @@ class CompressDialog {
       return chrome::ResolveState(enabled, hot_ == id, pressed_ == id, empty);
     };
 
-    constexpr float kLabelX = 20.0f;
-    constexpr float kControlX = 172.0f;
+    // DESIGN.md section 2: title 32 + content pad 16 start the rows; rows are
+    // 32 high; the action bar is the bottom 56 with 32-high buttons.
+    constexpr float kLabelX = 16.0f;
+    constexpr float kControlX = 168.0f;
     constexpr float kRow = 32.0f;
-    constexpr float kTop = 64.0f;
+    constexpr float kTop = 48.0f;
     const auto rowY = [](int row) { return kTop + kRow * row; };
 
     addLabel(L"Format", kLabelX, rowY(0) + 6.0f, 145.0f, 22.0f);
@@ -989,7 +991,7 @@ class CompressDialog {
     chrome::Widget format;
     format.id = ids::kFormat;
     format.kind = WidgetKind::Combo;
-    format.rect = D2D1::RectF(kControlX, rowY(0), kControlX + 210.0f, rowY(0) + 30.0f);
+    format.rect = D2D1::RectF(kControlX, rowY(0), kControlX + 210.0f, rowY(0) + 32.0f);
     format.value = WideFromUtf8(formats[static_cast<size_t>(FormatIndex(state_.format()))]);
     format.enabled = state_.IsEnabled(Field::Format);
     format.state = visual(ids::kFormat, format.enabled);
@@ -999,7 +1001,7 @@ class CompressDialog {
     chrome::Widget level;
     level.id = ids::kLevel;
     level.kind = WidgetKind::Slider;
-    level.rect = D2D1::RectF(kControlX, rowY(1), kControlX + 290.0f, rowY(1) + 30.0f);
+    level.rect = D2D1::RectF(kControlX, rowY(1), kControlX + 290.0f, rowY(1) + 32.0f);
     level.level = state_.level();
     level.minLevel = kLevelMin;
     level.maxLevel = kLevelMax;
@@ -1012,7 +1014,7 @@ class CompressDialog {
     chrome::Widget dictionary;
     dictionary.id = ids::kDictionary;
     dictionary.kind = WidgetKind::Combo;
-    dictionary.rect = D2D1::RectF(kControlX, rowY(2), kControlX + 280.0f, rowY(2) + 30.0f);
+    dictionary.rect = D2D1::RectF(kControlX, rowY(2), kControlX + 280.0f, rowY(2) + 32.0f);
     const std::vector<std::string> labels = DictionaryChoiceLabels();
     dictionary.value = WideFromUtf8(
         labels[static_cast<size_t>(state_.dictionaryIndex()) < labels.size()
@@ -1026,7 +1028,7 @@ class CompressDialog {
     chrome::Widget solid;
     solid.id = ids::kSolid;
     solid.kind = WidgetKind::CheckBox;
-    solid.rect = D2D1::RectF(kControlX, rowY(3), kControlX + 340.0f, rowY(3) + 26.0f);
+    solid.rect = D2D1::RectF(kControlX, rowY(3), kControlX + 340.0f, rowY(3) + 32.0f);
     solid.label = L"One solid block (better ratio)";
     solid.checked = state_.solid();
     solid.enabled = state_.IsEnabled(Field::Solid);
@@ -1037,7 +1039,7 @@ class CompressDialog {
     chrome::Widget threads;
     threads.id = ids::kThreads;
     threads.kind = WidgetKind::TextField;
-    threads.rect = D2D1::RectF(kControlX, rowY(4), kControlX + 120.0f, rowY(4) + 30.0f);
+    threads.rect = D2D1::RectF(kControlX, rowY(4), kControlX + 120.0f, rowY(4) + 32.0f);
     threads.label = L"Auto";
     threads.value = WideFromUtf8(state_.threadsText());
     threads.enabled = state_.IsEnabled(Field::Threads);
@@ -1048,7 +1050,7 @@ class CompressDialog {
     chrome::Widget password;
     password.id = ids::kPassword;
     password.kind = WidgetKind::TextField;
-    password.rect = D2D1::RectF(kControlX, rowY(5), kControlX + 280.0f, rowY(5) + 30.0f);
+    password.rect = D2D1::RectF(kControlX, rowY(5), kControlX + 280.0f, rowY(5) + 32.0f);
     password.label = L"Password (optional)";
     password.value = state_.showPassword()
                          ? WideFromUtf8(state_.password())
@@ -1061,7 +1063,7 @@ class CompressDialog {
     chrome::Widget show;
     show.id = ids::kShowPassword;
     show.kind = WidgetKind::CheckBox;
-    show.rect = D2D1::RectF(kControlX, rowY(6), kControlX + 220.0f, rowY(6) + 26.0f);
+    show.rect = D2D1::RectF(kControlX, rowY(6), kControlX + 220.0f, rowY(6) + 32.0f);
     show.label = L"Show password";
     show.checked = state_.showPassword();
     show.enabled = state_.IsEnabled(Field::ShowPassword);
@@ -1072,7 +1074,7 @@ class CompressDialog {
     chrome::Widget encrypt;
     encrypt.id = ids::kEncryptNames;
     encrypt.kind = WidgetKind::CheckBox;
-    encrypt.rect = D2D1::RectF(kControlX, rowY(7), kControlX + 330.0f, rowY(7) + 26.0f);
+    encrypt.rect = D2D1::RectF(kControlX, rowY(7), kControlX + 330.0f, rowY(7) + 32.0f);
     encrypt.label = L"Encrypt file names (7z header)";
     encrypt.checked = state_.encryptFileNames();
     encrypt.enabled = state_.IsEnabled(Field::EncryptFileNames);
@@ -1083,7 +1085,7 @@ class CompressDialog {
     chrome::Widget target;
     target.id = ids::kTarget;
     target.kind = WidgetKind::TextField;
-    target.rect = D2D1::RectF(kControlX, rowY(8), kControlX + 262.0f, rowY(8) + 30.0f);
+    target.rect = D2D1::RectF(kControlX, rowY(8), kControlX + 262.0f, rowY(8) + 32.0f);
     target.label = L"Choose where to save";
     target.value = WideFromUtf8(state_.targetPath());
     target.enabled = state_.IsEnabled(Field::Target);
@@ -1093,26 +1095,27 @@ class CompressDialog {
     chrome::Widget browse;
     browse.id = ids::kBrowse;
     browse.kind = WidgetKind::Button;
-    browse.rect = D2D1::RectF(kControlX + 272.0f, rowY(8), kControlX + 362.0f, rowY(8) + 30.0f);
+    browse.rect = D2D1::RectF(kControlX + 272.0f, rowY(8), kControlX + 362.0f, rowY(8) + 32.0f);
     browse.label = L"Browse...";
     browse.enabled = state_.IsEnabled(Field::Browse);
     browse.state = visual(ids::kBrowse, browse.enabled);
     model.widgets.push_back(browse);
 
-    addLabel(L"Estimate", kLabelX, 348.0f, 145.0f, 22.0f);
-    addHint(WideFromUtf8(state_.ComputeEstimate().text), kControlX, 348.0f,
-            static_cast<float>(kClientWidth) - kControlX - 20.0f, 20.0f, false);
+    addLabel(L"Estimate", kLabelX, 344.0f, 145.0f, 22.0f);
+    addHint(WideFromUtf8(state_.ComputeEstimate().text), kControlX, 344.0f,
+            static_cast<float>(kClientWidth) - kControlX - 16.0f, 20.0f, false);
+    // Status strip: 28 high, the same height DESIGN.md gives the window status.
     addHint(WideFromUtf8(state_.ReasonLine()),
-            kLabelX, 376.0f, static_cast<float>(kClientWidth) - 40.0f, 34.0f,
+            kLabelX, 372.0f, static_cast<float>(kClientWidth) - 32.0f, 28.0f,
             !state_.Blockers().empty());
 
     chrome::Widget ok;
     ok.id = ids::kOk;
     ok.kind = WidgetKind::Button;
     ok.rect = D2D1::RectF(static_cast<float>(kClientWidth) - 200.0f,
-                         static_cast<float>(kClientHeight) - 52.0f,
+                         static_cast<float>(kClientHeight) - 44.0f,
                          static_cast<float>(kClientWidth) - 116.0f,
-                         static_cast<float>(kClientHeight) - 22.0f);
+                         static_cast<float>(kClientHeight) - 12.0f);
     ok.label = L"Create";
     ok.primary = true;
     ok.enabled = state_.OkEnabled();
@@ -1123,9 +1126,9 @@ class CompressDialog {
     cancel.id = ids::kCancel;
     cancel.kind = WidgetKind::Button;
     cancel.rect = D2D1::RectF(static_cast<float>(kClientWidth) - 104.0f,
-                             static_cast<float>(kClientHeight) - 52.0f,
+                             static_cast<float>(kClientHeight) - 44.0f,
                              static_cast<float>(kClientWidth) - 20.0f,
-                             static_cast<float>(kClientHeight) - 22.0f);
+                             static_cast<float>(kClientHeight) - 12.0f);
     cancel.label = L"Cancel";
     cancel.enabled = true;
     cancel.state = visual(ids::kCancel, true);

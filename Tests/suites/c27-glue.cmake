@@ -51,6 +51,11 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
     add_test(NAME "mutation.glue.${mutant_id}" COMMAND "win_glue_mutant_${mutant_lc}")
     set_tests_properties("mutation.glue.${mutant_id}" PROPERTIES TIMEOUT 300
         SKIP_RETURN_CODE 77
-        PASS_REGULAR_EXPRESSION "C27 MUTATION CAUGHT: ${mutant_id}")
+        # The binary prints the C++ switch spelling (underscores); the CTest
+        # entry name uses dashes. Pinning the wrong one made all three mutation
+        # entries red while the mutations WERE caught -- a false negative that
+        # looks exactly like a stale injection, so the two spellings are named
+        # separately here on purpose.
+        PASS_REGULAR_EXPRESSION "C27 MUTATION CAUGHT: ${mutant_lc}")
   endforeach()
 endif()

@@ -89,10 +89,15 @@ function Test-RegKey {
 }
 
 function Open-RegKey {
+    <# Read paths must not require write access: OpenSubKey(name, writable:true)
+       throws for a missing key on some runtimes (CI Windows runner), while a
+       half-uninstalled machine is full of missing keys. #>
     param([string]$Path, [switch]$Create)
     $h = Get-Hive $Path
     if ($Create) { return $h[0].CreateSubKey($h[1], $true) }
-    return $h[0].OpenSubKey($h[1], $true)
+    try { return $h[0].OpenSubKey($h[1], $true) } catch { }
+    try { return $h[0].OpenSubKey($h[1]) } catch { }
+    return $null
 }
 
 function Get-RegValue {
@@ -180,7 +185,18 @@ $script:ScopeRoot = $ScopeRoot
 $script:ClassesRoot = $ScopeRoot + '\Classes'
 $script:AppRoot = $ScopeRoot + '\PrismArchive'
 $script:UninstallKey = $ScopeRoot + '\Microsoft\Windows\CurrentVersion\Uninstall\PrismArchive'
-$script:EnvRoot = $ScopeRoot + '\Environment'
+function Get-EnvRootPath {
+    <# Same mapping as the installer: HKCU\Environment is hive-root, a scratch
+       scope keeps its own copy so the self-test round trip cannot touch the real
+       value. Kept in step with tools/install.ps1 (its self-test asserts the
+       mapping; the two files are deployed separately and cannot share code). #>
+    param([string]$Scope, [string]$Mutate = '')
+    if ($Mutate -eq 'EnvUnderSoftware') { return $Scope + '\Environment' }
+    if ($Scope -eq 'HKCU:\Software') { return 'HKCU:\Environment' }
+    return $Scope + '\Environment'
+}
+
+$script:EnvRoot = Get-EnvRootPath $ScopeRoot $Mutate
 $script:BackupRoot = $script:AppRoot + '\AssocBackup'
 
 function Get-ProgId {

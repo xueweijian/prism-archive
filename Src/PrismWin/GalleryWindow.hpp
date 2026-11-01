@@ -248,6 +248,13 @@ class GalleryWindow {
     EnsureSidebar();
     return sidebarLayout_;
   }
+  // C29: pixels the list content is inset by right now (0 when the rail is
+  // folded, off, or the window is too narrow). One formula, used by the paint
+  // path and by hit-testing, so the two can never disagree.
+  float SidebarInset() const {
+    if (!sidebarRailVisible_) return 0.0f;
+    return GalleryRenderer::SidebarInset(static_cast<float>(clientW_));
+  }
   // Engine facts the catalog cannot derive (method / dictionary / cipher).
   void SetArchiveInfo(const prism::sidebar::ArchiveInfo& info) {
     sidebar_.SetArchiveInfo(info);
@@ -471,7 +478,9 @@ class GalleryWindow {
     // click inside it belongs to the sidebar -- never to a tile hidden under it.
     // RowHit commands are the same boxes the renderer fills, which is what keeps
     // "what I see" and "what I hit" one list.
-    if (sidebarRailVisible_ && SidebarClick(x, y)) return true;
+    // The rail is painted (and therefore clickable) in LIST mode only: the grid
+    // keeps its full-bleed geometry and its tiles must stay reachable.
+    if (listMode_ && sidebarRailVisible_ && SidebarClick(x, y)) return true;
     if (CrumbClick(x, y)) return true;
     // A click inside the breadcrumb bar that misses every crumb is NOT "click
     // on empty list space" -- swallowing it into SetSelection(-1) silently
@@ -1036,6 +1045,13 @@ class GalleryWindow {
 
   int ItemAtPoint(int x, int y) const {
     if (clientW_ <= 0.0 || clientH_ <= 0.0) return -1;  // no WM_SIZE yet
+    // C29: in LIST mode the sidebar owns the left column (list rows are inset
+    // by it, and their hit test is y-only, so the guard has to be here once).
+    // The grid keeps its full-bleed geometry: the sidebar is not painted there
+    // (GalleryRenderer::SidebarShown), so no tile can be covered by it.
+    if (listMode_ && SidebarInset() > 0.0f && x < static_cast<int>(SidebarInset())) {
+      return -1;
+    }
     if (listMode_) {
       // The list paints the VIEW, not the folder: filter first, then hit-test.
       const uint32_t count = static_cast<uint32_t>(listItems_.size());
@@ -1191,7 +1207,16 @@ class GalleryWindow {
     GalleryRenderer::Scene scene;
     scene.items = host_.items;
     scene.viewport = &viewport_;
-    scene.sidebar = sidebarRailVisible_ ? &sidebarLayout_ : nullptr;
+    // C29: the rail is LIST-MODE chrome and folds itself below its width
+    // threshold. The window owns that POLICY (list mode + the C27 toggle + the
+    // width); the renderer paints whatever Scene it is handed, which is what
+    // C27's glue suite relies on (it builds a bare scene with a layout and
+    // expects pixels at 900 px wide).
+    scene.sidebar = (listMode_ && sidebarRailVisible_ &&
+                     GalleryRenderer::SidebarFits(static_cast<float>(clientW_)))
+                        ? &sidebarLayout_
+                        : nullptr;
+    scene.sidebarCollapsed = !sidebarRailVisible_;
     scene.listMode = listMode_;
     scene.listColumns = &listColumns_;
     scene.hasListColumns = hasListColumns_;
@@ -1200,6 +1225,9 @@ class GalleryWindow {
     // to read scene.listScroll (always 0) while clicks used the viewport.
     scene.listScroll = listMode_ ? static_cast<uint32_t>(viewport_.Scroll()) : 0u;
     scene.breadcrumb = breadcrumbText_;
+    // C29: the rail's command list is a LAYOUT input; EnsureSidebar rebuilds it
+    // only when the model is dirty, so this is a cache hit on every other frame.
+    EnsureSidebar();
     {
       std::lock_guard<std::mutex> lock(thumbMutex_);
       scene.thumbs = thumbs_.get();
@@ -1373,7 +1401,9 @@ class GalleryWindow {
   int closedWidth_ = 0;
   int closedHeight_ = 0;
   prism::sidebar::FocusTarget lastSidebarHit_;
-  bool sidebarRailVisible_ = false;  // C27: opt-in until the grid reflows
+  // C29: the rail really paints now, and the grid reflow landed (list inset +
+  // hit-test guard), so the rail is ON by default in list mode.
+  bool sidebarRailVisible_ = true;
   prism::sidebar::SidebarStore* sidebarStore_ = nullptr;  // C14 port (not owned)
   bool sidebarRestored_ = false;
   std::function<void()> onArchiveChanged_;

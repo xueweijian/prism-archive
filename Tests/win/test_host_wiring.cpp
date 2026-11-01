@@ -35,10 +35,12 @@
 //   * PRISM_C34_MUTANT_NO_TRIM            -- the minimise path keeps the layer (2)
 //   * PRISM_C34_MUTANT_NO_ARCHIVE_SWITCH  -- the refresh keeps the old archive (3)
 // The verdict shape is D26's: NO WILL_FAIL anywhere. The mutant prints a banner
-// (proof the injection compiled in) and only when the suite really went RED
-// prints "C34 MUTATION CAUGHT: <id>" and exits 0 -- that marker is the target's
-// PASS_REGULAR_EXPRESSION. If the injection ever stopped applying, the suite
-// would stay green, the marker would be absent and the target would fail.
+// (proof the injection compiled in) and, per D27, arms the marker BEFORE the
+// first assertion; mini_test's ReportFailure prints "C34 MUTATION CAUGHT: <id>"
+// at the first failure and leaves with 0 -- that marker is the target's
+// PASS_REGULAR_EXPRESSION, and no later crash can take it away. If the
+// injection ever stopped applying, the suite would stay green, the marker would
+// be absent and the target would fail.
 //
 // D1: no silent skip. A missing 7z.dll/7z.exe, a window station that refuses a
 // window, or a machine without DirectComposition prints WHY and exits 77 (the
@@ -474,16 +476,6 @@ PRISM_TEST("compress: the new archive is opened, leased and shown") {
   PRISM_CHECK(archivePath == fx.archiveNew);
   PRISM_CHECK_EQ(items.size(), static_cast<size_t>(3));
   PRISM_CHECK(items.size() != before);
-  if (kMutation != nullptr && !switched.switched) {
-    // The mutant's whole job is to make the assertions above fail. Stop here:
-    // everything below assumes the switch happened, and letting the mutant walk
-    // into that code turns a deliberate failure into a crash -- which is exactly
-    // how the verdict got lost in CI ("required regex not found" while the FAIL
-    // lines were right there).
-    std::cout << "C34 MUTATION CAUGHT: " << kMutation << std::endl;
-    ops->Close();
-    std::exit(0);
-  }
   PRISM_CHECK(catalog.size() == items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     PRISM_CHECK(items[i].path == fx.catalogNew[i].path);
@@ -527,6 +519,11 @@ PRISM_TEST("compress: the new archive is opened, leased and shown") {
 int main(int argc, char** argv) {
   if (kMutation != nullptr) {
     std::cout << "C34 MUTANT ACTIVE: " << kMutation << std::endl;
+    // CONTRACTS D27: arm the verdict BEFORE the first assertion. ReportFailure
+    // prints it at that moment and leaves with 0, so neither the "assume the
+    // switch succeeded" code nor CoUninitialize/teardown can swallow it.
+    prism::test::SetMutationVerdict(
+        (std::string("C34 MUTATION CAUGHT: ") + kMutation).c_str());
   }
   if (FAILED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::cout << "SKIP: CoInitializeEx failed (this window station has no COM)" << std::endl;
@@ -546,15 +543,13 @@ int main(int argc, char** argv) {
   }
   const int rc = prism::test::RunAll(argc, argv);
 
-  // CONTRACTS D26: the mutant's verdict is a CONJUNCTION printed by the suite
-  // itself, never WILL_FAIL (which cannot be combined with a pass marker and
-  // would turn a skip into a green).
+  // CONTRACTS D26 + D27: the mutant's verdict is a CONJUNCTION printed by the
+  // suite itself, never WILL_FAIL (which cannot be combined with a pass marker
+  // and would turn a skip into a green).
   //
-  // Printed BEFORE CoUninitialize on purpose: CI reported "Required regular
-  // expression not found" for mutation.host_wiring.no-archive-switch while the
-  // FAIL lines below the marker were clearly present -- the suite went red and
-  // the process then died in teardown, taking the marker with it. A verdict that
-  // can be lost to a later crash is not a verdict.
+  // Reaching here with a red suite is only possible if a failure bypassed
+  // ReportFailure; the normal verdict was already printed (and the process left
+  // with 0) at the first failed assertion -- see the arm above.
   if (kMutation != nullptr) {
     if (rc == 0) {
       std::cout << "C34 MUTATION NOT CAUGHT: the suite stayed green with the regression compiled "

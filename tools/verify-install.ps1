@@ -33,6 +33,10 @@
                           verifies the association was really left pointing at
                           the removed ProgID before expecting the restore check
                           to go red.
+  The mutation verdict is printed at the FIRST failed assertion and the process
+  leaves immediately (CONTRACTS D27). A marker printed after teardown can be
+  lost to a throw, a hang or a crash in that teardown -- the failure mode that
+  made a red C39 run report "required regular expression not found" (2026-11-02).
   Mutation mode is allowed only with -Sandbox: a deliberately broken uninstall
   must never be pointed at the real user's associations.
 
@@ -142,6 +146,20 @@ function Say {
 
 function Add-Check { $script:Checks++ }
 
+function Add-Failure {
+    param([string]$Line)
+    $script:Failures.Add($Line)
+    # CONTRACTS D27: the verdict belongs to the FIRST failed assertion, not to
+    # the end of the run. Print it here and leave before the catch/finally
+    # teardown (cleanup uninstall, scratch-registry removal) can throw or hang.
+    # Exit 0 on purpose: the ctest entry decides with PASS_REGULAR_EXPRESSION
+    # and already printed its FAIL line above (CONTRACTS D26).
+    if ($script:Mutation -and $script:MutationObserved) {
+        Say ('VERIFY-INSTALL(MUTATION ' + $script:Mutation + '): CAUGHT (' + $script:Failures.Count + ' assertion(s) went red; injection observed; verdict printed at the first failure)')
+        exit 0
+    }
+}
+
 function Assert-True {
     param([string]$What, [bool]$Condition, [string]$Detail = '')
     Add-Check
@@ -150,8 +168,8 @@ function Assert-True {
     } else {
         $line = $What
         if ($Detail) { $line += ' (' + $Detail + ')' }
-        $script:Failures.Add($line)
         Say $line 'fail'
+        Add-Failure $line
     }
 }
 
@@ -162,8 +180,8 @@ function Assert-Equal {
         Say $What 'pass'
     } else {
         $line = $What + ' -- expected [' + [string]$Expected + '], got [' + [string]$Actual + ']'
-        $script:Failures.Add($line)
         Say $line 'fail'
+        Add-Failure $line
     }
 }
 
@@ -340,9 +358,9 @@ function Compare-Snapshots {
         return
     }
     $line = $What + ' -- ' + $diff.Count + ' differing snapshot line(s)'
-    $script:Failures.Add($line)
     Add-Check
     Say $line 'fail'
+    Add-Failure $line
     foreach ($d in @($diff | Select-Object -First 30)) {
         $side = if ([string]$d.SideIndicator -eq '=>') { 'extra now' } else { 'missing now' }
         Say ('  ' + $side + ': ' + [string]$d.InputObject) 'fail'
@@ -876,9 +894,9 @@ try {
         Compare-Snapshots 'second uninstall left the registry unchanged' $after (Get-Snapshot)
     }
 } catch {
-    $script:Failures.Add('harness threw: ' + $_.Exception.Message)
     Say ('VERIFY-INSTALL: FAIL (harness threw: ' + $_.Exception.Message + ')') 'error'
     Say ($_.ScriptStackTrace) 'error'
+    Add-Failure ('harness threw: ' + $_.Exception.Message)
 } finally {
     if ($script:Installed -and -not $script:Uninstalled -and -not $KeepInstalled) {
         Say 'CLEANUP: uninstall after an aborted run ...' 'warn'
@@ -906,6 +924,8 @@ if ($script:Mutation) {
         Say ('VERIFY-INSTALL(MUTATION ' + $script:Mutation + '): NOT INJECTED -- the code path did not change; a red result would be meaningless') 'error'
         exit 1
     }
+    # Reached only if a failure never went through Add-Failure (there is none
+    # today): the D27 verdict was printed and the process left at the first one.
     if ($script:Failures.Count -gt 0) {
         Say ('VERIFY-INSTALL(MUTATION ' + $script:Mutation + '): CAUGHT (' + $script:Failures.Count + ' assertion(s) went red; injection observed)')
         exit 0

@@ -30,11 +30,13 @@
 //   * PRISM_C25_MUTANT_SHARED_READER -- the old shape: one ArchiveReader for
 //     every concurrent operation. (1) must go red.
 //   * PRISM_C25_MUTANT_NO_MOTW      -- stamping skipped. (2) must go red.
-// The verdict shape is D26's: NO WILL_FAIL. The mutant prints a banner (proof the
-// injection compiled in) and, only when the suite really went red, prints
-// "C25 MUTATION CAUGHT: <name>" and exits 0; that marker is the target's
-// PASS_REGULAR_EXPRESSION. If the injection ever stopped applying, the suite
-// would stay green, the marker would be absent and the target would fail.
+// The verdict shape is D26's: NO WILL_FAIL. The mutant prints a banner (proof
+// the injection compiled in) and, per D27, arms the marker BEFORE the first
+// assertion; mini_test's ReportFailure prints "C25 MUTATION CAUGHT: <name>" at
+// the first failure and leaves with 0 immediately. That marker is the target's
+// PASS_REGULAR_EXPRESSION, and teardown cannot swallow it. If the injection ever
+// stopped applying, the suite would stay green, the marker would be absent and
+// the target would fail.
 //
 // D1: no silent skip. A missing 7z.dll/7z.exe prints WHY and exits 77, which the
 // suite maps to SKIP_RETURN_CODE, and the stdout marker is required all the same.
@@ -505,6 +507,14 @@ int main(int argc, char** argv) {
                  "skipped"
               << std::endl;
   }
+  if (kSharedReaderMutant || kNoMotwMutant) {
+    // CONTRACTS D27: the verdict is armed before the first assertion; the first
+    // failed check prints the marker and exits 0 on the spot, so a mutant that
+    // walks into the shared-reader premise cannot lose its verdict to teardown.
+    prism::test::SetMutationVerdict(kSharedReaderMutant
+                                        ? "C25 MUTATION CAUGHT: shared_reader"
+                                        : "C25 MUTATION CAUGHT: no_motw");
+  }
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::cout << "SKIP: CoInitializeEx failed (this window station has no COM)" << std::endl;
     return 77;
@@ -525,13 +535,15 @@ int main(int argc, char** argv) {
   const int rc = prism::test::RunAll(argc, argv);
   CoUninitialize();
 
-  // CONTRACTS D26: a mutation build's verdict is a CONJUNCTION printed by the
-  // suite itself, never WILL_FAIL (which cannot be combined with a pass marker,
-  // and which would turn a SKIP on a 7z-less runner into a green).
+  // CONTRACTS D26 + D27: a mutation build's verdict is a CONJUNCTION printed by
+  // the suite itself, never WILL_FAIL (which cannot be combined with a pass
+  // marker, and which would turn a SKIP on a 7z-less runner into a green).
   //   * marker printed  <=> the injection was really compiled in (banner above)
-  //                       AND the suite went red;
+  //                       AND the suite went red (printed at the FIRST failure);
   //   * if the mutation silently stopped applying, the suite stays green, the
   //     marker is absent and this target goes RED -- the injection proves itself.
+  // Reaching here with a red suite means a failure bypassed ReportFailure; the
+  // normal verdict already left with 0 from inside the first failed check.
   if (kSharedReaderMutant || kNoMotwMutant) {
     if (rc == 0) {
       std::cout << "C25 MUTATION NOT CAUGHT: the suite stayed green with the regression "

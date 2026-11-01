@@ -14,7 +14,7 @@
 |---|---|---|
 | 官方 7-Zip 25.01 的 7z.dll 有 Zstd/LZ4/Brotli 吗？ | **有 Zstd 解码器（仅解 .zst 单流），没有 Zstd 方法、没有编码器、没有 LZ4/Brotli** | §1：format 表 60 项含 zstd；method 表 25 项不含 ZSTD |
 | 换成 7-Zip ZS 的 7z.dll 是否 ABI 兼容？ | **是。14 个导出名与序号完全一致，ZS 只多一个 SetLargePageMode2（纯新增）** | §2：dumpbin /exports 全量 diff |
-| 二进制层面能跑通吗？ | **能。zstd 压缩的 .7z 走我们未改一行 的 ArchiveReader 解出 2270 B 原文；裸 .zst/.lz4/.br 用对应 handler CLSID 各解出 2270 B** | §3：win.codec_probe 89 个断言全绿 |
+| 二进制层面能跑通吗？ | **能。zstd 压缩的 .7z 走我们未改一行 的 ArchiveReader 解出 2270 B 原文；裸 .zst/.lz4/.br 用对应 handler CLSID 各解出 2270 B** | §3：win.codec_probe 87 个断言全绿 |
 | 需要构建源码吗？ | **不需要（不需要 C 档）。** 除非要「产品内置 Zstd 压缩」而不是「支持用户指定的引擎」 | §6 |
 | 许可还满足「引擎不入库」吗？ | **满足。仍然是运行时动态加载 LGPL DLL，仓库零引擎二进制**；额外 codec 的许可是附加条件，不是冲突 | §5 |
 
@@ -85,7 +85,7 @@ win.codec_probe 里那三次 opResult=0 的提取不可能成功。
 
 ## 3. 二进制兼容性：跑通了什么（实测）
 
-win.codec_probe（Tests/win/test_codec_probe.cpp）7 个用例 / 89 个断言全绿：
+win.codec_probe（Tests/win/test_codec_probe.cpp）7 个用例 / 87 个断言全绿：
 
     codec-probe: 26.2.0.0 formats=65 methods=31 zstd=handler+method lz4=handler+method brotli=handler+method
     method ids: lzma2=0x21 brotli=0x4F71102 lz4=0x4F71104 zstd=0x4F71101
@@ -98,6 +98,8 @@ win.codec_probe（Tests/win/test_codec_probe.cpp）7 个用例 / 89 个断言全
       stock bare .zst:  CreateObject(id=0x0E) … opResult=0 bytes=2270
       stock zstd .7z:   CreateObject(id=0x07) … Extract hr=0x00000000 opResult=1 bytes=0
       stock ArchiveReader open=accepted trace: Zip…S_FALSE; 7z…S_OK; catalog=1 bytes=0
+      ArchiveReader(.zst) opened=no trace: Zip hr=0x00000000; Zip.Open hr=0x00000001; 7z…S_FALSE;
+
 
 读法（每一条都是证据，不是装饰）：
 

@@ -129,14 +129,13 @@ int main() {
     return (row >= 0 && row < static_cast<int>(rows.size())) ? rows[row].path
                                                             : std::string("<none>");
   };
+  // V4: the grid is a FLOW (tile-less items are full-width bands), so the item's
+  // painted rectangle is asked for directly instead of re-deriving a cell grid.
   auto tileCentre = [&window](int row, int* px, int* py) {
-    const int cols = window.Viewport().Columns();
-    if (cols <= 0) return false;
-    const double cellW = window.Viewport().ColumnWidth();
-    const double cellH = window.Viewport().CellHeight();
-    if (cellW <= 0.0 || cellH <= 0.0) return false;
-    *px = static_cast<int>((row % cols) * cellW + cellW / 2.0);
-    *py = static_cast<int>((row / cols) * cellH + cellH / 2.0);
+    const prism::layout::Rect rect = window.ItemRect(row);
+    if (rect.Empty()) return false;
+    *px = (rect.left + rect.right) / 2;
+    *py = (rect.top + rect.bottom) / 2;
     return true;
   };
   auto postDoubleClick = [&window, &tileCentre](int row) {

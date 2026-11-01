@@ -448,6 +448,47 @@ inline constexpr int kDropdownRowHeight = 28;
 inline constexpr int kDropdownPad = 6;
 inline constexpr int kDropdownMinWidth = 180;
 
+// ------------------------------------------------------- V4: icon + label boxes
+// The v2 screenshot showed the glyph sitting high and the label clipped mid
+// glyph. The cause was that neither box existed: the painter placed the icon at
+// "button.top + 9" and the text in "button.top + 32 .. button.bottom - 2", two
+// hand-tuned constants with no relationship to each other.
+//
+// V4 gives each button two NAMED boxes and pins the relation:
+//   * the icon box is kIconBox square, horizontally centred, kIconTop below the
+//     button's top edge;
+//   * the label box starts kLabelGap under it and is exactly kLabelHeight tall,
+//     spanning the button's full width;
+//   * therefore iconCentre == labelCentre - (0, kIconLabelOffset): one fixed
+//     pixel offset, asserted by the paint suite instead of eyeballed.
+// The label is kButtonMinWidth wide at its narrowest, which is the width the
+// shortest usable label (64 px) needs; anything longer is ELLIPSIZED (DWrite
+// trimming with U+2026), never clipped mid-glyph.
+inline constexpr int kIconTop = 8;
+inline constexpr int kLabelGap = 4;
+inline constexpr int kLabelHeight = 16;
+inline constexpr int kLabelTop = kIconTop + kIconBox + kLabelGap;  // 32
+// labelCentre.y - iconCentre.y, derived so a change to either box moves it.
+inline constexpr int kIconLabelOffset =
+    (kLabelTop + kLabelHeight / 2) - (kIconTop + kIconBox / 2);  // 22
+// The narrowest label area that must fit ("解压到…" is ~44 px at 11 px): the
+// button's own floor, so every button in the band satisfies it by construction.
+inline constexpr int kMinLabelWidth = kButtonMinWidth;
+// U+2026 HORIZONTAL ELLIPSIS -- the only truncation the band may show.
+inline constexpr char32_t kLabelEllipsis = 0x2026;
+
+// The two boxes of one button, in the same coordinate space as Button::rect.
+inline Rect IconBoxRect(const Rect& button) {
+  const int centre = (button.left + button.right) / 2;
+  return Rect{centre - kIconBox / 2, button.top + kIconTop, centre + kIconBox / 2,
+              button.top + kIconTop + kIconBox};
+}
+
+inline Rect LabelBoxRect(const Rect& button) {
+  return Rect{button.left, button.top + kLabelTop, button.right,
+              button.top + kLabelTop + kLabelHeight};
+}
+
 struct Button {
   ActionId id = ActionId::Count;
   Rect rect;

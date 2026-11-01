@@ -157,6 +157,11 @@ class GalleryRenderer {
     // snapshot suite can prove its "skeleton colour" detector actually fires.
     bool debugForceSkeleton = false;
 
+    // V4: the status band's readout (encryption / method / dictionary / ratio).
+    // Defaults to the "unknown" state, which is what an archive the engine has
+    // not reported on yet honestly shows -- never an empty 28 px strip.
+    prism::layout::StatusInfo status;
+
     // C-V2: the action band. nullptr -> no band at all (every pre-V2 scene, so
     // the older suites and the snapshot keep their exact framing). The band
     // rectangle itself comes from V1's layout (actionIsland); the model only
@@ -244,6 +249,16 @@ class GalleryRenderer {
       sidebarLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     if (sidebarSmall_) sidebarSmall_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    // V4: the status band's readout format (11 px, one line, leading, centred
+    // in its 20 px inner band so the four segments share one baseline).
+    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                    11.0f, L"en-US", statusFormat_.ReleaseAndGetAddressOf());
+    if (statusFormat_) {
+      statusFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+      statusFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+      statusFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
     // C-V2: the band's own brush/text formats. A caller that never builds an
     // action-bar scene pays one brush and two text formats.
     hr = actionBar_.CreateDeviceResources(target);
@@ -255,10 +270,12 @@ class GalleryRenderer {
     const D2D1_SIZE_F size = target->GetSize();
     // V1: ONE layout for the whole frame -- bands, grid metrics, list body and
     // chrome. A component that wants a rectangle asks this object.
-    // C29: the rail is a COLUMN, so the layout reserves it only while the rail
-    // is actually painted AND the view is the list. The grid keeps its
-    // full-bleed geometry (that is the C29 contract win.tree_nav depends on).
-    const bool railColumn = SidebarShown(scene) && scene.listMode;
+    // V4: the rail is CHROME (DESIGN.md §2 lists it as a band beside the
+    // content, §3 lists it with its own four states), so it reserves width in
+    // BOTH views. C29's "rail only in list mode" rule is the policy this card
+    // reverses: the grid is not a different window, and a rail that disappears
+    // when the user presses Ctrl+2 is a layout jump, not a mode.
+    const bool railColumn = SidebarShown(scene);
     const prism::layout::Layout layout =
         scene.layout != nullptr
             ? *scene.layout
@@ -267,6 +284,9 @@ class GalleryRenderer {
                                      scene.listMode);
     target->Clear(kBackdrop);
     DrawBands(target, layout);
+    // V4: the 28 px band carries its four segments; an empty strip was symptom
+    // #4 of the screenshot.
+    DrawStatusBar(target, scene, layout);
 
     // The content is the ONLY region an item may paint into. One clip here
     // replaces the per-tile guesswork that let cards slide under the rail.
@@ -334,6 +354,50 @@ class GalleryRenderer {
                                       static_cast<float>(layout.statusBar.top) + 1.0f),
                           islandBorder_.Get());
     island_->SetColor(kIslandFill);
+  }
+
+  // V4: the status band (DESIGN.md §2 "状态条 28", §3 four states).
+  //
+  // Four segments, left to right: encryption | method | dictionary | ratio. The
+  // rectangles and the text come from prism::layout::StatusSegments, so the
+  // suite can assert "each state paints ink inside its own segment" without
+  // duplicating a pixel table here. Nothing is centred by hand: the format is
+  // paragraph-centred inside the segment, which is why the four labels share a
+  // baseline no matter which state they are in.
+  void DrawStatusBar(ID2D1RenderTarget* target, const Scene& scene,
+                     const prism::layout::Layout& layout) {
+    if (!statusFormat_ || layout.statusBar.Empty()) return;
+    const std::vector<prism::layout::StatusSegment> segments =
+        prism::layout::StatusSegments(layout, scene.status);
+    for (const prism::layout::StatusSegment& segment : segments) {
+      const D2D1_RECT_F rect = ToRectF(segment.rect);
+      float textLeft = rect.left;
+      if (segment.id == prism::layout::StatusId::Encryption) {
+        // A 6 px state dot: accent while encrypted, secondary while not, hollow
+        // while unknown. Colour is never the ONLY signal (the text says it too).
+        const D2D1_COLOR_F dot =
+            scene.status.crypto == prism::layout::CryptoState::Encrypted
+                ? kAccent
+                : (scene.status.crypto == prism::layout::CryptoState::Unencrypted
+                       ? kTextSecondary
+                       : kIslandBorder);
+        const float cy = (rect.top + rect.bottom) * 0.5f;
+        island_->SetColor(dot);
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 3.0f, cy), 3.0f, 3.0f),
+                            island_.Get());
+        island_->SetColor(kIslandFill);
+        textLeft = rect.left + 12.0f;
+      }
+      std::wstring text = Utf8(segment.text);
+      if (segment.id == prism::layout::StatusId::Ratio && segment.value >= 0) {
+        text += L" " + std::to_wstring(segment.value) + L"%";
+      }
+      if (text.empty()) continue;
+      target->DrawText(text.c_str(), static_cast<UINT32>(text.size()), statusFormat_.Get(),
+                       D2D1::RectF(textLeft, rect.top, rect.right, rect.bottom),
+                       textSecondary_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+      ++dbgStatusSegments;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -787,31 +851,50 @@ class GalleryRenderer {
                 const prism::layout::Layout& layout) {
     if (!scene.items) return;
     const int count = static_cast<int>(scene.items->size());
-    const int rows = layout.columns > 0 ? (count + layout.columns - 1) / layout.columns : 0;
-    const int maxScroll =
-        (std::max)(0, rows * layout.cellHeight - layout.contentInner.Height());
+    if (count <= 0) return;
+    // V4: the grid is a FLOW (WindowLayout::FlowCells). This layer only reads
+    // the two FACTS the classification needs -- the item type and whether the
+    // ThumbStore really holds pixels -- and hands them to the layout, which owns
+    // every rectangle. A tile-less item therefore paints a 32 px BAND across the
+    // content, not a 220 px pill inside a cell.
+    std::vector<prism::layout::FlowItem> flow;
+    flow.reserve(static_cast<size_t>(count));
+    for (const prism::ArchiveItem& item : *scene.items) {
+      prism::layout::FlowItem entry;
+      entry.isDir = item.isDir;
+      entry.kind = prism::QuickLookPlanner::KindByName(item.path);
+      // Availability is a FACT read from the store, not a guess from the name.
+      entry.thumbnailAvailable = scene.thumbs != nullptr &&
+                                 prism::layout::ThumbnailCapable(entry.kind) &&
+                                 scene.thumbs->Contains(item.index);
+      if (scene.debugForceSkeleton) {
+        // TEST SEAM: force the tile path (a photo with no pixels -> skeleton).
+        // The flow classifies from these fields, so "available" is what makes
+        // it a tile; the painter is then told there are no pixels (below), which
+        // is exactly the state the skeleton colour exists for.
+        entry.isDir = false;
+        entry.kind = prism::PreviewKind::Image;
+        entry.thumbnailAvailable = true;
+      }
+      flow.push_back(entry);
+    }
+    const int maxScroll = prism::layout::FlowMaxScroll(layout, flow);
     const int scroll = (std::min)(
-        scene.viewport ? static_cast<int>(scene.viewport->Scroll()) : 0, maxScroll);
-    const std::vector<prism::layout::Cell> cells =
-        prism::layout::VisibleCells(layout, count, scroll);
-    for (const prism::layout::Cell& cell : cells) {
+        (std::max)(0, scene.viewport ? static_cast<int>(scene.viewport->Scroll()) : 0),
+        maxScroll);
+    const std::vector<prism::layout::FlowCell> cells =
+        prism::layout::VisibleFlowCells(layout, flow, scroll);
+    for (const prism::layout::FlowCell& cell : cells) {
       if (cell.index < 0 || cell.index >= count) continue;
       const prism::ArchiveItem& item = (*scene.items)[static_cast<size_t>(cell.index)];
-      const prism::PreviewKind kind = prism::QuickLookPlanner::KindByName(item.path);
-      // Availability is a FACT read from the store, not a guess from the name.
-      const bool hasThumb = scene.thumbs != nullptr &&
-                            prism::layout::ThumbnailCapable(kind) &&
-                            scene.thumbs->Contains(item.index);
-      const prism::layout::CellKind cellKind =
-          scene.debugForceSkeleton
-              ? prism::layout::CellKind::Tile
-              : prism::layout::CellKindFor(item.isDir, kind, hasThumb);
-      if (cellKind == prism::layout::CellKind::Row) {
+      if (cell.kind == prism::layout::CellKind::Row) {
         DrawFallbackRow(target, scene, cell, item);
       } else if (item.isDir) {
         DrawFolderTile(target, scene, cell.rect, item);
       } else {
-        DrawThumbTile(target, scene, cell.rect, item, hasThumb);
+        DrawThumbTile(target, scene, cell.rect, item,
+                      !scene.debugForceSkeleton &&
+                          flow[static_cast<size_t>(cell.index)].thumbnailAvailable);
       }
     }
   }
@@ -819,11 +902,12 @@ class GalleryRenderer {
   static D2D1_RECT_F CellRectF(const prism::layout::Rect& cell) { return ToRectF(cell); }
 
   // P0-2: a cell with no thumbnail is a 32 px ROW (icon + name + size), never
-  // a skeleton card. The row is anchored to the top of the cell.
+  // a skeleton card. V4: the row IS the band the layout handed in -- full
+  // content width, 32 px tall, contiguous with its neighbours.
   void DrawFallbackRow(ID2D1RenderTarget* target, const Scene& scene,
-                       const prism::layout::Cell& cell, const prism::ArchiveItem& item) {
+                       const prism::layout::FlowCell& cell, const prism::ArchiveItem& item) {
     ++dbgRowCells;
-    const D2D1_RECT_F band = ToRectF(prism::layout::FallbackRowRect(cell.rect));
+    const D2D1_RECT_F band = ToRectF(cell.rect);
     const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(band, 10.0f, 10.0f);
     target->FillRoundedRectangle(pill, tile_.Get());
     target->DrawRoundedRectangle(pill, tileBorder_.Get(), 1.0f);
@@ -852,8 +936,7 @@ class GalleryRenderer {
       DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(item.size)),
                         band.right - 100.0f, band.top + 7.0f, 92.0f, textSecondary_.Get());
     }
-    DrawSelectionRing(target, scene, prism::layout::FallbackRowRect(cell.rect), item.index,
-                      10.0f);
+    DrawSelectionRing(target, scene, cell.rect, item.index, 10.0f);
   }
 
   void DrawFolderTile(ID2D1RenderTarget* target, const Scene& scene,
@@ -1303,6 +1386,8 @@ class GalleryRenderer {
   // C29 sidebar: one recolourable brush + the two single-line text formats.
   ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
   ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
+  // V4: the status band's readout format (11 px, one line).
+  ComPtr<IDWriteTextFormat> statusFormat_;
   // C-V2: the action band's painter (own brush + text formats).
   prism::win::actionbar::ActionBarPainter actionBar_;
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
@@ -1335,6 +1420,11 @@ class GalleryRenderer {
   int dbgSidebarPainted = 0;
   int dbgSidebarClipped = 0;
   int dbgSidebarCollapsed = 0;
+  // V4: labels that needed the ellipsis (0 for the shipping table). The painter
+  // owns the measurement; this is the seam the polish suite reads.
+  int ActionLabelsClipped() const { return actionBar_.dbgLabelsClipped; }
+  int ActionLabelsPainted() const { return actionBar_.dbgLabels; }
+
   // C-V2: proof that the action band reached the device, and that each visual
   // state was actually painted (the hover/disabled/focus assertions key on
   // these being non-zero -- a zero would make the pixel diff meaningless).
@@ -1344,6 +1434,8 @@ class GalleryRenderer {
   int dbgActionHover = 0;
   int dbgActionPressed = 0;
   int dbgActionDropdowns = 0;
+  // V4: proof that the status band painted its segments (four per frame).
+  int dbgStatusSegments = 0;
 
  private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;

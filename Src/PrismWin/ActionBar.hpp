@@ -83,6 +83,15 @@ class ActionBarPainter {
         labelFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         labelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         labelFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        // V4: a label that does not fit ends in "…", never mid-glyph. The sign
+        // and the trimming options are DWrite state, so the suite can QUERY them
+        // back (LabelEllipsisConfigured) instead of trusting this comment.
+        DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        ComPtr<IDWriteInlineObject> sign;
+        if (SUCCEEDED(writeFactory_->CreateEllipsisTrimmingSign(
+                labelFormat_.Get(), sign.ReleaseAndGetAddressOf()))) {
+          labelFormat_->SetTrimming(&trimming, sign.Get());
+        }
       }
     }
     if (!mnemonicFormat_) {
@@ -176,6 +185,27 @@ class ActionBarPainter {
   int dbgFocusRings = 0;
   int dbgDropdowns = 0;
   int dbgDropdownRows = 0;
+  // V4: labels that needed the ellipsis. MUST be 0 for the shipping table (the
+  // assertion is "no truncated label"), and non-zero only in a squeeze.
+  int dbgLabelsClipped = 0;
+
+  // V4: proves the ellipsis is wired into the text format (D3-style: query the
+  // device state, do not trust a comment). Requires CreateDeviceResources.
+  bool LabelEllipsisConfigured() const {
+    if (!labelFormat_) return false;
+    DWRITE_TRIMMING trimming{};
+    IDWriteInlineObject* sign = nullptr;
+    const HRESULT hr = labelFormat_->GetTrimming(&trimming, &sign);
+    bool ok = false;
+    if (SUCCEEDED(hr)) {
+      // CHARACTER granularity + a real ellipsis sign object: the only way a
+      // too-long label can be cut is with "…" at the end.
+      ok = trimming.granularity == DWRITE_TRIMMING_GRANULARITY_CHARACTER &&
+           prism::actionbar::kLabelEllipsis == 0x2026 && sign != nullptr;
+    }
+    if (sign != nullptr) sign->Release();
+    return ok;
+  }
 
  private:
   static D2D1_RECT_F RectF(const prism::actionbar::Rect& r) {
@@ -302,6 +332,24 @@ class ActionBarPainter {
     target->DrawGeometry(geometry.Get(), brush_.Get(), width);
   }
 
+  // Does the label need more than its box? Measured with the SAME format the
+  // painter uses, so a shipping string that would be ellipsized is counted
+  // (dbgLabelsClipped) instead of silently truncated.
+  bool LabelOverflows(const std::wstring& label, int boxWidth) {
+    if (!labelFormat_ || !writeFactory_ || boxWidth <= 0) return false;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(writeFactory_->CreateTextLayout(
+            label.c_str(), static_cast<UINT32>(label.size()), labelFormat_.Get(),
+            static_cast<float>(boxWidth), static_cast<float>(prism::actionbar::kLabelHeight),
+            layout.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    DWRITE_TEXT_METRICS metrics{};
+    if (FAILED(layout->GetMetrics(&metrics))) return false;
+    return metrics.widthIncludingTrailingWhitespace >
+           static_cast<float>(boxWidth) + 0.5f;
+  }
+
   // ---- one button's icon + label + mnemonic, all offset by dy (the sink).
   void PaintButtonContent(ID2D1RenderTarget* target, const prism::actionbar::Button& button,
                           const prism::actionbar::Model& model, bool enabled, float dy) {
@@ -309,23 +357,30 @@ class ActionBarPainter {
         (std::max)(0, prism::actionbar::IndexOf(button.id)));
     const float alpha = enabled ? 1.0f : kDisabledAlpha;
     const D2D1_RECT_F r = RectF(button.rect);
-    const float centreX = (r.left + r.right) * 0.5f;
-    const float iconSize = static_cast<float>(prism::actionbar::kIconBox);
-    const float iconTop = r.top + 9.0f + dy;
+    // V4: both boxes come from the MODEL, and the press sink moves both by the
+    // SAME dy -- moving one would reopen the misalignment the screenshot showed.
+    const prism::actionbar::Rect iconRect(prism::actionbar::IconBoxRect(button.rect));
+    const prism::actionbar::Rect labelRect(prism::actionbar::LabelBoxRect(button.rect));
     const D2D1_RECT_F iconBox =
-        D2D1::RectF(centreX - iconSize * 0.5f, iconTop, centreX + iconSize * 0.5f,
-                    iconTop + iconSize);
+        D2D1::RectF(static_cast<float>(iconRect.left), static_cast<float>(iconRect.top) + dy,
+                    static_cast<float>(iconRect.right),
+                    static_cast<float>(iconRect.bottom) + dy);
     SetBrush(ToD2d(Token(prism::theme::TokenId::TextPrimary, lastVariant_), alpha));
     PaintGlyph(target, spec.icon, iconBox);
     ++dbgIcons;
 
     const std::wstring label = Utf8(spec.label);
     if (!label.empty() && labelFormat_) {
+      const D2D1_RECT_F labelBox =
+          D2D1::RectF(static_cast<float>(labelRect.left),
+                      static_cast<float>(labelRect.top) + dy,
+                      static_cast<float>(labelRect.right),
+                      static_cast<float>(labelRect.bottom) + dy);
+      // Ellipsis, not CLIP: the format carries the U+2026 trimming sign.
       target->DrawText(label.c_str(), static_cast<UINT32>(label.size()), labelFormat_.Get(),
-                       D2D1::RectF(r.left + 2.0f, r.top + 32.0f + dy, r.right - 2.0f,
-                                   r.bottom + dy - 2.0f),
-                       brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                       labelBox, brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
       ++dbgLabels;
+      if (LabelOverflows(label, labelRect.Width())) ++dbgLabelsClipped;
     }
     // The mnemonic: a quiet 10 px letter in the corner. It is the only visible
     // promise that Alt+<letter> works, and it disappears when disabled.

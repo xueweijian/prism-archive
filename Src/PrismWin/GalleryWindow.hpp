@@ -280,10 +280,56 @@ class GalleryWindow {
     if (!sidebarRailVisible_) return 0.0f;
     return GalleryRenderer::SidebarInset(static_cast<float>(clientW_));
   }
+
+  // V4: the painted rectangle of one item in grid mode (scroll 0). The click
+  // path uses this same flow, so a test that wants to click an item asks for
+  // its rectangle instead of re-deriving a cell grid that no longer exists.
+  prism::layout::Rect ItemRect(int index) {
+    const std::vector<prism::layout::FlowItem> flow = FlowInputs();
+    return prism::layout::FlowItemRect(layout_, flow, index);
+  }
+
+  // The ONE layout the frame painted -- read by the polish suite to assert the
+  // rail is part of the grid, not list-mode chrome.
+  const prism::layout::Layout& LayoutForTest() const { return layout_; }
+
+  // V4: the status band's readout. The app sets it from the engine's archive
+  // properties; until it does, every field honestly reads "unknown".
+  void SetArchiveStatus(const prism::layout::StatusInfo& status) {
+    archiveStatus_ = status;
+    Invalidate();
+  }
+  const prism::layout::StatusInfo& ArchiveStatus() const { return archiveStatus_; }
   // Engine facts the catalog cannot derive (method / dictionary / cipher).
   void SetArchiveInfo(const prism::sidebar::ArchiveInfo& info) {
     sidebar_.SetArchiveInfo(info);
     sidebarDirty_ = true;
+    // V4: the status band reads the SAME archive info the rail does. The engine
+    // reports "no password" as Unknown, so the band says so instead of lying
+    // with "未加密"; the cipher is only shown while the archive really is
+    // encrypted.
+    using prism::layout::CryptoState;
+    switch (info.encryption) {
+      case prism::sidebar::Encryption::None:
+        archiveStatus_.crypto = CryptoState::Unencrypted;
+        break;
+      case prism::sidebar::Encryption::Aes256:
+        archiveStatus_.crypto = CryptoState::Encrypted;
+        break;
+      case prism::sidebar::Encryption::Unknown:
+        archiveStatus_.crypto = CryptoState::Unknown;
+        break;
+    }
+    // Method and dictionary are engine facts the rail already receives; the
+    // status band shows the SAME ones (one archive, one readout).
+    statusMethod_ = info.method;
+    statusDictionary_ = info.dictionaryBytes != 0
+                            ? std::string("字典 ") +
+                                  prism::list::FormatBytes(info.dictionaryBytes)
+                            : std::string();
+    archiveStatus_.method = statusMethod_;
+    archiveStatus_.dictionary = statusDictionary_;
+    Invalidate();
     Invalidate();
   }
 
@@ -601,7 +647,7 @@ class GalleryWindow {
     // "what I see" and "what I hit" one list.
     // The rail is painted (and therefore clickable) in LIST mode only: the grid
     // keeps its full-bleed geometry and its tiles must stay reachable.
-    if (listMode_ && sidebarRailVisible_ && SidebarClick(x, y)) return true;
+    if (sidebarRailVisible_ && SidebarClick(x, y)) return true;
     if (CrumbClick(x, y)) return true;
     // A click inside the breadcrumb bar that misses every crumb is NOT "click
     // on empty list space" -- swallowing it into SetSelection(-1) silently
@@ -1395,13 +1441,11 @@ class GalleryWindow {
     }
   }
 
-  int ItemAtPoint(int x, int y) const {
+  int ItemAtPoint(int x, int y) {
     if (clientW_ <= 0.0 || clientH_ <= 0.0) return -1;  // no WM_SIZE yet
-    // C29: in LIST mode the sidebar owns the left column (list rows are inset
-    // by it, and their hit test is y-only, so the guard has to be here once).
-    // V1: the layout already starts the list body after the rail; this guard is
-    // the belt to that braces (and keeps the C29 contract explicit).
-    if (listMode_ && SidebarInset() > 0.0f && x < static_cast<int>(SidebarInset())) {
+    // V4: the rail owns the left column in BOTH view modes (it is chrome, not
+    // list-mode chrome), and the hit test is y-only in list mode -- one guard.
+    if (SidebarInset() > 0.0f && x < static_cast<int>(SidebarInset())) {
       return -1;
     }
     if (listMode_) {
@@ -1411,22 +1455,36 @@ class GalleryWindow {
       if (row < 0 || row >= static_cast<int>(listRowToFolder_.size())) return -1;
       return listRowToFolder_[static_cast<size_t>(row)];
     }
-    // V1: hit-testing and painting consume the SAME rectangles. Asking the
-    // layout (instead of dividing by a column width) is what keeps a click on
-    // a 12 px gap from selecting the neighbouring tile.
-    if (x < layout_.contentInner.left || x >= layout_.contentInner.right ||
+    // V4: hit-testing and painting consume the SAME rectangles. The grid is a
+    // FLOW now (tiles in rows, tile-less items as full-width bands), so the
+    // question "which item is under this point" is answered by the flow and not
+    // by a divide-by-column-width that no longer describes the paint.
+    if (x < layout_.content.left || x >= layout_.content.right ||
         y < layout_.contentInner.top || y >= layout_.contentInner.bottom) {
       return -1;
     }
-    const int scroll = static_cast<int>(viewport_.Scroll());
-    const std::vector<prism::layout::Cell> cells =
-        prism::layout::VisibleCells(layout_, ItemCount(), scroll);
-    for (const prism::layout::Cell& cell : cells) {
-      if (x < cell.rect.left || x >= cell.rect.right) continue;
-      if (y < cell.rect.top || y >= cell.rect.bottom) continue;
-      return cell.index;
+    const std::vector<prism::layout::FlowItem> flow = FlowInputs();
+    return prism::layout::FlowItemAt(layout_, flow, x, y,
+                                     static_cast<int>(viewport_.Scroll()));
+  }
+
+  // V4: the classification FACTS for the current folder, in catalog order. Only
+  // the ThumbStore knows whether a photo really has pixels; the geometry is the
+  // layout's job. One function feeds painting, hit-testing and the test seam.
+  std::vector<prism::layout::FlowItem> FlowInputs() {
+    std::vector<prism::layout::FlowItem> flow;
+    flow.reserve(folderItems_.size());
+    std::lock_guard<std::mutex> lock(thumbMutex_);
+    for (const prism::ArchiveItem& item : folderItems_) {
+      prism::layout::FlowItem entry;
+      entry.isDir = item.isDir;
+      entry.kind = prism::QuickLookPlanner::KindByName(item.path);
+      entry.thumbnailAvailable = thumbs_ != nullptr &&
+                                 prism::layout::ThumbnailCapable(entry.kind) &&
+                                 thumbs_->Contains(item.index);
+      flow.push_back(entry);
     }
-    return -1;
+    return flow;
   }
 
   static std::wstring Utf8ToWide(std::string_view text) {
@@ -1488,7 +1546,9 @@ class GalleryWindow {
     int height = static_cast<int>(clientH_);
     if (width <= 0) width = 1280;  // headless default (pre-Create)
     if (height <= 0) height = 800;
-    const bool rail = listMode_ && sidebarRailVisible_ &&
+    // V4: the rail is chrome (WindowLayout::RailVisible), so it reserves width
+    // in BOTH views; only an explicit collapse or a too-narrow window removes it.
+    const bool rail = prism::layout::RailVisible(sidebarRailVisible_, listMode_) &&
                       GalleryRenderer::SidebarFits(static_cast<float>(width));
     return prism::layout::Compute(width, height, rail, listMode_);
   }
@@ -1577,12 +1637,11 @@ class GalleryWindow {
     scene.items = host_.items;
     scene.viewport = &viewport_;
     scene.layout = clientW_ > 0.0 ? &layout_ : nullptr;  // ONE geometry authority
-    // C29: the rail is LIST-MODE chrome and folds itself below its width
-    // threshold. The window owns that POLICY (list mode + the C27 toggle + the
-    // width); the renderer paints whatever Scene it is handed, which is what
-    // C27's glue suite relies on (it builds a bare scene with a layout and
-    // expects pixels at 900 px wide).
-    scene.sidebar = (listMode_ && sidebarRailVisible_ &&
+    // V4: the rail is CHROME (DESIGN.md §2), not list-mode chrome, and folds
+    // itself only below its width threshold or when the user collapses it. The
+    // window owns that POLICY; the renderer paints whatever Scene it is handed,
+    // which is what C27's glue suite relies on (a bare 900 px scene).
+    scene.sidebar = (sidebarRailVisible_ &&
                      GalleryRenderer::SidebarFits(static_cast<float>(clientW_)))
                         ? &sidebarLayout_
                         : nullptr;
@@ -1595,6 +1654,10 @@ class GalleryWindow {
     // to read scene.listScroll (always 0) while clicks used the viewport.
     scene.listScroll = listMode_ ? static_cast<uint32_t>(viewport_.Scroll()) : 0u;
     scene.breadcrumb = breadcrumbText_;
+    // V4: the status band's four segments read the archive properties the
+    // engine reported (encryption from SetArchiveInfo, the rest from
+    // SetArchiveStatus). Unknown is a state, not an empty strip.
+    scene.status = archiveStatus_;
     // C-V2: the band. The model is the SAME object the click path hit-tests, so
     // a button can never be painted somewhere it cannot be pressed.
     scene.actions = &actionBar_;
@@ -1761,13 +1824,27 @@ class GalleryWindow {
   // it is really painted: list mode + the C27 toggle + C29's width threshold.
   void RecomputeLayout() {
     const double scroll = viewport_.Scroll();
-    const bool rail = listMode_ && sidebarRailVisible_ &&
+    const bool rail = prism::layout::RailVisible(sidebarRailVisible_, listMode_) &&
                       GalleryRenderer::SidebarFits(static_cast<float>(clientW_));
     layout_ = prism::layout::Compute(static_cast<int>(clientW_),
                                      static_cast<int>(clientH_), rail, listMode_);
-    const prism::gallery::GridLayout grid{
-        listMode_ ? 1 : layout_.columns,
-        static_cast<double>(listMode_ ? prism::layout::kListRowHeight : layout_.cellHeight)};
+    // V4: the grid's content height is the FLOW's height (tiles are cellHeight
+    // tall, tile-less rows are 32 px bands), so the viewport is fed an average
+    // pitch that makes Rows() * pitch == FlowContentHeight(). Scroll clamping
+    // and the painted frame therefore agree at every offset, and the list view
+    // keeps its 32 px pitch unchanged.
+    double pitch = 0.0;
+    if (listMode_) {
+      pitch = static_cast<double>(prism::layout::kListRowHeight);
+    } else {
+      const std::vector<prism::layout::FlowItem> flow = FlowInputs();
+      const int rows = ItemsCount() > 0 && layout_.columns > 0
+                           ? (ItemsCount() + layout_.columns - 1) / layout_.columns
+                           : 0;
+      const int height = prism::layout::FlowContentHeight(layout_, flow);
+      pitch = rows > 0 ? static_cast<double>(height) / rows : 0.0;
+    }
+    const prism::gallery::GridLayout grid{listMode_ ? 1 : layout_.columns, pitch};
     viewport_ = prism::gallery::ViewportWindow(grid, ItemsCount());
     viewport_.SetViewportSize(static_cast<double>(layout_.contentInner.Width()),
                               static_cast<double>(layout_.contentInner.Height()));
@@ -1830,6 +1907,11 @@ class GalleryWindow {
   // C29: the rail really paints now, and the grid reflow landed (list inset +
   // hit-test guard), so the rail is ON by default in list mode.
   bool sidebarRailVisible_ = true;
+  // V4: the status band's readout. The strings are OWNED here because the
+  // model holds views; ArchiveInfo arrives by value on every set.
+  prism::layout::StatusInfo archiveStatus_;
+  std::string statusMethod_;
+  std::string statusDictionary_;
   prism::sidebar::SidebarStore* sidebarStore_ = nullptr;  // C14 port (not owned)
   bool sidebarRestored_ = false;
   std::function<void(const std::wstring&)> onArchiveChanged_;  // C34: names the new file

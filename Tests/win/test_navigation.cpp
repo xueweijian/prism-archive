@@ -96,16 +96,16 @@ int main() {
     return (row >= 0 && row < static_cast<int>(rows.size())) ? rows[row].path
                                                              : std::string("<none>");
   };
-  // Row -> the pixel its tile centre is painted at (same geometry the renderer
-  // uses: columns and cell height from the viewport, scroll added back).
+  // Row -> the pixel its item is painted at. V4: the grid is a FLOW (tiles in
+  // grid cells, tile-less items as full-width bands), so the cell arithmetic
+  // this used to do no longer describes the paint. Asking the window for the
+  // item's own rectangle keeps the click on the pixels the renderer drew --
+  // which is what a double-click test is supposed to exercise.
   auto rowCentre = [&window](int row, int* px, int* py) {
-    const int cols = window.Viewport().Columns();
-    if (cols <= 0) return false;
-    const double cellW = window.Viewport().ColumnWidth();
-    const double cellH = window.Viewport().CellHeight();
-    if (cellW <= 0.0 || cellH <= 0.0) return false;
-    *px = static_cast<int>((row % cols) * cellW + cellW / 2.0);
-    *py = static_cast<int>((row / cols) * cellH + cellH / 2.0);
+    const prism::layout::Rect rect = window.ItemRect(row);
+    if (rect.Empty()) return false;
+    *px = (rect.left + rect.right) / 2;
+    *py = (rect.top + rect.bottom) / 2;
     return true;
   };
   auto doubleClickRow = [&](int row) {

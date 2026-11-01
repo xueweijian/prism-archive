@@ -462,3 +462,69 @@ recording: the first scale run printed its digits and then died with 0xC0000005
 the last `ComPtr`s were released. The exit code is part of a ctest verdict, so
 the suite was red even with the marker present (contract D1's conjunction doing
 its job). Fixed with an RAII apartment guard declared first in `main`.
+
+## Report lane (card C42): how the digits reach the run summary
+
+C32 found the hole: `report.yml` ran `ctest --output-on-failure -R "bench"`, and
+ctest does **not** print the stdout of a passing test. Every `BENCH {json}` line
+from a green bench suite therefore died inside ctest, the summary step printed
+"(no BENCH lines)", and the run stayed green. `win.bench_scale`,
+`win.bench_memory` and `win.bench_startup` were all affected; only
+`win.bench_solid` escaped, because `ci.yml` runs that executable directly.
+
+**What the lane does now.** `ctest -V -R "bench" -E "^(mutation|report)\."`
+prints the captured stdout of passing tests, so the BENCH lines reach the log
+with ctest's verdict (exit code + `PASS_REGULAR_EXPRESSION` + `TIMEOUT`, contract
+D1) still attached. Measured on a compiler-free probe project (2026-11-02, ctest
+3.31): plain `ctest --output-on-failure` printed **0** BENCH lines, `ctest -V`
+printed **all** of them. Two consequences the parser had to absorb: `-V` prefixes
+each captured line with `<n>: `, and ctest prints a test's stdout *before* its
+`Test #N: name ... Passed` line -- so attribution keys off `<n>`, never off line
+order.
+
+Running each bench executable directly was the other candidate (and is what
+`ci.yml` does for `win_bench_solid`): raw stdout, no prefix, but the ctest
+verdict is lost -- `PASS_REGULAR_EXPRESSION`, `TIMEOUT` and the WILL_FAIL shape
+stop applying, and every suite needs a hardcoded exe name. `-V` was chosen for
+that reason, not for taste.
+
+**`tools/report/extract_bench.py` is a gate, not a helper.** It parses
+`BENCH` / `BENCH_STARTUP` / `BENCH_MEMORY` / `BENCH_SCALE` /
+`BENCH_GLASS_MEM` / `CORE-BENCH` lines into one Markdown table per suite and
+appends it to the step summary. The failure modes are red, never silent:
+
+| exit | meaning |
+|---|---|
+| 0 | every bench line parsed, table written |
+| 1 | a malformed bench line (truncated JSON, non-object, `NaN`, `{}`, marker without payload, trailing junk) -- reported with its log line number |
+| 2 | no bench lines at all (the C32 bug itself) |
+| 3 | the same suite+marker appears twice with different payloads (ambiguous digits) |
+| 4 | the log cannot be read |
+| 5 | a bench suite is `Passed` but printed no BENCH line (the summary would silently lose it) |
+
+A wrong report is worse than no report: nothing is written to the summary on any
+non-zero exit.
+
+**Self-test, no benchmark needed.** `tools/report/test_extract_bench.py` builds
+fake `ctest -V` logs in their own temp directory -- good lines for every marker,
+one broken line per failure mode, a conflicting duplicate, a silent green suite,
+an empty log, a raw executable log -- and asserts exact table rows (counts and
+bytes, no stopwatches). Registered as ctest `report.extract_bench` with
+`PASS_REGULAR_EXPRESSION "EXTRACT-BENCH SELFTEST: PASSED"`, so a silent skip is
+red (D1). Negative control (D3): commenting out the parser's bad-line `raise`
+turns the self-test red on its own assertions, and the injection is verified to
+have applied before that run -- a replacement that did not match would be a
+silent no-op.
+
+**Nightly full gate.** `report.yml` gained `nightly-full`: the complete ctest,
+no `-R`/`-E` (bench + fuzz + installer), 90-minute timeout, serial (the win
+suites share `%TEMP%` and shell out to `7z.exe`), with the failed test names in
+the step summary. The merge gate keeps running the fast subset; this job is the
+backstop that runs everything once a night.
+
+Local repro:
+
+```sh
+python tools/report/extract_bench.py <ctest -V log> [--summary "$GITHUB_STEP_SUMMARY"]
+python tools/report/test_extract_bench.py        # 58 assertions, no bench run
+```

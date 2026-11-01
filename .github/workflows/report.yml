@@ -1,4 +1,4 @@
-name: Report (benchmarks + fuzz corpus)
+name: Report (benchmarks + fuzz corpus + nightly full gate)
 
 # Report-only lane: these suites publish numbers (blueprint ch. 7.2) or sweep a
 # 10 000-sample malformed corpus (Phase 1 exit criteria). They are deliberately
@@ -6,6 +6,35 @@ name: Report (benchmarks + fuzz corpus)
 # 4 GiB fixture plus a 10k corpus turned every PR into an 8-minute wait.
 #
 # They still run: nightly, and on demand from the Actions tab.
+#
+# --- Card C42: the digits now actually reach the summary ---------------------
+# C32 found that this lane ran `ctest --output-on-failure -R "bench"`, and ctest
+# does NOT print the stdout of a PASSING test. So every `BENCH {json}` line from
+# a green bench suite stayed inside ctest's buffer: the summary step printed
+# "(no BENCH lines)" and the run was still green. bench_scale / bench_memory /
+# bench_startup were affected the same way.
+#
+# Both obvious fixes were tried (2026-11-02, ctest 3.31, local probe project with
+# one green suite that prints a BENCH line, one green suite that prints nothing):
+#
+#   (a) run each bench executable directly and grep its stdout -- what ci.yml
+#       already does for win_bench_solid. Raw output, no prefix. But it throws
+#       the ctest verdict away: PASS_REGULAR_EXPRESSION (contract D1) and TIMEOUT
+#       stop applying, and every suite needs its own hardcoded exe name.
+#   (b) `ctest -V`: ctest then prints the captured stdout of PASSING tests.
+#       Measured on the probe: plain ctest printed 0 BENCH lines, `ctest -V`
+#       printed every one. Exit code + marker + timeout all stay ctest's.
+#
+# (b) is the stable one, so the bench step below uses it. Two details it forces:
+#   * `-V` prefixes every captured line with "<n>: " -- the extractor strips it
+#     and maps <n> back to the test name;
+#   * ctest prints a test's stdout BEFORE its "Test #N: name ... Passed" line, so
+#     attribution must key off that <n>, never off line order.
+#
+# tools/report/extract_bench.py is a gate, not a helper: a malformed BENCH line,
+# a Passed bench suite that printed no BENCH line, or a log with no numbers at
+# all turns this job RED. A report that silently drops a suite is worse than no
+# report.
 
 on:
   workflow_dispatch:
@@ -36,31 +65,153 @@ jobs:
         run: |
           $candidates = @(
             "$env:ProgramFiles\7-Zip\7z.dll",
-            "${env:ProgramFiles(x86)}\7-Zip\7z.dll")
+            "${env:ProgramFiles(x86)}\7-Zip\7z.dll",
+            "$env:LOCALAPPDATA\Programs\7-Zip\7z.dll")
           $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if ($found) { "PRISM_7Z_DLL=$found" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          if ($found) {
+            Write-Host "7z.dll: $found"
+            "PRISM_7Z_DLL=$found" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Host "::warning::7z.dll not found - bench suites will fail, not skip"
+          }
 
-      - name: "Benchmarks + fuzz (report only)"
+      # The honest bench set: win.bench_solid / bench_startup / bench_memory /
+      # bench_scale plus core.bench_sweep. -V is the whole point (see the header).
+      # The mutation.bench_* WILL_FAIL controls and this card's own self-test are
+      # excluded: the mutants print DELIBERATELY WRONG digits, and publishing them
+      # next to the real ones would be the "wrong report" this card exists to stop.
+      - name: "Benchmarks (ctest -V: passing stdout is visible)"
         working-directory: build
         shell: bash
         run: |
           set -o pipefail
-          ctest --output-on-failure -R "bench|fuzz" 2>&1 | tee "$RUNNER_TEMP/prism_report.log"
+          ctest -V -R "bench" -E "^(mutation|report)\." --no-tests=error 2>&1 \
+            | tee "$RUNNER_TEMP/prism_bench.log"
 
-      - name: Publish bench lines to the run summary
+      # D3 controls: each mutant must go red on the SAME suite, so the numbers
+      # above are sharp. WILL_FAIL makes ctest green only when it does. No -V:
+      # nothing here is published, and a mutant that stays green is a red run
+      # whose stdout ctest prints because the test failed.
+      - name: "Bench mutation controls (WILL_FAIL, expected red)"
+        working-directory: build
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --output-on-failure -R "^mutation\.bench" --no-tests=error 2>&1 \
+            | tee "$RUNNER_TEMP/prism_bench_mutants.log"
+
+      # Runs even when a bench suite failed: whatever digits exist are worth
+      # publishing, and the extractor is what decides whether the log is honest.
+      - name: Publish BENCH lines to the run summary
         if: always()
         shell: bash
         run: |
-          {
-            echo "### Benchmarks (report lane)"
-            echo '```json'
-            grep -hE '^BENCH \{' "$RUNNER_TEMP/prism_report.log" || echo "(no BENCH lines)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          python tools/report/extract_bench.py "$RUNNER_TEMP/prism_bench.log" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --title "Benchmarks (report lane)"
 
-      - name: Upload report log
+      - name: "Fuzz corpus (report only)"
+        working-directory: build
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --output-on-failure -R "fuzz" --no-tests=error 2>&1 \
+            | tee "$RUNNER_TEMP/prism_fuzz.log"
+
+      - name: Upload report logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-logs
-          path: ${{ runner.temp }}/prism_report.log
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/prism_bench.log
+            ${{ runner.temp }}/prism_bench_mutants.log
+            ${{ runner.temp }}/prism_fuzz.log
+            build/Testing/Temporary/LastTest.log
+
+  # ===========================================================================
+  # nightly-full: the whole ctest, nothing excluded (bench + fuzz + installer).
+  #
+  # The merge gate runs a SUBSET on purpose (ci.yml: -E "bench|fuzz"). That is a
+  # speed decision, not a claim that the excluded suites do not matter, and the
+  # "full Invoke-Gates never finishes" note from C21/C23/C29 is exactly why the
+  # backstop has to live somewhere. This job is that backstop: once a night, on a
+  # runner, every registered test runs -- no -R, no -E.
+  #
+  # Serial on purpose: the win suites share %TEMP% and shell out to 7z.exe, and
+  # the first -j 8 run made win.reader_pool fail (see the measured note in
+  # ci.yml). 90 minutes is the budget for the 4 GiB bench_scale fixture plus the
+  # 10k corpus; a red run names the failed tests in the step summary so the run
+  # page is enough to start the investigation.
+  # ===========================================================================
+  nightly-full:
+    name: "Nightly full gate (complete ctest: bench + fuzz + installer)"
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Locate 7z.dll
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\7-Zip\7z.dll",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.dll",
+            "$env:LOCALAPPDATA\Programs\7-Zip\7z.dll")
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($found) {
+            Write-Host "7z.dll: $found"
+            "PRISM_7Z_DLL=$found" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Host "::warning::7z.dll not found - integration suites will fail, not skip"
+          }
+
+      # No -R and no -E: this is the one lane that runs everything.
+      - name: Full ctest (bench + fuzz + installer, nothing excluded)
+        working-directory: build
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --output-on-failure --no-tests=error 2>&1 \
+            | tee "$RUNNER_TEMP/prism_full.log"
+
+      # Green or red, the run page has to answer "what ran and what failed".
+      - name: Full ctest verdict -> step summary
+        if: always()
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/prism_full.log"
+          {
+            echo "### Nightly full gate (complete ctest: bench + fuzz + installer)"
+            echo '~~~text'
+            grep -E '^[0-9]+% tests passed' "$log" | tail -1 \
+              || echo "(no ctest verdict line -- the log is the evidence)"
+            echo '~~~'
+            if grep -q 'The following tests FAILED' "$log" 2>/dev/null; then
+              echo ''
+              echo '**Failed tests**'
+              echo '~~~text'
+              sed -n '/The following tests FAILED/,$p' "$log" | head -60
+              echo '~~~'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full-gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-full-logs
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/prism_full.log
+            build/Testing/Temporary/LastTest.log

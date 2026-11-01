@@ -505,6 +505,7 @@ struct OpenIoCounters {
   std::atomic<uint64_t> reads{0};          // Read() calls
   std::atomic<uint64_t> sniffBytes{0};     // the part spent identifying the file
   std::atomic<uint64_t> mutantProbeAll{0}; // injection counter (CONTRACTS D3)
+  std::atomic<uint64_t> mutantIsoSniffOff{0};  // C43: iso rule deleted (D3)
 };
 
 inline OpenIoCounters& IoCounters() {
@@ -609,10 +610,18 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
 // and still a rounding error next to any real archive.
 constexpr std::size_t kSniffHeadBytes = 512;
 constexpr std::size_t kSniffTailBytes = 1024;
+// Card C43: ISO9660 keeps its primary volume descriptor at sector 16 -- offset
+// 0x8000, with the "CD001" identifier at 0x8001 -- 32 KiB into the file, so a
+// 512-byte head can never see it. Eight bytes at 0x8000 are all the rule needs,
+// and they are the ONLY extra I/O the sniff adds to a large file (the byte gate
+// in Tests/win/test_format_coverage.cpp counts them).
+constexpr abi::UInt64 kSniffSector16Offset = 0x8000;
+constexpr std::size_t kSniffSector16Bytes = 8;
 
 inline bool ReadSniffWindow(InFileStream& stream, sniff::Window* window,
-                            std::vector<uint8_t>* head, std::vector<uint8_t>* tail) {
-  if (!window || !head || !tail) return false;
+                            std::vector<uint8_t>* head, std::vector<uint8_t>* tail,
+                            std::vector<uint8_t>* sector16) {
+  if (!window || !head || !tail || !sector16) return false;
   abi::UInt64 pos = 0;
   if (FAILED(stream.Seek(0, /*STREAM_SEEK_SET=*/0, &pos))) return false;
   head->assign(kSniffHeadBytes, 0);
@@ -623,7 +632,25 @@ inline bool ReadSniffWindow(InFileStream& stream, sniff::Window* window,
   head->resize(got);
   IoCounters().sniffBytes.fetch_add(got, std::memory_order_relaxed);
 
+  // Sector 16 (ISO9660/UDF volume recognition area). Skipped for a file that
+  // cannot hold it -- never a short read, never a guess.
+  sector16->clear();
   const uint64_t size = stream.size();
+  if (size >= kSniffSector16Offset + kSniffSector16Bytes) {
+    pos = 0;
+    if (FAILED(stream.Seek(static_cast<abi::Int64>(kSniffSector16Offset),
+                           /*STREAM_SEEK_SET=*/0, &pos))) {
+      return false;
+    }
+    sector16->assign(kSniffSector16Bytes, 0);
+    abi::UInt32 sectorGot = 0;
+    if (FAILED(stream.Read(sector16->data(), static_cast<abi::UInt32>(sector16->size()),
+                           &sectorGot))) {
+      return false;
+    }
+    sector16->resize(sectorGot);
+    IoCounters().sniffBytes.fetch_add(sectorGot, std::memory_order_relaxed);
+  }
   if (size <= kSniffHeadBytes) {
     // Tiny file: the head IS the whole file, so the tail is the same bytes.
     *tail = *head;
@@ -647,6 +674,8 @@ inline bool ReadSniffWindow(InFileStream& stream, sniff::Window* window,
   window->headSize = head->size();
   window->tail = tail->data();
   window->tailSize = tail->size();
+  window->sector16 = sector16->empty() ? nullptr : sector16->data();
+  window->sector16Size = sector16->size();
   window->fileSize = size;
   return true;
 }
@@ -1246,6 +1275,29 @@ constexpr GUID kClsidTar = {0x23170F69, 0x40C1, 0x278A,
                             {0x10, 0x00, 0x00, 0x01, 0x10, 0xEE, 0x00, 0x00}};
 constexpr GUID kClsidGzip = {0x23170F69, 0x40C1, 0x278A,
                              {0x10, 0x00, 0x00, 0x01, 0x10, 0xEF, 0x00, 0x00}};
+// Card C43. Every GUID below was READ BACK from this machine's 7z.dll through
+// GetNumberOfFormats/GetHandlerProperty2 (60 handlers, 2026-11-02), never
+// recalled: handler index 03 Arj, 04 nothing, 06 Lzh, 08 Cab, E4 Dmg, E5
+// Compound, E6 wim, E7 Iso, E9 Chm, ED Cpio. The full dump is quoted in
+// Tests/win/test_format_coverage.cpp.
+constexpr GUID kClsidArj = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0x04, 0x00, 0x00}};
+constexpr GUID kClsidLzh = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0x06, 0x00, 0x00}};
+constexpr GUID kClsidCab = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0x08, 0x00, 0x00}};
+constexpr GUID kClsidDmg = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0xE4, 0x00, 0x00}};
+constexpr GUID kClsidCompound = {0x23170F69, 0x40C1, 0x278A,
+                                 {0x10, 0x00, 0x00, 0x01, 0x10, 0xE5, 0x00, 0x00}};
+constexpr GUID kClsidWim = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0xE6, 0x00, 0x00}};
+constexpr GUID kClsidIso = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0xE7, 0x00, 0x00}};
+constexpr GUID kClsidChm = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0xE9, 0x00, 0x00}};
+constexpr GUID kClsidCpio = {0x23170F69, 0x40C1, 0x278A,
+                             {0x10, 0x00, 0x00, 0x01, 0x10, 0xED, 0x00, 0x00}};
 
 struct FormatRoute {
   const wchar_t* extension;  // lowercase, with the dot: L".7z"
@@ -1282,6 +1334,26 @@ inline const FormatRoute* FindFormatRoute(std::wstring_view path) {
       {L".tzst", "zstd", nullptr},
       {L".lz4", "lz4", nullptr},
       {L".br", "br", nullptr},
+      // Card C43: the "common formats" the C26 table did not cover. The handler
+      // names are the engine's own (see the dump in test_format_coverage.cpp),
+      // and the CLSIDs are read back from it, not recalled (CONTRACTS A4).
+      {L".iso", "Iso", &kClsidIso},
+      {L".cab", "Cab", &kClsidCab},
+      {L".wim", "wim", &kClsidWim},
+      {L".swm", "wim", &kClsidWim},
+      {L".esd", "wim", &kClsidWim},
+      {L".ppkg", "wim", &kClsidWim},
+      {L".msi", "Compound", &kClsidCompound},
+      {L".msp", "Compound", &kClsidCompound},
+      {L".chm", "Chm", &kClsidChm},
+      {L".chi", "Chm", &kClsidChm},
+      {L".chq", "Chm", &kClsidChm},
+      {L".chw", "Chm", &kClsidChm},
+      {L".cpio", "Cpio", &kClsidCpio},
+      {L".arj", "Arj", &kClsidArj},
+      {L".lzh", "Lzh", &kClsidLzh},
+      {L".lha", "Lzh", &kClsidLzh},
+      {L".dmg", "Dmg", &kClsidDmg},
   };
   const std::wstring extension = PathExtensionLower(path);
   if (extension.empty()) return nullptr;
@@ -1326,12 +1398,18 @@ class ArchiveReader {
     // two-handler probe survives as the fallback below, so a mislabeled file
     // (a .zip named .7z, an archive with no extension at all) still opens.
     //
-    // C28: the FILE now speaks before the name does. 64 head bytes plus the
-    // last 1 KiB identify the container, and a format proven by its own magic
-    // gets exactly ONE handler -- no candidate walks a 4 GiB archive to
-    // discover it is the wrong one. The extension route and the legacy probe
-    // stay in the list BEHIND the sniffed handler, so a sniff that guessed
-    // wrong costs correctness nothing: the file still opens, just later.
+    // C28: the FILE now speaks before the name does. A 512-byte head, the last
+    // 1 KiB and (C43) 8 bytes at sector 16 identify the container, and a format
+    // proven by its own magic gets exactly ONE handler -- no candidate walks a
+    // 4 GiB archive to discover it is the wrong one.
+    // C43 tightens that: for a PROVEN format the extension route and the legacy
+    // probe are no longer queued behind the sniffed handler. They used to be,
+    // for a "what if the sniff guessed wrong" that a signature cannot express --
+    // and the price was measured: the [Zip, 7z] probe reads an entire 8 MiB file
+    // before declining one whose bytes already said "cab". A proven format now
+    // fails by NAME instead (failureReason()/unsupportedFormat()). kHint and
+    // kNone keep the full route + probe list, so a mislabeled or prefix-wrapped
+    // file still opens.
     const std::wstring extension = PathExtensionLower(archivePath);
     const FormatRoute* route = FindFormatRoute(archivePath);
     openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
@@ -1356,14 +1434,28 @@ class ArchiveReader {
       candidates.push_back({clsid, label});
     };
 
+    failureReason_.clear();
+    unsupportedFormat_.clear();
+
     sniff::Window sniffWindow;
     std::vector<uint8_t> sniffHead;
     std::vector<uint8_t> sniffTail;
+    std::vector<uint8_t> sniffSector16;
     sniff::Finding finding;
-    if (ReadSniffWindow(*stream_, &sniffWindow, &sniffHead, &sniffTail)) {
+    if (ReadSniffWindow(*stream_, &sniffWindow, &sniffHead, &sniffTail, &sniffSector16)) {
       sniffWindow.extensionHint = WideToUtf8(extension.substr(1));
       finding = sniff::Sniff(sniffWindow);
     }
+#ifdef PRISM_C43_MUTANT_NO_ISO_SNIFF
+    // CONTRACTS D3: the injection counter. It rises ONLY for a file that really
+    // carries the ISO9660 descriptor -- i.e. exactly when the deleted rule would
+    // have fired. A mutation that never runs cannot look sharp by staying green.
+    if (sniffWindow.sector16 &&
+        sniff::BytesAre(sniffWindow.sector16, sniffWindow.sector16Size, 1,
+                        {'C', 'D', '0', '0', '1'})) {
+      IoCounters().mutantIsoSniffOff.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
 #ifdef PRISM_C28_MUTANT_PROBE_ALL
     // The pre-C28 defect, injected on purpose (CONTRACTS D3): throw the sniff
     // away, so the extension route and the legacy [Zip, 7z] probe decide again
@@ -1376,7 +1468,16 @@ class ArchiveReader {
 #endif
     openTrace_ += sniff::DescribeRoute(finding) + " [" + finding.evidence + "]; ";
 
+    // C43: a format proven by its own magic gets ONE answer, not a search.
+    // When the sniff says kMagic the container's bytes are the fact; asking any
+    // other handler afterwards can only re-read the file to learn the same
+    // thing -- measured on this engine, the legacy [Zip, 7z] probe walks a whole
+    // 8 MiB file before declining (Tests/win/test_format_coverage.cpp). So the
+    // extension route and the probe stay in the list only for kHint/kNone, and
+    // a proven format that cannot be opened fails EXPLICITLY, by name.
+    bool sniffIsFinal = false;
     if (finding.singleHandler()) {
+      sniffIsFinal = true;
       const char* formatExt = sniff::FormatExtension(finding.format);
       const char* handler = sniff::FormatName(finding.format);
       const std::vector<GUID> fromEngine =
@@ -1388,11 +1489,18 @@ class ArchiveReader {
         if (sniffRoute && sniffRoute->pinnedClsid) addCandidate(*sniffRoute->pinnedClsid, handler);
       }
       if (candidates.empty()) {
-        openTrace_ += "(sniffed format has no handler in this engine) ";
+        // The bytes name a format this 7z.dll has no handler for (a fork-only
+        // codec, or an engine without the format). Say it, name it, and do not
+        // probe: "no handler" is the answer, not a reason to read the file again.
+        unsupportedFormat_ = handler;
+        failureReason_ = std::string("unsupported format '") + handler +
+                         "': this 7z.dll has no handler for it";
+        openTrace_ += std::string("unsupported=") + handler + " reason=no-handler; ";
+        return false;
       }
     }
 
-    if (route) {
+    if (!sniffIsFinal && route) {
       const std::vector<GUID> fromEngine = library_.ClsidsForExtension(WideToUtf8(extension.substr(1)));
       for (const GUID& clsid : fromEngine) addCandidate(clsid, route->handler);
       if (fromEngine.empty()) {
@@ -1404,9 +1512,12 @@ class ArchiveReader {
       }
     }
     // The pre-C26 candidate list, always last: unknown extensions land here by
-    // definition, and so does a routed handler that declined the file.
-    addCandidate(abi::CLSID_CFormatZip, "Zip");
-    addCandidate(abi::CLSID_CFormat7z, "7z");
+    // definition, and so does a routed handler that declined the file. A
+    // sniff-proven format never reaches it (C43).
+    if (!sniffIsFinal) {
+      addCandidate(abi::CLSID_CFormatZip, "Zip");
+      addCandidate(abi::CLSID_CFormat7z, "7z");
+    }
 
     for (const Candidate& slot : candidates) {
       abi::IInArchive* candidate = nullptr;
@@ -1439,11 +1550,26 @@ class ArchiveReader {
       }
       candidate->Release();
     }
+    if (sniffIsFinal) {
+      // Proven format, handler refused the file (truncated, corrupt, or an
+      // image this handler cannot parse). The probe would read the whole file
+      // to reach the same verdict, so the failure names the format instead.
+      const char* handler = sniff::FormatName(finding.format);
+      failureReason_ = std::string("the '") + handler + "' handler rejected this file: its bytes " +
+                       "identify it as " + handler + ", but this 7z.dll cannot read this one";
+      openTrace_ += std::string("declined=") + handler + " reason=handler-rejected; ";
+    }
     return false;
   }
 
   // Diagnostics for the last Open() attempt (printed by the integration test).
   const std::string& openTrace() const { return openTrace_; }
+  // C43: the EXPLICIT verdict for a file whose own bytes prove a format this
+  // build cannot open. 'unsupportedFormat' is set only when the engine has no
+  // handler at all; 'failureReason' explains both that case and a handler that
+  // rejected the file. Empty after a successful Open().
+  const std::string& unsupportedFormat() const { return unsupportedFormat_; }
+  const std::string& failureReason() const { return failureReason_; }
   const std::string& propTrace() const { return propTrace_; }
 
   // Release the archive and the file handle *before* the caller deletes the
@@ -1461,6 +1587,8 @@ class ArchiveReader {
     }
     openTrace_.clear();
     propTrace_.clear();
+    failureReason_.clear();
+    unsupportedFormat_.clear();
   }
 
   bool opened() const { return archive_ != nullptr; }
@@ -1841,6 +1969,11 @@ class ArchiveReader {
   ITranscoder* transcoder_ = nullptr;
   InFileStream* stream_ = nullptr;
   abi::IInArchive* archive_ = nullptr;
+  // C43: the explicit verdict when the bytes prove a format this build cannot
+  // open. 'unsupportedFormat_' is set only when NO handler exists at all;
+  // 'failureReason_' explains that case and a handler that rejected the file.
+  std::string failureReason_;
+  std::string unsupportedFormat_;
   std::string openTrace_;
   // Diagnostics only -- see PropertyId(): this set must never gate a
   // property read, because handlers answer properties they do not advertise.

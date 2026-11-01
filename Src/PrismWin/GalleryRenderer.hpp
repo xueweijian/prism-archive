@@ -35,8 +35,10 @@
 #include "../PrismCore/PathSafety.hpp"  // FileNameOf
 #include "../PrismCore/Preview.hpp"
 #include "../PrismCore/ProgressHud.hpp"
+#include "../PrismCore/SidebarModel.hpp"
+#include "../PrismCore/ThemeTokens.hpp"
 #include "../PrismCore/ThumbStore.hpp"
-#include "SidebarView.hpp"  // C12 draw commands -- painted here since C27
+#include "SidebarView.hpp"  // C12 draw commands -- painted since C27, refined by C29
 
 namespace prism::win::gallery {
 
@@ -60,6 +62,46 @@ class GalleryRenderer {
   static constexpr D2D1_COLOR_F kAccent = {0.243f, 0.545f, 1.0f, 1.0f};       // #3E8BFF
   static constexpr D2D1_COLOR_F kTextPrimary = {0.910f, 0.925f, 0.945f, 1.0f};
   static constexpr D2D1_COLOR_F kTextSecondary = {0.604f, 0.655f, 0.706f, 1.0f};
+
+  // ------------------------------------------------------------ C29 sidebar
+  // The rail is a real COLUMN: when it is shown, list content starts after it.
+  // Both numbers below are layout POLICY, not paint, so they live next to the
+  // painter that applies them and are pinned by their own unit test.
+  static constexpr float kSidebarColumnWidth = 236.0f;    // SidebarView::Metrics::width
+  static constexpr float kSidebarCollapseBelow = 960.0f;  // 4 list columns + chrome
+
+  // Negative-control switch (CONTRACTS D3): the rail is never painted, so the
+  // suite's "the commands reached pixels" assertions MUST go red.
+#if defined(PRISM_C29_MUTANT_NO_SIDEBAR_PAINT)
+  static constexpr bool kSidebarPaintDisabled = true;
+#else
+  static constexpr bool kSidebarPaintDisabled = false;
+#endif
+  // ... and the width fold inverted (960 px and wider folds, narrower shows).
+#if defined(PRISM_C29_MUTANT_COLLAPSE_INVERTED)
+  static constexpr bool kSidebarCollapseInverted = true;
+#else
+  static constexpr bool kSidebarCollapseInverted = false;
+#endif
+
+  static constexpr std::string_view ActiveMutation() {
+    if (kSidebarPaintDisabled) return "no-sidebar-paint";
+    if (kSidebarCollapseInverted) return "collapse-inverted";
+    return {};
+  }
+
+  // Pure function of the client width: no hysteresis, no hidden state, so the
+  // suite pins the threshold exactly (959 -> folded, 960 -> shown). This is the
+  // window's auto-fold POLICY; the renderer paints whatever Scene it is handed,
+  // because C27's glue suite builds a 900 px scene and expects pixels.
+  static bool SidebarFits(float windowWidth) {
+    const bool roomEnough = windowWidth >= kSidebarCollapseBelow;
+    return kSidebarCollapseInverted ? !roomEnough : roomEnough;
+  }
+  // Pixels the list content must leave free on the left while the rail shows.
+  static float SidebarInset(float windowWidth) {
+    return SidebarFits(windowWidth) ? kSidebarColumnWidth : 0.0f;
+  }
 
   struct Scene {
     std::vector<prism::ArchiveItem>* items = nullptr;
@@ -88,6 +130,11 @@ class GalleryRenderer {
     // C13 columns, persisted by the app (C27): 0/absent -> the module default.
     const prism::list::ColumnLayout* listColumns = nullptr;
     bool hasListColumns = false;
+    // C29: the explicit fold (the width fold is GalleryWindow's policy through
+    // SidebarFits) and the theme whose design tokens the rail resolves. Both
+    // default to the shipping values, so a pre-C29 scene is unchanged.
+    bool sidebarCollapsed = false;
+    prism::theme::Variant sidebarTheme = prism::theme::Variant::Midnight;
   };
 
   HRESULT Initialize() {
@@ -150,6 +197,23 @@ class GalleryRenderer {
                                     12.0f, L"en-US", small_.ReleaseAndGetAddressOf());
     if (caption_) caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     if (title_) title_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+
+    // C29: one recolourable brush for the rail (dozens of tiny runs; a brush per
+    // token would churn device state) and two single-line text formats -- a
+    // wrapped label would spill into its neighbour and be clipped mid-glyph.
+    hr = target->CreateSolidColorBrush(kTextPrimary, sidebarBrush_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                    13.0f, L"en-US", sidebarLabel_.ReleaseAndGetAddressOf());
+    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                    11.0f, L"en-US", sidebarSmall_.ReleaseAndGetAddressOf());
+    if (sidebarLabel_) {
+      sidebarLabel_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+      sidebarLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+    if (sidebarSmall_) sidebarSmall_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     return S_OK;
   }
 
@@ -157,11 +221,18 @@ class GalleryRenderer {
     const D2D1_SIZE_F size = target->GetSize();
     target->Clear(kBackdrop);
 
-    if (scene.viewport && scene.items) DrawGrid(target, scene, size);
-
+    // C29: the rail is part of the LAYOUT. While it is shown the list content
+    // starts AFTER the column, so folding it returns a full column of row width
+    // (asserted in pixels by win.sidebar_paint and the snapshot).
+    const float inset =
+        (SidebarShown(scene) && SidebarFits(size.width)) ? kSidebarColumnWidth : 0.0f;
+    // The grid is only drawn when a viewport AND its items exist: a scene may be
+    // a sidebar-only composition (the C27 glue suite and the C29 suites both
+    // build one), and DrawGrid dereferences the viewport. The pre-C29 version
+    // painted the grid twice in grid mode; the guard makes the call total.
     if (scene.listMode) {
-      DrawListMode(target, scene, size);
-    } else {
+      DrawListMode(target, scene, size, inset);
+    } else if (scene.viewport && scene.items) {
       DrawGrid(target, scene, size);
     }
     // NEGATIVE CONTROL (CONTRACTS D3): the rail is never painted, so the suite's
@@ -173,159 +244,437 @@ class GalleryRenderer {
   }
 
   // -------------------------------------------------------------------------
-  // The sidebar rail (card C12's commands, painted since C27).
+  // The sidebar rail (C12's commands; painted since C27, refined by C29).
   //
-  // Every primitive below consumes ONE command: nothing here decides where a row
-  // goes, which row is focused, or what the telemetry capsule says -- that is
-  // SidebarView::Build's job and its suite already proves it. What this function
-  // adds is the proof that the command list reaches PIXELS: the counters below
-  // are incremented per painted primitive, and the test asserts both them and a
-  // sampled pixel inside the panel.
+  // Everything below CONSUMES the command list: nothing here decides where a row
+  // goes, which row is focused or what the capsule says -- that is
+  // SidebarView::Build's job and C12's suite already proves it. What this code
+  // adds is the last mile:
+  //   * colours come from C15's design tokens (never raw literals),
+  //   * the scrolled content is clipped between contentTop and contentBottom,
+  //   * the telemetry capsule stays anchored to the viewport bottom,
+  //   * corners are the C15 SQUIRCLE (theme::SquircleField), not a circular arc,
+  //   * icon ids become vector glyphs, so a snapshot shows the real rail.
+  // The counters are the negative control's evidence (CONTRACTS D3): the mutant
+  // build never paints, so "the commands reached pixels" MUST go red.
   // -------------------------------------------------------------------------
-  void DrawSidebar(ID2D1RenderTarget* target, const Scene& scene, const D2D1_SIZE_F& size) {
-    if (scene.sidebar == nullptr) return;
-    const prism::win::sidebar::Layout& layout = *scene.sidebar;
-    if (layout.panel.Empty()) return;
-    const float panelLeft = layout.panel.left;
-    const float panelTop = layout.panel.top;
-    const float panelRight = layout.panel.right;
-    const float panelBottom = (std::min)(layout.panel.bottom, size.height);
-
-    for (const prism::win::sidebar::Command& command : layout.commands) {
-      if (command.kind == prism::win::sidebar::PrimKind::RowHit) continue;  // hit only
-      if (command.box.Empty()) continue;
-      // The rail is clipped to the client area: a pill anchored below a resized
-      // window must not paint over the title bar.
-      if (command.box.top >= panelBottom || command.box.bottom <= panelTop) continue;
-      const D2D1_RECT_F box = D2D1::RectF(command.box.left, command.box.top,
-                                         (std::min)(command.box.right, panelRight),
-                                         (std::min)(command.box.bottom, panelBottom));
-      ++dbgSidebarCommands;
-      switch (command.kind) {
-        case prism::win::sidebar::PrimKind::Panel: {
-          // Glass rail: a touch lighter than the backdrop, with a hairline edge
-          // on the side the content starts.
-          D2D1_COLOR_F rail = kBackdrop;
-          rail.r += 0.035f;
-          rail.g += 0.040f;
-          rail.b += 0.050f;
-          rail.a = 1.0f;
-          island_->SetColor(rail);
-          target->FillRectangle(box, island_.Get());
-          island_->SetColor(kIslandBorder);
-          target->FillRectangle(D2D1::RectF(panelRight - 1.0f, panelTop, panelRight, panelBottom),
-                                island_.Get());
-          island_->SetColor(kIslandFill);  // restore: the next primitive expects it
-          break;
-        }
-        case prism::win::sidebar::PrimKind::Selection: {
-          D2D1_COLOR_F fill = kAccent;
-          fill.a = 0.26f;
-          accent_->SetColor(fill);
-          target->FillRoundedRectangle(
-              D2D1::RoundedRect(box, 8.0f, 8.0f), accent_.Get());
-          accent_->SetColor(kAccent);
-          break;
-        }
-        case prism::win::sidebar::PrimKind::Separator: {
-          D2D1_COLOR_F line = kTextSecondary;
-          line.a = 0.35f;
-          islandBorder_->SetColor(line);
-          target->FillRectangle(D2D1::RectF(box.left, box.top, box.right, box.top + 1.0f),
-                                islandBorder_.Get());
-          islandBorder_->SetColor(kIslandBorder);
-          break;
-        }
-        case prism::win::sidebar::PrimKind::Glyph:
-        case prism::win::sidebar::PrimKind::Chevron:
-        case prism::win::sidebar::PrimKind::StatusIcon: {
-          // Vector icons are a later pass; the command id is drawn as a 2 px
-          // rounded mark in its token colour so a missing icon is visible in a
-          // snapshot instead of silently absent.
-          ID2D1Brush* brush = BrushFor(command.color, command.opacity);
-          if (brush == nullptr) break;
-          const float inset = 4.0f;
-          target->FillRoundedRectangle(
-              D2D1::RoundedRect(D2D1::RectF(box.left + inset, box.top + inset,
-                                            box.right - inset, box.bottom - inset),
-                                2.0f, 2.0f),
-              brush);
-          break;
-        }
-        case prism::win::sidebar::PrimKind::StatusPill: {
-          D2D1_COLOR_F fill = kCardFill;
-          fill.a = 0.85f;
-          card_->SetColor(fill);
-          target->FillRoundedRectangle(D2D1::RoundedRect(box, 12.0f, 12.0f), card_.Get());
-          card_->SetColor(kCardFill);
-          islandBorder_->SetColor(kIslandBorder);
-          target->DrawRoundedRectangle(D2D1::RoundedRect(box, 12.0f, 12.0f), islandBorder_.Get(),
-                                       1.0f);
-          break;
-        }
-        case prism::win::sidebar::PrimKind::RatioBar: {
-          ID2D1Brush* brush = BrushFor(command.color, command.opacity);
-          if (brush == nullptr) break;
-          target->FillRoundedRectangle(D2D1::RoundedRect(box, 1.5f, 1.5f), brush);
-          break;
-        }
-        case prism::win::sidebar::PrimKind::SectionLabel:
-        case prism::win::sidebar::PrimKind::EmptyState:
-        case prism::win::sidebar::PrimKind::Label:
-        case prism::win::sidebar::PrimKind::StatusText: {
-          if (command.text.empty()) break;
-          // Section labels are caps (design token 3.3) and ride the small
-          // format; everything else is a caption run inside its own box.
-          IDWriteTextFormat* format = command.kind == prism::win::sidebar::PrimKind::SectionLabel
-                                          ? small_.Get()
-                                          : caption_.Get();
-          ID2D1Brush* brush = BrushFor(command.color, command.opacity);
-          if (brush == nullptr) break;
-          ++dbgSidebarLabels;
-          DrawLabel(target, format, Utf8(command.text), box, brush);
-          break;
-        }
-        default:
-          break;
-      }
-      accent_->SetColor(kAccent);  // see BrushFor: no colour leaks between runs
-      // The rail's Own counters are what the negative control reads.
-      ++dbgSidebarPrimitives;
-    }
-    ++dbgSidebarPanels;
+  static bool SidebarShown(const Scene& scene) {
+    if (kSidebarPaintDisabled) return false;
+    return scene.sidebar != nullptr && !scene.sidebarCollapsed;
   }
 
-  // Token -> brush. The accent brush is restored after every command (see the
-  // loop), so a "locked" amber mark cannot leak into the next primitive.
-  ID2D1Brush* BrushFor(prism::win::sidebar::ColorToken token, float opacity) {
-    const float alpha = (std::max)(0.0f, (std::min)(1.0f, opacity));
+  static D2D1_COLOR_F ToD2d(const prism::theme::Rgba& c) {
+    D2D1_COLOR_F out;
+    out.r = c.r;
+    out.g = c.g;
+    out.b = c.b;
+    out.a = c.a;
+    return out;
+  }
+
+  // ColorToken -> concrete RGBA from the token table (C15). The rail's panel is
+  // the floating-island surface at near-opaque alpha, and the telemetry capsule
+  // is the recessed canvas pane, which is what makes the capsule legible on the
+  // panel instead of a same-colour box.
+  static prism::theme::Rgba TokenColor(prism::win::sidebar::ColorToken token,
+                                       prism::theme::Variant variant) {
+    using prism::theme::TokenId;
+    const auto color = [variant](TokenId id) {
+      return prism::theme::Lookup(id, variant).color;
+    };
+    const auto liquidFrom = [variant]() {
+      return prism::theme::Lookup(TokenId::AccentLiquidPrimary, variant).gradient.from;
+    };
     switch (token) {
-      case prism::win::sidebar::ColorToken::Panel: return island_.Get();
-      case prism::win::sidebar::ColorToken::SectionLabel:
-      case prism::win::sidebar::ColorToken::SecondaryText:
-      case prism::win::sidebar::ColorToken::Muted: {
-        D2D1_COLOR_F color = kTextSecondary;
-        color.a = alpha;
-        textSecondary_->SetColor(color);
-        return textSecondary_.Get();
+      case prism::win::sidebar::ColorToken::Panel: {
+        prism::theme::Rgba c = color(TokenId::SurfaceFloatingIsland);
+        c.a = 0.94f;
+        return c;
       }
-      case prism::win::sidebar::ColorToken::PrimaryText: return textPrimary_.Get();
+      case prism::win::sidebar::ColorToken::SectionLabel:
+        return color(TokenId::TextSecondary);
+      case prism::win::sidebar::ColorToken::PrimaryText:
+        return color(TokenId::TextPrimary);
+      case prism::win::sidebar::ColorToken::SecondaryText:
+        return color(TokenId::TextSecondary);
       case prism::win::sidebar::ColorToken::SelectedBackground: {
-        D2D1_COLOR_F color = kAccent;
-        color.a = 0.26f * alpha;
-        accent_->SetColor(color);
-        return accent_.Get();
+        prism::theme::Rgba c = liquidFrom();
+        c.a = 0.32f;
+        return c;
       }
       case prism::win::sidebar::ColorToken::Accent:
-        accent_->SetColor(kAccent);
-        return accent_.Get();
       case prism::win::sidebar::ColorToken::Locked: {
-        const D2D1_COLOR_F amber = {1.0f, 0.584f, 0.0f, 1.0f};
-        accent_->SetColor(amber);
-        return accent_.Get();
+        prism::theme::Rgba c = liquidFrom();
+        c.a = 1.0f;
+        return c;
+      }
+      case prism::win::sidebar::ColorToken::Muted: {
+        prism::theme::Rgba c = color(TokenId::TextSecondary);
+        c.a = 0.62f;
+        return c;
       }
     }
-    return nullptr;
+    return color(TokenId::TextPrimary);
+  }
+
+  // Rounded rectangle whose corners are the C15 SQUIRCLE (|x|^n + |y|^n = 1),
+  // not a circular arc: the boundary is solved against theme::SquircleField, so
+  // the exponent -- and its negative control -- stay owned by the token header.
+  // A hardcoded 4.2 here would be a second, silently divergent design source.
+  static HRESULT CreateSquircleRoundedRect(ID2D1RenderTarget* target,
+                                           const D2D1_RECT_F& rect, float radius,
+                                           ID2D1PathGeometry** out) {
+    ComPtr<ID2D1Factory> factory;
+    target->GetFactory(factory.ReleaseAndGetAddressOf());
+    ComPtr<ID2D1PathGeometry> path;
+    HRESULT hr = factory->CreatePathGeometry(path.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    ComPtr<ID2D1GeometrySink> sink;
+    hr = path->Open(sink.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    const float w = rect.right - rect.left;
+    const float h = rect.bottom - rect.top;
+    if (!(w > 0.0f) || !(h > 0.0f)) {
+      sink->Close();
+      return E_INVALIDARG;
+    }
+    const float r = (std::max)(0.0f, (std::min)(radius, (std::min)(w, h) * 0.5f));
+    constexpr int kCornerSegments = 6;
+    constexpr double kPi = 3.14159265358979323846;
+
+    // One point of a corner quadrant: direction (cos t, sin t), distance the
+    // root of the squircle field along it (bisection, 20 steps, 6 points per
+    // corner -- nothing at 60 Hz).
+    const auto cornerPoint = [&](float cx, float cy, float dx, float dy, double t) {
+      const double ct = std::cos(t);
+      const double st = std::sin(t);
+      double lo = 0.0, hi = 1.6;
+      for (int i = 0; i < 20 && r > 0.0f; ++i) {
+        const double mid = (lo + hi) * 0.5;
+        if (prism::theme::SquircleField(ct * mid * r, st * mid * r, r, r) <= 0.0) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      const double s = r > 0.0f ? (lo + hi) * 0.5 : 0.0;
+      return D2D1::Point2F(cx + dx * static_cast<float>(ct * s * r),
+                           cy + dy * static_cast<float>(st * s * r));
+    };
+
+    const float left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
+    sink->BeginFigure(D2D1::Point2F(left + r, top), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(right - r, top));
+    for (int i = 1; i <= kCornerSegments; ++i) {
+      const double t = (kPi * 0.5) * (1.0 - static_cast<double>(i) / kCornerSegments);
+      sink->AddLine(cornerPoint(right - r, top + r, 1.0f, -1.0f, t));
+    }
+    sink->AddLine(D2D1::Point2F(right, bottom - r));
+    for (int i = 1; i <= kCornerSegments; ++i) {
+      const double t = (kPi * 0.5) * (static_cast<double>(i) / kCornerSegments);
+      sink->AddLine(cornerPoint(right - r, bottom - r, 1.0f, 1.0f, t));
+    }
+    sink->AddLine(D2D1::Point2F(left + r, bottom));
+    for (int i = 1; i <= kCornerSegments; ++i) {
+      const double t = (kPi * 0.5) * (1.0 - static_cast<double>(i) / kCornerSegments);
+      sink->AddLine(cornerPoint(left + r, bottom - r, -1.0f, 1.0f, t));
+    }
+    sink->AddLine(D2D1::Point2F(left, top + r));
+    for (int i = 1; i <= kCornerSegments; ++i) {
+      const double t = (kPi * 0.5) * (static_cast<double>(i) / kCornerSegments);
+      sink->AddLine(cornerPoint(left + r, top + r, -1.0f, -1.0f, t));
+    }
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    hr = sink->Close();
+    if (FAILED(hr)) return hr;
+    *out = path.Detach();
+    return S_OK;
+  }
+
+  void FillSquircleRoundedRect(ID2D1RenderTarget* target, const D2D1_RECT_F& rect,
+                               float radius, ID2D1Brush* brush) {
+    ComPtr<ID2D1PathGeometry> geometry;
+    if (FAILED(CreateSquircleRoundedRect(target, rect, radius,
+                                         geometry.ReleaseAndGetAddressOf()))) {
+      // No path: a plain rectangle is still legible, and a failed paint must
+      // never abort the whole frame.
+      target->FillRectangle(rect, brush);
+      return;
+    }
+    target->FillGeometry(geometry.Get(), brush);
+  }
+
+  // Icon ids, not bitmaps (C12 contract): tiny vector geometry keeps the
+  // snapshot crisp and needs no asset pipeline at 16 px.
+  void DrawSidebarGlyph(ID2D1RenderTarget* target, const prism::win::sidebar::Box& box,
+                        std::string_view icon, const D2D1_COLOR_F& color) {
+    if (!sidebarBrush_ || box.Empty()) return;
+    sidebarBrush_->SetColor(color);
+    ID2D1Brush* brush = sidebarBrush_.Get();
+    const float l = box.left, t = box.top, r = box.right, b = box.bottom;
+    const float cx = (l + r) * 0.5f, cy = (t + b) * 0.5f;
+    const float w = r - l, h = b - t;
+
+    if (icon == "chevron-right" || icon == "chevron-down") {
+      if (icon == "chevron-right") {
+        target->DrawLine(D2D1::Point2F(l + w * 0.32f, t + h * 0.22f),
+                         D2D1::Point2F(l + w * 0.62f, cy), brush, 1.6f);
+        target->DrawLine(D2D1::Point2F(l + w * 0.62f, cy),
+                         D2D1::Point2F(l + w * 0.32f, b - h * 0.22f), brush, 1.6f);
+      } else {
+        target->DrawLine(D2D1::Point2F(l + w * 0.22f, t + h * 0.34f),
+                         D2D1::Point2F(cx, t + h * 0.66f), brush, 1.6f);
+        target->DrawLine(D2D1::Point2F(cx, t + h * 0.66f),
+                         D2D1::Point2F(r - w * 0.22f, t + h * 0.34f), brush, 1.6f);
+      }
+      return;
+    }
+    if (icon == "folder") {
+      target->FillRoundedRectangle(
+          D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.20f, l + w * 0.54f,
+                                        t + h * 0.40f), 1.5f, 1.5f), brush);
+      target->FillRoundedRectangle(
+          D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.30f, r - w * 0.10f,
+                                        b - h * 0.16f), 2.5f, 2.5f), brush);
+      return;
+    }
+    if (icon == "clock") {
+      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), w * 0.40f, h * 0.40f),
+                          brush, 1.4f);
+      target->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(cx, t + h * 0.24f), brush, 1.4f);
+      target->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(r - w * 0.24f, cy), brush, 1.4f);
+      return;
+    }
+    if (icon == "home") {
+      target->DrawLine(D2D1::Point2F(l + w * 0.10f, t + h * 0.52f),
+                       D2D1::Point2F(cx, t + h * 0.16f), brush, 1.5f);
+      target->DrawLine(D2D1::Point2F(cx, t + h * 0.16f),
+                       D2D1::Point2F(r - w * 0.10f, t + h * 0.52f), brush, 1.5f);
+      target->FillRoundedRectangle(
+          D2D1::RoundedRect(D2D1::RectF(l + w * 0.24f, t + h * 0.48f, r - w * 0.24f,
+                                        b - h * 0.12f), 1.5f, 1.5f), brush);
+      return;
+    }
+    if (icon == "download") {
+      target->DrawLine(D2D1::Point2F(cx, t + h * 0.14f), D2D1::Point2F(cx, t + h * 0.64f),
+                       brush, 1.5f);
+      target->DrawLine(D2D1::Point2F(cx - w * 0.22f, t + h * 0.44f),
+                       D2D1::Point2F(cx, t + h * 0.66f), brush, 1.5f);
+      target->DrawLine(D2D1::Point2F(cx + w * 0.22f, t + h * 0.44f),
+                       D2D1::Point2F(cx, t + h * 0.66f), brush, 1.5f);
+      target->FillRectangle(
+          D2D1::RectF(l + w * 0.18f, b - h * 0.18f, r - w * 0.18f, b - h * 0.10f), brush);
+      return;
+    }
+    if (icon == "star") {
+      const D2D1_POINT_2F north = D2D1::Point2F(cx, t + h * 0.10f);
+      const D2D1_POINT_2F east = D2D1::Point2F(r - w * 0.10f, cy);
+      const D2D1_POINT_2F south = D2D1::Point2F(cx, b - h * 0.10f);
+      const D2D1_POINT_2F west = D2D1::Point2F(l + w * 0.10f, cy);
+      target->DrawLine(north, east, brush, 1.5f);
+      target->DrawLine(east, south, brush, 1.5f);
+      target->DrawLine(south, west, brush, 1.5f);
+      target->DrawLine(west, north, brush, 1.5f);
+      return;
+    }
+    if (icon == "lock") {
+      target->FillRoundedRectangle(
+          D2D1::RoundedRect(D2D1::RectF(l + w * 0.24f, t + h * 0.46f, r - w * 0.24f,
+                                        b - h * 0.12f), 2.0f, 2.0f), brush);
+      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, t + h * 0.44f), w * 0.22f,
+                                        h * 0.26f), brush, 1.4f);
+      return;
+    }
+    if (icon == "bolt") {
+      target->DrawLine(D2D1::Point2F(r - w * 0.26f, t + h * 0.14f),
+                       D2D1::Point2F(l + w * 0.32f, cy), brush, 1.6f);
+      target->DrawLine(D2D1::Point2F(l + w * 0.32f, cy),
+                       D2D1::Point2F(r - w * 0.32f, cy), brush, 1.6f);
+      target->DrawLine(D2D1::Point2F(r - w * 0.32f, cy),
+                       D2D1::Point2F(l + w * 0.26f, b - h * 0.14f), brush, 1.6f);
+      return;
+    }
+    if (icon == "chart") {
+      const float heights[3] = {0.36f, 0.66f, 0.90f};
+      for (int i = 0; i < 3; ++i) {
+        const float x = l + w * (0.16f + 0.28f * static_cast<float>(i));
+        const float top = b - h * 0.14f - (h * 0.68f) * heights[i];
+        target->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(x, top, x + w * 0.18f, b - h * 0.14f), 1.0f,
+                              1.0f), brush);
+      }
+      return;
+    }
+    if (icon == "empty") {
+      target->DrawRoundedRectangle(
+          D2D1::RoundedRect(D2D1::RectF(l + w * 0.18f, t + h * 0.18f, r - w * 0.18f,
+                                        b - h * 0.18f), 2.5f, 2.5f), brush, 1.4f);
+      return;
+    }
+    // Unknown id: a token-driven plate, never an invisible row.
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(l + w * 0.20f, t + h * 0.20f, r - w * 0.20f,
+                                      b - h * 0.20f), 2.5f, 2.5f), brush);
+  }
+
+  static void DrawSidebarText(ID2D1RenderTarget* target, IDWriteTextFormat* format,
+                              const std::string& text, const D2D1_RECT_F& box,
+                              ID2D1Brush* brush, float nudgeY, float nudgeX = 0.0f) {
+    if (!format || text.empty()) return;
+    const std::wstring wide = Utf8(text);
+    if (wide.empty()) return;
+    target->DrawText(wide.c_str(), static_cast<UINT32>(wide.size()), format,
+                     D2D1::RectF(box.left + nudgeX, box.top + nudgeY, box.right,
+                                 box.bottom + nudgeY),
+                     brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+  }
+
+  static bool IsAnchoredSidebarCommand(prism::win::sidebar::PrimKind kind) {
+    using prism::win::sidebar::PrimKind;
+    switch (kind) {
+      case PrimKind::Panel:
+      case PrimKind::Separator:
+      case PrimKind::StatusPill:
+      case PrimKind::StatusIcon:
+      case PrimKind::StatusText:
+      case PrimKind::RatioBar:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  void PaintSidebarCommand(ID2D1RenderTarget* target,
+                           const prism::win::sidebar::Command& command,
+                           prism::theme::Variant variant) {
+    using prism::win::sidebar::PrimKind;
+    if (!sidebarBrush_) return;
+    const D2D1_RECT_F box = D2D1::RectF(command.box.left, command.box.top,
+                                        command.box.right, command.box.bottom);
+    sidebarBrush_->SetColor(ToD2d(TokenColor(command.color, variant)));
+    switch (command.kind) {
+      case PrimKind::Panel:
+      case PrimKind::RowHit:
+        return;  // the panel is painted up front; a hit region paints nothing
+      case PrimKind::SectionLabel:
+        ++dbgSidebarLabels;
+        DrawSidebarText(target, sidebarSmall_.Get(), command.text, box,
+                        sidebarBrush_.Get(), 2.0f);
+        return;
+      case PrimKind::Selection:
+        // The focus pill: squircle radius 8 (blueprint 3.2 row highlight).
+        FillSquircleRoundedRect(target, box, 8.0f, sidebarBrush_.Get());
+        return;
+      case PrimKind::Glyph:
+      case PrimKind::Chevron:
+      case PrimKind::StatusIcon:
+        DrawSidebarGlyph(target, command.box, command.icon,
+                         ToD2d(TokenColor(command.color, variant)));
+        return;
+      case PrimKind::Label:
+      case PrimKind::EmptyState:
+        ++dbgSidebarLabels;
+        DrawSidebarText(target, sidebarLabel_.Get(), command.text, box,
+                        sidebarBrush_.Get(), 6.0f, 2.0f);
+        return;
+      case PrimKind::Separator:
+        target->FillRectangle(box, sidebarBrush_.Get());
+        return;
+      case PrimKind::StatusPill: {
+        // A RECESSED pane, not a second floating one: the canvas surface over
+        // the column's island fill. That is also what makes the capsule's
+        // squircle corner legible instead of a same-colour rectangle.
+        prism::theme::Rgba pane =
+            prism::theme::Lookup(prism::theme::TokenId::SurfaceCanvasBase, variant).color;
+        pane.a = 0.95f;
+        sidebarBrush_->SetColor(ToD2d(pane));
+        FillSquircleRoundedRect(target, box, 14.0f, sidebarBrush_.Get());
+        prism::theme::Rgba rim =
+            prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant)
+                .gradient.from;
+        rim.a = 0.16f;
+        sidebarBrush_->SetColor(ToD2d(rim));
+        ComPtr<ID2D1PathGeometry> outline;
+        if (SUCCEEDED(CreateSquircleRoundedRect(target, box, 14.0f,
+                                                outline.ReleaseAndGetAddressOf()))) {
+          target->DrawGeometry(outline.Get(), sidebarBrush_.Get(), 1.0f);
+        }
+        return;
+      }
+      case PrimKind::StatusText:
+        ++dbgSidebarLabels;
+        DrawSidebarText(target, sidebarSmall_.Get(), command.text, box,
+                        sidebarBrush_.Get(), 3.0f, 2.0f);
+        return;
+      case PrimKind::RatioBar:
+        target->FillRoundedRectangle(D2D1::RoundedRect(box, 1.5f, 1.5f),
+                                     sidebarBrush_.Get());
+        return;
+    }
+  }
+
+  void DrawSidebar(ID2D1RenderTarget* target, const Scene& scene,
+                   const D2D1_SIZE_F& size) {
+    if (!SidebarShown(scene)) {
+      if (scene.sidebar != nullptr) ++dbgSidebarCollapsed;
+      return;
+    }
+    if (!sidebarBrush_) return;
+    const prism::win::sidebar::Layout& layout = *scene.sidebar;
+    const prism::theme::Variant variant = scene.sidebarTheme;
+    using prism::win::sidebar::ColorToken;
+    const float left = layout.panel.left;
+    const float right = layout.panel.right;
+    const float top = (std::max)(layout.panel.top, 0.0f);
+    const float bottom = (std::min)(layout.panel.bottom, size.height);
+    if (right <= left || bottom <= top) return;
+
+    // 1. the column itself, plus the specular hairline that separates it from
+    //    the content without a hard black line.
+    sidebarBrush_->SetColor(ToD2d(TokenColor(ColorToken::Panel, variant)));
+    target->FillRectangle(D2D1::RectF(left, top, right, bottom), sidebarBrush_.Get());
+    prism::theme::Rgba rim =
+        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant)
+            .gradient.from;
+    rim.a = 0.22f;
+    sidebarBrush_->SetColor(ToD2d(rim));
+    target->FillRectangle(D2D1::RectF(right - 1.0f, top, right, bottom),
+                          sidebarBrush_.Get());
+    ++dbgSidebarPanels;
+
+    // 2. the scrolled content, clipped to [contentTop, contentBottom]. The
+    //    layout already CULLED what is fully outside (C12); this clip is what
+    //    makes a partially visible row slide under the header and behind the
+    //    anchored capsule instead of bleeding over them.
+    const D2D1_RECT_F contentClip =
+        D2D1::RectF(left, layout.contentTop, right, layout.contentBottom);
+    bool clipped = false;
+    for (const prism::win::sidebar::Command& command : layout.commands) {
+      if (command.kind == prism::win::sidebar::PrimKind::RowHit) continue;  // hit only
+      if (command.box.top >= bottom || command.box.bottom <= top) {
+        ++dbgSidebarClipped;
+        continue;  // outside the client area entirely
+      }
+      ++dbgSidebarCommands;
+      if (!IsAnchoredSidebarCommand(command.kind)) {
+        if (command.box.bottom <= contentClip.top ||
+            command.box.top >= contentClip.bottom) {
+          ++dbgSidebarClipped;
+          continue;  // outside the scroll window: nothing to paint
+        }
+        if (!clipped) {
+          target->PushAxisAlignedClip(contentClip, D2D1_ANTIALIAS_MODE_ALIASED);
+          clipped = true;
+        }
+      } else if (clipped) {
+        target->PopAxisAlignedClip();
+        clipped = false;
+      }
+      PaintSidebarCommand(target, command, variant);
+      ++dbgSidebarPrimitives;
+      ++dbgSidebarPainted;
+    }
+    if (clipped) target->PopAxisAlignedClip();
   }
 
  private:
@@ -551,7 +900,7 @@ class GalleryRenderer {
   // The main-window file list (blueprint ch. 3.2): 名称 | 原始大小 | 压缩后 |
   // 压缩率, 36px virtualized rows, semantic micro-capsule bars, folders first.
   void DrawListMode(ID2D1RenderTarget* target, const Scene& scene,
-                    const D2D1_SIZE_F& size) {
+                    const D2D1_SIZE_F& size, float inset) {
     if (!scene.listItems) return;
     const auto& rows = *scene.listItems;
     // The app persists the user's column geometry (C27); absent means the module
@@ -566,7 +915,9 @@ class GalleryRenderer {
         static_cast<uint32_t>((std::max)(0.0f, footerY - contentTop));
 
     // Header
-    DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^", D2D1::RectF(24.0f, headerY,
+    // `inset` is the rail's column (C29): every LEFT-anchored edge moves with
+    // it while the right-anchored columns stay put, so no column shifts.
+    DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^", D2D1::RectF(24.0f + inset, headerY,
                                                 cols.sizeX(size.width) - 12.0f,
                                                 headerY + 26.0f), textSecondary_.Get());
     DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
@@ -588,7 +939,8 @@ class GalleryRenderer {
       if (static_cast<int>(i) == scene.selectedRow) {
         // Selection highlight: G2 squircle R=10, accent fluid fill.
         D2D1_ROUNDED_RECT sel =
-            D2D1::RoundedRect(D2D1::RectF(16.0f, top + 3.0f, size.width - 16.0f, bottom - 3.0f),
+            D2D1::RoundedRect(D2D1::RectF(16.0f + inset, top + 3.0f, size.width - 16.0f,
+                                          bottom - 3.0f),
                               10.0f, 10.0f);
         D2D1_COLOR_F selColor = kAccent;
         selColor.a = 0.26f;
@@ -600,16 +952,16 @@ class GalleryRenderer {
       const std::wstring name = Utf8(row.name);
       if (row.isDir) {
         const D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
-            D2D1::RectF(28.0f, top + 9.0f, 60.0f, top + 27.0f), 5.0f, 5.0f);
+            D2D1::RectF(28.0f + inset, top + 9.0f, 60.0f + inset, top + 27.0f), 5.0f, 5.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
-        DrawLabel(target, caption_.Get(), name, D2D1::RectF(70.0f, top + 5.0f,
+        DrawLabel(target, caption_.Get(), name, D2D1::RectF(70.0f + inset, top + 5.0f,
                       cols.sizeX(size.width) - 80.0f, bottom - 4.0f), textPrimary_.Get());
         DrawTrailingLabel(target, L"--", size.width - cols.sizeW - cols.packedW - cols.ratioW + 6,
                           top + 6.0f, cols.sizeW - 18, textSecondary_.Get());
         DrawTrailingLabel(target, L"--", size.width - cols.packedW - cols.ratioW + 6,
                           top + 6.0f, cols.packedW - 18, textSecondary_.Get());
       } else {
-        DrawLabel(target, caption_.Get(), name, D2D1::RectF(44.0f, top + 5.0f,
+        DrawLabel(target, caption_.Get(), name, D2D1::RectF(44.0f + inset, top + 5.0f,
                       cols.sizeX(size.width) - 52.0f, bottom - 4.0f), textPrimary_.Get());
         const std::wstring sizeText = Utf8(prism::list::FormatBytes(row.size));
         const std::wstring packedText = Utf8(prism::list::FormatBytes(row.packedSize));
@@ -772,6 +1124,9 @@ class GalleryRenderer {
   ComPtr<IDWriteFactory> writeFactory_;
   ComPtr<ID2D1SolidColorBrush> accent_, tile_, tileBorder_, island_, card_, islandBorder_;
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
+  // C29 sidebar: one recolourable brush + the two single-line text formats.
+  ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
+  ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
   std::unordered_map<uint32_t, ComPtr<ID2D1Bitmap>> thumbBitmaps_;
   uint64_t thumbVersion_ = 0;
@@ -790,6 +1145,11 @@ class GalleryRenderer {
   int dbgSidebarPrimitives = 0;
   int dbgSidebarLabels = 0;
   int dbgSidebarPanels = 0;
+  // C29 additions: primitives that reached the device, commands culled by the
+  // scroll window, and how often the rail was folded away.
+  int dbgSidebarPainted = 0;
+  int dbgSidebarClipped = 0;
+  int dbgSidebarCollapsed = 0;
 
  private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;

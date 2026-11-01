@@ -217,6 +217,62 @@ bool WriteBgraPng(IWICImagingFactory* wic, const char* outDir, const wchar_t* fi
          SUCCEEDED(encoder->Commit());
 }
 
+// Read a rendered WIC bitmap back into BGRA words (the sidebar assertions
+// below compare frames pixel by pixel; a PNG comparison would need a decoder).
+bool ReadWicPixels(IWICBitmap* bitmap, UINT32 width, UINT32 height,
+                   std::vector<UINT32>* out) {
+  WICRect rc{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
+  ComPtr<IWICBitmapLock> lock;
+  if (FAILED(bitmap->Lock(&rc, WICBitmapLockRead, lock.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  UINT stride = 0;
+  UINT size = 0;
+  BYTE* data = nullptr;
+  if (FAILED(lock->GetStride(&stride)) || FAILED(lock->GetDataPointer(&size, &data))) {
+    return false;
+  }
+  out->resize(static_cast<size_t>(width) * height);
+  for (UINT32 y = 0; y < height; ++y) {
+    std::memcpy(out->data() + static_cast<size_t>(y) * width,
+                data + static_cast<size_t>(y) * stride, static_cast<size_t>(width) * 4);
+  }
+  return true;
+}
+
+// Mean per-channel difference of two frames over a rectangle.
+double MeanDiffRect(const std::vector<UINT32>& a, const std::vector<UINT32>& b, UINT32 width,
+                    int left, int top, int right, int bottom) {
+  double sum = 0.0;
+  int count = 0;
+  for (int y = top; y < bottom; ++y) {
+    for (int x = left; x < right; ++x) {
+      const size_t i = static_cast<size_t>(y) * width + static_cast<size_t>(x);
+      for (int shift = 0; shift <= 16; shift += 8) {
+        sum += std::abs(static_cast<int>((a[i] >> shift) & 0xFFu) -
+                        static_cast<int>((b[i] >> shift) & 0xFFu));
+      }
+      ++count;
+    }
+  }
+  return count > 0 ? sum / (count * 3.0) : 0.0;
+}
+
+// Pixels that belong to the selection pill (blue-dominant accent over glass).
+int CountAccent(const std::vector<UINT32>& pixels, UINT32 width, int left, int top,
+                int right, int bottom) {
+  int count = 0;
+  for (int y = top; y < bottom; ++y) {
+    for (int x = left; x < right; ++x) {
+      const UINT32 value = pixels[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
+      const int blue = static_cast<int>(value & 0xFFu);
+      const int red = static_cast<int>((value >> 16) & 0xFFu);
+      if (blue - red >= 40) ++count;
+    }
+  }
+  return count;
+}
+
 // Mean absolute per-channel difference over a pixel predicate.
 template <typename Predicate>
 double MeanAbsDiff(const std::vector<UINT32>& a, const std::vector<UINT32>& b, Predicate inside,
@@ -498,7 +554,8 @@ int main(int argc, char** argv) {
   constexpr D2D1_PIXEL_FORMAT kPix = {DXGI_FORMAT_B8G8R8A8_UNORM,
                                       D2D1_ALPHA_MODE_PREMULTIPLIED};
 
-  const auto renderScene = [&](const GalleryRenderer::Scene& scene, const wchar_t* fileName) {
+  const auto renderScene = [&](const GalleryRenderer::Scene& scene, const wchar_t* fileName,
+                               std::vector<UINT32>* outPixels = nullptr) {
     GalleryRenderer renderer;
     if (FAILED(renderer.Initialize())) {
       std::puts("SKIP: renderer init");
@@ -532,6 +589,10 @@ int main(int argc, char** argv) {
     if (FAILED(target->EndDraw())) {
       std::puts("SKIP: EndDraw");
       return;
+    }
+    if (outPixels != nullptr && !ReadWicPixels(bitmap.Get(), kW, kH, outPixels)) {
+      std::puts("FAIL: the sidebar assertions need the rendered pixels");
+      outPixels->clear();
     }
 
     wchar_t path[MAX_PATH];
@@ -700,6 +761,222 @@ int main(int argc, char** argv) {
     sceneList.selectedRow = 4;
     sceneList.breadcrumb = L"Design_Assets_v4.7z  |  7 items";
     renderScene(sceneList, L"prism_list.png");
+
+    // ---------------------------------------------------------------
+    // Scene 5 (card C29): the SIDEBAR, painted from C12's command list.
+    // Until this card the sidebar had a model and a layout and no pixels; the
+    // snapshot is the design-review evidence AND a pixel assertion, so "the
+    // command list is consumed" is not a claim but a measurement.
+    // ---------------------------------------------------------------
+    // The sidebar tree lists FOLDERS (the blueprint's tree never lists files),
+    // so the model needs a catalog with real folder rows: focus index 1 and 3
+    // below are two different tree rows, which is what the pill assertion needs.
+    std::vector<ArchiveItem> sidebarCatalog;
+    sidebarCatalog.push_back(MakeItem("Design_Assets/", 0, 0, true));
+    sidebarCatalog.push_back(MakeItem("Design_Assets/01_Brand/", 1, 0, true));
+    sidebarCatalog.push_back(MakeItem("Design_Assets/02_UI_Kit/", 2, 0, true));
+    for (const auto& item : real) sidebarCatalog.push_back(item);
+    prism::sidebar::Model model(&sidebarCatalog);
+    model.SetArchiveName("Design_Assets_v4.7z");
+    model.SetFavorites({
+        prism::sidebar::Favorite{"Desktop", "C:/Users/designer/Desktop", "home"},
+        prism::sidebar::Favorite{"Downloads", "C:/Users/designer/Downloads", "download"},
+    });
+    model.PushRecent("D:/Work/Design_Assets.7z", 500);
+    prism::sidebar::ArchiveInfo archiveInfo;
+    archiveInfo.method = "LZMA2";
+    archiveInfo.dictionaryBytes = 64ull << 20;
+    archiveInfo.encryption = prism::sidebar::Encryption::Aes256;
+    model.SetArchiveInfo(archiveInfo);
+    model.SetFocus(prism::sidebar::FocusTarget{prism::sidebar::Section::Tree, 1});
+
+    prism::win::sidebar::Metrics sidebarMetrics;
+    sidebarMetrics.viewportTop = 0.0f;
+    sidebarMetrics.viewportBottom = static_cast<float>(kH);
+    const prism::win::sidebar::Layout sidebarLayout =
+        prism::win::sidebar::Build(model, sidebarMetrics);
+
+    GalleryRenderer::Scene sceneSidebar;
+    sceneSidebar.listMode = true;
+    sceneSidebar.listItems = &rows;
+    sceneSidebar.selectedRow = 4;
+    sceneSidebar.breadcrumb = L"Design_Assets_v4.7z  |  7 items  |  C29 sidebar";
+    sceneSidebar.sidebar = &sidebarLayout;
+
+    std::vector<UINT32> frameSidebar;
+    renderScene(sceneSidebar, L"prism_sidebar.png", &frameSidebar);
+
+    GalleryRenderer::Scene sceneNoSidebar = sceneSidebar;
+    sceneNoSidebar.sidebar = nullptr;
+    std::vector<UINT32> frameNoSidebar;
+    renderScene(sceneNoSidebar, L"prism_sidebar_off.png", &frameNoSidebar);
+
+    // Leak check pair: the SAME frame without the list, once with and once
+    // without the column. Every pixel right of the column must be identical --
+    // that is the "the sidebar does not paint over the content" invariant,
+    // measured without the list's own (legitimate) inset shift in the way.
+    GalleryRenderer::Scene panelOnly = sceneSidebar;
+    panelOnly.listMode = true;  // the sidebar is list-mode chrome
+    panelOnly.listItems = nullptr;
+    panelOnly.selectedRow = -1;
+    std::vector<UINT32> framePanelOnly;
+    renderScene(panelOnly, L"prism_sidebar_panel.png", &framePanelOnly);
+    GalleryRenderer::Scene blank = panelOnly;
+    blank.sidebar = nullptr;
+    std::vector<UINT32> frameBlank;
+    renderScene(blank, L"prism_sidebar_blank.png", &frameBlank);
+
+    // The focus pill moves to a different tree row: only that row may change.
+    GalleryRenderer::Scene sceneOtherFocus = sceneSidebar;
+    model.SetFocus(prism::sidebar::FocusTarget{prism::sidebar::Section::Tree, 3});
+    const prism::win::sidebar::Layout otherFocusLayout =
+        prism::win::sidebar::Build(model, sidebarMetrics);
+    sceneOtherFocus.sidebar = &otherFocusLayout;
+    std::vector<UINT32> frameOtherFocus;
+    renderScene(sceneOtherFocus, L"prism_sidebar_focus.png", &frameOtherFocus);
+    model.SetFocus(prism::sidebar::FocusTarget{prism::sidebar::Section::Tree, 1});
+
+    // ... and the fold: same scene, one flag, the list gets a column of width.
+    GalleryRenderer::Scene sceneFolded = sceneSidebar;
+    sceneFolded.sidebarCollapsed = true;
+    std::vector<UINT32> frameFolded;
+    renderScene(sceneFolded, L"prism_sidebar_collapsed.png", &frameFolded);
+
+    int sidebarFailures = 0;
+    constexpr int kColumnRight = 236;  // GalleryRenderer::kSidebarColumnWidth
+    const int selectedRowTop = 104 + 4 * 36;
+    const int selectedRowBottom = selectedRowTop + 36;
+    const auto selectionBox = [](const prism::win::sidebar::Layout& layout,
+                                prism::win::sidebar::Box* out) {
+      for (const auto& command : layout.commands) {
+        if (command.kind != prism::win::sidebar::PrimKind::Selection) continue;
+        *out = command.box;
+        return true;
+      }
+      return false;
+    };
+    prism::win::sidebar::Box pillBox{};
+    prism::win::sidebar::Box otherPillBox{};
+    const bool focusPillFound = selectionBox(sidebarLayout, &pillBox);
+    const bool otherPillFound = selectionBox(otherFocusLayout, &otherPillBox);
+    const int pillLeft = static_cast<int>(pillBox.left);
+    const int pillRight = static_cast<int>(pillBox.right);
+    const int pillTop = static_cast<int>(pillBox.top);
+    const int pillBottom = static_cast<int>(pillBox.bottom);
+    if (frameSidebar.empty() || frameNoSidebar.empty() || frameOtherFocus.empty() ||
+        frameFolded.empty()) {
+      std::puts("FAIL: sidebar frames were not rendered");
+      ++sidebarFailures;
+    } else {
+      // 1. The column paints its surface inside the panel box and NOTHING to the
+      //    right of it (the list is untouched by the sidebar's presence).
+      const double columnDiff =
+          MeanDiffRect(frameSidebar, frameNoSidebar, kW, 4, 90, kColumnRight - 4, 700);
+      const double leakDiff =
+          MeanDiffRect(framePanelOnly, frameBlank, kW, kColumnRight + 2, 90, 1500, 700);
+      int differingPixels = 0;
+      for (int y = 90; y < 700; ++y) {
+        for (int x = 4; x < kColumnRight - 4; ++x) {
+          const size_t i = static_cast<size_t>(y) * kW + static_cast<size_t>(x);
+          if (frameSidebar[i] != frameNoSidebar[i]) ++differingPixels;
+        }
+      }
+      std::printf("SIDEBAR: columnDiff=%.2f leakDiff=%.2f differingPixels=%d focusPill=%d\n",
+                  columnDiff, leakDiff, differingPixels, focusPillFound ? 1 : 0);
+      if (columnDiff < 8.0) {
+        std::printf("FAIL: the sidebar column did not change its region (columnDiff=%.2f)\n",
+                    columnDiff);
+        ++sidebarFailures;
+      }
+      if (differingPixels < 4000) {
+        std::printf("FAIL: only %d pixels changed inside the column\n", differingPixels);
+        ++sidebarFailures;
+      }
+      if (leakDiff > 0.001) {
+        std::printf("FAIL: the sidebar painted right of its column (leakDiff=%.2f)\n",
+                    leakDiff);
+        ++sidebarFailures;
+      }
+
+      // 2. The keyboard focus pill is a real colour difference inside its row,
+      //    and only there.
+      if (!focusPillFound) {
+        std::puts("FAIL: the layout emitted no Selection command for the focused row");
+        ++sidebarFailures;
+      } else {
+        const double pillDiff = MeanDiffRect(frameSidebar, frameOtherFocus, kW, pillLeft,
+                                             pillTop, pillRight, pillBottom);
+        // Locality: outside BOTH pills (plus a 2 px antialias margin) the two
+        // frames must be BIT-identical -- the highlight may not repaint
+        // neighbouring rows, the column or the list.
+        const auto inner = [](const prism::win::sidebar::Box& box, int x, int y) {
+          return x >= static_cast<int>(box.left) - 2 && x <= static_cast<int>(box.right) + 2 &&
+                 y >= static_cast<int>(box.top) - 2 && y <= static_cast<int>(box.bottom) + 2;
+        };
+        int outsideDiff = 0;
+        for (int y = 0; y < static_cast<int>(kH); ++y) {
+          for (int x = 0; x < static_cast<int>(kW); ++x) {
+            if (inner(pillBox, x, y) || inner(otherPillBox, x, y)) continue;
+            const size_t i = static_cast<size_t>(y) * kW + static_cast<size_t>(x);
+            if (frameSidebar[i] != frameOtherFocus[i]) ++outsideDiff;
+          }
+        }
+        std::printf("SIDEBAR: focusPillDiff=%.2f outsidePillPixels=%d otherPill=%d\n", pillDiff,
+                    outsideDiff, otherPillFound ? 1 : 0);
+        if (pillDiff < 6.0) {
+          std::printf("FAIL: the focused row is not highlighted (diff=%.2f)\n", pillDiff);
+          ++sidebarFailures;
+        }
+        if (outsideDiff != 0) {
+          std::printf("FAIL: the highlight is not local (%d pixels changed outside the pill)\n",
+                      outsideDiff);
+          ++sidebarFailures;
+        }
+      }
+
+      // 3. Folded: the list starts at the 16 px inset instead of after the
+      //    column -- a full 236 px of extra row width, measured in pixels.
+      const int accentLeftExpanded =
+          CountAccent(frameSidebar, kW, 16, selectedRowTop + 2, kColumnRight + 4,
+                      selectedRowBottom - 2);
+      const int accentLeftFolded =
+          CountAccent(frameFolded, kW, 16, selectedRowTop + 2, kColumnRight + 4,
+                      selectedRowBottom - 2);
+      const int accentRightExpanded =
+          CountAccent(frameSidebar, kW, kColumnRight + 4, selectedRowTop + 2, 1400,
+                      selectedRowBottom - 2);
+      size_t foldedRightEdge = 0;
+      for (int y = selectedRowTop + 2; y < selectedRowBottom - 2; ++y) {
+        for (int x = static_cast<int>(foldedRightEdge); x < 1400; ++x) {
+          const UINT32 value = frameFolded[static_cast<size_t>(y) * kW + x];
+          if (static_cast<int>(value & 0xFFu) - static_cast<int>((value >> 16) & 0xFFu) >= 40) {
+            foldedRightEdge = static_cast<size_t>(x);
+          }
+        }
+      }
+      (void)foldedRightEdge;
+      std::printf("SIDEBAR: accent before column expanded=%d folded=%d rightOfColumn=%d\n",
+                  accentLeftExpanded, accentLeftFolded, accentRightExpanded);
+      if (accentLeftExpanded != 0) {
+        std::printf("FAIL: the list painted inside the sidebar column (%d accent pixels)\n",
+                    accentLeftExpanded);
+        ++sidebarFailures;
+      }
+      if (accentLeftFolded < 200) {
+        std::printf("FAIL: the folded list did not reclaim the column (%d accent pixels)\n",
+                    accentLeftFolded);
+        ++sidebarFailures;
+      }
+      if (accentRightExpanded < 2000) {
+        std::printf("FAIL: the expanded selection pill is missing (%d accent pixels)\n",
+                    accentRightExpanded);
+        ++sidebarFailures;
+      }
+    }
+    if (sidebarFailures != 0) {
+      std::printf("FAIL: sidebar pixel assertions: %d failure(s)\n", sidebarFailures);
+      return 1;
+    }
   }
 
   // The Liquid Glass optics, pixel-asserted (see VerifyGlassOptics).

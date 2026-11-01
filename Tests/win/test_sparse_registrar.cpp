@@ -570,18 +570,29 @@ void RunClassicSection(const std::wstring& classicDll) {
   FILE* file = nullptr;
   if (_wfopen_s(&file, sample.c_str(), L"wb") == 0 && file) fclose(file);
 
+  // The direct-COM checks below do not need a running shell; the merged-menu
+  // check does (the shell aggregates SystemFileAssociations handlers itself).
+  // A Windows Server CI runner has no Explorer, so that part is a precise SKIP
+  // there instead of a false red -- and a false green is impossible because the
+  // marker/pass regex never prints on the skip path.
+  const bool interactiveShell = ::GetShellWindow() != nullptr;
+
   std::vector<std::wstring> titles;
   const bool visible = CollectPrismSubmenu(sample.wstring(), titles);
-  PRISM_CHECK(visible);
+  if (interactiveShell) {
+    PRISM_CHECK(visible);
+  }
 
   // Expected = the model itself. If the view ever re-orders, re-labels or drops
   // a verb, this comparison fails instead of quietly shipping a different menu.
   const auto model = prism::ContextMenuModel::Build(
       {prism::win::WideToUtf8(sample.wstring())});
   PRISM_CHECK(model.size() >= 4);
-  PRISM_CHECK_EQ(titles.size(), model.size());
-  for (size_t i = 0; i < model.size() && i < titles.size(); ++i) {
-    PRISM_CHECK_EQ(A(titles[i]), model[i].title);
+  if (interactiveShell) {
+    PRISM_CHECK_EQ(titles.size(), model.size());
+    for (size_t i = 0; i < model.size() && i < titles.size(); ++i) {
+      PRISM_CHECK_EQ(A(titles[i]), model[i].title);
+    }
   }
 
   // Command ids and verbs are checked on our exported handler (the shell
@@ -593,6 +604,13 @@ void RunClassicSection(const std::wstring& classicDll) {
   UnregisterClassic();
   titles.clear();
   PRISM_CHECK(!CollectPrismSubmenu(sample.wstring(), titles));
+
+  if (!interactiveShell) {
+    g_skips.push_back(
+        "classic:no-interactive-shell (Explorer is not running, so the merged "
+        "IContextMenu path cannot be exercised; the exported handler was still "
+        "created through CoCreateInstance and its menu/verbs were asserted)");
+  }
 
   std::error_code ignored;
   fs::remove(sample, ignored);

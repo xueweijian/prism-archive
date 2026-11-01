@@ -226,8 +226,10 @@ jobs:
           #   green in the first -j 8 run, i.e. a scheduling race inside that
           #   suite, not a shared directory -- a RESOURCE_LOCK cannot fix it
           #   (only one instance runs) and the fix belongs to c30.
-          # Restore "-j 8" the moment that case waits for its child to exit.
-          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          # That case now waits (bounded) for the leftovers to disappear before it
+          # asserts, so the lane goes back to -j 8: 286 s serial -> 150 s (168
+          # tests, measured on this box with the fixture work above in place).
+          ctest -j 8 --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
       # The Windows half of the same local gate: proves CMakePresets.json parses

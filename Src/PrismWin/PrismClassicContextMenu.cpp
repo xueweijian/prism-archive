@@ -1,12 +1,23 @@
 // PrismArchive -- PrismWin
-// Win10 classic shell extension (blueprint ch. 4.1, M2 compat layer).
+// Win10 classic shell extension: IShellExtInit + IContextMenu (blueprint ch. 4.1,
+// M2 compat layer).
 //
 // Win11 uses IExplorerCommand + the MSIX sparse package (PrismShellCommand.cpp);
 // Win10 still needs the old IContextMenu / IShellExtInit COM contract. Both
 // render the SAME PrismCore ContextMenuModel -- this file is a view, not a brain.
 //
-// Compile-checked on windows-latest CI; full behaviour needs a shell host, so
-// the logic it renders is unit-tested in PrismCore instead.
+// Registration for this DLL is per-user HKCU and needs no package identity:
+// tools/msix/register-classic.ps1 writes the CLSID + the ContextMenuHandlers
+// entry c3's installer calls. Clients/installer must use the CLSID declared in
+// SparsePackageRegistrar.hpp -- that header is the single source of truth and
+// Tests/win/test_sparse_registrar.cpp cross-checks it against the manifest.
+//
+// Contract notes that cost real debugging time:
+//  * QueryContextMenu returns the number of menu IDs consumed, and must never
+//    reserve an ID >= idCmdLast (the shell reuses that range for "Open with").
+//  * InvokeCommand's lpVerb is an OFFSET from idCmdFirst, not our verb string.
+//  * The selection lives in an STGMEDIUM that WE own: it must be released, and
+//    it must not be a process-wide static (two Explorer windows would share it).
 #include <windows.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -18,130 +29,174 @@
 
 #include "../PrismCore/ContextMenuModel.hpp"
 #include "PrismEngineBridge.hpp"  // WideToUtf8 / Utf8ToWide
+#include "SparsePackageRegistrar.hpp"
 
 using namespace Microsoft::WRL;
 
-namespace {
-// Address anchor for GetModuleHandleExW(FROM_ADDRESS): member function
-// pointers cannot be reinterpreted as LPCWSTR, free function pointers can.
-void ModuleAnchor() {}
-}  // namespace
-
 namespace prism::win::classic {
 
-// {8C1B7E52-1F3A-4B7E-9C41-PRISM0000C100} -- classic menu CLSID (independent of
-// the Win11 handler's CLSID_PrismShellCommand).
-constexpr CLSID CLSID_PrismClassicMenu = {
-    0x8C1B7E52, 0x1F3A, 0x4B7E, {0x9C, 0x41, 0x5B, 0x3C, 0x00, 0x00, 0xC1, 0x00}};
+using shell_ids::kClassicMenuClsid;
+
+namespace {
+
+// Verb ids as UTF-16 for GetCommandString(GCS_VERBW); the shell uses these for
+// "always do this" / telemetry, and our own tests use them to prove that the
+// offset -> verb mapping is right WITHOUT launching a process.
+std::wstring VerbWide(const std::string& verb) { return Utf8ToWide(verb); }
+
+}  // namespace
 
 class ClassicMenu final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IShellExtInit, IContextMenu> {
  public:
+  ClassicMenu() = default;
+  ~ClassicMenu() override {
+    if (medium_.hGlobal) {
+      ::ReleaseStgMedium(&medium_);
+      medium_ = STGMEDIUM{};
+    }
+  }
+
   // IShellExtInit: pull CF_HDROP out of the data object.
   STDMETHODIMP Initialize(PCIDLIST_ABSOLUTE, IDataObject* dataObject, HKEY) override {
     if (!dataObject) return E_INVALIDARG;
-    FORMATETC fmt = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-    if (FAILED(dataObject->GetData(&fmt, &medium_))) return E_FAIL;
-    const UINT count = DragQueryFileW(static_cast<HDROP>(medium_.hGlobal), 0xFFFFFFFF, nullptr, 0);
+    FORMATETC format = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    if (medium_.hGlobal) {
+      ::ReleaseStgMedium(&medium_);
+      medium_ = STGMEDIUM{};
+    }
+    if (FAILED(dataObject->GetData(&format, &medium_))) return E_FAIL;
+    const UINT count =
+        ::DragQueryFileW(static_cast<HDROP>(medium_.hGlobal), 0xFFFFFFFF, nullptr, 0);
+    selected_.clear();
     for (UINT i = 0; i < count; ++i) {
-      wchar_t path[MAX_PATH * 2]{};
-      if (DragQueryFileW(static_cast<HDROP>(medium_.hGlobal), i, path, ARRAYSIZE(path)) > 0) {
-        selected_.push_back(WideToUtf8(path));
-      }
+      const UINT needed =
+          ::DragQueryFileW(static_cast<HDROP>(medium_.hGlobal), i, nullptr, 0);
+      if (needed == 0) continue;
+      std::wstring path(static_cast<size_t>(needed) + 1, L'\0');
+      const UINT written = ::DragQueryFileW(static_cast<HDROP>(medium_.hGlobal), i,
+                                            path.data(), needed + 1);
+      if (written == 0) continue;
+      path.resize(written);
+      selected_.push_back(WideToUtf8(path));
     }
     return selected_.empty() ? E_FAIL : S_OK;
   }
 
   // IContextMenu: render the PrismCore model into a popup submenu.
-  STDMETHODIMP QueryContextMenu(HMENU menu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast,
-                                UINT) override {
+  STDMETHODIMP QueryContextMenu(HMENU menu, UINT indexMenu, UINT idCmdFirst,
+                                UINT idCmdLast, UINT flags) override {
+    if (!menu) return E_INVALIDARG;
     if (idCmdLast <= idCmdFirst) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-    const auto model = prism::ContextMenuModel::Build(selected_);
-    if (model.empty()) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+    // CMF_DEFAULTONLY: the shell only wants the default verb; offering a
+    // submenu here would hijack double-click.
+    if (flags & CMF_DEFAULTONLY) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 
-    HMENU popup = CreatePopupMenu();
-    UINT id = idCmdFirst;
-    for (const auto& command : model) {
+    model_ = prism::ContextMenuModel::Build(selected_);
+    if (model_.empty()) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+
+    HMENU popup = ::CreatePopupMenu();
+    if (!popup) return E_OUTOFMEMORY;
+
+    const UINT available = idCmdLast - idCmdFirst;  // exclusive upper bound
+    UINT used = 0;
+    UINT defaultOffset = static_cast<UINT>(-1);
+    for (const prism::MenuCommand& command : model_) {
+      if (used >= available) break;  // never steal an ID the shell reserved
       const std::wstring title = Utf8ToWide(command.title);
-      InsertMenuW(popup, static_cast<UINT>(-1), MF_BYPOSITION | MF_STRING,
-                  id++, title.c_str());
+      ::InsertMenuW(popup, static_cast<UINT>(-1), MF_BYPOSITION | MF_STRING,
+                    idCmdFirst + used, title.c_str());
+      if (command.isDefault) defaultOffset = used;
+      ++used;
     }
-    InsertMenuW(menu, indexMenu++, MF_BYPOSITION | MF_POPUP,
-                reinterpret_cast<UINT_PTR>(popup), L"PrismArchive");
-    const UINT used = id - idCmdFirst;
+    // Truncating the model would silently drop verbs the user can see in the
+    // Win11 menu, so the popup is only inserted when the whole model fits.
+    if (used != model_.size()) {
+      ::DestroyMenu(popup);
+      model_.clear();
+      return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+    }
+    if (defaultOffset != static_cast<UINT>(-1)) {
+      ::SetMenuDefaultItem(popup, idCmdFirst + defaultOffset, FALSE);
+    }
+    ::InsertMenuW(menu, indexMenu, MF_BYPOSITION | MF_POPUP,
+                  reinterpret_cast<UINT_PTR>(popup), L"PrismArchive");
     return MAKE_HRESULT(SEVERITY_SUCCESS, 0, used);
   }
 
   STDMETHODIMP InvokeCommand(CMINVOKECOMMANDINFO* info) override {
-    if (!info || IS_INTRESOURCE(info->lpVerb) == FALSE) return E_FAIL;
-    const auto model = prism::ContextMenuModel::Build(selected_);
-    const size_t offset = reinterpret_cast<size_t>(info->lpVerb);
-    if (offset >= model.size()) return E_INVALIDARG;
-    // The verb model is shared with the Win11 handler; the actual worker is
-    // launched by the same companion process both menus talk to.
-    LaunchWorker(model[offset].verb);
+    if (!info) return E_INVALIDARG;
+    if (model_.empty()) model_ = prism::ContextMenuModel::Build(selected_);
+    if (model_.empty()) return E_UNEXPECTED;
+
+    std::string verb;
+    if (IS_INTRESOURCE(info->lpVerb)) {
+      const size_t offset = static_cast<size_t>(reinterpret_cast<UINT_PTR>(info->lpVerb));
+      if (offset >= model_.size()) return E_INVALIDARG;
+      verb = model_[offset].verb;
+    } else if (info->lpVerb) {
+      // CMINVOKECOMMANDINFO::lpVerb is ANSI even in the W build (only
+      // CMINVOKECOMMANDINFOEX carries lpVerbW). Our verb ids are ASCII, so the
+      // narrow form is exactly right -- but it is matched against the model, so
+      // an unknown string can never turn into a launch.
+      const std::string requested(info->lpVerb);
+      for (const prism::MenuCommand& command : model_) {
+        if (command.verb == requested) {
+          verb = command.verb;
+          break;
+        }
+      }
+      if (verb.empty()) return E_INVALIDARG;
+    } else {
+      return E_INVALIDARG;
+    }
+
+    std::vector<std::wstring> paths;
+    paths.reserve(selected_.size());
+    for (const std::string& path : selected_) paths.push_back(Utf8ToWide(path));
+    if (!shell_launch::LaunchCompanion(verb, paths)) {
+      return HRESULT_FROM_WIN32(::GetLastError());
+    }
     return S_OK;
   }
 
-  STDMETHODIMP GetCommandString(UINT_PTR, UINT type, UINT*, CHAR* buffer, UINT count) override {
-    if (type != GCS_VERBW) return E_NOTIMPL;
-    return E_NOTIMPL;  // verbs are exposed by the sparse-package manifest on Win11
+  STDMETHODIMP GetCommandString(UINT_PTR idCmd, UINT type, UINT*, CHAR* buffer,
+                                UINT count) override {
+    if (model_.empty()) model_ = prism::ContextMenuModel::Build(selected_);
+    const size_t offset = static_cast<size_t>(idCmd);
+    if (type == GCS_VALIDATEA || type == GCS_VALIDATEW) {
+      return offset < model_.size() ? S_OK : S_FALSE;
+    }
+    if (offset >= model_.size()) return E_INVALIDARG;
+    if (type == GCS_VERBW) {
+      if (!buffer || count == 0) return E_INVALIDARG;
+      const std::wstring verb = VerbWide(model_[offset].verb);
+      wchar_t* out = reinterpret_cast<wchar_t*>(buffer);
+      const size_t room = count / sizeof(wchar_t);
+      const size_t copy = (std::min)(verb.size(), room - 1);
+      std::wmemcpy(out, verb.c_str(), copy);
+      out[copy] = L'\0';
+      return S_OK;
+    }
+    if (type == GCS_HELPTEXTW) {
+      if (!buffer || count == 0) return E_INVALIDARG;
+      const std::wstring help = Utf8ToWide(model_[offset].title);
+      wchar_t* out = reinterpret_cast<wchar_t*>(buffer);
+      const size_t room = count / sizeof(wchar_t);
+      const size_t copy = (std::min)(help.size(), room - 1);
+      std::wmemcpy(out, help.c_str(), copy);
+      out[copy] = L'\0';
+      return S_OK;
+    }
+    return E_NOTIMPL;  // ANSI variants: the shell must ask by ID, not by string
   }
 
  private:
-  // Hand the verb + selection to the companion process; the shell DLL never
-  // links the extraction engine directly (process isolation, blueprint ch. 7).
-  void LaunchWorker(const std::string& verb) {
-    std::wstring args = Utf8ToWide("--shell-verb " + verb);
-    for (const std::string& path : selected_) {
-      args += L" \"" + Utf8ToWide(path) + L"\"";
-    }
-    // Resolve OUR module path (the DLL), not the host's (explorer.exe).
-    // A free function inside this .obj is the address anchor -- member
-    // function pointers do not convert to LPCWSTR.
-    HMODULE self = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&ModuleAnchor), &self);
-    wchar_t exe[MAX_PATH * 2]{};
-    GetModuleFileNameW(self, exe, ARRAYSIZE(exe));
-    std::wstring cmdline = std::wstring(L"\"") + exe + L"\" " + args;
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    if (CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr,
-                       nullptr, &si, &pi)) {
-      CloseHandle(pi.hProcess);
-      CloseHandle(pi.hThread);
-    }
-  }
-
-  static STGMEDIUM medium_;
+  STGMEDIUM medium_{};
   std::vector<std::string> selected_;
+  std::vector<prism::MenuCommand> model_;
 };
 
-STGMEDIUM ClassicMenu::medium_{};
-
-
-// Called by the module entry points below. The static_cast chain is required:
-// ClassicMenu inherits two IUnknown paths, so an implicit conversion to
-// IUnknown* would be ambiguous.
-HRESULT CreateClassicMenuInstance(IUnknown** out) {
-  if (!out) return E_POINTER;
-  ComPtr<ClassicMenu> menu;
-  const HRESULT hr = MakeAndInitialize<ClassicMenu>(&menu);
-  if (FAILED(hr)) return hr;
-  *out = static_cast<IShellExtInit*>(menu.Detach());
-  return S_OK;
-}
-
-}  // namespace prism::win::classic
-
-
-// ---------------------------------------------------------------------------
-// COM module entry points (same STDAPI discipline as PrismShellCommand.cpp).
-// ---------------------------------------------------------------------------
-namespace prism::win::classic {
 class ClassicMenuFactory final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IClassFactory> {
  public:
@@ -149,22 +204,24 @@ class ClassicMenuFactory final
     if (!out) return E_POINTER;
     *out = nullptr;
     if (outer) return CLASS_E_NOAGGREGATION;
-    ComPtr<IUnknown> instance;
-    const HRESULT hr = CreateClassicMenuInstance(&instance);
+    ComPtr<ClassicMenu> menu;
+    const HRESULT hr = MakeAndInitialize<ClassicMenu>(&menu);
     if (FAILED(hr)) return hr;
-    return instance.CopyTo(iid, out);
+    // QI through the object, not a static_cast: the shell asks for
+    // IContextMenu first and IShellExtInit second (contract B8/D10).
+    return menu.CopyTo(iid, out);
   }
   STDMETHODIMP LockServer(BOOL) override { return S_OK; }
 };
+
 }  // namespace prism::win::classic
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
   if (!ppv) return E_POINTER;
   *ppv = nullptr;
-  if (rclsid != prism::win::classic::CLSID_PrismClassicMenu) return CLASS_E_CLASSNOTAVAILABLE;
+  if (rclsid != prism::win::classic::kClassicMenuClsid) return CLASS_E_CLASSNOTAVAILABLE;
   ComPtr<IClassFactory> factory;
-  const HRESULT hr =
-      MakeAndInitialize<prism::win::classic::ClassicMenuFactory>(&factory);
+  const HRESULT hr = MakeAndInitialize<prism::win::classic::ClassicMenuFactory>(&factory);
   if (FAILED(hr)) return hr;
   return factory.CopyTo(riid, ppv);
 }

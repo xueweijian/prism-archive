@@ -11,7 +11,13 @@
 // breaks on Win11 dark mode and mixed-DPI setups. We render the native
 // cascading menu and pop a *separate* non-activating DirectComposition flyout
 // (see PrismLiquidGlass, milestone M2) for the inline archive preview.
-#include <shlwapi.h>   // SHStrDupW
+//
+// Package identity (not registry) is what puts us in the Win11 menu: the CLSID
+// below must equal com:Class/@Id and desktop5:Verb/@Clsid in
+// Assets/Package/AppxManifest.xml -- both sides read the constant from
+// SparsePackageRegistrar.hpp, and Tests/win/test_sparse_registrar.cpp asserts
+// the manifest text against it.
+#include <shlwapi.h>  // SHStrDupW
 #include <shobjidl_core.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -19,10 +25,12 @@
 
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../PrismCore/ContextMenuModel.hpp"
-#include "PrismEngineBridge.hpp"  // WideToUtf8 / Utf8ToWide
+#include "PrismEngineBridge.hpp"      // WideToUtf8 / Utf8ToWide
+#include "SparsePackageRegistrar.hpp"  // CLSID + verb table + launcher
 
 using namespace Microsoft::WRL;
 
@@ -31,13 +39,12 @@ namespace prism::win::shell {
 namespace {
 
 constexpr wchar_t kPreviewWakeEvent[] = L"Local\\PrismLiquidPreviewWakeEvent";
+constexpr wchar_t kPreviewTargetMapping[] = L"Local\\PrismLiquidPreviewTarget";
 
 // Blueprint ch. 4.1: the companion Liquid Glass flyout is woken through a named
-// event, so explorer.exe never blocks on us. The selected path travels in a
-// second named object so the flyout can render before it is visible.
-constexpr wchar_t kPreviewTargetMapping[] = L"Local\PrismLiquidPreviewTarget";
-
+// event, so explorer.exe never blocks on us.
 void NotifyCompanionPreviewFlyout(const std::string& path) noexcept {
+  if (path.empty()) return;
   const std::wstring wide = Utf8ToWide(path);
   const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
   HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
@@ -53,32 +60,6 @@ void NotifyCompanionPreviewFlyout(const std::string& path) noexcept {
   if (!event) return;
   SetEvent(event);
   CloseHandle(event);
-}
-
-void LaunchWorker(const std::wstring& args) noexcept {
-  STARTUPINFOW si{};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi{};
-  std::wstring cmd = L"PrismArchive.exe " + args;
-  if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                     nullptr, nullptr, &si, &pi)) {
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-  }
-}
-
-// Model verb -> companion CLI. The verb ids live in ContextMenuModel; this is
-// the single place they become command lines.
-std::wstring ArgsForVerb(const std::string& verb, const std::wstring& archive) {
-  const std::wstring quoted = L"\"" + archive + L"\"";
-  if (verb == "smart.extract.here") return L"--smart-extract " + quoted;
-  if (verb == "extract.here") return L"--extract-here " + quoted;
-  if (verb == "extract.to.subfolder") return L"--extract-sub " + quoted;
-  if (verb == "test.integrity") return L"--test-integrity " + quoted;
-  if (verb == "smart.extract.each.to.own.folder") return L"--smart-extract-each " + quoted;
-  if (verb == "compress.to.7z") return L"--compress-7z " + quoted;
-  if (verb == "compress.to.zip") return L"--compress-zip " + quoted;
-  return quoted;  // open.in.prism
 }
 
 }  // namespace
@@ -110,10 +91,10 @@ std::vector<std::string> FromSelection(IShellItemArray* selection) {
 class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExplorerCommand> {
  public:
   HRESULT RuntimeClassInitialize(const prism::MenuCommand& command,
-                                 const std::wstring& archivePath) {
+                                 std::vector<std::wstring> selection) {
     verb_ = command.verb;
     title_ = Utf8ToWide(command.title);
-    archive_ = archivePath;
+    selection_ = std::move(selection);
     return S_OK;
   }
 
@@ -133,11 +114,14 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
     return S_OK;
   }
   IFACEMETHODIMP GetState(IShellItemArray*, BOOL, EXPCMDSTATE* pCmdState) override {
+    if (!pCmdState) return E_POINTER;
     *pCmdState = ECS_ENABLED;
     return S_OK;
   }
   IFACEMETHODIMP Invoke(IShellItemArray*, IBindCtx*) override {
-    LaunchWorker(ArgsForVerb(verb_, archive_));
+    if (!shell_launch::LaunchCompanion(verb_, selection_)) {
+      return HRESULT_FROM_WIN32(::GetLastError());
+    }
     return S_OK;
   }
   IFACEMETHODIMP GetFlags(EXPCMDFLAGS* pFlags) override {
@@ -145,6 +129,7 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
     return S_OK;
   }
   IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override {
+    if (!ppEnum) return E_POINTER;
     *ppEnum = nullptr;
     return E_NOTIMPL;
   }
@@ -152,7 +137,7 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
  private:
   std::string verb_;
   std::wstring title_;
-  std::wstring archive_;
+  std::vector<std::wstring> selection_;
 };
 
 // Renders prism::ContextMenuModel::Build(selection) as an Explorer enum.
@@ -163,12 +148,13 @@ class SubCommandEnumerator final
   // renders. Keeping the decision out of the renderer is what lets the Win10
   // layer and the in-app menu show byte-identical commands.
   HRESULT RuntimeClassInitialize(const std::vector<prism::MenuCommand>& model,
-                                 const std::wstring& archivePath) {
-    if (model.empty()) return E_INVALIDARG;
-    archive_ = archivePath;
+                                 std::vector<std::wstring> selection) {
+    if (model.empty() || selection.empty()) return E_INVALIDARG;
+    model_ = model;
+    selection_ = std::move(selection);
     for (const auto& command : model) {
       ComPtr<SubCommand> cmd;
-      if (SUCCEEDED(MakeAndInitialize<SubCommand>(&cmd, command, archive_))) {
+      if (SUCCEEDED(MakeAndInitialize<SubCommand>(&cmd, command, selection_))) {
         items_.push_back(cmd);
       }
     }
@@ -177,9 +163,13 @@ class SubCommandEnumerator final
 
   IFACEMETHODIMP Next(ULONG celt, IExplorerCommand** rgelt, ULONG* pceltFetched) override {
     if (!rgelt) return E_POINTER;
+    if (pceltFetched) *pceltFetched = 0;
     ULONG fetched = 0;
     while (fetched < celt && pos_ < items_.size()) {
-      items_[pos_++]->QueryInterface(IID_PPV_ARGS(&rgelt[fetched]));
+      // A QI failure must not leave a null slot behind: the caller walks
+      // exactly "fetched" entries and would dereference it.
+      if (FAILED(items_[pos_]->QueryInterface(IID_PPV_ARGS(&rgelt[fetched])))) break;
+      ++pos_;
       ++fetched;
     }
     if (pceltFetched) *pceltFetched = fetched;
@@ -193,14 +183,23 @@ class SubCommandEnumerator final
     pos_ = 0;
     return S_OK;
   }
+  // Explorer clones enumerators when a submenu is reopened. E_NOTIMPL made the
+  // second open render nothing at all.
   IFACEMETHODIMP Clone(IEnumExplorerCommand** ppEnum) override {
+    if (!ppEnum) return E_POINTER;
     *ppEnum = nullptr;
-    return E_NOTIMPL;
+    ComPtr<SubCommandEnumerator> clone;
+    HRESULT hr = MakeAndInitialize<SubCommandEnumerator>(&clone, model_, selection_);
+    if (FAILED(hr)) return hr;
+    hr = clone->Skip(static_cast<ULONG>(pos_));
+    if (FAILED(hr)) return hr;
+    return clone.CopyTo(IID_PPV_ARGS(ppEnum));
   }
 
  private:
   std::vector<ComPtr<SubCommand>> items_;
-  std::wstring archive_;
+  std::vector<prism::MenuCommand> model_;
+  std::vector<std::wstring> selection_;
   size_t pos_ = 0;
 };
 
@@ -209,13 +208,7 @@ class SubCommandEnumerator final
 class PrismRootCommand final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExplorerCommand> {
  public:
-  HRESULT RuntimeClassInitialize(std::wstring) { return S_OK; }  // selection comes per-query
-
- private:
-  std::vector<prism::MenuCommand> cachedCommands_;
-  std::wstring selectionArchive_;
-
- public:
+  HRESULT RuntimeClassInitialize(std::wstring) { return S_OK; }  // selection per query
 
   IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* ppszName) override {
     return SHStrDupW(L"PrismArchive", ppszName);
@@ -233,17 +226,17 @@ class PrismRootCommand final
     return S_OK;
   }
 
-  // Windows queries GetState when the submenu opens -- that is our cue to wake
+  // Windows queries GetState while building the menu -- that is our cue to wake
   // the Liquid Glass inline preview flyout (< 12 ms budget, blueprint ch. 7.2).
   IFACEMETHODIMP GetState(IShellItemArray* selection, BOOL, EXPCMDSTATE* pCmdState) override {
+    if (!pCmdState) return E_POINTER;
     *pCmdState = ECS_ENABLED;
     const auto selected = paths::FromSelection(selection);
     cachedCommands_ = prism::ContextMenuModel::Build(selected);
-    selectionArchive_.clear();
-    if (!selected.empty()) {
-      selectionArchive_ = Utf8ToWide(selected.front());
-      NotifyCompanionPreviewFlyout(selected.front());
-    }
+    selection_.clear();
+    selection_.reserve(selected.size());
+    for (const std::string& path : selected) selection_.push_back(Utf8ToWide(path));
+    if (!selected.empty()) NotifyCompanionPreviewFlyout(selected.front());
     // An empty model means "nothing here" -- hide the command entirely.
     if (cachedCommands_.empty()) *pCmdState = ECS_HIDDEN;
     return S_OK;
@@ -252,11 +245,17 @@ class PrismRootCommand final
   IFACEMETHODIMP Invoke(IShellItemArray* selection, IBindCtx*) override {
     const auto selected = paths::FromSelection(selection);
     if (selected.empty()) return E_INVALIDARG;
-    LaunchWorker(L"\"" + Utf8ToWide(selected.front()) + L"\"");
+    std::vector<std::wstring> paths;
+    paths.reserve(selected.size());
+    for (const std::string& path : selected) paths.push_back(Utf8ToWide(path));
+    if (!shell_launch::LaunchCompanion("open.in.prism", paths)) {
+      return HRESULT_FROM_WIN32(::GetLastError());
+    }
     return S_OK;
   }
 
   IFACEMETHODIMP GetFlags(EXPCMDFLAGS* pFlags) override {
+    if (!pFlags) return E_POINTER;
     *pFlags = ECF_HASSUBCOMMANDS;
     return S_OK;
   }
@@ -267,22 +266,19 @@ class PrismRootCommand final
   IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override {
     if (!ppEnum) return E_POINTER;
     *ppEnum = nullptr;
-    if (cachedCommands_.empty()) return E_NOTIMPL;
+    if (cachedCommands_.empty() || selection_.empty()) return E_NOTIMPL;
     ComPtr<SubCommandEnumerator> enumerator;
-    // The archive path that the model was built for is the first selection.
-    const std::wstring archivePath =
-        selectionArchive_.empty() ? std::wstring() : selectionArchive_;
     if (FAILED(MakeAndInitialize<SubCommandEnumerator>(&enumerator, cachedCommands_,
-                                                      archivePath))) {
+                                                      selection_))) {
       return E_FAIL;
     }
     return enumerator->QueryInterface(IID_PPV_ARGS(ppEnum));
   }
-};
 
-// {6F6A5E2C-3E7B-4F8A-9C1D-0A1B2C3D4E5F}
-constexpr CLSID CLSID_PrismShellCommand = {0x6F6A5E2C, 0x3E7B, 0x4F8A,
-                                           {0x9C, 0x1D, 0x0A, 0x1B, 0x2C, 0x3D, 0x4E, 0x5F}};
+ private:
+  std::vector<prism::MenuCommand> cachedCommands_;
+  std::vector<std::wstring> selection_;
+};
 
 class PrismShellClassFactory final
     : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IClassFactory> {
@@ -321,7 +317,9 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
   using namespace prism::win::shell;
   if (ppv == nullptr) return E_POINTER;
   *ppv = nullptr;
-  if (rclsid != CLSID_PrismShellCommand) return CLASS_E_CLASSNOTAVAILABLE;
+  if (rclsid != prism::win::shell_ids::kExplorerCommandClsid) {
+    return CLASS_E_CLASSNOTAVAILABLE;
+  }
   ComPtr<PrismShellClassFactory> factory;
   HRESULT hr = MakeAndInitialize<PrismShellClassFactory>(&factory);
   if (FAILED(hr)) return hr;

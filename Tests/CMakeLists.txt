@@ -58,7 +58,12 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                                                       dwrite.lib d3d11.lib dxgi.lib
                                                       dcomp.lib WindowsApp.lib)
   target_compile_options(win_engine_bridge_test PRIVATE /WX-)
-  target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge)
+  # prism_shell_contract: m2_compile_check.cpp is a LINK contract for the sparse
+  # registrar (it calls prisms' IsRegistered on purpose). The registrar became a
+  # static library when its WinRT half moved out of the header (card C4), so the
+  # contract now also proves the library links -- keep this on the same target.
+  target_link_libraries(win_engine_bridge_test PRIVATE prism_core prism_win_bridge
+                                                      prism_shell_contract)
   add_test(NAME "win.engine_bridge" COMMAND win_engine_bridge_test)
   # The stdout marker is part of the verdict: a silent SKIP can never count
   # as a pass (L2 negative control for false greens).
@@ -246,4 +251,72 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "win.dnd_seek" COMMAND win_dnd_seek_test)
   set_tests_properties(win.dnd_seek PROPERTIES TIMEOUT 600
       PASS_REGULAR_EXPRESSION "ALL DND-SEEK CHECKS PASSED")
+endif()
+# ---------------------------------------------------------------------------
+# C4 shell double-stack (APPENDED; nothing above was reordered).
+#   win.sparse_registrar          -- verb table / URI encoding / manifest <->
+#                                   compiled CLSID / real shell IContextMenu
+#                                   round-trip / sparse deploy-unregister
+#   mutation.sparse_registrar.*   -- three negative controls (D3):
+#       1. manifest without uap10:AllowExternalContent  -> manifest checks red
+#       2. manifest with a CLSID that is not the compiled one -> red
+#       3. Evaluate() that accepts an UNVERIFIED deploy -> verdict test red
+#   Each mutant is WILL_FAIL, so ctest is green only when the suite catches it.
+# ---------------------------------------------------------------------------
+if(WIN32 AND PRISM_BUILD_WIN_LAYER)
+  file(TO_CMAKE_PATH ${CMAKE_BINARY_DIR} PRISM_BUILD_ROOT_FWD)
+
+  add_executable(win_sparse_registrar_test win/test_sparse_registrar.cpp)
+  target_link_libraries(win_sparse_registrar_test PRIVATE prism_core prism_win_bridge
+                        prism_shell_contract shlwapi.lib shell32.lib ole32.lib advapi32.lib)
+  target_compile_options(win_sparse_registrar_test PRIVATE /WX-)
+  target_compile_definitions(win_sparse_registrar_test PRIVATE
+      PRISM_BUILD_ROOT="${PRISM_BUILD_ROOT_FWD}")
+  add_dependencies(win_sparse_registrar_test PrismShellExtClassic)
+  add_test(NAME "win.sparse_registrar" COMMAND win_sparse_registrar_test)
+  set_tests_properties(win.sparse_registrar PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "ALL SPARSE-REGISTRAR CHECKS PASSED")
+
+  # --- negative control 1: the manifest must declare external content ---
+  add_executable(win_sparse_registrar_mutant_manifest win/test_sparse_registrar.cpp)
+  target_link_libraries(win_sparse_registrar_mutant_manifest PRIVATE prism_core prism_win_bridge
+                        prism_shell_contract shlwapi.lib shell32.lib ole32.lib advapi32.lib)
+  target_compile_options(win_sparse_registrar_mutant_manifest PRIVATE /WX-)
+  target_compile_definitions(win_sparse_registrar_mutant_manifest PRIVATE PRISM_TEST_PURE_ONLY
+      PRISM_MUTANT_MANIFEST_DROP_EXTERNAL_CONTENT PRISM_BUILD_ROOT="${PRISM_BUILD_ROOT_FWD}")
+  add_test(NAME "mutation.sparse_registrar.manifest_external_content"
+           COMMAND win_sparse_registrar_mutant_manifest)
+  set_tests_properties(mutation.sparse_registrar.manifest_external_content
+      PROPERTIES WILL_FAIL TRUE)
+
+  # --- negative control 2: the manifest CLSID must be the compiled CLSID ---
+  add_executable(win_sparse_registrar_mutant_clsid win/test_sparse_registrar.cpp)
+  target_link_libraries(win_sparse_registrar_mutant_clsid PRIVATE prism_core prism_win_bridge
+                        prism_shell_contract shlwapi.lib shell32.lib ole32.lib advapi32.lib)
+  target_compile_options(win_sparse_registrar_mutant_clsid PRIVATE /WX-)
+  target_compile_definitions(win_sparse_registrar_mutant_clsid PRIVATE PRISM_TEST_PURE_ONLY
+      PRISM_MUTANT_MANIFEST_WRONG_CLSID PRISM_BUILD_ROOT="${PRISM_BUILD_ROOT_FWD}")
+  add_test(NAME "mutation.sparse_registrar.manifest_clsid"
+           COMMAND win_sparse_registrar_mutant_clsid)
+  set_tests_properties(mutation.sparse_registrar.manifest_clsid PROPERTIES WILL_FAIL TRUE)
+
+  # --- negative control 3: a deploy that leaves nothing registered is NOT ok ---
+  add_library(prism_shell_contract_mutant_unverified STATIC
+              ../Src/PrismWin/SparsePackageRegistrar.cpp)
+  target_include_directories(prism_shell_contract_mutant_unverified PUBLIC
+                             ../Src/PrismWin)
+  target_link_libraries(prism_shell_contract_mutant_unverified PUBLIC WindowsApp.lib
+                        shlwapi.lib advapi32.lib shell32.lib)
+  target_compile_definitions(prism_shell_contract_mutant_unverified PRIVATE
+                             PRISM_MUTANT_ACCEPT_UNVERIFIED=1)
+  target_compile_options(prism_shell_contract_mutant_unverified PRIVATE /WX-)
+  add_executable(win_sparse_registrar_mutant_unverified win/test_sparse_registrar.cpp)
+  target_link_libraries(win_sparse_registrar_mutant_unverified PRIVATE prism_core prism_win_bridge
+                        prism_shell_contract_mutant_unverified shlwapi.lib shell32.lib ole32.lib advapi32.lib)
+  target_compile_options(win_sparse_registrar_mutant_unverified PRIVATE /WX-)
+  target_compile_definitions(win_sparse_registrar_mutant_unverified PRIVATE PRISM_TEST_PURE_ONLY
+      PRISM_BUILD_ROOT="${PRISM_BUILD_ROOT_FWD}")
+  add_test(NAME "mutation.sparse_registrar.accept_unverified"
+           COMMAND win_sparse_registrar_mutant_unverified)
+  set_tests_properties(mutation.sparse_registrar.accept_unverified PROPERTIES WILL_FAIL TRUE)
 endif()

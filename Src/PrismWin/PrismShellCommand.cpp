@@ -31,6 +31,7 @@
 #include "../PrismCore/ContextMenuModel.hpp"
 #include "CompanionPreviewBridge.hpp"  // C30: the one inline-preview IPC channel
 #include "PrismEngineBridge.hpp"       // WideToUtf8 / Utf8ToWide
+#include "ShellTranslator.hpp"         // C47: the tables both shell DLLs share
 #include "SparsePackageRegistrar.hpp"  // CLSID + verb table + launcher
 
 using namespace Microsoft::WRL;
@@ -93,9 +94,27 @@ class SubCommand final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExp
     return S_OK;
   }
 
+  // C47: the title is the TRANSLATED label, resolved once by the shared
+  // translator when GetState built the model (ShellTranslator.hpp). This class
+  // stores the resolved text, so Explorer's per-repaint GetTitle cannot parse
+  // JSON, take a lock or touch COM state -- it copies a string it already has.
+#if defined(PRISM_C47_MUTANT_VERB_TITLE)
+  // NEGATIVE CONTROL (CONTRACTS D3): the pre-C47 shape, where the shell host had
+  // nothing but the verb id to show. Explorer would render
+  // "smart.extract.here"; the C47 suite MUST go red on the zh-CN case, and the
+  // mutation proves itself by handing back a string no table contains (D27).
+  IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* ppszName) override {
+    return SHStrDupW(Utf8ToWide(verb_).c_str(), ppszName);
+  }
+#else
   IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* ppszName) override {
     return SHStrDupW(title_.c_str(), ppszName);
   }
+#endif
+  // Deliberately still E_NOTIMPL: IExplorerCommand::GetIcon takes a resource
+  // LOCATION ("module.exe,-id"), not text, and this DLL ships no icon resource.
+  // The localized surface of a command is its title; inventing an icon path here
+  // would make Explorer load a file from disk on every menu open.
   IFACEMETHODIMP GetIcon(IShellItemArray*, LPWSTR* ppszIcon) override {
     *ppszIcon = nullptr;
     return E_NOTIMPL;
@@ -227,7 +246,11 @@ class PrismRootCommand final
     if (!pCmdState) return E_POINTER;
     *pCmdState = ECS_ENABLED;
     const auto selected = paths::FromSelection(selection);
-    cachedCommands_ = prism::ContextMenuModel::Build(selected);
+    // C47: the SAME resolver the Win10 classic menu uses (ShellTranslator.hpp).
+    // It reads the tables from THIS DLL's directory -- inside explorer.exe the
+    // executable's directory would be C:\Windows -- and the language from the
+    // user's language.tag, once per DLL lifetime.
+    cachedCommands_ = prism::win::shelli18n::BuildMenuModel(selected);
     selection_.clear();
     selection_.reserve(selected.size());
     for (const std::string& path : selected) selection_.push_back(Utf8ToWide(path));

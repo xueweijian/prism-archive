@@ -256,7 +256,11 @@ inline std::string MissingName(VolumeFamily family, const std::string& stem,
     case VolumeFamily::SplitZip:
       return stem + ".z" + PadOrdinal(ordinal, width < 2 ? 2 : width);
     case VolumeFamily::RarNew:
-      return stem + ".part" + PadOrdinal(ordinal, width < 1 ? 1 : width) + ".rar";
+      // WinRAR does NOT zero-pad the part number (part1 .. part9 .. part10),
+      // so the width of the widest sibling must not be applied here: a padded
+      // "part03.rar" names a file that never exists.
+      (void)width;
+      return stem + ".part" + std::to_string(ordinal) + ".rar";
     case VolumeFamily::RarOld:
       return stem + ".r" + PadOrdinal(ordinal, width < 2 ? 2 : width);
     case VolumeFamily::None:

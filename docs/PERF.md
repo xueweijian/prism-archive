@@ -37,6 +37,68 @@ regression* reappeared — someone buffered the block, someone deleted the
 eviction loop, someone lets the extractor decode past abandon. The suite names
 which one. A wall-clock regression names nothing.
 
+## The Kaggle matrix: 44 configurations, and what it actually says
+
+`kaggle/bench_solid.py` sweeps N ∈ {10, 50, 200} × file size ∈ {8KB, 256KB, 4MB}
+× `-mx` ∈ {1,5,9} × `-ms` ∈ {on, off}, median-of-3, on a dedicated kernel
+(`weijianxue/prism-bench-matrix`) so the digits do not depend on the phone
+sandbox or a shared CI runner. 44/44 configurations completed, 0 pruned.
+
+### Two measurement bugs found before any number was believed
+
+The first version of this matrix was wrong in two ways that made every digit
+meaningless, and both were caught by measuring rather than reading:
+
+1. **Packing ran without `cwd`.** `7z a ... .` resolves `.` against the
+   *calling process's* directory, so it packed the entire repository. Measured
+   side by side on the same 20 files: **0.17 MB with `cwd`, 159.64 MB
+   without** — a 940× error in archive size, which is also the input to both
+   timing arms. Fixed, and `run()` now documents why `cwd` is not optional.
+2. **`archive_names()` returned the archive itself as entry 0**, so the
+   per-item arm ran one extra `7z e` that opened the archive rather than an
+   item. Negative control: removing the self-row filter takes a 10-file
+   fixture from 10 names to 11.
+
+A calibration was also run on the per-item arm's own convention (`7z e -so`,
+stdout discarded): compared against actually writing each item to disk, the
+`-so` form understates real per-item cost by **2%** — so that arm is honest,
+and it is the *conservative* one.
+
+### Folders-first, and the number that was hiding
+
+The headline claim — solid blocks make a sweep beat per-item extraction — is
+**true but incomplete**, because the ratio conflates two effects:
+
+* **N**: per-item extraction pays process spawn N times. At N=200 with 8 KB
+  files that alone yields 15.3× even with `-ms=off`.
+* **Solid**: the prefix replay per item, which is the effect we actually claim.
+
+Isolating it by holding N and file size fixed and comparing `per_item(ms=on)`
+against `per_item(ms=off)` — the cost solid blocks *add* to the per-item path:
+
+| N | 8 KB | 256 KB | 4 MB |
+|---|---|---|---|
+| 10 | 1.2× | 2.3× | 4.3× |
+| 50 | 1.4× | 6.5× | 6.5× |
+| 200 | 1.7× | **21.4×** | (budget) |
+
+So solid mode makes per-item extraction **1.2×–21.4× slower**, and the penalty
+grows with item size — exactly the prefix-replay cost the sweep avoids. Reporting
+only `peritem/sweep` hides that; reporting both makes the claim falsifiable.
+
+Sweep-vs-per-item by N (median over all sizes and levels), which is what a user
+feels when selecting the whole archive:
+
+| N | `-ms=off` | `-ms=on` | net solid effect |
+|---|---|---|---|
+| 10 | 1.5× | 6.7× | 4.3× |
+| 50 | 1.6× | 33.2× | **20.1×** |
+| 200 | 15.5× | 63.7× | 4.1× |
+
+The N=200 row is the honest anomaly: at 8 KB the spawn cost dominates `-ms=off`
+so the *net* solid effect looks small, and the 4 MB cells were cut by the
+kernel's time budget. Both are stated rather than smoothed.
+
 ## Negative controls (anti-fake-green)
 
 Every invariant ships with a deliberately broken implementation that the same

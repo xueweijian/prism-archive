@@ -89,6 +89,7 @@
 #include "../PrismCore/ListSortModel.hpp"     // persisted sort key (C13 view state)
 #include "../PrismCore/OpenFlow.hpp"          // C40: the measured E_ABORT password signal
 #include "../PrismCore/SecurityGuard.hpp"
+#include "../PrismCore/SessionStore.hpp"      // C46 session document (schema + crash guard)
 #include "../PrismCore/SettingsStore.hpp"     // C14 document (schema + validation)
 #include "../PrismCore/SidebarModel.hpp"      // C12 SidebarStore port
 #include "../PrismCore/SmartExtractor.hpp"
@@ -157,8 +158,14 @@ struct LaunchRequest {
   LaunchMode mode = LaunchMode::kGallery;
   std::wstring archive;      // first non-flag argument
   // Every non-flag argument. For --compress-here that is the input list; the
-  // other verbs only ever take one path, and archive is its head.
+  // other verbs that take a path use archive, its head.
   std::vector<std::wstring> inputs;
+  // C46: EVERY non-flag argument, for every mode. The gallery reads this list as
+  // "the archives this launch opened" (a file-manager multi-selection or
+  // "PrismArchive.exe a.7z b.7z"): the head is shown, the rest join the session
+  // so the next launch can offer them. --compress-here keeps using inputs (its
+  // arguments are sources to pack, not archives to open).
+  std::vector<std::wstring> archives;
   std::wstring flag;         // the verb flag we matched ("" when none)
   // Set when the caller passed a flag we do NOT implement. The app must refuse
   // visibly rather than fall back to "open the gallery": a context-menu command
@@ -205,6 +212,7 @@ inline LaunchRequest ParseLaunch(const std::vector<std::wstring>& argv) {
   for (const std::wstring& arg : argv) {
     if (StartsWithFlag(arg)) continue;
     if (request.mode == LaunchMode::kCompressHere) request.inputs.push_back(arg);
+    request.archives.push_back(arg);  // C46: the gallery's session list
     if (request.archive.empty()) request.archive = arg;
   }
   return request;
@@ -1971,6 +1979,149 @@ inline bool OpenNeedsPassword(const std::string& openTrace) {
   std::snprintf(needle, sizeof(needle), "hr=0x%08lX",
                 static_cast<unsigned long>(prism::openflow::kOpenHrAbort));
   return openTrace.find(needle) != std::string::npos;
+}
+
+// ---------------------------------------------------------------------------
+// 12. Session (C46): the last archives, their view, and the crash guard.
+//
+// C14/C27's settings document answers "how do I like it"; it cannot answer "what
+// was I doing". This section is the FILE half of the session card -- the model,
+// the schema and the clean-shutdown policy live in PrismCore/SessionStore.hpp so
+// they are testable on Linux. Everything Win32 stays on this side:
+//
+//   * ONE location, next to the settings file: %LOCALAPPDATA%\PrismArchive\
+//     session.json (C14 already owns that folder's creation path);
+//   * the SAME atomic publish C14 uses (temp file + ReplaceFileW through
+//     SaveFileAtomic) -- a half-written session is indistinguishable from a
+//     crash, and would be treated as one;
+//   * a test seam: LOCALAPPDATA is an input, so a suite can point the whole
+//     stack at a temp folder without touching the developer's real session.
+//
+// The dirty mark is written by the CALLER's order: the exe arms it
+// (MarkCleanShutdown(false) + SaveSession) as soon as it owns a session, and
+// clears it at the end of a normal exit. A killed process therefore leaves
+// "cleanShutdown": false behind, and the next start restores nothing.
+// ---------------------------------------------------------------------------
+inline constexpr wchar_t kSessionFileName[] = L"session.json";
+
+inline std::wstring SessionFileUnder(const std::wstring& localAppData) {
+  const prism::win::settingsfile::Paths root = prism::win::settingsfile::PathsUnder(localAppData);
+  if (!root.valid()) return {};
+  return root.root + L"\\" + kSessionFileName;
+}
+
+struct SessionBootstrap {
+  prism::session::SessionStore store;
+  prism::session::SessionLoadReport report;
+  std::wstring file;
+  bool loaded = false;   // bytes existed and were handed to the model
+  std::string detail;    // why loading failed (a warn line, never a dialog)
+};
+
+inline SessionBootstrap LoadSessionUnder(const std::wstring& localAppData) {
+  SessionBootstrap bootstrap;
+  bootstrap.file = SessionFileUnder(localAppData);
+  if (bootstrap.file.empty()) {
+    bootstrap.detail = "%LOCALAPPDATA% could not be resolved";
+    return bootstrap;
+  }
+  std::string bytes;
+  DWORD readError = 0;
+  if (!prism::win::settingsfile::ReadAllBytes(bootstrap.file, bytes, &readError)) {
+    // Not found is NORMAL: the first run of a fresh profile has no session yet.
+    if (readError != ERROR_FILE_NOT_FOUND && readError != ERROR_PATH_NOT_FOUND) {
+      bootstrap.detail = "session read failed (win32 error " + std::to_string(readError) + ")";
+    }
+    return bootstrap;
+  }
+  bootstrap.report = bootstrap.store.Load(bytes);
+  bootstrap.loaded = true;
+  return bootstrap;
+}
+
+inline SessionBootstrap LoadSession() {
+  return LoadSessionUnder(prism::win::settingsfile::LocalAppDataDirectory());
+}
+
+// Atomically publishes the document. Returns false and fills detail on failure:
+// a session that silently stops being remembered is a bug, not a preference.
+inline bool SaveSession(SessionBootstrap* bootstrap, std::string* detail = nullptr) {
+  if (bootstrap == nullptr) {
+    if (detail != nullptr) *detail = "no session document";
+    return false;
+  }
+  if (bootstrap->file.empty()) {
+    if (detail != nullptr) *detail = "%LOCALAPPDATA% could not be resolved";
+    return false;
+  }
+  std::string bytes = bootstrap->store.ToJson();
+  bytes.push_back('\n');
+  prism::win::settingsfile::SaveResult saved;
+  if (!prism::win::settingsfile::SaveFileAtomic(bootstrap->file, bytes, &saved)) {
+    if (detail != nullptr) {
+      *detail = "session save failed (win32 error " + std::to_string(saved.error) + ")";
+    }
+    return false;
+  }
+  return true;
+}
+
+// The restore pass as a decision, with the engine injected: an entry is
+// restorable only when it still OPENS. Missing and damaged archives are counted
+// and skipped -- eight message boxes at startup is worse than eight quiet skips
+// (the card's contract, and the reason this is one predicate and not a loop of
+// error handlers).
+struct SessionRestorePlan {
+  std::vector<prism::session::SessionEntry> entries;  // in session order
+  std::size_t tried = 0;
+  std::size_t skipped = 0;
+};
+
+inline SessionRestorePlan PlanSessionRestore(const prism::session::SessionStore& store,
+                                             const std::function<bool(const std::wstring&)>& canOpen) {
+  SessionRestorePlan plan;
+  for (const prism::session::SessionEntry& entry : store.RestorableEntries()) {
+    ++plan.tried;
+    if (canOpen && canOpen(prism::win::Utf8ToWide(entry.path))) {
+      plan.entries.push_back(entry);
+    } else {
+      ++plan.skipped;
+    }
+  }
+  return plan;
+}
+
+// Applies a restored entry's VIEW to a gallery window: list/grid mode first, then
+// the folder inside the archive, walked one segment at a time through the same
+// ActivateRow a double-click uses (a window that owns navigation stays the only
+// thing that moves the cursor -- no new public navigation API is invented here
+// while GALLERY V2 is being written).
+//
+// A segment that is no longer there ends the walk: the user lands at the deepest
+// folder that still exists, which is what "the archive changed since yesterday"
+// should do. Returns true when the whole saved folder was reached.
+template <class WindowLike>
+bool ApplySessionView(WindowLike& window, const prism::session::SessionEntry& entry) {
+  window.SetListMode(entry.listMode);
+  bool complete = true;
+  for (const std::string& segment : prism::session::FolderSegments(entry.folder)) {
+    bool stepped = false;
+    const auto& items = window.Items();
+    for (std::size_t row = 0; row < items.size(); ++row) {
+      const std::string& path = items[row].path;
+      if (!items[row].isDir) continue;
+      const std::size_t slash = path.find_last_of('/');
+      const std::string leaf = slash == std::string::npos ? path : path.substr(slash + 1);
+      if (leaf != segment) continue;
+      stepped = window.ActivateRow(static_cast<int>(row));
+      break;
+    }
+    if (!stepped) {
+      complete = false;
+      break;
+    }
+  }
+  return complete;
 }
 
 }  // namespace prism::app

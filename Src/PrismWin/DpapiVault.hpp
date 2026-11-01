@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../PrismCore/PasswordVault.hpp"
+#include "MotwGuard.hpp"
 
 #pragma comment(lib, "crypt32.lib")
 
@@ -123,41 +124,14 @@ class DpapiVault final : public IPasswordVault {
 
 // Blueprint ch. 7.1 defence #1: every extracted file must inherit the source
 // archive's Zone.Identifier so SmartScreen still sees "downloaded from the web".
-class MoTWPropagator {
- public:
-  // Reads "<archive>:Zone.Identifier" once and stamps every written file.
-  explicit MoTWPropagator(const std::wstring& archivePath) {
-    const std::wstring stream = archivePath + L":Zone.Identifier";
-    HANDLE file = CreateFileW(stream.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;  // no MoTW on the source: nothing to do
-    LARGE_INTEGER size{};
-    GetFileSizeEx(file, &size);
-    blob_.resize(static_cast<size_t>(size.QuadPart));
-    DWORD read = 0;
-    ReadFile(file, blob_.data(), static_cast<DWORD>(blob_.size()), &read, nullptr);
-    CloseHandle(file);
-    blob_.resize(read);
-    hasMoTW_ = !blob_.empty();
-  }
-
-  bool hasMoTW() const { return hasMoTW_; }
-
-  bool Stamp(const std::wstring& writtenFilePath) const {
-    if (!hasMoTW_) return false;
-    const std::wstring stream = writtenFilePath + L":Zone.Identifier";
-    HANDLE file = CreateFileW(stream.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    WriteFile(file, blob_.data(), static_cast<DWORD>(blob_.size()), &written, nullptr);
-    CloseHandle(file);
-    return written == blob_.size();
-  }
-
- private:
-  std::vector<uint8_t> blob_;
-  bool hasMoTW_ = false;
-};
+//
+// The implementation moved to MotwGuard.hpp (read-back verification, long paths,
+// absent-vs-unreadable distinction). This alias exists only so older call sites
+// keep compiling -- there must be exactly ONE MoTW implementation, because two
+// would drift and one of them would be the unverified one.
+//
+// New code should use prism::win::motw::SourceMark and the PrismCore policy
+// (PlanMotwInheritance) instead of the boolean API below.
+using MoTWPropagator = motw::SourceMark;
 
 }  // namespace prism::win

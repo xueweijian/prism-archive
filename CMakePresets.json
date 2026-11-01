@@ -1,0 +1,120 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base-msvc",
+      "hidden": true,
+      "description": "Shared MSVC + Ninja settings. cl.exe must be on PATH (vcvars64 / msvc-dev-cmd); tools/local_gates.ps1 imports vcvars when it is not.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PRISM_BUILD_WIN_LAYER": "ON",
+        "PRISM_WARNINGS_AS_ERRORS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release-msvc",
+      "displayName": "Windows x64 Release (MSVC + Ninja)",
+      "description": "The Windows CI lane's plain shape: Release, real 7z.dll integration suites, /WX. This is the preset tools/local_gates.ps1 uses on a Windows dev box.",
+      "inherits": "base-msvc"
+    },
+    {
+      "name": "asan-msvc",
+      "displayName": "Windows x64 Release + AddressSanitizer (MSVC)",
+      "description": "Byte-for-byte the flags of the Windows CI lane: /fsanitize=address /Zi /EHsc + /InferAsanLibraries. CONTRACTS D14: the 7z.dll shipped by some runner images is itself ASan-instrumented and reports a SetCodecs use-after-free with zero frames of ours -- that report is 7-Zip's, not ours.",
+      "inherits": "base-msvc",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "/fsanitize=address /Zi /EHsc",
+        "CMAKE_EXE_LINKER_FLAGS": "/InferAsanLibraries"
+      }
+    },
+    {
+      "name": "base-unix",
+      "hidden": true,
+      "description": "PrismCore-only configuration for Linux/macOS. The Windows layer needs a Windows SDK, so it is off by design (that split is what makes the decision layer testable in seconds).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "PRISM_BUILD_WIN_LAYER": "OFF",
+        "PRISM_WARNINGS_AS_ERRORS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release-gcc",
+      "displayName": "Linux PrismCore Release (gcc)",
+      "description": "Mirrors the core/gcc-release CI lane.",
+      "inherits": "base-unix",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "asan-clang",
+      "displayName": "Linux PrismCore Debug + ASan/UBSan (clang++)",
+      "description": "Mirrors the core/asan+ubsan CI lane.",
+      "inherits": "base-unix",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release-msvc",
+      "configurePreset": "release-msvc"
+    },
+    {
+      "name": "asan-msvc",
+      "configurePreset": "asan-msvc"
+    },
+    {
+      "name": "release-gcc",
+      "configurePreset": "release-gcc"
+    },
+    {
+      "name": "asan-clang",
+      "configurePreset": "asan-clang"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "release-msvc",
+      "configurePreset": "release-msvc",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan-msvc",
+      "configurePreset": "asan-msvc",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release-gcc",
+      "configurePreset": "release-gcc",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan-clang",
+      "configurePreset": "asan-clang",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

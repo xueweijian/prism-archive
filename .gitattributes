@@ -1,0 +1,13 @@
+# Line endings (card C2).
+#
+# This checkout has core.autocrlf=true, so without these rules every Windows
+# working tree gets CRLF copies of the POSIX gates. That is not cosmetic:
+# a CRLF shebang plus CRLF 'set -eu' makes dash abort with
+# "set: Illegal option -", i.e. tools/check_headers.sh and
+# tools/check_windows_tu.sh stop working for exactly the developers who need
+# them from Windows (through WSL). Verified: after a rebase re-checked these
+# files out with CRLF, both gates died on their 'set -eu' line.
+#
+# Keep it to shell/python entry points; everything else stays on text=auto.
+*.sh  text eol=lf
+*.py  text eol=lf

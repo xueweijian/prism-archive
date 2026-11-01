@@ -20,10 +20,9 @@
 // Negative controls (CONTRACTS D3, registered in Tests/suites/c35-pwd.cmake):
 //   PRISM_PWD_UI_MUTANT_ECHO_PLAINTEXT   MaskSecret returns the plaintext.
 //   PRISM_PWD_UI_MUTANT_UNLIMITED_RETRIES  UiBudgetAllows always says yes.
-// Both are compiled from THIS source. main() arms PASSWORD-UI MUTANT CAUGHT
-// BEFORE the first assertion (D27): mini_test prints it at the first failed
-// check and leaves with 0, so nothing later can swallow it. The marker is still
-// the conjunction (D3 + D26): a dead injection never fails, so it never prints.
+// Both are compiled from THIS source. main() prints PASSWORD-UI MUTANT CAUGHT
+// only when the run went red AND the injection actually fired (D3 + D26: the
+// marker is the conjunction; no WILL_FAIL is stacked with a regex).
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -557,22 +556,17 @@ PRISM_TEST("model: showPassword is a display flag with no effect on the state") 
 }
 
 int main(int argc, char** argv) {
-#if defined(PRISM_PWD_UI_MUTANT_ECHO_PLAINTEXT) || \
-    defined(PRISM_PWD_UI_MUTANT_UNLIMITED_RETRIES)
-  // CONTRACTS D3 + D26 + D27: the marker is armed BEFORE the first assertion;
-  // ReportFailure prints it at the first failed check and leaves with 0, so no
-  // later teardown can swallow it. A dead mutation never fails and the marker
-  // never appears, so PASS_REGULAR_EXPRESSION misses and the target is RED.
-  prism::test::SetMutationVerdict("PASSWORD-UI MUTANT CAUGHT",
-                                 [] { return prism::pwd::UiMutationFired(); });
-#endif
   const int failures = prism::test::RunAll(argc, argv);
 #if defined(PRISM_PWD_UI_MUTANT_ECHO_PLAINTEXT) || \
     defined(PRISM_PWD_UI_MUTANT_UNLIMITED_RETRIES)
-  // Reaching here means no failed check went through ReportFailure, so no
-  // verdict was printed. Stay RED (exit 1); never print a late marker (D27).
-  std::printf("mutant build: no first-failure verdict (checks=%d failures=%d mutation hits=%d)\n",
-              prism::test::CheckCount(), failures, prism::pwd::UiMutationCount());
+  // CONTRACTS D3 + D26: the marker is a CONJUNCTION -- the run went red AND the
+  // deliberate defect actually fired. A dead mutation prints nothing, the
+  // suite's PASS_REGULAR_EXPRESSION misses, and the mutation test is RED.
+  if (failures != 0 && prism::pwd::UiMutationFired()) {
+    std::puts("PASSWORD-UI MUTANT CAUGHT");
+  }
+  std::printf("mutant build: exit 1 on purpose (mutation hits=%d)\n",
+              prism::pwd::UiMutationCount());
   return 1;
 #else
   return failures;

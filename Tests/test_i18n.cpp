@@ -170,7 +170,7 @@ PRISM_TEST("catalog: the en-US table parses through the C14 JSON DOM") {
   Catalog en;
   PRISM_CHECK(LoadShippedCatalog("en-US", &en));
   PRISM_CHECK_EQ(en.language(), std::string("en-US"));
-  PRISM_CHECK(en.size() >= 36);  // the documented minimum surface
+  PRISM_CHECK(en.size() >= 50);  // the documented minimum surface (C38: 39 -> 50)
   PRISM_CHECK_EQ(en.size(), prism::i18n::RequiredKeys().size());
 
   const std::string* extract = en.Find("menu.extract.here");
@@ -261,9 +261,13 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
     PRISM_CHECK(zhValue->size() != 0);
   }
   // The surface list is part of the contract, so its size is asserted, not
-  // inferred: 8 menu keys, 4 sidebar, 9 capsule, 6 actions, 6 errors, 4 skip,
-  // 2 progress = 39.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{39});
+  // inferred: 9 menu keys, 4 sidebar, 10 capsule, 7 actions, 11 errors, 4 skip,
+  // 5 progress = 50. Card C38 added the eleven keys the exe was already asking
+  // for through Tr::Or() code defaults (menu.file, action.exit, the compression
+  // progress three, status.refreshDeferred, and the five CLI/verification
+  // errors); that is why this number moved from 39 -- and it moves only when
+  // RequiredKeys() moves, which is the point of the census.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{50});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

@@ -15,8 +15,19 @@ name: CI
 on:
   push:
     branches: [main, 'feat/**']
+    # Docs-only pushes cannot break a binary. Running an 8-minute Windows build
+    # for a README typo is pure loss; if branch protection ever requires these
+    # checks, delete these two blocks and accept the cost instead.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
   workflow_dispatch:
 
 permissions:
@@ -84,7 +95,7 @@ jobs:
       - name: Build (ASan/UBSan)
         run: cmake --build build-asan --parallel
       - name: Test (ASan/UBSan)
-        run: ctest --test-dir build-asan --output-on-failure --no-tests=error
+        run: ctest -j 4 --test-dir build-asan --output-on-failure --no-tests=error
 
       # ---- diagnostics: a red run has to be readable from the run page ----
       - name: Failed test names -> step summary
@@ -188,7 +199,10 @@ jobs:
           # actually go wrong in shipped code.
           PRISM_CTEST_EXCLUDE: "bench|fuzz"
         run: |
-          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          # -j: the suites are independent by construction (each one builds its
+          # own fixtures under its own temp dir), and the ones that cannot run
+          # concurrently declare RESOURCE_LOCK. Serial ctest spent ~60 s here.
+          ctest -j 8 --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
       # The Windows half of the same local gate: proves CMakePresets.json parses

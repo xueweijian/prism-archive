@@ -12,6 +12,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace prism::test {
@@ -59,6 +60,11 @@ struct Registrar {
 struct MutationVerdictState {
   bool armed = false;
   std::string prefix;
+  // Empty = "the injection compiled in" is the only proof available (the
+  // single-argument arming). When set, CAUGHT is printed only if this says the
+  // injected defect really fired -- CONTRACTS D3: a mutant build can go red for
+  // an unrelated reason, and that run must stay RED without a false CAUGHT.
+  std::function<bool()> injectionActive;
   std::atomic<bool> printed{false};
 };
 
@@ -67,15 +73,28 @@ inline MutationVerdictState& MutationVerdict() {
   return state;
 }
 
-// Arm the verdict with the caller's complete marker prefix. nullptr disarms.
-inline void SetMutationVerdict(const char* prefix) {
+// Arm the verdict with the caller's complete marker prefix plus the runtime
+// proof that the injected defect fired. nullptr disarms.
+inline void SetMutationVerdict(const char* prefix, std::function<bool()> injectionActive) {
   MutationVerdictState& state = MutationVerdict();
   state.prefix = prefix != nullptr ? prefix : "";
+  state.injectionActive = std::move(injectionActive);
   state.printed.store(false, std::memory_order_relaxed);
   state.armed = prefix != nullptr;
 }
 
-inline void ClearMutationVerdict() { SetMutationVerdict(nullptr); }
+// Arm without a runtime predicate: the build-time mutation flag is the proof.
+inline void SetMutationVerdict(const char* prefix) {
+  SetMutationVerdict(prefix, std::function<bool()>());
+}
+
+inline void ClearMutationVerdict() {
+  MutationVerdictState& state = MutationVerdict();
+  state.armed = false;
+  state.prefix.clear();
+  state.injectionActive = nullptr;
+  state.printed.store(false, std::memory_order_relaxed);
+}
 
 inline bool MutationVerdictArmed() { return MutationVerdict().armed; }
 
@@ -84,6 +103,11 @@ inline void ReportFailure(const char* file, int line, const std::string& what) {
   std::cout << "    FAIL  " << file << ":" << line << "  " << what << std::endl;
   MutationVerdictState& verdict = MutationVerdict();
   if (!verdict.armed) return;
+  // CONTRACTS D3: red does not by itself mean CAUGHT. When the caller supplied
+  // a predicate, only a failure that provably came from the injected defect may
+  // produce the verdict; otherwise fall through to the ordinary failure path
+  // (record and continue, exit 1 at the end) without ever printing CAUGHT.
+  if (verdict.injectionActive && !verdict.injectionActive()) return;
   // Only the first failure prints: a worker thread failing at the same time
   // must not append a second marker (or half a line) to a CAUGHT run.
   if (verdict.printed.exchange(true, std::memory_order_acq_rel)) return;

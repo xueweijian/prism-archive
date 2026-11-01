@@ -3,15 +3,18 @@
 // The property under test is process-level: the mutation verdict must be
 // printed at the FIRST failed assertion and the process must leave with 0, so
 // no teardown crash or hang can swallow the marker. The suite therefore
-// re-executes itself as a child for each shape:
+// re-executes itself as a child for each of D27's three states:
 //
-//   * --armed-child : SetMutationVerdict("C44 MUTATION CAUGHT: probe") and then
-//                     one failing check. The harness must print the caller's
-//                     marker immediately after the FAIL line, must NOT execute
-//                     the next statement, and must exit 0.
-//   * --clean-child : the same failing check without a verdict armed. The old
-//                     behaviour must be untouched: FAIL is recorded, execution
-//                     continues, the process exits 1.
+//   * --armed-child    : armed with a predicate that says the injection fired,
+//                        then one failing check. The harness must print the
+//                        caller's marker immediately after the FAIL line, must
+//                        NOT execute the next statement, and must exit 0.
+//   * --inactive-child : armed, but the predicate says the injected defect did
+//                        not fire (CONTRACTS D3: red for an unrelated reason).
+//                        No CAUGHT may be printed; the failure is recorded, the
+//                        run continues, and the process exits 1.
+//   * --clean-child    : no verdict armed at all. Behaviour must be untouched:
+//                        FAIL is recorded, execution continues, exit 1.
 //
 // Parent-side assertions are on strings (D2) and each child writes into its own
 // unique temp directory (D9). No GUI, no 7z.dll, no window station.
@@ -101,7 +104,7 @@ void DumpOnFailure(const ChildRun& run, bool ok) {
 
 }  // namespace
 
-PRISM_TEST("verdict.first_failure_prints_marker_and_exits_zero") {
+PRISM_TEST("verdict.active_injection_prints_marker_and_exits_zero") {
   const ChildRun run = RunChild("--armed-child");
   const std::size_t failAt = run.output.find("    FAIL  ");
   const std::size_t markerAt = run.output.find(kMarker);
@@ -128,6 +131,24 @@ PRISM_TEST("verdict.first_failure_prints_marker_and_exits_zero") {
   PRISM_CHECK(!continuedAfterFailure);
 }
 
+PRISM_TEST("verdict.inactive_injection_stays_red_without_caught") {
+  const ChildRun run = RunChild("--inactive-child");
+  const bool exitOne = run.exitCode == 1;
+  const bool failPrinted = run.output.find("    FAIL  ") != std::string::npos;
+  // D3: the run is red, but the injected defect did not fire -- claiming CAUGHT
+  // here would turn "failed for the wrong reason" into a green mutation test.
+  const bool noMarker = run.output.find("C44 MUTATION CAUGHT") == std::string::npos;
+  const bool noImmediateExit =
+      run.output.find("exiting 0 now so teardown") == std::string::npos;
+  const bool continued = run.output.find("INACTIVE CHILD CONTINUED") != std::string::npos;
+  DumpOnFailure(run, exitOne && failPrinted && noMarker && noImmediateExit && continued);
+  PRISM_CHECK(exitOne);
+  PRISM_CHECK(failPrinted);
+  PRISM_CHECK(noMarker);
+  PRISM_CHECK(noImmediateExit);
+  PRISM_CHECK(continued);
+}
+
 PRISM_TEST("verdict.unarmed_keeps_record_and_continue_behaviour") {
   const ChildRun run = RunChild("--clean-child");
   const bool exitOne = run.exitCode == 1;
@@ -145,10 +166,19 @@ PRISM_TEST("verdict.unarmed_keeps_record_and_continue_behaviour") {
 
 int main(int argc, char** argv) {
   if (argc > 1 && std::strcmp(argv[1], "--armed-child") == 0) {
-    prism::test::SetMutationVerdict(kMarker);
-    PRISM_CHECK(false);  // D27: the harness must print the marker and _Exit(0).
+    // D27 + D3: armed, and the predicate proves the injected defect fired.
+    prism::test::SetMutationVerdict(kMarker, [] { return true; });
+    PRISM_CHECK(false);  // The harness must print the marker and _Exit(0).
     std::printf("ARMED CHILD CONTINUED (the verdict did not leave at the first failure)\n");
     return 0;
+  }
+  if (argc > 1 && std::strcmp(argv[1], "--inactive-child") == 0) {
+    // D27 + D3: armed, but this red came from something other than the
+    // injection. No CAUGHT may be printed and the run must stay red.
+    prism::test::SetMutationVerdict(kMarker, [] { return false; });
+    PRISM_CHECK(false);
+    std::printf("INACTIVE CHILD CONTINUED (injection did not fire; no verdict printed)\n");
+    return prism::test::FailureCount() == 0 ? 0 : 1;
   }
   if (argc > 1 && std::strcmp(argv[1], "--clean-child") == 0) {
     PRISM_CHECK(false);  // No verdict armed: FAIL is recorded and execution goes on.

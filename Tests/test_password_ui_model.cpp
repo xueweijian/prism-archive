@@ -563,7 +563,8 @@ int main(int argc, char** argv) {
   // ReportFailure prints it at the first failed check and leaves with 0, so no
   // later teardown can swallow it. A dead mutation never fails and the marker
   // never appears, so PASS_REGULAR_EXPRESSION misses and the target is RED.
-  prism::test::SetMutationVerdict("PASSWORD-UI MUTANT CAUGHT");
+  prism::test::SetMutationVerdict("PASSWORD-UI MUTANT CAUGHT",
+                                 [] { return prism::pwd::UiMutationFired(); });
 #endif
   const int failures = prism::test::RunAll(argc, argv);
 #if defined(PRISM_PWD_UI_MUTANT_ECHO_PLAINTEXT) || \

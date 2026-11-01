@@ -522,8 +522,11 @@ int main(int argc, char** argv) {
     // CONTRACTS D27: arm the verdict BEFORE the first assertion. ReportFailure
     // prints it at that moment and leaves with 0, so neither the "assume the
     // switch succeeded" code nor CoUninitialize/teardown can swallow it.
+    // D3: the compile-time mutant flag is this suite's injection proof (the
+    // banner above); ReportFailure only claims CAUGHT while it holds.
     prism::test::SetMutationVerdict(
-        (std::string("C34 MUTATION CAUGHT: ") + kMutation).c_str());
+        (std::string("C34 MUTATION CAUGHT: ") + kMutation).c_str(),
+        [mutation = kMutation] { return mutation != nullptr; });
   }
   if (FAILED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::cout << "SKIP: CoInitializeEx failed (this window station has no COM)" << std::endl;

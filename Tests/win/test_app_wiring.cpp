@@ -511,9 +511,12 @@ int main(int argc, char** argv) {
     // CONTRACTS D27: the verdict is armed before the first assertion; the first
     // failed check prints the marker and exits 0 on the spot, so a mutant that
     // walks into the shared-reader premise cannot lose its verdict to teardown.
-    prism::test::SetMutationVerdict(kSharedReaderMutant
-                                        ? "C25 MUTATION CAUGHT: shared_reader"
-                                        : "C25 MUTATION CAUGHT: no_motw");
+    // D3: only a mutant build has an injection to claim (the banner above is
+    // the compiled-in proof); the predicate keeps a clean build untouched.
+    prism::test::SetMutationVerdict(
+        kSharedReaderMutant ? "C25 MUTATION CAUGHT: shared_reader"
+                            : "C25 MUTATION CAUGHT: no_motw",
+        [shared = kSharedReaderMutant, motw = kNoMotwMutant] { return shared || motw; });
   }
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::cout << "SKIP: CoInitializeEx failed (this window station has no COM)" << std::endl;

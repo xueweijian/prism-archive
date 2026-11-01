@@ -636,7 +636,8 @@ int main(int argc, char** argv) {
   // dialog teardown cannot swallow it (the failure mode this card hit on
   // 2026-11-02). A dead mutation never fails and the marker never appears, so
   // PASS_REGULAR_EXPRESSION misses and the mutation test is RED.
-  prism::test::SetMutationVerdict("PASSWORD-UI MUTANT CAUGHT");
+  prism::test::SetMutationVerdict("PASSWORD-UI MUTANT CAUGHT",
+                                 [] { return prism::pwd::UiMutationFired(); });
 #endif
   const int failures = prism::test::RunAll(argc, argv);
 

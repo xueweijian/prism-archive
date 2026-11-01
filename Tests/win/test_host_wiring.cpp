@@ -535,11 +535,16 @@ int main(int argc, char** argv) {
     return 1;
   }
   const int rc = prism::test::RunAll(argc, argv);
-  ::CoUninitialize();
 
   // CONTRACTS D26: the mutant's verdict is a CONJUNCTION printed by the suite
   // itself, never WILL_FAIL (which cannot be combined with a pass marker and
   // would turn a skip into a green).
+  //
+  // Printed BEFORE CoUninitialize on purpose: CI reported "Required regular
+  // expression not found" for mutation.host_wiring.no-archive-switch while the
+  // FAIL lines below the marker were clearly present -- the suite went red and
+  // the process then died in teardown, taking the marker with it. A verdict that
+  // can be lost to a later crash is not a verdict.
   if (kMutation != nullptr) {
     if (rc == 0) {
       std::cout << "C34 MUTATION NOT CAUGHT: the suite stayed green with the regression compiled "

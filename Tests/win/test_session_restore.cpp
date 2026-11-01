@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -71,8 +72,28 @@ constexpr const char* kMutantBanner = nullptr;
 constexpr const char* kMutant = nullptr;
 #endif
 
-constexpr DWORD kReadyTimeoutMs = 60'000;
-constexpr DWORD kExitTimeoutMs = 60'000;
+// ---------------------------------------------------------------------------
+// BOUNDED AWAITS -- the rule this file learned the hard way.
+//
+// A full lane runs eight agents on four cores, and this suite starts four child
+// processes per run. A "generous" 60 s budget per wait therefore turns one stuck
+// case into a 10-minute lane stall (observed: the mutant run hit ctest's 600 s
+// ceiling), and a child that has DIED is never "still starting". Hence:
+//
+//   * every wait has a deadline (the three budgets below);
+//   * every wait also watches the CHILD and returns the moment it exits -- a
+//     dead child is a diagnostic, not something to keep polling for;
+//   * TerminateProcess is followed by a BOUNDED reap (kKillTimeoutMs), so a
+//     process the kernel will not let go fails this suite instead of hanging it;
+//   * a timeout prints the child's exit code and stderr tail.
+//
+// The ctest TIMEOUT (120 s, set in Tests/suites/c46-session.cmake) is the
+// last-resort ceiling that turns a future hang RED; it is not the mechanism.
+// ---------------------------------------------------------------------------
+constexpr DWORD kLineTimeoutMs = 15'000;    // a stderr marker the child should print
+constexpr DWORD kWindowTimeoutMs = 15'000;  // first paint of the gallery window
+constexpr DWORD kExitTimeoutMs = 15'000;    // WM_CLOSE -> Run() returns
+constexpr DWORD kKillTimeoutMs = 5'000;     // TerminateProcess -> process gone
 
 std::string Narrow(const std::wstring& text) { return prism::win::WideToUtf8(text); }
 
@@ -89,7 +110,9 @@ struct Child {
   ~Child() {
     if (started && !exited) {
       TerminateProcess(info.hProcess, 0xC46);
-      WaitForSingleObject(info.hProcess, 10'000);
+      // Bounded on purpose: a destructor that waits forever hides the defect it
+      // is cleaning up behind a ctest timeout instead of a named failure.
+      WaitForSingleObject(info.hProcess, kKillTimeoutMs);
     }
     if (info.hProcess != nullptr) CloseHandle(info.hProcess);
     if (info.hThread != nullptr) CloseHandle(info.hThread);
@@ -174,15 +197,112 @@ bool StartChild(const std::wstring& exe, const std::vector<std::wstring>& args,
   return true;
 }
 
-// Readiness is a BYTE fact ("the line is in the file"), not a duration: the
-// deadline only bounds how long we refuse to believe a silent process.
-bool WaitForText(const fs::path& path, const std::string& needle, DWORD timeoutMs) {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (Contains(ReadText(path), needle)) return true;
+std::string Tail(const std::string& text, std::size_t bytes) {
+  return text.size() <= bytes ? text : text.substr(text.size() - bytes);
+}
+
+bool ChildAlive(const Child& child) {
+  return child.started && WaitForSingleObject(child.info.hProcess, 0) == WAIT_TIMEOUT;
+}
+
+DWORD ChildExitCode(const Child& child) {
+  DWORD code = STILL_ACTIVE;
+  if (child.started) GetExitCodeProcess(child.info.hProcess, &code);
+  return code;
+}
+
+// One diagnostic block, used by EVERY failed wait: whether the child is stuck or
+// dead, and what it managed to print. A red without this is a guessing game.
+void ReportChild(const char* what, const Child& child, const fs::path& stderrPath) {
+  std::printf("    %s: ", what);
+  if (ChildAlive(child)) {
+    std::printf("child %lu is STILL RUNNING after the bounded wait\n",
+                static_cast<unsigned long>(child.info.dwProcessId));
+  } else {
+    std::printf("child %lu exited with code %lu\n",
+                static_cast<unsigned long>(child.info.dwProcessId),
+                static_cast<unsigned long>(ChildExitCode(child)));
+  }
+  std::printf("    child stderr (tail):\n%s\n", Tail(ReadText(stderrPath), 2000).c_str());
+}
+
+struct LineWait {
+  bool found = false;
+  bool childExited = false;
+  DWORD exitCode = STILL_ACTIVE;
+  std::string text;
+};
+
+// Readiness is a BYTE fact ("the line is in the file"), not a duration. The two
+// exits from the loop are both bounded: the deadline, and the child's death.
+LineWait WaitForLine(const Child& child, const fs::path& path, const std::string& needle,
+                     DWORD budgetMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+  LineWait wait;
+  for (;;) {
+    wait.text = ReadText(path);
+    if (Contains(wait.text, needle)) {
+      wait.found = true;
+      return wait;
+    }
+    if (!ChildAlive(child)) {
+      wait.childExited = true;
+      wait.exitCode = ChildExitCode(child);
+      return wait;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) return wait;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
-  return Contains(ReadText(path), needle);
+}
+
+// "-1" when the field is absent, so "restored=" missing is never mistaken for 0.
+int ParseCount(const std::string& line, std::string_view key) {
+  const std::size_t at = line.find(key);
+  if (at == std::string::npos) return -1;
+  int value = 0;
+  bool digits = false;
+  for (std::size_t i = at + key.size(); i < line.size() && line[i] >= '0' && line[i] <= '9'; ++i) {
+    value = value * 10 + (line[i] - '0');
+    digits = true;
+  }
+  return digits ? value : -1;
+}
+
+struct RestoreWait {
+  bool found = false;        // a "session restore" line exists
+  bool restoredZero = false; // ... and it says restored=0
+  bool childExited = false;
+  DWORD exitCode = STILL_ACTIVE;
+  std::string line;
+  std::string text;
+};
+
+// The crash-guard case, as a decision: the FIRST "session restore" line decides.
+// A non-zero "restored" is the defect and is reported IMMEDIATELY -- waiting out
+// the budget for a line that will never change is how the mutant run used to
+// burn 60 s per attempt (and, under load, the whole ctest timeout).
+RestoreWait WaitForRestoreLine(const Child& child, const fs::path& path, DWORD budgetMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+  RestoreWait wait;
+  const std::string marker = "session restore ";
+  for (;;) {
+    wait.text = ReadText(path);
+    for (std::size_t at = wait.text.find(marker); at != std::string::npos;
+         at = wait.text.find(marker, at + marker.size())) {
+      const std::size_t end = wait.text.find('\n', at);
+      wait.line = wait.text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+      wait.found = true;
+      wait.restoredZero = ParseCount(wait.line, "restored=") == 0;
+      return wait;
+    }
+    if (!ChildAlive(child)) {
+      wait.childExited = true;
+      wait.exitCode = ChildExitCode(child);
+      return wait;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) return wait;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
 }
 
 bool WaitForExit(Child* child, DWORD timeoutMs, DWORD* exitCode) {
@@ -193,11 +313,20 @@ bool WaitForExit(Child* child, DWORD timeoutMs, DWORD* exitCode) {
   return true;
 }
 
-void Kill(Child* child) {
-  if (!child->started || child->exited) return;
+// BOUNDED kill. Returns false when the process is still alive after the budget:
+// the caller turns that into a named failure instead of hanging the lane.
+bool Kill(Child* child, const char* what) {
+  if (!child->started || child->exited) return true;
   TerminateProcess(child->info.hProcess, 0xC46);  // SIGKILL, in Windows spelling
-  WaitForSingleObject(child->info.hProcess, 30'000);
+  const DWORD waited = WaitForSingleObject(child->info.hProcess, kKillTimeoutMs);
+  if (waited == WAIT_TIMEOUT) {
+    std::printf("    KILL TIMEOUT: %s (%lu) survived TerminateProcess for %lu ms\n", what,
+                static_cast<unsigned long>(child->info.dwProcessId),
+                static_cast<unsigned long>(kKillTimeoutMs));
+    return false;
+  }
   child->exited = true;
+  return true;
 }
 
 struct FindWindowState {
@@ -217,23 +346,35 @@ BOOL CALLBACK FindWindowProc(HWND hwnd, LPARAM param) {
   return FALSE;
 }
 
-HWND WaitForMainWindow(DWORD pid, DWORD timeoutMs) {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-  while (std::chrono::steady_clock::now() < deadline) {
+// Same bounded shape as WaitForLine: a child that died before it painted its
+// window will never paint it, so the wait ends with the child, not with a stall.
+HWND WaitForMainWindow(const Child& child, DWORD budgetMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+  const DWORD pid = child.info.dwProcessId;
+  for (;;) {
     FindWindowState state;
     state.pid = pid;
     EnumWindows(&FindWindowProc, reinterpret_cast<LPARAM>(&state));
     if (state.window != nullptr) return state.window;
+    if (!ChildAlive(child)) return nullptr;
+    if (std::chrono::steady_clock::now() >= deadline) return nullptr;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
-  return nullptr;
 }
 
 // The real close path a user takes: WM_CLOSE on the gallery window.
-bool CloseMainWindow(DWORD pid) {
-  const HWND window = WaitForMainWindow(pid, kReadyTimeoutMs);
-  if (window == nullptr) return false;
-  return PostMessageW(window, WM_CLOSE, 0, 0) != 0;
+bool CloseMainWindow(const Child& child, const fs::path& stderrPath) {
+  const HWND window = WaitForMainWindow(child, kWindowTimeoutMs);
+  if (window == nullptr) {
+    ReportChild("no gallery window appeared (WM_CLOSE could not be sent)", child, stderrPath);
+    return false;
+  }
+  if (!PostMessageW(window, WM_CLOSE, 0, 0)) {
+    std::printf("    PostMessageW(WM_CLOSE) failed: %lu\n",
+                static_cast<unsigned long>(GetLastError()));
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,8 +535,9 @@ PRISM_TEST("restore.killed_process_is_not_restored") {
     std::printf("    %s\n", why.c_str());
     return;
   }
-  if (!PRISM_CHECK(WaitForText(runA, "session armed entries=2", kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(runA).c_str());
+  const LineWait armed = WaitForLine(a, runA, "session armed entries=2", kLineTimeoutMs);
+  if (!PRISM_CHECK(armed.found)) {
+    ReportChild("process A never printed the armed line", a, runA);
     return;
   }
   // The document on disk is the DIRTY one: two entries, cleanShutdown false.
@@ -403,7 +545,7 @@ PRISM_TEST("restore.killed_process_is_not_restored") {
   PRISM_CHECK_EQ(EntryCountInDocument(sandbox), size_t{2});
   PRISM_CHECK(SessionDocumentSays(sandbox, Narrow(first.filename().wstring())));
   PRISM_CHECK(SessionDocumentSays(sandbox, Narrow(second.filename().wstring())));
-  Kill(&a);
+  if (!PRISM_CHECK(Kill(&a, "process A (killed on purpose)"))) return;
 
   // Second start, no arguments: the crash guard must hand out zero entries.
   const fs::path runB = root / L"run-b.err";
@@ -413,15 +555,25 @@ PRISM_TEST("restore.killed_process_is_not_restored") {
     return;
   }
   // entries=2 (the document still lists them) but tried=0: the guard refused.
-  if (!PRISM_CHECK(WaitForText(runB, "session restore entries=2 tried=0 skipped=0 restored=0",
-                              kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(runB).c_str());
+  // The FIRST restore line decides, so a mutant that restores the dead session
+  // fails here in one poll instead of burning the whole budget waiting for a
+  // line that cannot change (that wait was the 60 s the mutant suite used to
+  // spend, and under load the reason the lane hit ctest's timeout).
+  const RestoreWait restored = WaitForRestoreLine(b, runB, kLineTimeoutMs);
+  if (!PRISM_CHECK(restored.found)) {
+    ReportChild("process B never printed a restore line", b, runB);
     return;
   }
+  if (!PRISM_CHECK(restored.restoredZero)) {
+    std::printf("    the killed session was RESTORED: %s\n", restored.line.c_str());
+    return;
+  }
+  PRISM_CHECK_EQ(ParseCount(restored.line, "entries="), 2);
+  PRISM_CHECK_EQ(ParseCount(restored.line, "tried="), 0);
   // "clean=0" in that line is the guard's own report; assert the shape too.
-  PRISM_CHECK(Contains(ReadText(runB), "clean=0"));
-  PRISM_CHECK(!Contains(ReadText(runB), "session opened"));
-  Kill(&b);
+  PRISM_CHECK(Contains(restored.line, "clean=0"));
+  PRISM_CHECK(!Contains(restored.text, "session opened"));
+  if (!PRISM_CHECK(Kill(&b, "process B (nothing to restore, picker open)"))) return;
   // A crashed session stays crashed: the second process never claimed a clean
   // shutdown, so the document still says false.
   PRISM_CHECK(SessionDocumentSays(sandbox, "\"cleanShutdown\": false"));
@@ -469,34 +621,33 @@ PRISM_TEST("restore.reopens_two_archives_with_their_folder_and_view") {
     std::printf("    %s\n", why.c_str());
     return;
   }
-  if (!PRISM_CHECK(WaitForText(run, "session restore entries=2 tried=2 skipped=0 restored=2",
-                              kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
+  const LineWait restored = WaitForLine(
+      child, run, "session restore entries=2 tried=2 skipped=0 restored=2", kLineTimeoutMs);
+  if (!PRISM_CHECK(restored.found)) {
+    ReportChild("the restore line never appeared", child, run);
     return;
   }
   // The folder and the view mode reached the WINDOW, not just the document:
   // "folder=docs view=list restored=1" is printed after the restore walk.
-  if (!PRISM_CHECK(WaitForText(run, "session opened", kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
+  const LineWait openedWait = WaitForLine(child, run, "session opened", kLineTimeoutMs);
+  if (!PRISM_CHECK(openedWait.found)) {
+    ReportChild("the window never reported the restored archive", child, run);
     return;
   }
-  const std::string opened = ReadText(run);
+  const std::string opened = openedWait.text;
   PRISM_CHECK(Contains(opened, "folder=" + firstFolder));
   PRISM_CHECK(Contains(opened, "view=list"));
   PRISM_CHECK(Contains(opened, "restored=1"));
 
   // A real WM_CLOSE: the clean path. The document must end up clean + two entries.
-  if (!PRISM_CHECK(CloseMainWindow(child.info.dwProcessId))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
-    return;
-  }
+  if (!PRISM_CHECK(CloseMainWindow(child, run))) return;
   DWORD exitCode = 1;
   if (!PRISM_CHECK(WaitForExit(&child, kExitTimeoutMs, &exitCode))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
+    ReportChild("Run() did not return after WM_CLOSE", child, run);
     return;
   }
   PRISM_CHECK_EQ(exitCode, DWORD{0});
-  PRISM_CHECK(WaitForText(run, "session saved", 5'000));
+  PRISM_CHECK(WaitForLine(child, run, "session saved", kLineTimeoutMs).found);
   PRISM_CHECK(SessionDocumentSays(sandbox, "\"cleanShutdown\": true"));
   PRISM_CHECK_EQ(EntryCountInDocument(sandbox), size_t{2});
 }
@@ -541,19 +692,24 @@ PRISM_TEST("restore.skips_missing_and_damaged_archives_without_dialogs") {
     std::printf("    %s\n", why.c_str());
     return;
   }
-  if (!PRISM_CHECK(WaitForText(run, "session restore entries=3 tried=3 skipped=2 restored=1",
-                              kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
+  const LineWait restored = WaitForLine(
+      child, run, "session restore entries=3 tried=3 skipped=2 restored=1", kLineTimeoutMs);
+  if (!PRISM_CHECK(restored.found)) {
+    ReportChild("the restore line never appeared", child, run);
     return;
   }
-  if (!PRISM_CHECK(WaitForText(run, "session opened", kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
+  const LineWait openedWait = WaitForLine(child, run, "session opened", kLineTimeoutMs);
+  if (!PRISM_CHECK(openedWait.found)) {
+    ReportChild("the window never reported the restored archive", child, run);
     return;
   }
-  PRISM_CHECK(Contains(ReadText(run), "folder=" + goodFolder));
-  if (!PRISM_CHECK(CloseMainWindow(child.info.dwProcessId))) return;
+  PRISM_CHECK(Contains(openedWait.text, "folder=" + goodFolder));
+  if (!PRISM_CHECK(CloseMainWindow(child, run))) return;
   DWORD exitCode = 1;
-  if (!PRISM_CHECK(WaitForExit(&child, kExitTimeoutMs, &exitCode))) return;
+  if (!PRISM_CHECK(WaitForExit(&child, kExitTimeoutMs, &exitCode))) {
+    ReportChild("Run() did not return after WM_CLOSE", child, run);
+    return;
+  }
   PRISM_CHECK_EQ(exitCode, DWORD{0});
   // The dead entries are not carried forward: the session converges on what is
   // actually openable instead of growing a graveyard.
@@ -584,12 +740,13 @@ PRISM_TEST("restore.corrupt_session_starts_anyway") {
     return;
   }
   // The discard is reported on stderr (one warn line) and nothing is restored.
-  if (!PRISM_CHECK(WaitForText(run, "status=corrupt", kReadyTimeoutMs))) {
-    std::printf("    child stderr:\n%s\n", ReadText(run).c_str());
+  const LineWait discarded = WaitForLine(child, run, "status=corrupt", kLineTimeoutMs);
+  if (!PRISM_CHECK(discarded.found)) {
+    ReportChild("the corrupt document was never reported", child, run);
     return;
   }
-  PRISM_CHECK(Contains(ReadText(run), "restored=0"));
+  PRISM_CHECK(Contains(discarded.text, "restored=0"));
   // Reaching that line at all IS the "did not crash on the document" proof: the
   // corrupt file was read, discarded and reported before anything else ran.
-  Kill(&child);
+  PRISM_CHECK(Kill(&child, "process (corrupt document run)"));
 }

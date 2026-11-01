@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Assets/Icon/prism.ico -- the multi-size application icon.
+r"""Generate Assets/Icon/prism.ico -- the multi-size application icon.
 
 Deliberately dependency-free: this file is the *source* of the committed .ico, so
 a reviewer can regenerate it byte-for-byte (Pillow's output changes between

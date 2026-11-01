@@ -591,16 +591,18 @@ int main() {
       RemoveDir(dir);
       return 1;
     }
-    // END - kLookback: the inclusive window edge, served for FREE from the
-    // ring (zero decoder work), then END - (kLookback + 1) is one byte past it
-    // and must pay one honest restart. Together these two pin the boundary
-    // from both sides: an off-by-one in either the planner or the ring turns
-    // one of them red.
+    // END - kLookback on a COLD stream: nothing has been read yet, so the ring
+    // is empty and this must be an honest restart -- NOT a free hit. That is
+    // the real Explorer opening sequence (Stat, seek to end, seek back), and
+    // asserting the restart here proves END-origin resolves to an absolute
+    // target that the re-decode path actually consumes. The warm-stream free
+    // hit at the same offset is covered in the lookback case above; both sides
+    // of the distinction matter, and this one is the one a cold stream sees.
     if (!PRISM_CHECK(SeekTo(stream.Get(), -static_cast<int64_t>(kLookback), STREAM_SEEK_END))) {
       RemoveDir(dir);
       return 1;
     }
-    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(0))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(1))) { RemoveDir(dir); return 1; }
     std::string window;
     if (!PRISM_CHECK(ReadExactly(stream.Get(), 32, &window))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ByteEquals(window, contentGamma,
@@ -608,10 +610,13 @@ int main() {
       RemoveDir(dir);
       return 1;
     }
+    // END + 0 is a pure forward no-op from anywhere: it must not spend another
+    // restart, and the next byte-past-the-window seek pays exactly restart #2.
     if (!PRISM_CHECK(SeekTo(stream.Get(), 0, STREAM_SEEK_END))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(1))) { RemoveDir(dir); return 1; }
     const int64_t kBack = static_cast<int64_t>(kLookback) + 1;
     if (!PRISM_CHECK(SeekTo(stream.Get(), -kBack, STREAM_SEEK_END))) { RemoveDir(dir); return 1; }
-    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(1))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(2))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ReadExactly(stream.Get(), 32, &window))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ByteEquals(window, contentGamma,
                                 static_cast<size_t>(static_cast<int64_t>(kGamma) - kBack)))) {

@@ -1018,14 +1018,14 @@ class SettingsStore {
   // through BOTH steps instead of being guessed at.
   void ApplyMigrations(int fromVersion) {
     for (int version = fromVersion; version < kSchemaVersion; ++version) {
-      const int to = version + 1;
 #if defined(PRISM_C14_MUTANT_SKIP_MIGRATION)
       // NEGATIVE CONTROL (CONTRACTS D3): every step below is compiled out.
       // The migration cases in Tests/test_settings_store.cpp MUST go red; the
       // CTest entry is WILL_FAIL, so red here is green there. If the macro were
       // misspelled the suite would pass, and THAT is what turns the mutant entry
       // red -- the inversion is the verdict, not this comment.
-      migrations_.push_back("skipped " + std::to_string(version) + "->" + std::to_string(to));
+      migrations_.push_back("skipped " + std::to_string(version) + "->" +
+                            std::to_string(version + 1));
 #else
       if (version == 1) {
         MigrateOneToTwo();

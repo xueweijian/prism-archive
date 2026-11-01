@@ -22,6 +22,7 @@
 // Tests/CMakeLists.txt registers PASS_REGULAR_EXPRESSION on the marker.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -104,6 +105,19 @@ PRISM_TEST("7z.dll discovery: env wins, order is the documented one") {
 
   // (c) order with no override in the way: app dir first, then 7-Zip's own
   //     registry answer (when the machine has one), then the two probes.
+  //
+  // Restore the override on EVERY exit path below. The rest of this file (and
+  // every later case in the same process) needs PRISM_7Z_DLL, because the
+  // fixture locates 7z.exe BESIDE the dll. Clearing it here and not restoring
+  // made "closing cancels the whole-archive scan" fail on the runner with an
+  // empty fixture path while passing locally -- the dev box re-set the variable
+  // by way of case (a), the runner did not. CI caught it on 2026-11-01.
+  struct EnvRestore {
+    std::wstring value;
+    ~EnvRestore() {
+      if (!value.empty()) SetEnvironmentVariableW(L"PRISM_7Z_DLL", value.c_str());
+    }
+  } env_restore{realDll};
   SetEnvironmentVariableW(L"PRISM_7Z_DLL", nullptr);
   const prism::win::SevenZipDllLookup ordered = prism::win::Resolve7zDll();
   if (!PRISM_CHECK(ordered.candidates.size() >= 2)) return;
@@ -111,12 +125,33 @@ PRISM_TEST("7z.dll discovery: env wins, order is the documented one") {
                    JoinPath(prism::win::ExecutableDirectory(), L"7z.dll"))) {
     return;
   }
-  // The two Program Files probes are the LAST resort and are always tried, in
-  // this order (they are also the only candidates a registry-less install can
-  // match).
+  // The Program Files probes are the LAST resort (they are also the only
+  // candidates a registry-less install can match), and the x64 probe is tried
+  // before the x86 one.
+  //
+  // Assert the CONTRACT, never a literal index and never "both must exist": a
+  // machine may provide only one of the two (the CI runner installs 7-Zip x64
+  // only), and a machine whose 7-Zip IS under Program Files gets a registry
+  // answer equal to the x64 probe, which the dedupe collapses. Two rounds of
+  // main-red on 2026-11-01 came from exactly those two assumptions.
+  const std::wstring kProbe64 = L"C:\\Program Files\\7-Zip\\7z.dll";
+  const std::wstring kProbe86 = L"C:\\Program Files (x86)\\7-Zip\\7z.dll";
   const std::vector<std::wstring>& c = ordered.candidates;
-  if (!PRISM_CHECK(c[c.size() - 2] == L"C:\\Program Files\\7-Zip\\7z.dll")) return;
-  if (!PRISM_CHECK(c.back() == L"C:\\Program Files (x86)\\7-Zip\\7z.dll")) return;
+  auto index_of = [&c](const std::wstring& value) {
+    for (std::size_t i = 0; i < c.size(); ++i) {
+      if (c[i] == value) return i;
+    }
+    return c.size();
+  };
+  const std::size_t probe64 = index_of(kProbe64);
+  const std::size_t probe86 = index_of(kProbe86);
+  // At least one probe is always tried, and it is always the last resort.
+  if (!PRISM_CHECK(probe64 < c.size() || probe86 < c.size())) return;
+  if (!PRISM_CHECK(c.back() == kProbe64 || c.back() == kProbe86)) return;
+  // Documented order between them, when the machine has both.
+  if (probe64 < c.size() && probe86 < c.size()) {
+    if (!PRISM_CHECK(probe64 < probe86)) return;
+  }
   // If this machine DOES register 7-Zip, its own InstallDir must be among the
   // candidates and must win over the probes -- that is the non-default-drive
   // case this card exists for (a 7-Zip at E:\DevTools\7-Zip used to be

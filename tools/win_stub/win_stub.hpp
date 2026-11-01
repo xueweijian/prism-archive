@@ -82,6 +82,30 @@ using SSIZE_T = long long;
 #define TEXT(x) L##x
 #define _T(x) L##x
 
+// ---- registry + module-path vocabulary (2026-11-01) -------------------------
+// Vocabulary only, like everything else here: the gate compiles headers against
+// this file with -fsyntax-only and never links, so no behaviour can leak out.
+// Needed the moment PrismEngineBridge.hpp started resolving 7z.dll through
+// HKLM/HKCU SOFTWARE\7-Zip InstallDir (card C1): the Windows-TU gate caught it
+// on main within minutes, which is exactly the job it exists to do.
+using LSTATUS = LONG;
+using LPBYTE = BYTE*;
+#define KEY_QUERY_VALUE 0x0001L
+#define ERROR_SUCCESS 0L
+#define INVALID_FILE_ATTRIBUTES (static_cast<DWORD>(-1))
+#define REG_SZ 1u
+#define REG_EXPAND_SZ 2u
+#define HKEY_LOCAL_MACHINE (reinterpret_cast<HKEY>(static_cast<LONG_PTR>(0x80000002L)))
+#define HKEY_CURRENT_USER (reinterpret_cast<HKEY>(static_cast<LONG_PTR>(0x80000001L)))
+
+DWORD GetFileAttributesW(PCWSTR path);
+DWORD GetModuleFileNameW(HMODULE module, PWSTR filename, DWORD size);
+DWORD GetEnvironmentVariableW(PCWSTR name, PWSTR buffer, DWORD size);
+LSTATUS RegOpenKeyExW(HKEY key, PCWSTR subKey, DWORD options, DWORD samDesired, HKEY* result);
+LSTATUS RegQueryValueExW(HKEY key, PCWSTR valueName, DWORD* reserved, DWORD* type,
+                         BYTE* data, DWORD* dataSize);
+LSTATUS RegCloseKey(HKEY key);
+
 enum : HRESULT {
   S_OK = 0,
   S_FALSE = 1,

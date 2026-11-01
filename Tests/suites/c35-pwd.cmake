@@ -28,9 +28,11 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   # D3 negative controls. Each compiles the SAME source with exactly one rule
   # broken, and each is registered with PASS_REGULAR_EXPRESSION and NO
   # WILL_FAIL (CONTRACTS D26: stacking the two turns the expected failure into
-  # an always-red test). The binary prints PASSWORD-UI MUTANT CAUGHT only when
-  # the run went red AND UiMutationFired() > 0, so a dead mutation prints
-  # nothing and this test is RED -- the "the injection stopped working" alarm.
+  # an always-red test). The binary arms PASSWORD-UI MUTANT CAUGHT before the
+  # first assertion (CONTRACTS D27): the first failed check prints it and exits
+  # 0 immediately, so teardown cannot swallow it. A dead mutation never fails
+  # and prints nothing, so this test is RED -- the "injection stopped working"
+  # alarm.
   # -------------------------------------------------------------------------
   add_executable(win_password_dialog_mutant_echo win/test_password_ui.cpp)
   target_link_libraries(win_password_dialog_mutant_echo PRIVATE prism_core
@@ -63,8 +65,9 @@ add_executable(core_test_password_ui_model test_password_ui_model.cpp)
 target_link_libraries(core_test_password_ui_model PRIVATE prism_core)
 add_test(NAME "core.test_password_ui_model" COMMAND core_test_password_ui_model)
 
-# Two rule mutations, compiled from the SAME source. The marker is the
-# conjunction (red AND the injection fired) rather than WILL_FAIL, per D3/D26.
+# Two rule mutations, compiled from the SAME source. The marker is still the
+# conjunction (red AND the injection fired, D3/D26), but it is armed before
+# RunAll and printed at the first failure (D27) rather than after the run.
 add_executable(core_test_password_ui_model_mutant_echo test_password_ui_model.cpp)
 target_link_libraries(core_test_password_ui_model_mutant_echo PRIVATE prism_core)
 target_compile_definitions(core_test_password_ui_model_mutant_echo

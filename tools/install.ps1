@@ -102,7 +102,7 @@ function Fail {
     $script:ExitCode = 1
 }
 
-$ValidMutations = @('SkipDefaultIcon', 'NoBackup', 'NoRestore', 'UnquotedVerb', 'Rebackup')
+$ValidMutations = @('SkipDefaultIcon', 'NoBackup', 'NoRestore', 'UnquotedVerb', 'Rebackup', 'EnvUnderSoftware')
 if ($script:Mutate -and ($ValidMutations -notcontains $script:Mutate)) {
     Write-Host ('ERROR unknown mutation: ' + $script:Mutate + ' (valid: ' + ($ValidMutations -join ', ') + ')')
     exit 2
@@ -261,7 +261,22 @@ $script:ClassesRoot = $ScopeRoot + '\Classes'
 $script:AppRoot = $ScopeRoot + '\PrismArchive'
 $script:UninstallRoot = $ScopeRoot + '\Microsoft\Windows\CurrentVersion\Uninstall'
 $script:UninstallKey = $script:UninstallRoot + '\PrismArchive'
-$script:EnvRoot = $ScopeRoot + '\Environment'
+function Get-EnvRootPath {
+    <# The user environment is a HIVE-ROOT key: HKCU\Environment, not
+       HKCU\Software\Environment. A scratch scope (self-test) keeps its own copy
+       inside the scope so the round trip never touches the real value.
+       This cost a real bug once: the engine override was written to
+       HKCU\Software\Environment, where nothing reads it, and the self-test could
+       not see it because it only exercised its own scratch mapping. The self-test
+       now asserts the real-scope mapping directly, and mutation
+       EnvUnderSoftware is its negative control. #>
+    param([string]$Scope)
+    if ($script:Mutate -eq 'EnvUnderSoftware') { return $Scope + '\Environment' }
+    if ($Scope -eq 'HKCU:\Software') { return 'HKCU:\Environment' }
+    return $Scope + '\Environment'
+}
+
+$script:EnvRoot = Get-EnvRootPath $ScopeRoot
 $script:BackupRoot = $script:AppRoot + '\AssocBackup'
 
 $script:DefaultExtensions = @(
@@ -925,6 +940,11 @@ function Invoke-SelfTest {
     Set-RegValue ($script:ClassesRoot + '\.zip') '' '7-Zip.zip' | Out-Null
     Set-RegValue ($script:EnvRoot) 'PRISM_7Z_DLL' 'C:\stale\7z.dll' | Out-Null
     $seeded = Get-RegTree $root
+
+    # -- 0. the mapping itself (this is the bug the first self-test missed) ---
+    $script:EnvRoot = Get-EnvRootPath $root
+    Assert-Equal 'real scope places the engine override at HKCU\Environment' 'HKCU:\Environment' (Get-EnvRootPath 'HKCU:\Software')
+    Assert-Equal 'scratch scope keeps its override inside the scope' ($root + '\Environment') (Get-EnvRootPath $root)
 
     # -- 1. dry run changes nothing ----------------------------------------
     $script:Wrote = 0

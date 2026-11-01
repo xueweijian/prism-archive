@@ -180,7 +180,18 @@ $script:ScopeRoot = $ScopeRoot
 $script:ClassesRoot = $ScopeRoot + '\Classes'
 $script:AppRoot = $ScopeRoot + '\PrismArchive'
 $script:UninstallKey = $ScopeRoot + '\Microsoft\Windows\CurrentVersion\Uninstall\PrismArchive'
-$script:EnvRoot = $ScopeRoot + '\Environment'
+function Get-EnvRootPath {
+    <# Same mapping as the installer: HKCU\Environment is hive-root, a scratch
+       scope keeps its own copy so the self-test round trip cannot touch the real
+       value. Kept in step with tools/install.ps1 (its self-test asserts the
+       mapping; the two files are deployed separately and cannot share code). #>
+    param([string]$Scope, [string]$Mutate = '')
+    if ($Mutate -eq 'EnvUnderSoftware') { return $Scope + '\Environment' }
+    if ($Scope -eq 'HKCU:\Software') { return 'HKCU:\Environment' }
+    return $Scope + '\Environment'
+}
+
+$script:EnvRoot = Get-EnvRootPath $ScopeRoot $Mutate
 $script:BackupRoot = $script:AppRoot + '\AssocBackup'
 
 function Get-ProgId {

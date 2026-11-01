@@ -39,6 +39,7 @@ PrismArchive 有两条分发路径，**注册表内容逐字节一致**，区别
     pwsh -File tools\install.ps1 -SelfTest -Quiet -Mutate NoRestore
     pwsh -File tools\install.ps1 -SelfTest -Quiet -Mutate UnquotedVerb
     pwsh -File tools\install.ps1 -SelfTest -Quiet -Mutate Rebackup
+    pwsh -File tools\install.ps1 -SelfTest -Quiet -Mutate EnvUnderSoftware
 
 自测在一个丢弃式注册表根（`HKCU\Software\PrismArchiveSelfTest`）和临时目录里跑完整回合：
 DryRun 纯净性 → 安装 → 幂等重装（逐字节比对整棵注册表子树）→ 还原关联 → 完全卸载（与安装前逐字节一致）

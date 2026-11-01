@@ -164,7 +164,11 @@ int AlignImpl(std::string_view target, std::string_view query,
       if (FoldAscii(target[j]) != qc) continue;
       const int bonus = kBase + BoundaryBonus(target, j);
       int best = kNoMatch;
-      int parentPos = -1;
+      // Only the tracing instantiation reads this; [[maybe_unused]] keeps the
+      // ranking instantiation warning-free under gcc -Wall -Werror (the Linux
+      // lane builds these headers with -Werror; MSVC has no such warning, so a
+      // "passes locally" here would be exactly the CONTRACTS B3 trap).
+      [[maybe_unused]] int parentPos = -1;
       if (prev[j - 1] != kNoMatch) {  // extend the run: strongest signal
         best = prev[j - 1] + bonus + kConsecutive;
         parentPos = static_cast<int>(j - 1);
@@ -173,16 +177,14 @@ int AlignImpl(std::string_view target, std::string_view query,
         const int candidate = prefixMax[j - 2] + bonus - kRunRestart;
         if (candidate > best) {
           best = candidate;
-          // Recover the position that produced the prefix max (needed for the
-          // trace). O(n) only for the entries whose trace we actually need.
           if constexpr (kTrace) {
+            // Recover the position that produced the prefix max (needed for
+            // the trace). O(n) only for entries whose trace we need.
             size_t k2 = j - 1;
             while (k2-- > 0) {
               if (prev[k2] == prefixMax[j - 2]) break;
             }
             parentPos = static_cast<int>(k2);
-          } else {
-            parentPos = 0;
           }
         }
       }

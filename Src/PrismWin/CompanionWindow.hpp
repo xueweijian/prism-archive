@@ -3,34 +3,58 @@
 // non-activating Liquid Glass flyout that shows the inline preview next to the
 // Explorer context menu.
 //
-// Milestone scope: a real top-level message window that consumes the PrismCore
-// models (QuickLookPlanner decides WHAT to show, ProgressHud decides the
-// phase) and paints through GDI. The DirectComposition + Direct2D optics land
-// in M3 -- the window, its lifecycle, the named-event wake protocol and the
-// model wiring are the contract that survives that upgrade.
+// Card C30 wires the flyout to the shell: the payload now arrives over the
+// shared-memory channel declared in CompanionPreviewBridge.hpp (the shell
+// extension writes it, this window reads and renders it), and the window is
+// placed next to the click with a right-edge flip. The window itself stays the
+// M2 GDI skeleton -- the DirectComposition optics land in M3 -- but the
+// CONTRACT that survives that upgrade is here: no activation, always inside the
+// work area, closes on ESC / deactivation, and never blocks the shell.
+//
+// Focus rules (both are asserted by Tests/win/test_companion_preview.cpp):
+//   * created with WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+//   * shown/moved with SetWindowPos(SWP_NOACTIVATE) / SW_SHOWNOACTIVATE only,
+//   * WM_MOUSEACTIVATE answers MA_NOACTIVATE, so a click into the flyout cannot
+//     pull focus out of the Explorer window that owns the menu.
+// NOREDIRECTIONBITMAP is deliberate: the window has no redirection surface by
+// design (its pixels come from the M3 DirectComposition visual). Until then the
+// flyout is a lifecycle/hit-test shell -- which is exactly the part under test.
 #pragma once
 
 #include <windows.h>
-#include <windowsx.h>  // IDC_ARROW etc.
+#include <windowsx.h>  // GET_WHEEL_DELTA_WPARAM / GET_X_LPARAM
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../PrismCore/ArchiveCatalog.hpp"
 #include "../PrismCore/Preview.hpp"
 #include "../PrismCore/ProgressHud.hpp"
+#include "CompanionPreviewBridge.hpp"
 
 namespace prism::win::companion {
-
-// Shared-memory contract with the shell DLL (see PrismShellCommand.cpp):
-//   1. the DLL writes the selected archive path into the section,
-//   2. signals the wake event,
-//   3. this window renders within the 12 ms budget (blueprint ch. 7.2).
-constexpr wchar_t kSectionName[] = L"Local\\PrismLiquidPreviewSection";
-constexpr wchar_t kWakeEventName[] = L"Local\\PrismLiquidPreviewWakeEvent";
 
 class CompanionWindow {
  public:
   static constexpr wchar_t kClassName[] = L"PrismArchiveCompanionPreview";
+
+  // Flyout metrics (also the row model the hover hit-test uses).
+  static constexpr int kHeaderHeight = 24;
+  static constexpr int kRowHeight = 18;
+  static constexpr int kMaxVisibleRows = 10;
+
+  // The focus policy in ONE place: the window creation, the test assertion and
+  // the negative-control mutant all read this function, so "created without
+  // NOACTIVATE" and "asserted without NOACTIVATE" cannot drift apart.
+  static DWORD ExStylePolicy() noexcept {
+#ifdef PRISM_C30_MUTANT_DROP_NOACTIVATE
+    // MUTATION: the flyout is created as an ordinary activating popup.
+    return WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP;
+#else
+    return WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP;
+#endif
+  }
 
   bool RegisterClass(HINSTANCE instance) {
     WNDCLASSEXW wc{sizeof(wc)};
@@ -47,17 +71,33 @@ class CompanionWindow {
 
   bool Create(HINSTANCE instance, int width, int height) {
     hwnd_ = CreateWindowExW(
-        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, kClassName,
-        L"PrismArchive Preview", WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
-        nullptr, nullptr, instance, this);
+        ExStylePolicy(), kClassName, L"PrismArchive Preview", WS_POPUP, CW_USEDEFAULT,
+        CW_USEDEFAULT, width, height, nullptr, nullptr, instance, this);
     return hwnd_ != nullptr;
   }
 
-  // Model inputs -------------------------------------------------------------
+  // ---- model inputs -----------------------------------------------------
   void SetCatalogItem(const prism::ArchiveItem& item, uint64_t previewLimit) {
     const auto decision = prism::QuickLookPlanner::Decide(item, previewLimit);
     kindLine_ = KindLabel(decision.kind);
     if (decision.exceedsLimit) kindLine_ += L"  (large -- preview capped)";
+  }
+
+  // Payload from the shell extension. Rejects a torn / foreign-layout packet and
+  // keeps the previous list instead of painting half of the new one.
+  bool ApplyPreview(const PreviewPacket& packet) {
+    if (!ValidPacket(packet)) return false;
+    archivePath_ = ArchivePathOf(packet);  // bounded: the section is untrusted
+    entries_.clear();
+    entries_.reserve(packet.entryCount);
+    for (uint32_t i = 0; i < packet.entryCount; ++i) entries_.push_back(packet.entries[i]);
+    cursorX_ = packet.cursorX;
+    cursorY_ = packet.cursorY;
+    needsScan_ = (packet.flags & kFlagNeedsCatalogScan) != 0;
+    scroll_ = 0;
+    hover_ = -1;
+    InvalidateRect(hwnd_, nullptr, TRUE);
+    return true;
   }
 
   void SetProgress(prism::ProgressHud& hud, uint64_t nowMs) {
@@ -80,12 +120,82 @@ class CompanionWindow {
     InvalidateRect(hwnd_, nullptr, TRUE);
   }
 
+  // ---- placement --------------------------------------------------------
+  // Where the flyout belongs for a click at cursorScreen inside workArea. Pure
+  // geometry lives in the bridge header (ComputeFlyoutRect) so it is testable
+  // without a window; this only remembers the answer.
+  FlyoutRect PlacementFor(POINT cursorScreen, RECT workArea) noexcept {
+    RECT client{0, 0, 0, 0};
+    SIZE size{};
+    if (hwnd_) {
+      GetWindowRect(hwnd_, &client);
+      size.cx = client.right - client.left;
+      size.cy = client.bottom - client.top;
+    }
+    placement_ = ComputeFlyoutRect(cursorScreen, size, workArea);
+    return placement_;
+  }
+
+  // Move + show WITHOUT activation: SWP_NOACTIVATE is the Win32 proof that this
+  // path cannot take focus (SetWindowPos refuses to activate on request here).
+  void PlaceForCursor(POINT cursorScreen, RECT workArea) {
+    const FlyoutRect rect = PlacementFor(cursorScreen, workArea);
+    if (!hwnd_) return;
+    SetWindowPos(hwnd_, nullptr, rect.left, rect.top, rect.right - rect.left,
+                 rect.bottom - rect.top, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+  }
+
+  FlyoutRect Placement() const noexcept { return placement_; }
+
+  // ---- interaction state ------------------------------------------------
+  void ScrollBy(int rows) noexcept {
+    int target = scroll_ + rows;
+    const int count = static_cast<int>(entries_.size());
+    if (target > count - 1) target = count > 0 ? count - 1 : 0;
+    if (target < 0) target = 0;
+    if (target == scroll_) return;
+    scroll_ = target;
+    InvalidateRect(hwnd_, nullptr, TRUE);
+  }
+
+  int ScrollOffset() const noexcept { return scroll_; }
+
+  // Row under a client-space y, in ENTRIES_ index space (scroll offset applied).
+  // -1 for the header, an empty list, or past the last row.
+  int HitTestRow(int clientY) const noexcept {
+    if (clientY < kHeaderHeight) return -1;
+    const int row = (clientY - kHeaderHeight) / kRowHeight;
+    if (row < 0 || row >= kMaxVisibleRows) return -1;
+    const int index = scroll_ + row;
+    if (index < 0 || index >= static_cast<int>(entries_.size())) return -1;
+    return index;
+  }
+
+  void SetHoverFromClient(int clientY) noexcept {
+    const int hit = HitTestRow(clientY);
+    if (hit == hover_) return;
+    hover_ = hit;
+    InvalidateRect(hwnd_, nullptr, TRUE);
+  }
+
+  int HoveredIndex() const noexcept { return hover_; }
+  const std::wstring& ArchivePath() const noexcept { return archivePath_; }
+  size_t EntryCount() const noexcept { return entries_.size(); }
+  bool NeedsCatalogScan() const noexcept { return needsScan_; }
+  POINT Cursor() const noexcept {
+    POINT p{};
+    p.x = cursorX_;
+    p.y = cursorY_;
+    return p;
+  }
+
   void Show() const {
     if (hwnd_) ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
   }
   void Hide() const {
     if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
   }
+  bool IsVisible() const { return hwnd_ != nullptr && IsWindowVisible(hwnd_) != FALSE; }
   HWND Hwnd() const { return hwnd_; }
 
  private:
@@ -98,14 +208,46 @@ class CompanionWindow {
     }
     if (!self) return DefWindowProcW(hwnd, msg, wparam, lparam);
     switch (msg) {
+      case WM_MOUSEACTIVATE:
+        // A click inside the flyout must leave the Explorer window activated:
+        // the preview is a peek, not a window the user can "enter".
+#ifdef PRISM_C30_MUTANT_DROP_NOACTIVATE
+        return MA_ACTIVATE;  // MUTATION
+#else
+        return MA_NOACTIVATE;
+#endif
+      case WM_ACTIVATE:
+        // Losing activation closes the peek (blueprint ch. 4.1); with
+        // WS_EX_NOACTIVATE this only fires when the owning app goes away.
+        if (LOWORD(wparam) == WA_INACTIVE) {
+          self->Hide();
+          return 0;
+        }
+        break;
+      case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE) {
+          self->Hide();
+          return 0;
+        }
+        break;
+      case WM_MOUSEWHEEL:
+        // One entry per notch; GET_WHEEL_DELTA_WPARAM is signed.
+        self->ScrollBy(-GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA);
+        return 0;
+      case WM_MOUSEMOVE:
+        self->SetHoverFromClient(GET_Y_LPARAM(lparam));
+        return 0;
+      case WM_ERASEBKGND:
+        return 1;  // painted in WM_PAINT; no flicker between the two
       case WM_PAINT:
         self->OnPaint();
         return 0;
       case WM_DESTROY:
         return 0;
       default:
-        return DefWindowProcW(hwnd, msg, wparam, lparam);
+        break;
     }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
   }
 
   void OnPaint() const {
@@ -116,10 +258,36 @@ class CompanionWindow {
     // M3 swaps this for the D2D Liquid Glass pipeline; the text contract stays.
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0x20, 0x24, 0x2E));
-    DrawTextW(dc, kindLine_.c_str(), -1, &rc, DT_LEFT | DT_TOP | DT_SINGLELINE);
+    const std::wstring header = archivePath_.empty() ? kindLine_ : archivePath_;
+    RECT headerRect = rc;
+    headerRect.bottom = headerRect.top + kHeaderHeight;
+    DrawTextW(dc, header.c_str(), -1, &headerRect,
+              DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    const int visible = static_cast<int>(entries_.size()) - scroll_;
+    for (int row = 0; row < visible && row < kMaxVisibleRows; ++row) {
+      const int index = scroll_ + row;
+      RECT rowRect = rc;
+      rowRect.top = kHeaderHeight + row * kRowHeight;
+      rowRect.bottom = rowRect.top + kRowHeight;
+      if (rowRect.top >= rc.bottom) break;
+      if (index == hover_) {
+        HBRUSH brush = CreateSolidBrush(RGB(0xE8, 0xEE, 0xF9));
+        FillRect(dc, &rowRect, brush);
+        DeleteObject(brush);
+      }
+      const PreviewEntry& entry = entries_[static_cast<size_t>(index)];
+      std::wstring line = EntryName(entry);  // bounded: never a raw C-string read
+      if (entry.kind == static_cast<uint32_t>(PreviewEntryKind::Directory)) line += L"  <dir>";
+      RECT textRect = rowRect;
+      textRect.left += 8;
+      DrawTextW(dc, line.c_str(), -1, &textRect,
+                DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
     if (!progressLine_.empty()) {
       RECT below = rc;
-      below.top += 28;
+      below.top = kHeaderHeight + kMaxVisibleRows * kRowHeight;
       DrawTextW(dc, progressLine_.c_str(), -1, &below, DT_LEFT | DT_TOP | DT_SINGLELINE);
     }
     EndPaint(hwnd_, &ps);
@@ -150,6 +318,14 @@ class CompanionWindow {
   HWND hwnd_ = nullptr;
   std::wstring kindLine_;
   std::wstring progressLine_;
+  std::wstring archivePath_;
+  std::vector<PreviewEntry> entries_;
+  bool needsScan_ = false;
+  int32_t cursorX_ = 0;
+  int32_t cursorY_ = 0;
+  int scroll_ = 0;
+  int hover_ = -1;
+  FlyoutRect placement_{};
 };
 
 }  // namespace prism::win::companion

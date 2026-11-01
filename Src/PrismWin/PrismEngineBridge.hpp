@@ -1833,15 +1833,57 @@ class ArchiveReader {
   void ClearBatchAbort() { batchAbort_.store(false, std::memory_order_release); }
   bool BatchAbortRequested() const { return batchAbort_.load(std::memory_order_acquire); }
 
-  bool ExtractBatch(const std::vector<uint32_t>& indices,
-                    abi::IArchiveExtractCallback* callback) const {
-    if (!archive_ || indices.empty() || !callback) return false;
+  // C50: WHY a batch extraction failed. ExtractBatch() collapsed three
+  // different facts into one bool -- "the C41 guard refused a second operation",
+  // "the engine answered a failing HRESULT" and "the engine reported a failed
+  // item" -- so a red CI log said only "expected true: ok[i]". Measured on
+  // 2026-11-01 (main, run 41332202296, win.reader_pool): the worker's payload
+  // was COMPLETE and its SHA-256 matched, and the log still could not say
+  // whether a lease had been shared or the engine had hiccuped. This struct
+  // reports the three cases apart; the guard's semantics are untouched
+  // (refusal stays a refusal, and still counts).
+  struct BatchVerdict {
+    bool ok = false;
+    bool refused = false;    // C41 guard: another operation was in flight
+    bool aborted = false;    // the batch-abort flag was set when the call began
+    HRESULT hr = S_OK;       // engine answer (S_OK whenever ok)
+    uint64_t conflicts = 0;  // this handler's C41 counter AFTER the call
+    size_t requested = 0;
+    bool invalidArgument = false;  // null handler/callback, or no indices
+  };
+
+  BatchVerdict ExtractBatchVerdict(const std::vector<uint32_t>& indices,
+                                   abi::IArchiveExtractCallback* callback) const {
+    BatchVerdict verdict;
+    verdict.requested = indices.size();
+    verdict.aborted = BatchAbortRequested();
+    if (!archive_ || indices.empty() || !callback) {
+      verdict.hr = E_INVALIDARG;
+      verdict.invalidArgument = true;
+      verdict.conflicts = operationConflicts();
+      return verdict;
+    }
     OperationScope operation(*this);
-    if (!operation.Enter()) return false;  // C41: one handler, one operation
+    if (!operation.Enter()) {
+      // C41: one handler, one operation. Refusing is the fix -- the caller must
+      // be able to tell this apart from an engine failure, because a refusal
+      // wastes no bytes while an engine failure produced some.
+      verdict.refused = true;
+      verdict.hr = E_ABORT;
+      verdict.conflicts = operationConflicts();
+      return verdict;
+    }
     BatchAbortProbe probe(callback, &batchAbort_);
     std::vector<abi::UInt32> idx(indices.begin(), indices.end());
-    return SUCCEEDED(
-        archive_->Extract(idx.data(), static_cast<abi::UInt32>(idx.size()), 0, &probe));
+    verdict.hr = archive_->Extract(idx.data(), static_cast<abi::UInt32>(idx.size()), 0, &probe);
+    verdict.ok = SUCCEEDED(verdict.hr);
+    verdict.conflicts = operationConflicts();
+    return verdict;
+  }
+
+  bool ExtractBatch(const std::vector<uint32_t>& indices,
+                    abi::IArchiveExtractCallback* callback) const {
+    return ExtractBatchVerdict(indices, callback).ok;
   }
 
   // Property ids are discovered by name (authoritative, read out of the DLL

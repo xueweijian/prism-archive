@@ -29,7 +29,8 @@
 #include <vector>
 
 #include "../PrismCore/ContextMenuModel.hpp"
-#include "PrismEngineBridge.hpp"      // WideToUtf8 / Utf8ToWide
+#include "CompanionPreviewBridge.hpp"  // C30: the one inline-preview IPC channel
+#include "PrismEngineBridge.hpp"       // WideToUtf8 / Utf8ToWide
 #include "SparsePackageRegistrar.hpp"  // CLSID + verb table + launcher
 
 using namespace Microsoft::WRL;
@@ -38,28 +39,22 @@ namespace prism::win::shell {
 
 namespace {
 
-constexpr wchar_t kPreviewWakeEvent[] = L"Local\\PrismLiquidPreviewWakeEvent";
-constexpr wchar_t kPreviewTargetMapping[] = L"Local\\PrismLiquidPreviewTarget";
-
-// Blueprint ch. 4.1: the companion Liquid Glass flyout is woken through a named
-// event, so explorer.exe never blocks on us.
+// Blueprint ch. 4.1: the companion Liquid Glass flyout is woken through the SAME
+// channel the Win10 IContextMenu layer uses (card C30, CompanionPreviewBridge.hpp),
+// so the companion has exactly one contract to read instead of two.
+//
+// The version this replaces created a private "PrismLiquidPreviewTarget" section
+// that nothing ever read, and created it even when no companion was running:
+// explorer.exe kept a section alive for a reader that did not exist, and the
+// wake event was signalled into the void. The bridge only OPENS the companion's
+// section, so "no companion" is a microsecond NoReader instead of dead state.
 void NotifyCompanionPreviewFlyout(const std::string& path) noexcept {
   if (path.empty()) return;
-  const std::wstring wide = Utf8ToWide(path);
-  const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
-  HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                                      static_cast<DWORD>(bytes), kPreviewTargetMapping);
-  if (mapping) {
-    if (void* view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, bytes)) {
-      std::memcpy(view, wide.c_str(), bytes);
-      UnmapViewOfFile(view);
-    }
-    CloseHandle(mapping);
-  }
-  HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, kPreviewWakeEvent);
-  if (!event) return;
-  SetEvent(event);
-  CloseHandle(event);
+  POINT cursor{};
+  if (!::GetCursorPos(&cursor)) return;  // no anchor: the flyout would be guessed
+  const auto packet =
+      prism::win::companion::MakeShellPacket(Utf8ToWide(path), cursor);
+  (void)prism::win::companion::TryPublishPreview(packet, /*ackTimeoutMs=*/0);
 }
 
 }  // namespace

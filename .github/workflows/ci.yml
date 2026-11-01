@@ -179,8 +179,16 @@ jobs:
       - name: Test
         working-directory: build
         shell: bash
+        env:
+          # Report-only lanes are excluded from the MERGE gate and run in
+          # report.yml instead. They are not correctness proofs: bench_scale
+          # packs and extracts a 4 GiB fixture (64 s alone) and the fuzz smoke
+          # feeds 10k samples, which together pushed this lane past 8 minutes
+          # and slowed every merge. What stays here is everything that can
+          # actually go wrong in shipped code.
+          PRISM_CTEST_EXCLUDE: "bench|fuzz"
         run: |
-          ctest --output-on-failure --no-tests=error 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
       # The Windows half of the same local gate: proves CMakePresets.json parses

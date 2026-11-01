@@ -819,11 +819,14 @@ class SettingsStore {
       const bool whole = versionNode->type == JsonType::Number &&
                          std::floor(versionNode->number) == versionNode->number;
       if (!whole || versionNode->number < 1.0 || versionNode->number > 1000000.0) {
+        // The message is rendered BEFORE the reset: versionNode points into the
+        // document ResetToDefaults replaces (a sanitizer lane caught exactly
+        // this use-after-free, not a theoretical one).
+        const std::string rendered = SerializeJson(*versionNode, JsonWriteOptions{false, 0});
         ResetToDefaults();
         report_.status = LoadStatus::Corrupt;
         report_.readable = false;
-        report_.error = "schemaVersion must be a positive whole number, got " +
-                        SerializeJson(*versionNode, JsonWriteOptions{false, 0});
+        report_.error = "schemaVersion must be a positive whole number, got " + rendered;
         report_.targetVersion = kSchemaVersion;
         return report_;
       }

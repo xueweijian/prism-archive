@@ -220,8 +220,14 @@ std::wstring DescribeMissing7zDll(const prism::win::SevenZipDllLookup& lookup, c
             L"\u672A\u8BBE\u7F6E\uFF0C\u4E14\u6CE8\u518C\u8868\u4E0E"
             L"\u9ED8\u8BA4\u5B89\u88C5\u76EE\u5F55\u5747\u65E0 7z.dll)\n";
   }
-  for (const std::wstring& candidate : lookup.candidates) {
-    text += L"  " + candidate + L"\n";
+  // C37: every path carries its SOURCE. "C:\Program Files\7-Zip\7z.dll" listed
+  // without saying whether it came from PATH, a registry key or a hard-coded
+  // probe leaves the reader unable to tell a truncated search from a wrong one.
+  for (std::size_t i = 0; i < lookup.candidates.size(); ++i) {
+    const std::wstring source = i < lookup.candidateSources.size()
+                                    ? L"[" + lookup.candidateSources[i] + L"] "
+                                    : std::wstring();
+    text += L"  " + source + lookup.candidates[i] + L"\n";
   }
   text +=
       L"\n\u4FEE\u590D\u65B9\u6CD5\uFF08\u4EFB\u9009\u4E00\uFF09\uFF1A\n"
@@ -229,7 +235,8 @@ std::wstring DescribeMissing7zDll(const prism::win::SevenZipDllLookup& lookup, c
       L"  2. \u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF PRISM_7Z_DLL "
       L"\u6307\u5411 7z.dll \u7684\u5B8C\u6574\u8DEF\u5F84\uFF1B\n"
       L"  3. \u628A 7z.dll \u653E\u5230\u672C\u7A0B\u5E8F\u540C\u76EE"
-      L"\u5F55\u3002\n\n";
+      L"\u5F55\uFF1B\n"
+      L"  4. \u628A 7-Zip \u7684\u76EE\u5F55\u52A0\u5165 PATH\uFF08\u4FBF\u643A\u7248\u9002\u7528\uFF09\u3002\n\n";
   const std::wstring appDir = prism::win::ExecutableDirectory();
   if (!appDir.empty()) text += L"\u7A0B\u5E8F\u76EE\u5F55\uFF1A" + appDir + L"\n";
   return text;

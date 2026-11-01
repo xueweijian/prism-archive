@@ -23,6 +23,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "../PrismCore/PrismCore.hpp"
@@ -115,22 +116,40 @@ inline std::vector<std::string> ParseExtensionList(std::string_view raw) {
 }
 
 // ---------------------------------------------------------------------------
-// 7z.dll discovery (card C1: app lifecycle / startup)
+// 7z.dll discovery (card C1: app lifecycle / startup; card C37: portable)
 // ---------------------------------------------------------------------------
-// The order below is a product decision, not a guess:
+// The order below is a product decision, not a guess. Two suites assert it --
+// Tests/win/test_app_lifecycle.cpp (C1: env wins, probes are last) and
+// Tests/win/test_portable_lookup.cpp (C37: the whole ladder against a fake
+// PATH) -- so moving a rung here must move it in both:
 //   1. PRISM_7Z_DLL            -- explicit override, wins over everything;
 //   2. <exe dir>\7z.dll        -- a copy shipped beside the app (portable install);
 //   3. HKLM / HKLM(WOW64) / HKCU  SOFTWARE\7-Zip "InstallDir" -- the machine's
 //      own answer to "where am I installed", so 7-Zip on D: or E: is found;
-//   4. C:\Program Files\7-Zip / C:\Program Files (x86)\7-Zip -- last-resort
+//   4. every directory on PATH, in PATH order (C37) -- the "green" 7-Zip that
+//      was unpacked into E:\DevTools\7-Zip and never installed. It writes no
+//      registry key, so before C37 the only way to reach it was to hand-set
+//      PRISM_7Z_DLL; the probes in (6) can never find it (measured 2026-11-01:
+//      exit code 0, no artifact, and a box listing three dead ends);
+//   5. common per-user install dirs (C37): %LOCALAPPDATA%\Programs\7-Zip (the
+//      installer's non-admin layout) and %USERPROFILE%\scoop\apps\7zip\current
+//      (scoop's app directory);
+//   6. C:\Program Files\7-Zip / C:\Program Files (x86)\7-Zip -- last-resort
 //      probes for a registry-less (or copied) install.
+// The whole ladder is ENUMERATED (it no longer stops at the first hit) and the
+// highest-priority existing file wins. That is what makes the failure report
+// complete -- every path tried, with its source -- and what lets a test assert
+// the ORDER without depending on what this machine happens to have installed.
 // Discovery reports EVERY path it tried: a "7z.dll not found" box without the
 // candidate list is undiagnosable, and the machine this shipped from keeps
 // 7-Zip on E: (D12: the absence of evidence has to name what was expected).
 struct SevenZipDllLookup {
-  std::wstring path;                     // first candidate that exists (empty: none)
-  std::wstring source;                   // "env" | "app-dir" | "registry:HKLM" | "probe"
-  std::vector<std::wstring> candidates;  // every path tried, in probe order
+  std::wstring path;    // first candidate that exists (empty: none)
+  std::wstring source;  // where 'path' came from: "env" | "app-dir" |
+                        // "registry:HKLM" | "registry:HKLM32" | "registry:HKCU" |
+                        // "path" | "common:LOCALAPPDATA" | "common:scoop" | "probe"
+  std::vector<std::wstring> candidates;        // every path tried, in probe order
+  std::vector<std::wstring> candidateSources;  // parallel to 'candidates'
 };
 
 inline bool ExistsAsFile(const std::wstring& path) {
@@ -184,27 +203,57 @@ inline bool RegistryInstallDir(HKEY root, const wchar_t* subkey, std::wstring* o
   return true;
 }
 
-inline SevenZipDllLookup Resolve7zDll() {
-  SevenZipDllLookup lookup;
-  auto accept = [&lookup](const std::wstring& path, const wchar_t* source) {
-    if (path.empty()) return false;
-    lookup.candidates.push_back(path);
-    if (lookup.path.empty() && ExistsAsFile(path)) {
-      lookup.path = path;
-      lookup.source = source;
+// Win32 splits PATH on ';' only. Empty entries mean "the current directory" to
+// the loader -- never a place to import a DLL from -- so they are dropped, and
+// the quotes/stray spaces an "Edit environment variables" box leaves behind are
+// trimmed.
+inline std::vector<std::wstring> SplitSearchPath(const std::wstring& value) {
+  std::vector<std::wstring> out;
+  std::size_t start = 0;
+  while (start < value.size()) {
+    std::size_t end = value.find(L';', start);
+    if (end == std::wstring::npos) end = value.size();
+    const std::wstring piece = value.substr(start, end - start);
+    const std::size_t first = piece.find_first_not_of(L" \t\"");
+    if (first != std::wstring::npos) {
+      const std::size_t last = piece.find_last_not_of(L" \t\"");
+      out.push_back(piece.substr(first, last - first + 1));
     }
-    return !lookup.path.empty();
-  };
-
-  wchar_t envDll[MAX_PATH * 2]{};
-  if (GetEnvironmentVariableW(L"PRISM_7Z_DLL", envDll, ARRAYSIZE(envDll)) > 0) {
-    accept(envDll, L"env");
+    start = end + 1;
   }
-  if (!lookup.path.empty()) return lookup;
+  return out;
+}
 
-  accept(JoinFsPath(ExecutableDirectory(), L"7z.dll"), L"app-dir");
-  if (!lookup.path.empty()) return lookup;
+// GetEnvironmentVariableW needs the real size: PATH is allowed to be far longer
+// than MAX_PATH. "" means unset (or set to nothing).
+inline std::wstring ReadEnvironment(const wchar_t* name) {
+  const DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+  if (needed == 0) return {};
+  std::wstring value(static_cast<std::size_t>(needed), L'\0');
+  const DWORD written = GetEnvironmentVariableW(name, value.data(), needed);
+  if (written == 0 || written >= needed) return {};
+  value.resize(static_cast<std::size_t>(written));
+  return value;
+}
 
+// Everything Resolve7zDll() reads from the machine, as data. Split out so the
+// ORDER can be asserted against a CONTROLLED environment: on a dev box the
+// registry answers first, so a suite that could only call Resolve7zDll() could
+// never prove that the PATH layer (C37) finds anything at all.
+struct SevenZipDllEnvironment {
+  std::wstring envOverride;  // PRISM_7Z_DLL, "" = unset
+  std::wstring exeDir;       // <exe dir>
+  std::vector<std::pair<std::wstring, std::wstring>> registryDirs;  // (InstallDir, source)
+  std::wstring pathValue;    // PATH, "" = unset
+  std::wstring localAppData; // LOCALAPPDATA
+  std::wstring userProfile;  // USERPROFILE
+  bool includeProgramFilesProbes = true;
+};
+
+inline SevenZipDllEnvironment CurrentSevenZipDllEnvironment() {
+  SevenZipDllEnvironment env;
+  env.envOverride = ReadEnvironment(L"PRISM_7Z_DLL");
+  env.exeDir = ExecutableDirectory();
   // Registry before the Program Files probes: this is the only source that
   // knows about a non-default install drive.
   struct RegProbe {
@@ -220,14 +269,69 @@ inline SevenZipDllLookup Resolve7zDll() {
   for (const RegProbe& probe : probes) {
     std::wstring installDir;
     if (!RegistryInstallDir(probe.root, probe.subkey, &installDir)) continue;
-    accept(JoinFsPath(installDir, L"7z.dll"), probe.source);
-    if (!lookup.path.empty()) return lookup;
+    env.registryDirs.emplace_back(installDir, probe.source);
   }
+  env.pathValue = ReadEnvironment(L"PATH");
+  env.localAppData = ReadEnvironment(L"LOCALAPPDATA");
+  env.userProfile = ReadEnvironment(L"USERPROFILE");
+  return env;
+}
 
-  accept(L"C:\\Program Files\\7-Zip\\7z.dll", L"probe");
-  if (!lookup.path.empty()) return lookup;
-  accept(L"C:\\Program Files (x86)\\7-Zip\\7z.dll", L"probe");
+// The documented ladder (see the block above), as a pure function of 'env'.
+inline SevenZipDllLookup Resolve7zDllFrom(const SevenZipDllEnvironment& env) {
+  SevenZipDllLookup lookup;
+  auto alreadyListed = [&lookup](const std::wstring& path) {
+    // The same file spelled two ways is still one line in the report.
+    for (const std::wstring& seen : lookup.candidates) {
+      if (CompareStringOrdinal(seen.c_str(), -1, path.c_str(), -1, TRUE) == CSTR_EQUAL) return true;
+    }
+    return false;
+  };
+  bool dedupe = true;
+  auto accept = [&lookup, &alreadyListed, &dedupe](const std::wstring& path,
+                                                   const wchar_t* source) {
+    if (path.empty()) return;
+    if (dedupe && alreadyListed(path)) return;
+    lookup.candidates.push_back(path);
+    lookup.candidateSources.push_back(source);
+    if (lookup.path.empty() && ExistsAsFile(path)) {
+      lookup.path = path;
+      lookup.source = source;
+    }
+  };
+
+  accept(env.envOverride, L"env");                        // 1: explicit override
+  accept(JoinFsPath(env.exeDir, L"7z.dll"), L"app-dir");  // 2: shipped beside the app
+  for (const auto& entry : env.registryDirs) {            // 3: 7-Zip's own answer
+    accept(JoinFsPath(entry.first, L"7z.dll"), entry.second.c_str());
+  }
+#ifndef PRISM_C37_MUTANT_NO_PATH_SCAN
+  for (const std::wstring& dir : SplitSearchPath(env.pathValue)) {  // 4: PATH (C37)
+    accept(JoinFsPath(dir, L"7z.dll"), L"path");
+  }
+#endif
+  // 5: common per-user layouts (C37). JoinFsPath rejects an empty parent, so a
+  // machine without LOCALAPPDATA/USERPROFILE simply skips the rung.
+  accept(JoinFsPath(JoinFsPath(JoinFsPath(env.localAppData, L"Programs"), L"7-Zip"), L"7z.dll"),
+         L"common:LOCALAPPDATA");
+  const std::wstring scoopApp =
+      JoinFsPath(JoinFsPath(JoinFsPath(env.userProfile, L"scoop"), L"apps"), L"7zip");
+  accept(JoinFsPath(JoinFsPath(scoopApp, L"current"), L"7z.dll"), L"common:scoop");
+
+  // 6: the last-resort probes are ALWAYS the tail, even when PATH already named
+  // the same folder -- the two lines then differ by SOURCE ("path" vs "probe"),
+  // which is the honest report of one directory reachable two ways, and C1's
+  // suite asserts that the tail is exactly these two.
+  dedupe = false;
+  if (env.includeProgramFilesProbes) {
+    accept(L"C:\\Program Files\\7-Zip\\7z.dll", L"probe");
+    accept(L"C:\\Program Files (x86)\\7-Zip\\7z.dll", L"probe");
+  }
   return lookup;
+}
+
+inline SevenZipDllLookup Resolve7zDll() {
+  return Resolve7zDllFrom(CurrentSevenZipDllEnvironment());
 }
 
 // ---------------------------------------------------------------------------

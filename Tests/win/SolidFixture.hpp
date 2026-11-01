@@ -32,6 +32,41 @@ inline std::wstring ExePath() {
   return std::filesystem::exists(exe) ? exe.wstring() : std::wstring();
 }
 
+inline std::string Utf8String(const std::wstring& wide) {
+  if (wide.empty()) return {};
+  const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                         nullptr, 0, nullptr, nullptr);
+  std::string out(static_cast<std::size_t>(needed), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), needed,
+                      nullptr, nullptr);
+  return out;
+}
+
+// C37: name the missing HALF. The fixtures AUTHOR their archives with the 7-Zip
+// CLI, so a directory holding only 7z.dll -- an extracted / portable /
+// engine-only copy, which is exactly what a "green" 7-Zip leaves behind -- can
+// never run them. A bare "7z.exe not found" sends the reader looking for a
+// 7-Zip that is standing right there, on the drive in front of them.
+// Returns "" when the CLI is available, else one sentence saying WHAT is
+// missing, WHERE, and WHY the fixtures need it.
+inline std::string ExePathWhy() {
+  if (!ExePath().empty()) return {};
+  const std::wstring dll = DllPath();
+  if (dll.empty()) {
+    return "PRISM_7Z_DLL is not set: point it at the 7z.dll of a FULL 7-Zip install -- the "
+           "integration fixtures need 7z.exe beside it to author their archives";
+  }
+  const std::filesystem::path dllPath(dll);
+  std::error_code ec;
+  if (!std::filesystem::exists(dllPath, ec)) {
+    return "PRISM_7Z_DLL points at " + Utf8String(dll) + ", which does not exist";
+  }
+  return "7z.dll is present at " + Utf8String(dllPath.parent_path().wstring()) +
+         ", but 7z.exe (the 7-Zip command-line tool) is MISSING beside it: the integration "
+         "fixtures PACK their archives with the CLI, so an engine-only / portable 7z.dll cannot "
+         "run them. Install the full 7-Zip package, or copy 7z.exe next to that 7z.dll";
+}
+
 inline bool WritePng(const std::wstring& path, UINT width, UINT height, uint8_t b, uint8_t g,
                      uint8_t r) {
   ComPtr<IWICImagingFactory> factory;

@@ -31,7 +31,7 @@
       "description": "Byte-for-byte the flags of the Windows CI lane: /fsanitize=address /Zi /EHsc + /InferAsanLibraries. CONTRACTS D14: the 7z.dll shipped by some runner images is itself ASan-instrumented and reports a SetCodecs use-after-free with zero frames of ours -- that report is 7-Zip's, not ours.",
       "inherits": "base-msvc",
       "cacheVariables": {
-        "CMAKE_CXX_FLAGS": "/fsanitize=address /Zi /EHsc",
+        "CMAKE_CXX_FLAGS": "/fsanitize=address /Z7 /EHsc",
         "CMAKE_EXE_LINKER_FLAGS": "/InferAsanLibraries"
       }
     },

@@ -901,8 +901,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           window.SetThumbs(store);
           PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
         } else {
-          std::fprintf(stderr, "sweep discarded: the session switched archives
-");
+          std::fprintf(stderr, "sweep discarded: the session switched archives\n");
         }
       } else {
         std::fprintf(stderr, "sweep refused: %s\n", why.c_str());

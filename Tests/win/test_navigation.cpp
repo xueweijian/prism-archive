@@ -96,21 +96,52 @@ int main() {
     return (row >= 0 && row < static_cast<int>(rows.size())) ? rows[row].path
                                                              : std::string("<none>");
   };
-  // Row -> the pixel its tile centre is painted at (same geometry the renderer
-  // uses: columns and cell height from the viewport, scroll added back).
+  // Row -> the pixel its item is painted at. V4: the grid is a FLOW, and this
+  // point is computed HERE from the definition (DESIGN.md §2/§3) -- tiles of
+  // tileWidth x cellHeight inside the padded content, tile-less items as 32 px
+  // bands across it. The layout supplies the INPUTS only; asking the window for
+  // the rectangle would make the click and the hit test agree by construction.
   auto rowCentre = [&window](int row, int* px, int* py) {
-    const int cols = window.Viewport().Columns();
-    if (cols <= 0) return false;
-    const double cellW = window.Viewport().ColumnWidth();
-    const double cellH = window.Viewport().CellHeight();
-    if (cellW <= 0.0 || cellH <= 0.0) return false;
-    *px = static_cast<int>((row % cols) * cellW + cellW / 2.0);
-    *py = static_cast<int>((row / cols) * cellH + cellH / 2.0);
-    return true;
+    const prism::layout::Layout layout = window.LayoutForTest();
+    const auto& items = window.Items();
+    if (row < 0 || row >= static_cast<int>(items.size())) return false;
+    int bandTop = layout.contentInner.top;
+    int column = 0;
+    for (int i = 0; i <= row; ++i) {
+      if (items[static_cast<size_t>(i)].isDir) {
+        if (i == row) {
+          *px = layout.contentInner.left + column * (layout.tileWidth + layout.gap) +
+                layout.tileWidth / 2;
+          *py = bandTop + layout.cellHeight / 2;
+          return true;
+        }
+        if (++column == layout.columns) {
+          bandTop += layout.cellHeight;
+          column = 0;
+        }
+      } else {
+        // A tile run always occupies a full cell row, even when it ends early:
+        // the band that follows starts UNDER it (definition, not implementation).
+        if (column > 0) {
+          bandTop += layout.cellHeight;
+          column = 0;
+        }
+        if (i == row) {
+          *px = (layout.content.left + layout.content.right) / 2;
+          *py = bandTop + 16;
+          return true;
+        }
+        bandTop += 32;
+      }
+    }
+    return false;
   };
   auto doubleClickRow = [&](int row) {
     int x = 0, y = 0;
     if (!rowCentre(row, &x, &y)) return false;
+    // The point was computed from the definition; the window must resolve it to
+    // the SAME item. (Expectation from the spec, answer from the product.)
+    if (!PRISM_CHECK_EQ(window.HitTestForTest(x, y), row)) return false;
     window.Dispatch(WM_LBUTTONDBLCLK, 0, MAKELPARAM(x, y));
     return true;
   };

@@ -30,6 +30,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <ostream>
+#include <span>
+#include <string_view>
 #include <vector>
 
 #include "Preview.hpp"
@@ -54,6 +56,36 @@ inline constexpr bool kSidebarReservesWidth = false;
 inline constexpr bool kSidebarReservesWidth = true;
 #endif
 
+// V4 negative controls (CONTRACTS D3/D27). Both are compile-time switches, so
+// the same suite source proves the rule rather than a copy of it:
+//   PRISM_V4_MUTANT_CELL_ROW        -> a tile-less item keeps its 220 px CELL
+//                                      (V1's compromise: "row" inside the grid),
+//                                      which is exactly the pill the screenshot
+//                                      showed. The flow assertions go red.
+//   PRISM_V4_MUTANT_GRID_NO_SIDEBAR -> the rail is list-mode chrome again, so a
+//                                      grid frame reserves 0 px. The "the rail
+//                                      is chrome, not a list column" assertions
+//                                      go red.
+#if defined(PRISM_V4_MUTANT_CELL_ROW)
+inline constexpr bool kRowsSpanContent = false;
+#else
+inline constexpr bool kRowsSpanContent = true;
+#endif
+#if defined(PRISM_V4_MUTANT_GRID_NO_SIDEBAR)
+inline constexpr bool kRailInGridMode = false;
+#else
+inline constexpr bool kRailInGridMode = true;
+#endif
+
+
+// The runtime proof each mutant is REALLY armed (D3: a macro that stopped
+// matching would leave the mutant green and its WILL_FAIL entry red forever).
+inline constexpr std::string_view ActiveMutation() {
+  if (!kRowsSpanContent) return "cell-row";
+  if (!kRailInGridMode) return "grid-no-sidebar";
+  return {};
+}
+
 // ---------------------------------------------------------------- tokens
 inline constexpr int kTitleBarHeight = 32;
 inline constexpr int kActionIslandHeight = 56;
@@ -77,6 +109,20 @@ inline constexpr int kProgressCapsuleWidth = 260;
 inline constexpr int kProgressCapsuleHeight = 46;
 inline constexpr int kQuickLookWidth = 380;
 inline constexpr int kQuickLookHeight = 500;
+// V4: a fallback row is a BAND across the content, not a cell inside the grid.
+// A 32 px band is what makes 19 rows fit in 800 px (DESIGN.md §2 "列表：行高
+// 32"); the cell-sized row V1 shipped was a 220 px pill with dead air to its
+// right -- the exact defect the v2 screenshot showed.
+inline constexpr int kFlowRowHeight = kListRowHeight;
+inline constexpr int kFlowTileGap = kIslandGap;  // alias: the grid's gap
+// The hit test's row pitch. Off by one in the CONTROL build only: a click on
+// the last pixel of row N-1 must then land on row N (the neighbour), which is
+// what the polish suite's boundary assertions are written to catch.
+#if defined(PRISM_V4_MUTANT_HIT_PITCH)
+inline constexpr int kFlowHitPitch = kFlowRowHeight + 1;
+#else
+inline constexpr int kFlowHitPitch = kFlowRowHeight;
+#endif
 
 // ------------------------------------------------------------------ Rect
 struct Rect {
@@ -152,6 +198,16 @@ inline int ColumnsFor(int contentInnerWidth) {
   if (contentInnerWidth <= 0) return 1;
   const int columns = (contentInnerWidth + kIslandGap) / (kMinTileWidth + kIslandGap);
   return (std::max)(1, columns);
+}
+
+// DESIGN.md §2 lists the rail as a BAND ("侧栏 220 | 可折叠"), not as list-mode
+// chrome: it is constant in both views and only an explicit collapse (or a
+// window too narrow to hold it) removes it. This predicate is the ONE place
+// that decides, so the window's paint, its hit test and this header cannot
+// disagree about whether the grid has a rail.
+inline bool RailVisible(bool userWantsRail, bool listMode) {
+  if (!userWantsRail) return false;
+  return kRailInGridMode ? true : listMode;
 }
 
 // The complete geometry of the main window for one client size.
@@ -256,6 +312,245 @@ inline CellKind CellKindFor(bool isDir, prism::PreviewKind kind, bool thumbnailA
   if (!thumbnailAvailable) return CellKind::Row;
   return CellKind::Tile;
 }
+
+// --------------------------------------------------------------- V4: the flow
+// The grid used to be a RECTANGLE GRID for every item: a text file became a
+// 220 x 220 cell with a 32 px pill at its top-left, which is the "small capsule
+// with a wall of empty space to its right" in the v2 screenshot. DESIGN.md §3
+// ("没有缩略图的条目不得画骨架卡；直接回退成一条 32 px 的行") asks for a ROW,
+// and a row is a band, not a cell.
+//
+// So the grid is a FLOW: items are walked in catalog order and each one is
+// either
+//   * a TILE -- only a directory, or an image/media item whose thumbnail the
+//     ThumbStore actually holds. Tiles fill a grid row left to right, at most
+//     layout.columns of them, one layout.cellHeight tall;
+//   * a ROW  -- everything else. It spans the ENTIRE content band
+//     (left == content.left, right == content.right) and is kFlowRowHeight tall.
+// Consecutive rows are vertically contiguous (row N's bottom IS row N+1's top),
+// which is what makes the same 32 px pitch the list view uses.
+//
+// Both facts are asserted by Tests/win/test_visual_polish.cpp; the D3 control
+// PRISM_V4_MUTANT_CELL_ROW puts the rows back inside their cells and the same
+// assertions go red.
+struct FlowItem {
+  bool isDir = false;
+  prism::PreviewKind kind = prism::PreviewKind::None;
+  bool thumbnailAvailable = false;
+};
+
+inline CellKind FlowKindOf(const FlowItem& item) {
+  return CellKindFor(item.isDir, item.kind, item.thumbnailAvailable);
+}
+
+struct FlowCell {
+  int index = -1;
+  CellKind kind = CellKind::Row;
+  Rect rect;
+  bool operator==(const FlowCell&) const = default;
+};
+
+// Every item's painted rectangle, in catalog order, at scroll 0.
+inline std::vector<FlowCell> FlowCells(const Layout& layout, std::span<const FlowItem> items) {
+  std::vector<FlowCell> out;
+  const int count = static_cast<int>(items.size());
+  if (count <= 0 || layout.columns <= 0 || layout.contentInner.Empty()) return out;
+  out.reserve(static_cast<size_t>(count));
+
+  if (!kRowsSpanContent) {
+    // Negative control: V1's shape. Every item is a CELL; a tile-less item
+    // paints its 32 px pill anchored to the top of its 220 px cell.
+    for (int i = 0; i < count; ++i) {
+      const Rect cell = TileRect(layout, i, 0);
+      const CellKind kind = FlowKindOf(items[static_cast<size_t>(i)]);
+      out.push_back(FlowCell{i, kind, kind == CellKind::Row ? FallbackRowRect(cell) : cell});
+    }
+    return out;
+  }
+
+  int y = layout.contentInner.top;
+  int i = 0;
+  while (i < count) {
+    if (FlowKindOf(items[static_cast<size_t>(i)]) == CellKind::Row) {
+      // The band: full content width, 32 px, immediately under the previous
+      // band -- no gap, so N rows occupy exactly N * kFlowRowHeight.
+      out.push_back(FlowCell{i, CellKind::Row,
+                             Rect{layout.content.left, y, layout.content.right,
+                                  y + kFlowRowHeight}});
+      y += kFlowRowHeight;
+      ++i;
+      continue;
+    }
+    // A run of tiles fills ONE grid row; a row item ends the run early (a tile
+    // never shares a band with a row).
+    int column = 0;
+    while (i < count && column < layout.columns &&
+           FlowKindOf(items[static_cast<size_t>(i)]) == CellKind::Tile) {
+      const int x = layout.contentInner.left + column * (layout.tileWidth + layout.gap);
+      out.push_back(FlowCell{i, CellKind::Tile,
+                             Rect{x, y, x + layout.tileWidth, y + layout.cellHeight}});
+      ++column;
+      ++i;
+    }
+    y += layout.cellHeight;
+  }
+  return out;
+}
+
+// The cells that intersect the content viewport at scrollPx (the neighbours
+// just outside it are kept so a scrolling frame never pops a half-row in).
+inline std::vector<FlowCell> VisibleFlowCells(const Layout& layout,
+                                              std::span<const FlowItem> items,
+                                              int scrollPx) {
+  std::vector<FlowCell> cells = FlowCells(layout, items);
+  std::vector<FlowCell> out;
+  if (cells.empty() || layout.contentInner.Empty()) return out;
+  const int scroll = (std::max)(0, scrollPx);
+  const int top = layout.contentInner.top - kFlowRowHeight;
+  const int bottom = layout.contentInner.bottom + layout.cellHeight;
+  out.reserve(cells.size());
+  for (FlowCell& cell : cells) {
+    cell.rect.top -= scroll;
+    cell.rect.bottom -= scroll;
+    if (cell.rect.bottom <= top || cell.rect.top >= bottom) continue;
+    out.push_back(cell);
+  }
+  return out;
+}
+
+inline int FlowContentHeight(const Layout& layout, std::span<const FlowItem> items) {
+  const std::vector<FlowCell> cells = FlowCells(layout, items);
+  if (cells.empty()) return 0;
+  return (std::max)(0, cells.back().rect.bottom - layout.contentInner.top);
+}
+
+inline int FlowMaxScroll(const Layout& layout, std::span<const FlowItem> items) {
+  return (std::max)(0, FlowContentHeight(layout, items) - layout.contentInner.Height());
+}
+
+// One item's painted rectangle (scroll 0). Returns an empty rect when the index
+// is out of range, so a caller never divides by a phantom cell.
+inline Rect FlowItemRect(const Layout& layout, std::span<const FlowItem> items, int index) {
+  if (index < 0 || index >= static_cast<int>(items.size())) return Rect{};
+  const std::vector<FlowCell> cells = FlowCells(layout, items);
+  if (index >= static_cast<int>(cells.size())) return Rect{};
+  return cells[static_cast<size_t>(index)].rect;
+}
+
+// Client point -> item index, through the SAME rectangles that were painted.
+inline int FlowItemAt(const Layout& layout, std::span<const FlowItem> items, int x, int y,
+                      int scrollPx) {
+  if (x < layout.content.left || x >= layout.content.right) return -1;
+  const int scroll = (std::max)(0, scrollPx);
+  // kFlowHitPitch == kFlowRowHeight in every shipping build (the control adds
+  // one pixel, so the boundaries move and the suite's boundary checks go red).
+  const int local = y + scroll + (kFlowHitPitch - kFlowRowHeight);
+  const std::vector<FlowCell> cells = FlowCells(layout, items);
+  for (const FlowCell& cell : cells) {
+    if (local < cell.rect.top || local >= cell.rect.bottom) continue;
+    if (x < cell.rect.left || x >= cell.rect.right) continue;
+    return cell.index;
+  }
+  return -1;
+}
+
+// --------------------------------------------------------- V4: the status bar
+// DESIGN.md §2 gives the status band 28 px and §3 lists its four states
+// (常规/加密/未知方法/压缩中). A 28 px band that paints nothing is the defect the
+// screenshot showed; this block is the model behind the four segments, so the
+// text and the rectangles are assertable without a device.
+enum class CryptoState : std::uint8_t { Unencrypted, Encrypted, Unknown };
+
+inline std::ostream& operator<<(std::ostream& os, CryptoState state) {
+  switch (state) {
+    case CryptoState::Unencrypted: return os << "Unencrypted";
+    case CryptoState::Encrypted: return os << "Encrypted";
+    case CryptoState::Unknown: return os << "Unknown";
+  }
+  return os << "?";
+}
+
+struct StatusInfo {
+  CryptoState crypto = CryptoState::Unknown;
+  std::string_view method;              // empty -> "方法未知"
+  std::string_view dictionary;          // empty -> "字典未知"
+  int ratioPercent = -1;                // < 0 -> unknown
+  bool compressing = false;             // wins over the ratio
+};
+
+enum class StatusId : std::uint8_t { Encryption, Method, Dictionary, Ratio, Count };
+
+inline std::ostream& operator<<(std::ostream& os, StatusId id) {
+  switch (id) {
+    case StatusId::Encryption: return os << "Encryption";
+    case StatusId::Method: return os << "Method";
+    case StatusId::Dictionary: return os << "Dictionary";
+    case StatusId::Ratio: return os << "Ratio";
+    case StatusId::Count: return os << "Count";
+  }
+  return os << "?";
+}
+
+inline std::string_view CryptoText(const StatusInfo& info) {
+  switch (info.crypto) {
+    case CryptoState::Unencrypted: return "未加密";
+    case CryptoState::Encrypted: return "已加密";
+    case CryptoState::Unknown: return "加密状态未知";
+  }
+  return "加密状态未知";
+}
+
+inline std::string_view MethodText(const StatusInfo& info) {
+  return info.method.empty() ? std::string_view{"方法未知"} : info.method;
+}
+
+inline std::string_view DictionaryText(const StatusInfo& info) {
+  return info.dictionary.empty() ? std::string_view{"字典未知"} : info.dictionary;
+}
+
+// The label of the ratio segment; the NUMBER travels separately (value), so the
+// painter can format "压缩率 87%" without this header owning a buffer.
+inline std::string_view RatioText(const StatusInfo& info) {
+  if (info.compressing) return "压缩中…";
+  return info.ratioPercent >= 0 ? "压缩率" : "压缩率未知";
+}
+
+struct StatusSegment {
+  StatusId id = StatusId::Count;
+  Rect rect;
+  std::string_view text;
+  int value = -1;  // Ratio only: the percentage, or -1 when unknown/compressing
+};
+
+inline constexpr int kStatusPad = 12;
+inline constexpr int kStatusGap = 24;
+inline constexpr int kStatusSegmentMinWidth = 96;
+
+// The four segments, left to right, inside the status bar. Widths are fixed
+// minima (a status line is a readout, not a flexible table) and every rect is
+// padded inside the bar, so "the bar is empty" cannot come back unnoticed.
+inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const StatusInfo& info) {
+  std::vector<StatusSegment> out;
+  if (layout.statusBar.Empty()) return out;
+  const int top = layout.statusBar.top + 4;
+  const int bottom = layout.statusBar.bottom - 4;
+  if (bottom <= top) return out;
+  const int widths[] = {168, 128, 140, 112};
+  const std::string_view texts[] = {CryptoText(info), MethodText(info), DictionaryText(info),
+                                    RatioText(info)};
+  const int values[] = {-1, -1, -1, (info.compressing ? -1 : info.ratioPercent)};
+  int x = layout.statusBar.left + kContentPadding;
+  for (int i = 0; i < 4; ++i) {
+    const int width = (std::max)(kStatusSegmentMinWidth, widths[i]);
+    const Rect rect{x, top, (std::min)(x + width, layout.statusBar.right - kContentPadding), bottom};
+    if (rect.Empty()) break;
+    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, texts[i], values[i]});
+    x = rect.right + kStatusGap;
+    if (x >= layout.statusBar.right - kContentPadding) break;
+  }
+  return out;
+}
+
 
 // ------------------------------------------------------------- list mode
 inline Rect ListHeaderRect(const Layout& layout) {

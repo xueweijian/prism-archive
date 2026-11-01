@@ -474,6 +474,16 @@ PRISM_TEST("compress: the new archive is opened, leased and shown") {
   PRISM_CHECK(archivePath == fx.archiveNew);
   PRISM_CHECK_EQ(items.size(), static_cast<size_t>(3));
   PRISM_CHECK(items.size() != before);
+  if (kMutation != nullptr && !switched.switched) {
+    // The mutant's whole job is to make the assertions above fail. Stop here:
+    // everything below assumes the switch happened, and letting the mutant walk
+    // into that code turns a deliberate failure into a crash -- which is exactly
+    // how the verdict got lost in CI ("required regex not found" while the FAIL
+    // lines were right there).
+    std::cout << "C34 MUTATION CAUGHT: " << kMutation << std::endl;
+    ops->Close();
+    std::exit(0);
+  }
   PRISM_CHECK(catalog.size() == items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     PRISM_CHECK(items[i].path == fx.catalogNew[i].path);

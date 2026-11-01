@@ -455,11 +455,17 @@ function Deploy-Payload {
         Copy-FileStable (Join-Path $SourceDir $dll) (Join-Path $TargetDir $dll)
     }
     if ($AssetsDir) {
-        $assetFiles = Get-ChildItem -LiteralPath $AssetsDir -Recurse -File |
-            Where-Object { $_.Extension -ne '.py' }
-        foreach ($f in $assetFiles) {
-            $rel = $f.FullName.Substring($AssetsDir.Length).TrimStart('\')
-            Copy-FileStable $f.FullName (Join-Path (Join-Path $TargetDir 'Assets') $rel)
+        # Enumerate with System.IO instead of Get-ChildItem: on CI the payload sits
+        # under a short (8.3) TEMP path, and Get-ChildItem returns long-form
+        # FullNames, so Substring(base.Length) sliced "Assets\Icon\prism.ico" into
+        # "Assets\ets\Icon\prism.ico". Directory.EnumerateFiles returns paths built
+        # from the base string, which keeps the two forms identical by construction.
+        $assetFiles = [System.IO.Directory]::EnumerateFiles(
+            $AssetsDir, '*', [System.IO.SearchOption]::AllDirectories)
+        foreach ($full in $assetFiles) {
+            if ([System.IO.Path]::GetExtension($full) -eq '.py') { continue }
+            $rel = $full.Substring($AssetsDir.Length).TrimStart('\', '/')
+            Copy-FileStable $full (Join-Path (Join-Path $TargetDir 'Assets') $rel)
         }
     } else {
         Warn 'Assets directory not found; the association icon still resolves because the .ico is compiled into the exe'

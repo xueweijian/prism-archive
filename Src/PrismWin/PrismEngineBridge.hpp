@@ -1231,6 +1231,11 @@ class ArchiveReader {
     const std::wstring extension = PathExtensionLower(archivePath);
     const FormatRoute* route = FindFormatRoute(archivePath);
     openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
+    // The C26 trace token stays verbatim ("route=<handler>" / "route=probe"):
+    // win.extract_failure asserts on it, and a diagnostic format is a contract
+    // for every test that reads it. C28's own line is appended separately below.
+    openTrace_ += route ? (" route=" + std::string(route->handler) + "; ")
+                        : std::string(" route=probe; ");
 
     struct Candidate {
       GUID clsid;

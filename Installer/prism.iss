@@ -51,8 +51,12 @@ LicenseFile=..\LICENSE
 AllowNoIcons=yes
 
 [Languages]
+; English only. Inno 6 ships no Simplified Chinese .isl (it lives in the
+; unofficial translations set), and shipping a translation we cannot compile is
+; worse than not shipping one: ISCC aborts with "couldn't open include file".
+; Add it back as: Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
+; after dropping the official istrans file into Installer/Languages/.
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "associate"; Description: "Associate archive types with {#AppName} (current user only)"; GroupDescription: "Integration:"

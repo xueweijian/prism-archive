@@ -691,17 +691,23 @@ function Invoke-Verify {
     # user choice cannot be overridden by an installer; if that is the case for
     # every extension, verification genuinely cannot run and must say so instead
     # of pretending (D1: a silent skip is not a pass).
-    $probe = $null
+    # Formats 7z.exe can actually create: the launch half of the check needs a real
+    # file of the probed type, so a probe we cannot build is not a probe.
+    $creatable = @('.tar', '.gz', '.xz', '.bz2', '.cpio', '.wim')
+    $free = New-Object System.Collections.Generic.List[string]
     foreach ($ext in $Exts) {
         $choice = Get-UserChoice $ext
         if ($choice.Pinned) {
             if ($choice.ProgId -notlike 'PrismArchive.*') {
                 Say ('VERIFY: SKIP ' + $ext + ' -- pinned by Windows user choice (' + $choice.ProgId + '); switch it in Settings > Default apps') 'warn'
             }
-        } elseif (-not $probe) {
-            $probe = $ext
+        } else {
+            $free.Add($ext)
         }
     }
+    $probe = $null
+    foreach ($c in $creatable) { if (-not $probe -and $free.Contains($c)) { $probe = $c } }
+    if (-not $probe -and $free.Count -gt 0) { $probe = $free[0] }
     if (-not $probe) {
         Say 'VERIFY: FAIL every extension is pinned by a Windows user choice -- nothing can be verified without the user changing defaults' 'error'
         return 1
@@ -726,15 +732,25 @@ function Invoke-Verify {
 [System.Runtime.InteropServices.DllImport("shlwapi.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true)]
 public static extern int AssocQueryStringW(uint flags, uint str, string assoc, string extra, System.Text.StringBuilder outBuf, ref uint outLen);
 '@ -ErrorAction Stop
-    foreach ($str in @(1, 2)) {
+    $probeResolver = {
+        param([string]$ext)
         $sb = New-Object System.Text.StringBuilder 1024
         $len = [uint32]1024
-        $hr = [Prism.Shell]::AssocQueryStringW(0, $str, $probe, $null, $sb, [ref]$len)
-        $name = if ($str -eq 1) { 'ASSOCSTR_COMMAND' } else { 'ASSOCSTR_EXECUTABLE' }
-        if ($hr -eq 0 -and $sb.ToString().Contains('PrismArchive')) {
-            Say ('VERIFY: PASS shell resolver ' + $name + ' -> ' + $sb.ToString())
+        $hr = [Prism.Shell]::AssocQueryStringW(0, 1, $ext, $null, $sb, [ref]$len)
+        return [pscustomobject]@{ Hr = $hr; Text = $sb.ToString() }
+    }
+    # D4: calibrate the instrument before trusting it. .txt is associated on every
+    # Windows install; if it does not resolve here, the resolver is unavailable in
+    # this session and its silence says nothing about our registration.
+    $calibration = & $probeResolver '.txt'
+    if ($calibration.Hr -ne 0) {
+        Say ('VERIFY: SKIP shell resolver -- it cannot resolve even .txt (hr=0x' + ('{0:X8}' -f $calibration.Hr) + '), so this probe is uncalibrated in this session') 'warn'
+    } else {
+        $resolved = & $probeResolver $probe
+        if ($resolved.Hr -eq 0 -and $resolved.Text.Contains('PrismArchive')) {
+            Say ('VERIFY: PASS shell resolver ASSOCSTR_COMMAND -> ' + $resolved.Text)
         } else {
-            Say ('VERIFY: FAIL shell resolver ' + $name + ' hr=0x' + ('{0:X8}' -f $hr) + ' -> ' + $sb.ToString()) 'error'
+            Say ('VERIFY: FAIL shell resolver ' + $probe + ' hr=0x' + ('{0:X8}' -f $resolved.Hr) + ' -> ' + $resolved.Text) 'error'
             $failed++
         }
     }
@@ -752,16 +768,38 @@ public static extern int AssocQueryStringW(uint flags, uint str, string assoc, s
     }
     $sampleDir = Join-Path $env:TEMP ('prism-verify-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $sampleDir | Out-Null
-    $sample = Join-Path $sampleDir 'verify-sample.7z'
+    # The sample must carry the probed extension: launching a .7z would exercise
+    # whatever the user pinned .7z to, not the association we are verifying.
+    $sample = Join-Path $sampleDir ('verify-sample' + $probe)
+    $format = $probe.TrimStart('.')
     Set-Content -LiteralPath (Join-Path $sampleDir 'payload.txt') -Value 'prism-archive association probe' -Encoding utf8
-    & $sevenZip a -t7z $sample (Join-Path $sampleDir 'payload.txt') | Out-Null
+    & $sevenZip a ("-t" + $format) $sample (Join-Path $sampleDir 'payload.txt') | Out-Null
     if (-not (Test-Path -LiteralPath $sample)) {
-        Say 'VERIFY: FAIL could not create the .7z sample' 'error'
+        Say ('VERIFY: FAIL could not create a ' + $probe + ' sample with 7z.exe') 'error'
         return 1
     }
 
     $before = @(Get-Process -Name 'PrismArchive' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    $adoption = $null
     try {
+        # (a) our own contract: the installed exe accepts the archive path as argv[1].
+        # This is what the "%1" in the command string promises, and it is testable
+        # without involving the shell at all.
+        $direct = Start-Process -FilePath $exe -ArgumentList @($sample) -PassThru
+        Start-Sleep -Seconds 3
+        $direct.Refresh()
+        if (-not $direct.HasExited) {
+            Say ('VERIFY: PASS installed exe opens an archive argument directly (pid ' + $direct.Id + ', window "' + $direct.MainWindowTitle + '")')
+            Stop-Process -Id $direct.Id -Force -ErrorAction SilentlyContinue
+        } else {
+            Say ('VERIFY: FAIL installed exe exited immediately with code ' + $direct.ExitCode + ' when given an archive') 'error'
+            $failed++
+        }
+
+        # (b) OS adoption: what a double click would actually do. Kept separate on
+        # purpose -- on current Windows a registered ProgID is not a default until
+        # the user picks it, and reporting that as "our installer failed" would be
+        # as dishonest as reporting it as a pass.
         Start-Process -FilePath $sample | Out-Null
         $deadline = (Get-Date).AddSeconds(15)
         $launched = $null
@@ -774,29 +812,35 @@ public static extern int AssocQueryStringW(uint flags, uint str, string assoc, s
         if ($launched) {
             $path = $launched.Path
             if ($path -and $path.Equals($exe, [System.StringComparison]::OrdinalIgnoreCase)) {
-                Say ('VERIFY: PASS double-click .7z started ' + $path + ' (pid ' + $launched.Id + ')')
+                Say ('VERIFY: PASS double-click ' + $probe + ' started ' + $path + ' (pid ' + $launched.Id + ')')
+                $adoption = $true
             } else {
-                Say ('VERIFY: FAIL double-click started ' + ([string]$path) + ' instead of ' + $exe) 'error'
+                Say ('VERIFY: FAIL double-click ' + $probe + ' started ' + ([string]$path) + ' instead of ' + $exe) 'error'
                 $failed++
+                $adoption = $true
             }
             Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue
-        } else {
-            Say 'VERIFY: FAIL ShellExecute did not start PrismArchive within 15s' 'error'
-            $failed++
         }
     } catch {
-        Say ('VERIFY: FAIL ShellExecute threw: ' + $_.Exception.Message) 'error'
+        Say ('VERIFY: FAIL launch check threw: ' + $_.Exception.Message) 'error'
         $failed++
     } finally {
         Remove-Item -LiteralPath $sampleDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    if ($failed -eq 0) {
-        Say 'VERIFY: PASSED (registry + shell resolver + ShellExecute launch)'
+    if ($failed -gt 0) {
+        Say ('VERIFY: FAILED (' + $failed + ' checks)') 'error'
+        return 1
+    }
+    if ($adoption -eq $true) {
+        Say 'VERIFY: PASSED (registry + installed exe + OS adopted the association)'
         return 0
     }
-    Say ('VERIFY: FAILED (' + $failed + ' checks)') 'error'
-    return 1
+    # Everything we control is correct; the OS will not hand a newly registered
+    # ProgID the default. Documented platform behaviour (hash-protected user
+    # choice), with the exact user action printed above.
+    Say ('VERIFY: OS-ADOPTION-PENDING -- registry and exe verified, but this Windows build did not route ' + $probe + ' to PrismArchive. Finish it once in Settings > Default apps or via Open with -> PrismArchive; no installer can write a hash-protected default.')
+    return 3
 }
 
 # ---------------------------------------------------------------------------

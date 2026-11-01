@@ -60,7 +60,8 @@ using prism::win::sidebar::PrimKind;
 
 constexpr UINT32 kWidth = 1400;
 constexpr UINT32 kHeight = 900;
-// Mirrors GalleryRenderer::DrawListMode's header band (68 + 36).
+// The list body starts at the layout's content top (88 + 16 padding). The
+// header band and row pitch below come from WindowLayout, not literals.
 constexpr int kListContentTop = 104;
 
 struct Frame {
@@ -215,6 +216,9 @@ Layout BuildLayout(const std::vector<ArchiveItem>& items, float viewportHeight, 
   model.SetFocus(focus);
 
   Metrics metrics;
+  // V1: the rail's column width is DESIGN.md's 220 -- the SAME constant the
+  // renderer's layout reserves. A literal here would be a second source.
+  metrics.width = prism::win::gallery::GalleryRenderer::kSidebarColumnWidth;
   metrics.viewportTop = 0.0f;
   metrics.viewportBottom = viewportHeight;
   metrics.scrollY = scrollY;
@@ -226,6 +230,7 @@ Layout BuildLayout(const std::vector<ArchiveItem>& items, float viewportHeight, 
 Layout BuildEmptyLayout(float viewportHeight) {
   prism::sidebar::Model model;
   Metrics metrics;
+  metrics.width = prism::win::gallery::GalleryRenderer::kSidebarColumnWidth;
   metrics.viewportTop = 0.0f;
   metrics.viewportBottom = viewportHeight;
   return prism::win::sidebar::Build(model, metrics);
@@ -414,13 +419,16 @@ PRISM_TEST("collapsed column gives the list its width back") {
   PRISM_CHECK(RenderScene(gWic, folded, kWidth, kHeight, &b, nullptr, nullptr, &collapsed));
   PRISM_CHECK_EQ(collapsed, 1);  // the user's fold is honoured
 
-  const int rowTop = kListContentTop + 2 * static_cast<int>(prism::list::kRowHeight);
-  const int rowBottom = rowTop + static_cast<int>(prism::list::kRowHeight);
+  // V1: 32 px rows. The probe band must cover the SELECTED row only -- with a
+  // 36 px pitch the neighbouring folder glyph bled into the measurement.
+  const int rowTop = kListContentTop + prism::layout::kListHeaderHeight +
+                     2 * prism::layout::kListRowHeight;
+  const int rowBottom = rowTop + prism::layout::kListRowHeight;
   int expandedLeft = 0, expandedRight = 0, foldedLeft = 0, foldedRight = 0;
   PRISM_CHECK(AccentSpan(a, rowTop + 2, rowBottom - 2, 0, &expandedLeft, &expandedRight));
   PRISM_CHECK(AccentSpan(b, rowTop + 2, rowBottom - 2, 0, &foldedLeft, &foldedRight));
 
-  // Expanded: the pill starts after the 236 px column (16 px inset + column).
+  // Expanded: the pill starts after the 220 px column (16 px inset + column).
   PRISM_CHECK(expandedLeft >= 236);
   PRISM_CHECK(expandedLeft <= 260);
   // Folded: it starts at the plain 16 px inset...

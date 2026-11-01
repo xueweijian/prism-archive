@@ -303,7 +303,12 @@ bool SetupFixture() {
   // Unique per process AND per allocation (card C36, Tests/win/UniqueTempDir.hpp).
   // The old constant "%TEMP%\prism_c11_reader_pool" is why the first parallel
   // run failed with "7z.exe could not author the solid fixture archive": another
-  // ctest process was wiping the directory this one was packing into.
+  // ctest process was wiping the directory this one was packing into. C41
+  // measured the other half of that failure on 2026-11-02: two instances started
+  // together made one die with 0xC0000409 and the other decode a half-written
+  // archive into a 0-byte "success". C36's unique-per-allocation directory is
+  // the right fix; a PID-qualified name would still collide across two ctest
+  // allocations in one process.
   fx.scratch = std::make_unique<prism::testtmp::UniqueDir>(L"c36", L"reader_pool");
   if (!fx.scratch->ok()) {
     fx.why = "cannot create the fixture directory: " + fx.scratch->error();

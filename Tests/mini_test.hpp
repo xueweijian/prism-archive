@@ -12,7 +12,20 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+// Declared here instead of pulling <windows.h> into a dependency-free harness:
+// these are the exact processthreadsapi.h signatures, so a TU that already
+// included windows.h sees an identical redeclaration.
+extern "C" __declspec(dllimport) void* __stdcall GetCurrentProcess();
+extern "C" __declspec(dllimport) int __stdcall TerminateProcess(void* process,
+                                                               unsigned int exit_code);
+#else
+#include <unistd.h>
+#endif
 
 namespace prism::test {
 
@@ -56,12 +69,6 @@ struct Registrar {
 // invent one. Exit 0 on purpose: the CTest entries decide with
 // PASS_REGULAR_EXPRESSION (D26), and a non-zero code would lose to the same
 // teardown crash this mechanism exists to survive.
-//
-// NOTE (C48): this hook landed with C44 and was reverted with it in ce6cf26.
-// Card C48's contract requires D27, so the hook alone is re-landed here --
-// unarmed behaviour is byte-identical, and no other caller is touched. If C44
-// re-lands its own version, this block is the one to keep (it carries the D3
-// predicate; the reverted shape could only prove the injection COMPILED).
 struct MutationVerdictState {
   bool armed = false;
   std::string prefix;
@@ -103,6 +110,13 @@ inline void ClearMutationVerdict() {
 
 inline bool MutationVerdictArmed() { return MutationVerdict().armed; }
 
+// True once a CAUGHT marker was actually written (and the process left). The
+// ctest-driven inactive/clean modes assert this is false instead of capturing
+// their own stdout.
+inline bool MutationVerdictPrinted() {
+  return MutationVerdict().printed.load(std::memory_order_relaxed);
+}
+
 inline void ReportFailure(const char* file, int line, const std::string& what) {
   ++FailureCount();
   std::cout << "    FAIL  " << file << ":" << line << "  " << what << std::endl;
@@ -116,13 +130,32 @@ inline void ReportFailure(const char* file, int line, const std::string& what) {
   // Only the first failure prints: a worker thread failing at the same time
   // must not append a second marker (or half a line) to a CAUGHT run.
   if (verdict.printed.exchange(true, std::memory_order_acq_rel)) return;
-  std::cout << verdict.prefix << " (first failure at " << file << ":" << line
-            << "; exiting 0 now so teardown cannot swallow the verdict)" << std::endl;
-  // _Exit, not exit: static destructors and atexit handlers ARE the teardown
-  // that ate the verdict. _Exit does not flush, so flush both layers first.
-  std::cout.flush();
-  std::fflush(nullptr);
-  std::_Exit(0);
+  // Build and write the verdict through stdio, not iostream: under MSVC ASan a
+  // failure can arrive from a worker thread (or with an engine lock held), and
+  // touching iostream's static state on the way out is exactly the teardown
+  // this mechanism must not depend on.
+  std::string verdictLine;
+  verdictLine.reserve(verdict.prefix.size() + 128);
+  verdictLine += verdict.prefix;
+  verdictLine += " (first failure at ";
+  verdictLine += file != nullptr ? file : "?";
+  verdictLine += ':';
+  verdictLine += std::to_string(line);
+  verdictLine += "; exiting 0 now so teardown cannot swallow the verdict)\n";
+  std::fwrite(verdictLine.data(), 1, verdictLine.size(), stdout);
+  std::fflush(stdout);
+  // D27: leave with 0 deterministically and never run CRT/ASan teardown.
+  // std::_Exit re-enters the same CRT exit path that MSVC ASan can turn into a
+  // __fastfail (0xC0000409) while a lock or fake stack is live; TerminateProcess
+  // has no unwinding and exactly one exit code. _commit makes the redirected
+  // log durable before the process disappears.
+#if defined(_WIN32)
+  ::_commit(::_fileno(stdout));
+  ::TerminateProcess(::GetCurrentProcess(), 0);
+  std::_Exit(0);  // unreachable; keeps the control flow explicit for readers
+#else
+  ::_exit(0);
+#endif
 }
 
 template <class A, class B>

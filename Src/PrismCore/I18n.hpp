@@ -645,6 +645,10 @@ inline std::vector<std::string> ChainForChoice(const LanguageChoice& choice) {
 // test so the Win layer can assert the same list at startup.
 inline const std::vector<std::string>& RequiredKeys() {
   static const std::vector<std::string> keys = {
+      // The menu BAR title (card C38). It was missed by C19/C27: the app asked
+      // for it via Tr::Or() with a code default, so the miss was never recorded
+      // and the English menu bar shipped in Chinese builds.
+      "menu.file",
       // Right-click menu (5 items for a single archive + the group variants).
       "menu.smart.extract.here",
       "menu.extract.here",
@@ -676,13 +680,23 @@ inline const std::vector<std::string>& RequiredKeys() {
       "action.retry",
       "action.skip",
       "action.overwrite",
-      // Errors.
+      // The menu bar's Exit item (C38: same MissCount hole as menu.file).
+      "action.exit",
+      // Errors. The five below are the CLI/verb + verification surfaces the exe
+      // already asks for (C27 wiring, C38 keys): before C38 they only existed as
+      // code defaults inside Tr::Or(), so a user who hit them saw Chinese in an
+      // English build and a translator never learned the key existed.
       "error.engine.missing",
       "error.engine.load",
       "error.open",
       "error.password",
       "error.disk.full",
       "error.access.denied",
+      "error.engine.noReason",
+      "error.verify.failed",
+      "error.missingPath",
+      "error.verb.unsupported",
+      "error.verb.supported",
       // SKIP / progress prompts.
       "skip.file",
       "skip.summary",
@@ -690,6 +704,12 @@ inline const std::vector<std::string>& RequiredKeys() {
       "skip.reason.encrypted",
       "progress.extracted",
       "progress.failed",
+      // Compression progress (C27's menu -> dialog -> writer path, C38 keys).
+      "progress.compressed",
+      "progress.compressFailed",
+      "progress.compress.busy",
+      // Status line: a finished re-pack that cannot refresh yet (C27 wiring).
+      "status.refreshDeferred",
   };
   return keys;
 }

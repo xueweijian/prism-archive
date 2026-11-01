@@ -30,6 +30,18 @@
 // (ArchiveTreeView.hpp "the folder list keeps catalog ids"), so switching
 // folders re-filters rows and never renumbers them: zero rescans, and a
 // thumbnail harvested before the switch is still a hit afterwards.
+//
+// Card C34 added the two pieces of LIFETIME this window owns and nothing else:
+//   1. THE GLASS LAYER (C33's GlassIslandHost). A composition stack plus one
+//      swapchain per island is memory that a minimised window cannot use, and
+//      ReleaseTransient() is the only path that gives it back (C33 measured:
+//      without IDXGIDevice3::Trim not one byte returns). WM_SIZE(SIZE_MINIMIZED)
+//      releases it, the restore path rebuilds it, and the island is the NAV
+//      PILL's own rect -- never the window's (C33 finding 1).
+//   2. THE IDLE PUMP. The app's inline-preview companion (C30) is woken by an
+//      auto-reset event, and this window owns the message loop, so it offers a
+//      timer tick the app can poll. Nothing in the window knows what the handler
+//      does: the pump is a seam, not a policy.
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -70,7 +82,17 @@
 #include "../PrismCore/ThumbStore.hpp"
 #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
 #include "GalleryRenderer.hpp"
+#include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
+
+// C34: the glass layer is composition, so the window's TU needs the three
+// import libraries CreateSwapChainForComposition / D3D11 device creation pull
+// in. Naming them here keeps every consumer (the exe and each suite that
+// includes this header) linkable without editing CMakeLists per target --
+// the same device the header relies on is the device it names.
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dcomp.lib")
 
 namespace prism::win::gallery {
 
@@ -248,6 +270,13 @@ class GalleryWindow {
     EnsureSidebar();
     return sidebarLayout_;
   }
+  // C29: pixels the list content is inset by right now (0 when the rail is
+  // folded, off, or the window is too narrow). One formula, used by the paint
+  // path and by hit-testing, so the two can never disagree.
+  float SidebarInset() const {
+    if (!sidebarRailVisible_) return 0.0f;
+    return GalleryRenderer::SidebarInset(static_cast<float>(clientW_));
+  }
   // Engine facts the catalog cannot derive (method / dictionary / cipher).
   void SetArchiveInfo(const prism::sidebar::ArchiveInfo& info) {
     sidebar_.SetArchiveInfo(info);
@@ -353,12 +382,110 @@ class GalleryWindow {
   // The archive the window shows changed on disk (a re-pack finished). Posted by
   // a worker -- the handler runs on the UI thread, where a catalog reload is
   // legal (a worker must never touch the catalog the window navigates).
+  //
+  // C34: the message carries the NEW archive's path. A re-pack writes a new
+  // FILE, so "refresh" means "switch to it" -- the parameter is what makes that
+  // possible without a second member the worker would have to touch.
   static constexpr UINT kArchiveChanged = WM_APP + 5;
-  void PostArchiveChanged() {
-    if (host_.hwnd) PostMessageW(host_.hwnd, kArchiveChanged, 0, 0);
+  void PostArchiveChanged(std::wstring path) {
+    if (!host_.hwnd) return;
+    auto* heap = new std::wstring(std::move(path));
+    if (!PostMessageW(host_.hwnd, kArchiveChanged, 0, reinterpret_cast<LPARAM>(heap))) {
+      delete heap;  // the window is gone; nobody will free it for us
+    }
   }
-  void SetArchiveChangedHandler(std::function<void()> handler) {
+  void SetArchiveChangedHandler(std::function<void(const std::wstring&)> handler) {
     onArchiveChanged_ = std::move(handler);
+  }
+
+  // ---------- card C34: the glass layer's lifetime (C33's call site) --------
+  //
+  // A composition stack plus one swapchain per island is memory a minimised
+  // window cannot use. WM_SIZE(SIZE_MINIMIZED) releases it through
+  // GlassIslandHost::ReleaseTransient (which also calls IDXGIDevice3::Trim --
+  // without that call not one byte comes back, measured in C33) and the restore
+  // path rebuilds it. The island is the NAV PILL's own rect, never the window's
+  // (C33 finding 1: window-sized islands are where the 40 MB went).
+  //
+  // OPT-IN (EnableGlassLayer) on purpose: a window created by another card's
+  // suite must not grow a DirectComposition target behind that suite's back.
+  // Main.cpp enables it for the app.
+  static constexpr UINT kGlassIslandWidth = 960;
+  static constexpr UINT kGlassIslandHeight = 48;
+
+  // Creates the composition host and its one island. False means "this machine
+  // (or this window station) has no DirectComposition": the window keeps the
+  // pre-DComp D2D path and no glass memory is ever held.
+  bool EnableGlassLayer(const std::wstring& shaderDirectory = std::wstring()) {
+    if (glass_) return true;
+    if (!host_.hwnd) return false;
+    auto host = std::make_unique<prism::win::glass::GlassIslandHost>();
+    const std::wstring shaders =
+        shaderDirectory.empty() ? DefaultShaderDirectory() : shaderDirectory;
+    if (!host->Initialize(host_.hwnd, shaders) || !host->UsesComposition()) return false;
+    // ONE island, sized to the pill it belongs to (C33 finding 1).
+    if (!host->AddIsland(kGlassIslandWidth, kGlassIslandHeight)) return false;
+    glass_ = std::move(host);
+    PresentGlassFrame();
+    return true;
+  }
+  bool GlassLayerReady() const { return glass_ != nullptr; }
+  bool GlassLayerVisible() const { return glass_ != nullptr && glass_->Visible(); }
+  size_t GlassTransientBytes() const { return glass_ ? glass_->TransientBytes() : 0; }
+  bool GlassTransientLive() const { return glass_ ? glass_->TransientLive() : false; }
+  // The bytes the last release ACTUALLY returned (C33's accounting, derived
+  // from live COM pointers): 0 while nothing was held, 0 again on a second
+  // release -- which is how the negative control proves the call really ran.
+  size_t GlassReleasedBytes() const { return glassReleasedBytes_; }
+  size_t LastThumbTrimBytes() const { return lastThumbTrimBytes_; }
+
+  // The idle path, callable without synthesising WM_SIZE: the app's minimise
+  // handler and the suite must take the SAME road.
+  //
+  // ReleaseTransient is idempotent and reports the bytes it really gave back,
+  // so calling it twice is safe and the accounting is honest.
+  void ReleaseGlassLayer() {
+#if defined(PRISM_C34_MUTANT_NO_TRIM)
+    // MUTATION (CONTRACTS D3): the minimise path keeps the layer. The suite's
+    // C33 accounting assertion (transient == 0 and not live) must go red, and
+    // the mutant's runtime sign is glassReleasedBytes_ staying 0 while the
+    // layer is still live.
+    glassReleasedBytes_ = 0;
+#else
+    if (!glass_) return;
+    glassReleasedBytes_ = glass_->SetVisible(false);  // -> ReleaseTransient()
+#endif
+  }
+
+  // The restore path. SetVisible(true) alone is lazy (C33), so the surfaces are
+  // rebuilt here rather than on the next paint: a restore the user sees has to
+  // be a complete frame, not a first-frame stall.
+  bool RestoreGlassLayer() {
+    if (!glass_) return false;
+    glass_->SetVisible(true);
+    if (FAILED(glass_->EnsureTransient())) return false;
+    PresentGlassFrame();
+    Invalidate();
+    return true;
+  }
+
+  // C33: the budget is a CAP, not an allocation, so a gallery that once filled
+  // it keeps it. The idle target is an eighth (PERF.md 2.1's measured path).
+  void TrimThumbnails() {
+    std::lock_guard<std::mutex> lock(thumbMutex_);
+    if (!thumbs_) return;
+    lastThumbTrimBytes_ = thumbs_->Trim(thumbs_->BudgetBytes() / 8);
+  }
+
+  // ---------- card C34: the idle pump ----------
+  // The app's companion preview (C30) is woken by an auto-reset event. The
+  // window owns the message loop, so it offers ONE timer tick; the handler runs
+  // on the UI thread and the window knows nothing about what it polls.
+  static constexpr UINT kIdleTimerId = 0xC34;
+  static constexpr UINT kIdleTimerMs = 60;
+  void SetIdleHandler(std::function<void()> handler) {
+    onIdle_ = std::move(handler);
+    EnsureIdleTimer();
   }
 
   // C13: list-mode rows are a SORTED, FILTERED VIEW of the current folder.
@@ -471,7 +598,9 @@ class GalleryWindow {
     // click inside it belongs to the sidebar -- never to a tile hidden under it.
     // RowHit commands are the same boxes the renderer fills, which is what keeps
     // "what I see" and "what I hit" one list.
-    if (sidebarRailVisible_ && SidebarClick(x, y)) return true;
+    // The rail is painted (and therefore clickable) in LIST mode only: the grid
+    // keeps its full-bleed geometry and its tiles must stay reachable.
+    if (listMode_ && sidebarRailVisible_ && SidebarClick(x, y)) return true;
     if (CrumbClick(x, y)) return true;
     // A click inside the breadcrumb bar that misses every crumb is NOT "click
     // on empty list space" -- swallowing it into SetSelection(-1) silently
@@ -585,6 +714,17 @@ class GalleryWindow {
   LRESULT Proc(UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
       case WM_SIZE: {
+        if (wparam == SIZE_MINIMIZED) {
+          // C34: nothing of this window is on screen, so the transient device
+          // layers go back to the system -- the glass swapchains + effect graph
+          // through ReleaseTransient (C33's IDXGIDevice3::Trim is what makes the
+          // release real) and the thumbnail pixels down to their idle target.
+          // No resize here: the client rect keeps the size it had, so a restore
+          // repaints exactly what was there instead of a 0x0 frame.
+          ReleaseGlassLayer();
+          TrimThumbnails();
+          return 0;
+        }
         if (target_) {
           target_->Resize(D2D1::SizeU(LOWORD(lparam), HIWORD(lparam)));
         }
@@ -594,8 +734,19 @@ class GalleryWindow {
         barKnown_ = false;  // the island is a fraction of the client width
         sidebarDirty_ = true;  // the sidebar's status pill is bottom-anchored
         UpdateBreadcrumbLayout();
+        // C34: back on screen -> rebuild what the minimise path dropped.
+        if (wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) RestoreGlassLayer();
         Invalidate();
         return 0;
+      }
+      case WM_TIMER: {
+        // C34: the app's idle tick (the companion preview's wake poll). Only
+        // our own id is consumed; every other timer stays with DefWindowProc.
+        if (wparam == kIdleTimerId) {
+          if (onIdle_) onIdle_();
+          return 0;
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_KEYDOWN: {
         // CARD C25: the key chain that used to live here (a dozen ifs next to
@@ -622,10 +773,13 @@ class GalleryWindow {
       case kThumbsChanged:
         Invalidate();
         return 0;
-      case kArchiveChanged:
-        // UI thread: the app re-reads the archive and rebuilds the view.
-        if (onArchiveChanged_) onArchiveChanged_();
+      case kArchiveChanged: {
+        // UI thread: the app opens the archive the payload names and rebuilds
+        // the view. Ownership of the string came with the message.
+        std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lparam));
+        if (onArchiveChanged_ && path) onArchiveChanged_(*path);
         return 0;
+      }
       case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(host_.hwnd, &ps);
@@ -691,6 +845,10 @@ class GalleryWindow {
         }
         return 0;
       case WM_DESTROY:
+        if (idleTimer_ && host_.hwnd) {
+          KillTimer(host_.hwnd, kIdleTimerId);
+          idleTimer_ = false;
+        }
         PostQuitMessage(0);
         return 0;
       default:
@@ -1036,6 +1194,13 @@ class GalleryWindow {
 
   int ItemAtPoint(int x, int y) const {
     if (clientW_ <= 0.0 || clientH_ <= 0.0) return -1;  // no WM_SIZE yet
+    // C29: in LIST mode the sidebar owns the left column (list rows are inset
+    // by it, and their hit test is y-only, so the guard has to be here once).
+    // The grid keeps its full-bleed geometry: the sidebar is not painted there
+    // (GalleryRenderer::SidebarShown), so no tile can be covered by it.
+    if (listMode_ && SidebarInset() > 0.0f && x < static_cast<int>(SidebarInset())) {
+      return -1;
+    }
     if (listMode_) {
       // The list paints the VIEW, not the folder: filter first, then hit-test.
       const uint32_t count = static_cast<uint32_t>(listItems_.size());
@@ -1191,7 +1356,16 @@ class GalleryWindow {
     GalleryRenderer::Scene scene;
     scene.items = host_.items;
     scene.viewport = &viewport_;
-    scene.sidebar = sidebarRailVisible_ ? &sidebarLayout_ : nullptr;
+    // C29: the rail is LIST-MODE chrome and folds itself below its width
+    // threshold. The window owns that POLICY (list mode + the C27 toggle + the
+    // width); the renderer paints whatever Scene it is handed, which is what
+    // C27's glue suite relies on (it builds a bare scene with a layout and
+    // expects pixels at 900 px wide).
+    scene.sidebar = (listMode_ && sidebarRailVisible_ &&
+                     GalleryRenderer::SidebarFits(static_cast<float>(clientW_)))
+                        ? &sidebarLayout_
+                        : nullptr;
+    scene.sidebarCollapsed = !sidebarRailVisible_;
     scene.listMode = listMode_;
     scene.listColumns = &listColumns_;
     scene.hasListColumns = hasListColumns_;
@@ -1200,6 +1374,9 @@ class GalleryWindow {
     // to read scene.listScroll (always 0) while clicks used the viewport.
     scene.listScroll = listMode_ ? static_cast<uint32_t>(viewport_.Scroll()) : 0u;
     scene.breadcrumb = breadcrumbText_;
+    // C29: the rail's command list is a LAYOUT input; EnsureSidebar rebuilds it
+    // only when the model is dirty, so this is a cache hit on every other frame.
+    EnsureSidebar();
     {
       std::lock_guard<std::mutex> lock(thumbMutex_);
       scene.thumbs = thumbs_.get();
@@ -1259,6 +1436,40 @@ class GalleryWindow {
     }
     return true;
   }
+
+  // ---------- C34: the glass layer (composition) ----------
+  // <exe dir>\Assets\Shaders is the layout "cmake --install" produces; the
+  // effects are optional (a missing .hlsl leaves the host flat, still composing).
+  static std::wstring DefaultShaderDirectory() {
+    wchar_t module[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, module, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    std::wstring path(module, length);
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) path.resize(slash);
+    return path + L"\\Assets\\Shaders";
+  }
+
+  // One transparent frame. The composition visual is layered ABOVE the window's
+  // D2D content (CreateTargetForHwnd with topmost=TRUE), so a presented frame
+  // that only clears to transparent changes no pixels -- it exists so the
+  // swapchain has defined contents instead of whatever the driver left in
+  // buffer 0. The optics (what WOULD be painted here) belong to the renderer.
+  void PresentGlassFrame() {
+    if (!glass_) return;
+    const prism::glass::IslandRect rect{0, 0, kGlassIslandWidth, kGlassIslandHeight};
+    prism::win::glass::GlassConstants constants{};
+    glass_->PaintIsland(0, rect, constants, nullptr,
+                        [](ID2D1DeviceContext* dc, float, float) {
+                          dc->Clear(D2D1::ColorF(0, 0.0f));
+                        });
+  }
+
+  void EnsureIdleTimer() {
+    if (idleTimer_ || !host_.hwnd || !onIdle_) return;
+    idleTimer_ = SetTimer(host_.hwnd, kIdleTimerId, kIdleTimerMs, nullptr) != 0;
+  }
+
 
   // List mode rows are a SORTED, FILTERED VIEW over the current folder (C13).
   //
@@ -1373,10 +1584,12 @@ class GalleryWindow {
   int closedWidth_ = 0;
   int closedHeight_ = 0;
   prism::sidebar::FocusTarget lastSidebarHit_;
-  bool sidebarRailVisible_ = false;  // C27: opt-in until the grid reflows
+  // C29: the rail really paints now, and the grid reflow landed (list inset +
+  // hit-test guard), so the rail is ON by default in list mode.
+  bool sidebarRailVisible_ = true;
   prism::sidebar::SidebarStore* sidebarStore_ = nullptr;  // C14 port (not owned)
   bool sidebarRestored_ = false;
-  std::function<void()> onArchiveChanged_;
+  std::function<void(const std::wstring&)> onArchiveChanged_;  // C34: names the new file
   prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint budget
   std::vector<prism::list::SortItem> listItems_;  // what list mode PAINTS
   // C13: the view behind list mode. listRows_ is the sorted/filtered model row
@@ -1436,6 +1649,15 @@ class GalleryWindow {
   ComPtr<IDWriteTextFormat> crumbFormat_;
   ComPtr<ID2D1Factory> factory_;
   ComPtr<ID2D1HwndRenderTarget> target_;
+
+  // ---- card C34: the glass layer and the idle pump ----
+  // The host is OPT-IN (EnableGlassLayer): a window that nobody asked for glass
+  // never allocates a device stack.
+  std::unique_ptr<prism::win::glass::GlassIslandHost> glass_;
+  size_t glassReleasedBytes_ = 0;  // C33's accounting, last release
+  size_t lastThumbTrimBytes_ = 0;  // bytes the idle Trim returned
+  std::function<void()> onIdle_;   // the app's companion-preview poll
+  bool idleTimer_ = false;
 };
 
 }  // namespace prism::win::gallery

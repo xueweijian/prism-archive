@@ -98,7 +98,8 @@ int main() {
   const std::wstring dllPath = prism::fixture::DllPath();
   const std::wstring exePath = prism::fixture::ExePath();
   if (dllPath.empty() || exePath.empty()) {
-    std::printf("    FAIL: 7z.exe not found beside 7z.dll (set PRISM_7Z_DLL)\n");
+    // C37: ExePathWhy() says WHICH half is missing (engine vs CLI) and where.
+    std::printf("    FAIL: %s\n", prism::fixture::ExePathWhy().c_str());
     return 1;
   }
 

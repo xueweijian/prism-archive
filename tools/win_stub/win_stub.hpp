@@ -98,6 +98,22 @@ using LPBYTE = BYTE*;
 #define HKEY_LOCAL_MACHINE (reinterpret_cast<HKEY>(static_cast<LONG_PTR>(0x80000002L)))
 #define HKEY_CURRENT_USER (reinterpret_cast<HKEY>(static_cast<LONG_PTR>(0x80000001L)))
 
+// Needed the moment PrismEngineBridge.hpp began comparing DLL paths with
+// CompareStringOrdinal (card C37's PATH scan): the Windows-TU gate caught it on
+// main in 42 seconds, which is the whole point of keeping this file vocabulary
+// only. Constants and signature -- no behaviour.
+using LPCWSTR = const wchar_t*;
+#ifndef TRUE
+#define TRUE 1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
+#define CSTR_LESS_THAN 1
+#define CSTR_EQUAL 2
+#define CSTR_GREATER_THAN 3
+inline int CompareStringOrdinal(LPCWSTR, int, LPCWSTR, int, BOOL) { return 0; }
+
 DWORD GetFileAttributesW(PCWSTR path);
 DWORD GetModuleFileNameW(HMODULE module, PWSTR filename, DWORD size);
 DWORD GetEnvironmentVariableW(PCWSTR name, PWSTR buffer, DWORD size);

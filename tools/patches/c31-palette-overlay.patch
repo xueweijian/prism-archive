@@ -1,0 +1,45 @@
+C31 patch B -- Ctrl+K opens the OVERLAY, not only the shell (5 lines, one file).
+Generated with git diff against main@35bb3be and verified with "git apply --check".
+Apply:  git apply tools/patches/c31-palette-overlay.patch
+C8 already resolves Ctrl+K to Command::OpenPalette and GalleryWindow routes it to OpenPalette(),
+so the patch only attaches the overlay to that shell and opens both from the same call. Painting
+the commands is the renderer job (GalleryRenderer.hpp is C29): the list is overlay_.Build(w, h).
+The overlay takes precedence on keys, so the shell highlight is no longer what is painted --
+RunPalette() still uses palette_.Highlighted() for the entry.
+diff --git a/Src/PrismWin/GalleryWindow.hpp b/Src/PrismWin/GalleryWindow.hpp
+index 723389e..d5a3307 100644
+--- a/Src/PrismWin/GalleryWindow.hpp
++++ b/Src/PrismWin/GalleryWindow.hpp
+@@ -69,6 +69,7 @@
+ #include "../PrismCore/SpringAnimator.hpp"
+ #include "../PrismCore/ThumbStore.hpp"
+ #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
++#include "PaletteOverlay.hpp"                // C31: the palette draw commands
+ #include "GalleryRenderer.hpp"
+ #include "SidebarView.hpp"                  // sidebar draw commands (C12)
+ 
+@@ -586,6 +587,7 @@ class GalleryWindow {
+     // (that is how typing reaches the query field) and only a stroke it declines
+     // is re-resolved against the gallery table.
+     if (palette_.IsOpen()) {
++      overlay_.OnKey(stroke);  // C31: Tab switches scope before the shell sees it
+       const prism::win::palette::PaletteShell::KeyOutcome outcome = palette_.OnKey(stroke);
+       if (outcome.consumed) {
+         if (outcome.command == prism::keys::Command::ActivateSelection) RunPalette();
+@@ -711,6 +713,8 @@ class GalleryWindow {
+   // ---------- command palette (C8) ----------
+   void OpenPalette() {
+     palette_.Open();
++    overlay_.Attach(&palette_);  // C31: the shell rectangles, not a second set
++    overlay_.Open();             //     ... and Ctrl+K is what opens them
+     Invalidate();
+   }
+ 
+@@ -1176,6 +1180,7 @@ class GalleryWindow {
+       {{prism::list::SortKey::kName, prism::list::SortDirection::kAscending}}, true};
+   // C8: the two authorities the window asks instead of deciding for itself.
+   prism::win::palette::PaletteShell palette_;
++  prism::win::palette::PaletteOverlay overlay_;  // C31: what Ctrl+K paints
+   prism::history::Stack history_;
+   int zoomPx_ = 256;  // Ctrl+Shift+P stop; the renderer has no tile-size input yet
+   // C12: sidebar state + its draw-command list (painting is not wired yet).

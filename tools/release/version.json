@@ -1,0 +1,10 @@
+{
+  "product": "PrismArchive",
+  "version": "0.1.0",
+  "build": 0,
+  "channel": "dev",
+  "runtime": "win-x64",
+  "license": "MIT",
+  "description": "Single source of truth for the shipped version. tools/release/ReleaseCommon.ps1 compares CMakeLists.txt and Src/App/PrismArchive.rc against it on every package build; docs/RELEASE.md carries the patch that removes the duplicated literals.",
+  "repository": "https://github.com/xueweijian/prism-archive"
+}

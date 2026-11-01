@@ -51,6 +51,12 @@
 #define NOMINMAX  // windows.h must not own min/max: PrismCore uses std::min/std::max
 #endif
 #include <windows.h>
+// C52: HDROP and the Drag* family live in shellapi.h, which windows.h SKIPS
+// under the WIN32_LEAN_AND_MEAN defined above. A header that pulls windows.h in
+// itself must therefore name the shell header, or every TU that includes this
+// file first fails on "HDROP: undeclared" (the drop-in suite only compiled
+// because it happened to include windows.h without the lean-and-mean).
+#include <shellapi.h>
 
 #include <d2d1.h>
 #include <d2d1helper.h>
@@ -71,6 +77,7 @@
 #include "../PrismCore/ActionBarModel.hpp"  // C-V2: action table + enable rules
 #include "../PrismCore/ArchiveTreeView.hpp"
 #include "../PrismCore/CommandPalette.hpp"  // palette ranker (C8 decision layer)
+#include "../PrismCore/DropPlan.hpp"       // C52: what a drop ONTO the window means
 #include "../PrismCore/FilterModel.hpp"     // list view filter (C13)
 #include "../PrismCore/Gallery.hpp"
 #include "../PrismCore/HistoryStack.hpp"    // Alt+Left / Alt+Right (C8)
@@ -95,6 +102,11 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dcomp.lib")
+// C52: DragAcceptFiles / DragQueryFileW / DragQueryPoint / DragFinish live in
+// shell32. Naming the library here keeps every consumer of this header (the exe
+// and each suite that creates a real window) linkable without per-target edits
+// -- the same reason the three D3D/DComp libraries are named above.
+#pragma comment(lib, "shell32.lib")
 
 namespace prism::win::gallery {
 
@@ -153,6 +165,13 @@ class GalleryWindow {
                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                  1280, 800, nullptr, nullptr, instance, this);
     if (!host_.hwnd) return false;
+    // C52: register the window as a drop target. DragAcceptFiles is the cheap
+    // half of OLE drag & drop (it sets WS_EX_ACCEPTFILES and turns Explorer's
+    // drop into a WM_DROPFILES); IDropTarget would buy us modifier keys and
+    // per-pixel hover we cannot use yet, at the cost of a COM object whose
+    // lifetime has to survive every test that owns a window. The message is
+    // enough for the decision, and the decision is what this card is about.
+    ::DragAcceptFiles(host_.hwnd, TRUE);
     // The renderer's device-independent resources (D2D factory + the DirectWrite
     // factory its CreateTextFormat calls go through) must exist BEFORE the first
     // WM_PAINT. Skipping this left renderer_.writeFactory_ null, so the very
@@ -178,6 +197,7 @@ class GalleryWindow {
   // One catalog, three readers -- never a second copy that could drift.
   void SetItems(std::vector<prism::ArchiveItem>* items) {
     catalog_ = items;
+    archiveOpen_ = true;  // C52: a catalog means an archive is open (see SetArchiveOpen)
     nav_.Attach(items);
     selection_ = nav_.Selection();
     sidebar_.AttachCatalog(items);
@@ -779,6 +799,47 @@ class GalleryWindow {
     return prism::tree::HitBreadcrumb(crumbLayout_, x);
   }
 
+  // ---------- card C52: dropping files INTO the window ----------------------
+  // Explorer -> window. What the drop MEANS is PrismCore's decision
+  // (prism::drop::PlanDrop); this window only turns an HDROP into the tree the
+  // model wants, paints the hint and forwards the plan to the app. That is the
+  // same split as every other interaction: pixels and messages here, policy in
+  // PrismCore. Main.cpp is wired by a patch (this card does not touch it).
+  //
+  // HandleDropFiles is the EXACT entry point WM_DROPFILES uses, so the Windows
+  // suite drives the production path instead of a re-implementation of it (the
+  // Dispatch seam above exists for the same reason).
+  void SetDropHandler(std::function<void(const prism::drop::DropPlan&)> handler) {
+    onDrop_ = std::move(handler);
+  }
+  // Attaching a catalog (SetItems) means an archive is open; a window that
+  // never attached one is the "empty window" case. Exposed so a test can drive
+  // either state without an engine.
+  bool ArchiveOpen() const { return archiveOpen_; }
+  void SetArchiveOpen(bool open) { archiveOpen_ = open; }
+  bool DropHintVisible() const { return dropHintVisible_; }
+  prism::layout::Rect DropHintRect() const { return dropHintRect_; }
+  std::wstring DropHintTitle() const { return dropHintTitle_; }
+  std::wstring DropHintDetail() const { return dropHintDetail_; }
+  POINT DropPoint() const { return dropPoint_; }
+  const prism::drop::DropPlan& LastDropPlan() const { return lastDropPlan_; }
+  // Paint evidence: how many WM_PAINTs ran and how many of them actually drew
+  // the overlay. "The rect is inside the content area" is geometry; these two
+  // counters are what proves the hint reaches the device.
+  int PaintMessages() const { return paintMessages_; }
+  int DropHintDraws() const { return dropHintDraws_; }
+  // The same content rectangle the renderer paints (V1 authority), with the
+  // pre-first-size fallback the rest of the window uses.
+  prism::layout::Rect ContentArea() const { return ContentAreaForDrop(); }
+  void ClearDropHint() {
+    if (!dropHintVisible_) return;
+    dropHintVisible_ = false;
+    Invalidate();
+  }
+  // Consumes the handle: DragFinish is called before returning, exactly as the
+  // WM_DROPFILES contract requires.
+  void HandleDropFiles(HDROP drop) { EvaluateDrop(drop); }
+
  private:
   static LRESULT CALLBACK ProcThunk(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* self = reinterpret_cast<GalleryWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -859,6 +920,14 @@ class GalleryWindow {
         Invalidate();
         return 0;
       }
+      case WM_DROPFILES: {
+        // C52: Explorer hands over an HDROP (a HGLOBAL the shell allocated).
+        // The model decides; the window paints and forwards. Returning 0 CLAIMS
+        // the drop -- the shell frees nothing on our behalf, which is why
+        // EvaluateDrop calls DragFinish.
+        EvaluateDrop(reinterpret_cast<HDROP>(wparam));
+        return 0;
+      }
       case kThumbsChanged:
         Invalidate();
         return 0;
@@ -872,6 +941,7 @@ class GalleryWindow {
       case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(host_.hwnd, &ps);
+        ++paintMessages_;  // C52: paint evidence for the drop-hint suite
         AdvanceScrollSpring();
         Render();
         EndPaint(host_.hwnd, &ps);
@@ -931,6 +1001,10 @@ class GalleryWindow {
         return 0;
       }
       case WM_LBUTTONDOWN: {
+        // C52: a click anywhere dismisses a drop hint that is still on screen
+        // (the app clears it as soon as it acts; this is the "user changed
+        // their mind" path, so an overlay can never become permanent chrome).
+        if (dropHintVisible_) ClearDropHint();
         // C-V2: the band is chrome ABOVE the rows: a button click must never
         // also select the tile that happens to be behind it.
         if (ActionBarClick(MouseX(lparam), MouseY(lparam))) return 0;
@@ -1698,6 +1772,11 @@ class GalleryWindow {
       scene.hud = hud_.Render(NowMs());
     }
     renderer_.Draw(target_.Get(), scene);
+    // C52: the drop hint is a TRANSIENT overlay, not part of the scene snapshot
+    // (the renderer must not grow a fourth "mode" for something that lives for
+    // one drag). It is painted over the same target, in the same frame, from
+    // C15 tokens -- so it can never drift from the window's palette.
+    DrawDropHint();
     target_->EndDraw();
   }
 
@@ -1861,6 +1940,172 @@ class GalleryWindow {
 
   void Invalidate() { if (host_.hwnd) InvalidateRect(host_.hwnd, nullptr, FALSE); }
 
+  // ---------- card C52: the drop-in implementation --------------------------
+  //
+  // One drag = one bounded walk. Two bounds, both deliberate:
+  //   * kDropScanDepth     -- a junction/symlink chain cannot recurse forever;
+  //   * kDropScanEntries   -- a 200k-file folder cannot stall the UI thread.
+  // A drop is untrusted input from another process, and this code runs on the
+  // message loop (CONTRACTS D29's rule -- every wait AND every walk is bounded).
+  static constexpr int kDropScanDepth = 16;
+  static constexpr std::size_t kDropScanEntries = 1024;
+
+  // Win32 refuses paths longer than MAX_PATH unless they carry the extended
+  // prefix, and the prefix DISABLES '/'-normalisation (CONTRACTS B4). Explorer
+  // hands us backslashes already, so the conversion here is prefix-only.
+  static std::wstring ExtendedLength(const std::wstring& path) {
+    if (path.size() < MAX_PATH || path.rfind(L"\\\\?\\", 0) == 0) return path;
+    if (path.rfind(L"\\\\", 0) == 0) return L"\\\\?\\UNC\\" + path.substr(2);
+    return L"\\\\?\\" + path;
+  }
+
+  // One dragged item, walked depth-first. Symlinks and junctions are NOT
+  // followed: their contents are either a cycle or somebody else's folder, and
+  // "add this folder" must not silently pull in a second tree.
+  prism::drop::DropEntry ScanDropEntry(const std::wstring& path, int depth) {
+    prism::drop::DropEntry entry;
+    entry.path = WideToUtf8(path);
+    const std::wstring native = ExtendedLength(path);
+    const DWORD attributes = ::GetFileAttributesW(native.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) return entry;  // vanished mid-drag
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) return entry;
+    entry.isDirectory = true;
+    if (depth >= kDropScanDepth || dropScanBudget_ == 0) return entry;
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return entry;
+    WIN32_FIND_DATAW data{};
+    const std::wstring pattern = native + L"\\*";
+    HANDLE find = ::FindFirstFileW(pattern.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return entry;
+    do {
+      if (::wcscmp(data.cFileName, L".") == 0 || ::wcscmp(data.cFileName, L"..") == 0) continue;
+      if (dropScanBudget_ == 0) break;
+      --dropScanBudget_;
+      entry.children.push_back(ScanDropEntry(path + L"\\" + data.cFileName, depth + 1));
+    } while (::FindNextFileW(find, &data) != FALSE);
+    ::FindClose(find);
+    return entry;
+  }
+
+  // Content rect for the hint. layout_ is only valid after the first WM_SIZE, so
+  // a drop delivered before that falls back to the same default the renderer
+  // uses for a client it has not measured yet.
+  prism::layout::Rect ContentAreaForDrop() const {
+    if (clientW_ > 0.0 && clientH_ > 0.0) return layout_.contentInner;
+    return WindowLayoutForClient().contentInner;
+  }
+
+  // HDROP -> DropEntry tree -> PlanDrop -> hint. Owns the handle (DragFinish).
+  void EvaluateDrop(HDROP drop) {
+    std::vector<prism::drop::DropEntry> entries;
+    POINT point{};
+    dropScanBudget_ = kDropScanEntries;
+    if (drop != nullptr) {
+      const UINT count = ::DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+      entries.reserve(count);
+      for (UINT i = 0; i < count; ++i) {
+        const UINT length = ::DragQueryFileW(drop, i, nullptr, 0);
+        if (length == 0 || length > 32767) continue;  // abandoned / hostile entry
+        std::wstring wide(static_cast<std::size_t>(length) + 1, L'\0');
+        if (::DragQueryFileW(drop, i, wide.data(), length + 1) == 0) continue;
+        wide.resize(static_cast<std::size_t>(length));
+        prism::drop::DropEntry entry = ScanDropEntry(wide, 0);
+        if (!entry.path.empty()) entries.push_back(std::move(entry));
+      }
+      (void)::DragQueryPoint(drop, &point);
+      ::DragFinish(drop);
+    }
+    dropPoint_ = point;
+
+    prism::drop::DropInput input;
+    input.entries = std::move(entries);
+    // The claim we hand the model is the one our own walk just established; the
+    // model re-derives it anyway and reports a disagreement instead of trusting
+    // it (see DropPlan.hpp).
+    input.containsDirectory = prism::drop::TreeContainsDirectory(input.entries);
+    input.archiveOpen = archiveOpen_;
+    input.archiveReadOnly = readOnly_;
+    lastDropPlan_ = prism::drop::PlanDrop(input);
+
+    dropHintRect_ = prism::drop::HintRect(ContentAreaForDrop());
+    dropHintAccepted_ = lastDropPlan_.accepted();
+    dropHintTitle_ = Utf8ToWide(lastDropPlan_.headline);
+    dropHintDetail_ = Utf8ToWide(lastDropPlan_.detail);
+    dropHintVisible_ = true;
+    Invalidate();
+    // Executing the action is the app's job (it owns the engine, the password
+    // prompt and the progress HUD). A window that started extraction from a
+    // message handler would be UI-thread policy this card does not get to make.
+    if (onDrop_) onDrop_(lastDropPlan_);
+  }
+
+  static D2D1_COLOR_F ToD2DColor(const prism::theme::Rgba& color) {
+    return D2D1::ColorF(color.r, color.g, color.b, color.a);
+  }
+
+  // The overlay: the floating-island token, rimmed by the specular border token,
+  // with the refusal rim in the accent token. Two text lines: the headline (the
+  // action) and the detail (why, or what will be written). No new colours and no
+  // new geometry authority -- the rect comes from prism::drop::HintRect.
+  void DrawDropHint() {
+    if (!dropHintVisible_ || !target_) return;
+    const prism::layout::Rect rect = dropHintRect_;
+    if (rect.Empty()) return;
+    EnsureTextMeasurement();
+
+    const prism::theme::Variant variant = prism::theme::Variant::Daylight;
+    const prism::theme::Rgba island =
+        prism::theme::Lookup(prism::theme::TokenId::SurfaceFloatingIsland, variant).color;
+    const prism::theme::Rgba rim =
+        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant).gradient.from;
+    const prism::theme::Rgba accent =
+        prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary, variant).gradient.from;
+    const prism::theme::Rgba titleInk =
+        prism::theme::Lookup(prism::theme::TokenId::TextPrimary, variant).color;
+    const prism::theme::Rgba detailInk =
+        prism::theme::Lookup(prism::theme::TokenId::TextSecondary, variant).color;
+
+    ComPtr<ID2D1SolidColorBrush> fill;
+    ComPtr<ID2D1SolidColorBrush> edge;
+    ComPtr<ID2D1SolidColorBrush> titleBrush;
+    ComPtr<ID2D1SolidColorBrush> detailBrush;
+    if (FAILED(target_->CreateSolidColorBrush(
+            ToD2DColor(prism::theme::Rgba(island.r, island.g, island.b, 0.94f)),
+            fill.GetAddressOf()))) {
+      return;
+    }
+    if (FAILED(target_->CreateSolidColorBrush(
+            ToD2DColor(dropHintAccepted_ ? rim : accent), edge.GetAddressOf()))) {
+      return;
+    }
+    if (FAILED(target_->CreateSolidColorBrush(ToD2DColor(titleInk), titleBrush.GetAddressOf()))) {
+      return;
+    }
+    if (FAILED(target_->CreateSolidColorBrush(ToD2DColor(detailInk), detailBrush.GetAddressOf()))) {
+      return;
+    }
+
+    const D2D1_RECT_F box = D2D1::RectF(
+        static_cast<float>(rect.left), static_cast<float>(rect.top),
+        static_cast<float>(rect.right), static_cast<float>(rect.bottom));
+    const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(box, 18.0f, 18.0f);
+    target_->FillRoundedRectangle(shape, fill.Get());
+    target_->DrawRoundedRectangle(shape, edge.Get(), dropHintAccepted_ ? 1.0f : 2.0f);
+    if (crumbFormat_) {
+      const D2D1_RECT_F titleRect =
+          D2D1::RectF(box.left + 18.0f, box.top + 14.0f, box.right - 18.0f, box.bottom);
+      target_->DrawText(dropHintTitle_.c_str(), static_cast<UINT32>(dropHintTitle_.size()),
+                        crumbFormat_.Get(), titleRect, titleBrush.Get(),
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+      const D2D1_RECT_F detailRect = D2D1::RectF(titleRect.left, titleRect.top + 26.0f,
+                                                 titleRect.right, box.bottom - 12.0f);
+      target_->DrawText(dropHintDetail_.c_str(), static_cast<UINT32>(dropHintDetail_.size()),
+                        crumbFormat_.Get(), detailRect, detailBrush.Get(),
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    }
+    ++dropHintDraws_;
+  }
+
+
   // Destroy the HWND if it is still alive. Idempotent on purpose: the normal
   // path destroys it in the WM_CLOSE handler, and the destructor must not
   // destroy it a second time (the handle value would be stale or -- worse --
@@ -1995,6 +2240,22 @@ class GalleryWindow {
   size_t lastThumbTrimBytes_ = 0;  // bytes the idle Trim returned
   std::function<void()> onIdle_;   // the app's companion-preview poll
   bool idleTimer_ = false;
+
+  // ---- card C52: the drop-in overlay (see EvaluateDrop) ----
+  // archiveOpen_ is the model's second input. It is set by SetItems (a catalog
+  // means an archive is open) and can be forced by a test / the app.
+  bool archiveOpen_ = false;
+  std::function<void(const prism::drop::DropPlan&)> onDrop_;
+  prism::drop::DropPlan lastDropPlan_;
+  bool dropHintVisible_ = false;
+  bool dropHintAccepted_ = false;
+  prism::layout::Rect dropHintRect_;
+  std::wstring dropHintTitle_;
+  std::wstring dropHintDetail_;
+  POINT dropPoint_{};               // where the drop landed (client coords)
+  std::size_t dropScanBudget_ = 0;  // entries left in the current walk
+  int dropHintDraws_ = 0;           // frames that actually painted the overlay
+  int paintMessages_ = 0;           // WM_PAINTs handled (paint evidence)
 };
 
 }  // namespace prism::win::gallery

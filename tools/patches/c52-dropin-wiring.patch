@@ -1,0 +1,55 @@
+C52 patch -- Main.cpp wiring for a drop ONTO the window (one file, one block).
+Generated with git diff against main@37eca58 and verified with "git apply --check".
+Apply:  git apply tools/patches/c52-dropin-wiring.patch
+
+The window already owns the whole path: DragAcceptFiles + WM_DROPFILES -> a
+bounded HDROP walk -> prism::drop::PlanDrop -> the hint overlay. What is left is
+EXECUTION, and that belongs to the app: it owns the engine, the password prompt
+and the HUD (a window that started an add from a message handler would be
+UI-thread policy the card does not get to make).
+
+Two actions reuse doors the app already has:
+  * OpenArchive -> PostArchiveChanged, i.e. the archive-changed flow that
+                   re-opens the file and rebuilds the view;
+  * Refuse      -> PostStatus with the model's own reason text.
+ExtractHere / AddToArchive / TestArchive need C9's writer and C4's extract flow
+callable with an EXPLICIT file list instead of the whole catalog; until that
+seam exists they put the plan's headline on the status line, so a drop always
+answers (and never half-writes an archive).
+
+diff --git a/Src/App/Main.cpp b/Src/App/Main.cpp
+index 9a2bfac..8b1e7c0 100644
+--- a/Src/App/Main.cpp
++++ b/Src/App/Main.cpp
+@@ -930,6 +930,30 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+       CoUninitialize();
+     });
+   });
++  // ---- C52: a drop ONTO the window -----------------------------------------
++  //
++  // The window already turned Explorer's HDROP into a tree and asked PrismCore
++  // what it means (prism::drop::PlanDrop); this handler only EXECUTES. Two of
++  // the five actions reuse paths the app already owns:
++  //   * OpenArchive -> the archive-changed flow (open the file, rebuild the
++  //                    view, restore the folder from the session store) -- the
++  //                    same door the menu's "open" uses;
++  //   * Refuse      -> the status line, carrying the model's own reason text
++  //                    (a refusal that says nothing is indistinguishable from a
++  //                    broken drop target).
++  // ExtractHere / AddToArchive / TestArchive need the C9 write path and the C4
++  // extract flow to be callable with an EXPLICIT file list instead of the whole
++  // catalog. Until that seam exists they report the plan's headline, so a drop
++  // always produces visible feedback instead of silence (and never a half-run
++  // write). The window keeps its hint; a click clears it.
++  window.SetDropHandler([&window](const prism::drop::DropPlan& plan) {
++    if (plan.primary == prism::drop::DropAction::OpenArchive && !plan.members.empty()) {
++      window.PostArchiveChanged(prism::win::Utf8ToWide(plan.members.front()));
++      return;
++    }
++    window.PostStatus(prism::win::Utf8ToWide(plan.headline + "  " + plan.detail));
++  });
++
+   // ---- C27: the compress entry (menu -> C18 dialog -> C9 writer -> HUD) ----
+   //
+   // The window shows the CONTENT of an open archive, and ArchiveWriter writes
+

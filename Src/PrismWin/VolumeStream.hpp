@@ -103,6 +103,11 @@ class VolumeFileStream final : public abi::IInStream, public abi::IStreamGetSize
     if (handle_ != INVALID_HANDLE_VALUE) {
       LARGE_INTEGER size{};
       if (GetFileSizeEx(handle_, &size)) size_ = static_cast<std::uint64_t>(size.QuadPart);
+    } else {
+      // Capture immediately: the next allocation may clobber the thread's last
+      // error, and a stale 0 would turn "cannot open" into HRESULT_FROM_WIN32(0)
+      // == S_OK with a null out-parameter (the engine would dereference null).
+      error_ = GetLastError();
     }
   }
   ~VolumeFileStream() {
@@ -112,6 +117,7 @@ class VolumeFileStream final : public abi::IInStream, public abi::IStreamGetSize
   VolumeFileStream& operator=(const VolumeFileStream&) = delete;
 
   bool valid() const { return handle_ != INVALID_HANDLE_VALUE; }
+  DWORD lastError() const { return error_; }
   const std::wstring& path() const { return path_; }
   std::uint64_t size() const { return size_; }
 
@@ -169,6 +175,7 @@ class VolumeFileStream final : public abi::IInStream, public abi::IStreamGetSize
   std::wstring path_;
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   std::uint64_t size_ = 0;
+  DWORD error_ = 0;
   LONG refs_ = 1;
 };
 
@@ -233,9 +240,12 @@ class VolumeOpenCallback final : public abi::IArchiveOpenCallback,
       if (volume_detail::Lower(entry.name) != requestedLower) continue;
       auto* stream = new VolumeFileStream(JoinVolumePath(directory_, entry.name));
       if (!stream->valid()) {
-        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        const DWORD cause = stream->lastError();
         delete stream;
-        return hr;
+        const HRESULT hr = HRESULT_FROM_WIN32(cause);
+        // HRESULT_FROM_WIN32(ERROR_SUCCESS) is S_OK: never let an unopenable
+        // volume come back as "here is your stream" with a null pointer.
+        return FAILED(hr) ? hr : HRESULT_FROM_WIN32(ERROR_OPEN_FAILED);
       }
       ++streamsServed_;
       *inStream = stream;  // one reference, transferred to the caller

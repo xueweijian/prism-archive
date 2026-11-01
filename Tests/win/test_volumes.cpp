@@ -661,6 +661,21 @@ PRISM_TEST("IArchiveOpenVolumeCallback answers its IID and serves named volumes"
   prism::win::abi::IInStream* missing = nullptr;
   PRISM_CHECK(callback->GetStream(L"cb.7z.999", &missing) == S_FALSE);
   PRISM_CHECK(missing == nullptr);
+
+  // A volume that the plan LISTS but the disk no longer has: the failure must be
+  // a real HRESULT with a null out-parameter. HRESULT_FROM_WIN32(0) is S_OK, so
+  // a stale last-error would hand the engine "success + nullptr" and it would
+  // dereference it. This is the negative control for that exact exit.
+  if (plan.volumes.size() >= 2) {
+    const std::wstring goneName = prism::win::Utf8ToWideVolume(plan.volumes.back().name);
+    PRISM_CHECK(fs::remove(root / plan.volumes.back().name));
+    prism::win::abi::IInStream* gone = nullptr;
+    const HRESULT goneHr = callback->GetStream(goneName.c_str(), &gone);
+    std::cout << "    vanished volume -> hr=0x" << std::hex << goneHr << std::dec
+              << ", stream=" << (gone ? "non-null" : "null") << std::endl;
+    PRISM_CHECK(FAILED(goneHr));
+    PRISM_CHECK(gone == nullptr);
+  }
   std::cout << "    volume callback: " << callback->streamRequests() << " request(s), "
             << callback->streamsServed() << " served" << std::endl;
   callback->Release();

@@ -16,7 +16,11 @@ add_executable(PrismArchive ../App/Main.cpp ../App/PrismArchive.rc)
 target_include_directories(PrismArchive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(PrismArchive PRIVATE prism_win_bridge
                       user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
-                      ole32.lib comdlg32.lib shell32.lib shlwapi.lib)
+                      ole32.lib comdlg32.lib shell32.lib shlwapi.lib
+                      # comctl32: the compression dialog's level slider is a
+                      # msctls_trackbar32 common control (C18). Without it the
+                      # link fails only once the dialog is actually referenced.
+                      comctl32.lib)
 # GUI subsystem + UNICODE: wWinMain is only selected when UNICODE is defined
 # (otherwise the CRT wants plain main). The other TUs use explicit W APIs, so
 # the define changes nothing for them.

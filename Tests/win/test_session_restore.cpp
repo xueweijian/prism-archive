@@ -56,9 +56,17 @@ namespace session = prism::session;
 
 namespace {
 
+// The banner literal sits INSIDE the guard block: the C23 matrix looks for a
+// "MUTANT ACTIVE" string right after the macro guard as proof the injection
+// built (the arm's NAME is passed in as PRISM_C46_MUTANT_NAME, and deliberately
+// avoids the words clean/control/unarmed, which the matrix reads as "this is a
+// control" -- a control that is armed is a contradiction it rejects).
 #if defined(PRISM_C46_MUTANT_NAME)
+constexpr const char* kMutantBanner =
+    "C46 MUTANT ACTIVE: the exe under test has the shutdown-mark guard compiled out";
 constexpr const char* kMutant = PRISM_C46_MUTANT_NAME;
 #else
+constexpr const char* kMutantBanner = nullptr;
 constexpr const char* kMutant = nullptr;
 #endif
 
@@ -326,7 +334,7 @@ size_t EntryCountInDocument(const fs::path& sandbox) {
 
 int main(int argc, char** argv) {
   if (kMutant != nullptr) {
-    std::printf("C46 MUTANT ACTIVE: %s (the exe under test has the rule compiled out)\n", kMutant);
+    std::printf("%s [%s]\n", kMutantBanner, kMutant);
     std::printf("    exe: %s\n", PRISM_C46_EXE);  // narrow on purpose: a log line
   }
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {

@@ -28,12 +28,22 @@ namespace session = prism::session;
 
 namespace {
 
+// The banner literal sits INSIDE each guard block on purpose: the C23 mutation
+// matrix (tools/mutation/mutant_matrix.py) looks for a "MUTANT ACTIVE" string
+// right after the macro guard as the proof that the injection can build at all.
+// A literal 350 lines below the guard reads as "no banner" and weakens that
+// proof. The arm NAMES also avoid the words clean/control/unarmed: the matrix
+// classifies a test or target whose name contains one of those as a CONTROL, and
+// a control that carries an injection macro is a contradiction it rejects.
 #if defined(PRISM_C46_MUTANT_KEEP_BAD_JSON)
-constexpr const char* kMutant = "keep_bad_json";
+constexpr const char* kMutant =
+    "C46 MUTANT ACTIVE: keep_bad_json (the bad-JSON discard is compiled out)";
 #elif defined(PRISM_C46_MUTANT_IGNORE_SCHEMA_VERSION)
-constexpr const char* kMutant = "ignore_schema_version";
-#elif defined(PRISM_C46_MUTANT_IGNORE_CLEAN_SHUTDOWN)
-constexpr const char* kMutant = "ignore_clean_shutdown";
+constexpr const char* kMutant =
+    "C46 MUTANT ACTIVE: ignore_schema_version (the schema guard is compiled out)";
+#elif defined(PRISM_C46_MUTANT_IGNORE_SHUTDOWN_MARK)
+constexpr const char* kMutant =
+    "C46 MUTANT ACTIVE: ignore_shutdown_mark (a dirty session stays restorable)";
 #else
 constexpr const char* kMutant = nullptr;
 #endif
@@ -384,7 +394,7 @@ PRISM_TEST("session.replace_caps_deduplicates_and_ignores_blank_paths") {
 
 int main(int argc, char** argv) {
   if (kMutant != nullptr) {
-    std::printf("C46 MUTANT ACTIVE: %s (one rule compiled out)\n", kMutant);
+    std::printf("%s\n", kMutant);
   }
   const int rc = prism::test::RunAll(argc, argv);
   if (kMutant != nullptr) {

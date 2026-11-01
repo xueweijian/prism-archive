@@ -235,6 +235,23 @@ class ReaderPool {
   // timeout == milliseconds(0): non-blocking try. kWaitForever: wait.
   std::optional<Lease> Acquire(std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
     std::shared_ptr<State> state = state_;
+#if defined(PRISM_C50_MUTANT_SHARED_LEASE)
+    // Negative control (CONTRACTS D3/D27): the lease mutual exclusion is GONE.
+    // No slot is marked busy and every caller is handed slot 0, so two threads
+    // can hold the SAME ArchiveReader at once -- the exact defect this card
+    // exists to prove the pool does not have. The suite prints
+    // "C50 MUTATION CAUGHT: shared_lease" ONLY while the C41 counter proves the
+    // injection fired (conflicts > 0); a dead injection can go red without ever
+    // printing it, so the marker is the conjunction (D26), not a WILL_FAIL.
+    {
+      std::unique_lock<std::mutex> lock(state->mutex);
+      ++state->stats.acquired;
+      ++state->inUse;
+      if (!state->used.empty()) state->used[0] = true;
+      state->RefreshDerived();
+    }
+    return std::optional<Lease>(Lease(state, 0));
+#else
     std::unique_lock<std::mutex> lock(state->mutex);
     if (state->closed) return std::nullopt;
     if (!state->FreeExist()) {
@@ -267,6 +284,7 @@ class ReaderPool {
     ++state->stats.acquired;
     state->RefreshDerived();
     return std::optional<Lease>(std::move(lease));
+#endif
   }
 
   // Refuse new leases (shutdown / archive closed). Leases already out keep
@@ -294,10 +312,45 @@ class ReaderPool {
     return state_->stats;
   }
 
+  // C50: READ-ONLY observability. C41's guard refuses a second concurrent
+  // operation on one handler and counts it; that counter is the only direct
+  // evidence that two threads were handed the same ArchiveReader. Summing it
+  // over the pool lets a failing assertion print ONE number (and lets the
+  // stress suite assert "zero under normal load") without holding a lease.
+  //
+  // Zero is the contract on every clean run: a non-zero value beside a red
+  // win.reader_pool means the lease, not the engine, was wrong.
+  uint64_t operationConflicts() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return ConflictsLocked();
+  }
+
+  // Same counter, per slot. Slot index == Lease::slot() == handler index, so a
+  // failure log can be matched to the lease that produced it.
+  std::vector<uint64_t> operationConflictsBySlot() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::vector<uint64_t> out;
+    out.reserve(state_->slots.size());
+    for (const Slot& slot : state_->slots) {
+      out.push_back(slot.reader ? slot.reader->operationConflicts() : 0);
+    }
+    return out;
+  }
+
   const std::wstring& archivePath() const { return archivePath_; }
 
  private:
   ReaderPool() : state_(std::make_shared<State>()) {}
+
+  // Caller holds state_->mutex. Safe from a const method: slots never resize
+  // after Create, so the readers are stable for the pool's lifetime.
+  uint64_t ConflictsLocked() const {
+    uint64_t total = 0;
+    for (const Slot& slot : state_->slots) {
+      if (slot.reader) total += slot.reader->operationConflicts();
+    }
+    return total;
+  }
 
   // Non-const because Acquire mutates; kept private for that reason.
   mutable std::shared_ptr<State> state_;

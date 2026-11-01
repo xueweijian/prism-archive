@@ -148,7 +148,11 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   // before the next thread arrives and the concurrency assertion becomes a
   // coin flip.
   explicit SweepCollector(size_t itemCount, BeginGate* gate = nullptr)
-      : sinks_(itemCount, nullptr), sha_(itemCount), bytes_(itemCount), gate_(gate) {}
+      : sinks_(itemCount, nullptr),
+        sha_(itemCount),
+        bytes_(itemCount),
+        failedByIndex_(itemCount, false),
+        gate_(gate) {}
   ~SweepCollector() {
     for (auto* sink : sinks_) {
       if (sink) sink->Release();
@@ -197,7 +201,10 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   }
 
   STDMETHODIMP SetOperationResult(win::abi::Int32 operationResult) override {
-    if (operationResult != 0) failed_ = true;
+    if (operationResult != 0) {
+      failed_ = true;
+      if (pending_ < failedByIndex_.size()) failedByIndex_[pending_] = true;
+    }
     if (pending_ < sinks_.size() && sinks_[pending_] != nullptr) {
       auto* sink = sinks_[pending_];
       bytes_[pending_] = sink->bytes().size();
@@ -211,6 +218,11 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   }
 
   bool failed() const { return failed_; }
+  // C50: the opResult verdict for ONE item. A skipped neighbour in the same
+  // solid folder must not be able to fail the item this worker asked for.
+  bool itemFailed(size_t index) const {
+    return index < failedByIndex_.size() && failedByIndex_[index];
+  }
   int itemsSeen() const { return itemsSeen_; }
   const std::string& sha(size_t index) const { return sha_[index]; }
   size_t bytes(size_t index) const { return bytes_[index]; }
@@ -219,6 +231,7 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   std::vector<win::MemoryOutStream*> sinks_;
   std::vector<std::string> sha_;
   std::vector<size_t> bytes_;
+  std::vector<bool> failedByIndex_;
   BeginGate* gate_ = nullptr;
   bool gateHit_ = false;
   size_t pending_ = static_cast<size_t>(-1);
@@ -384,23 +397,59 @@ std::shared_ptr<win::ReaderPool> MakePool(size_t capacity) {
   return pool;
 }
 
+// C50: the pool state that turns "ok[i] was false" into a diagnosis. Every
+// failing path prints ONE line with the C41 conflict counter (zero on a clean
+// run: a non-zero value means two threads were handed the same handler, which
+// is the ONLY way this suite can lose a lease).
+void PrintPoolDiagnostics(const win::ReaderPool& pool, const char* why) {
+  const win::ReaderPool::Stats stats = pool.stats();
+  const std::vector<uint64_t> bySlot = pool.operationConflictsBySlot();
+  uint64_t conflicts = 0;
+  std::string slots;
+  for (size_t i = 0; i < bySlot.size(); ++i) {
+    conflicts += bySlot[i];
+    if (i != 0) slots += ",";
+    slots += std::to_string(bySlot[i]);
+  }
+  std::cout << "    pool [" << why << "]: capacity=" << stats.capacity
+            << " handlers=" << stats.handlers << " acquired=" << stats.acquired
+            << " returned=" << stats.returned << " waits=" << stats.waits
+            << " timeouts=" << stats.timeouts << " inUse=" << stats.inUse
+            << " maxConcurrent=" << stats.maxConcurrent
+            << " distinctSlotsUsed=" << stats.distinctSlotsUsed
+            << " operationConflicts=" << conflicts << " bySlot=[" << slots << "]"
+            << std::endl;
+}
+
 // One entry, extracted through its own callback so it can join a gate.
 struct SingleOutcome {
   bool ok = false;
   std::string sha;
   size_t bytes = 0;
+  // C50: WHY ok was false. A refusal (C41 guard) wastes no bytes; an engine
+  // failure can follow a complete payload, so the two must not look alike.
+  bool refused = false;
+  long hr = 0;
+  uint64_t conflicts = 0;
 };
 
 SingleOutcome ExtractOne(win::ArchiveReader& reader, const Fixture& fx, size_t payloadIndex,
                          BeginGate* gate) {
   auto* collector = new SweepCollector(fx.catalog.size(), gate);
   const std::vector<uint32_t> indices{static_cast<uint32_t>(fx.catalogIndex[payloadIndex])};
-  const bool callOk = reader.ExtractBatch(indices, collector);
+  const win::ArchiveReader::BatchVerdict verdict = reader.ExtractBatchVerdict(indices, collector);
   const size_t index = fx.catalogIndex[payloadIndex];
   SingleOutcome out;
   out.sha = collector->sha(index);
   out.bytes = collector->bytes(index);
-  out.ok = callOk && !collector->failed();
+  // C50: judge the REQUESTED index. In a solid folder 7z also reports
+  // SetOperationResult for the items it skipped on the way to ours, and a
+  // blanket "an item failed" flag would blame this worker's payload for a
+  // neighbour's status. The bytes + SHA-256 above remain the D2 evidence.
+  out.ok = verdict.ok && !collector->itemFailed(index);
+  out.refused = verdict.refused;
+  out.hr = static_cast<long>(verdict.hr);
+  out.conflicts = verdict.conflicts;
   collector->Release();
   return out;
 }
@@ -574,6 +623,8 @@ PRISM_TEST("reader_pool.four_concurrent_extractions_each_get_their_own_bytes") {
     std::vector<bool> ok(fx.names.size(), false);
     std::vector<std::string> sha(fx.names.size());
     std::vector<size_t> size(fx.names.size(), 0);
+    std::vector<bool> refused(fx.names.size(), false);
+    std::vector<long> hr(fx.names.size(), 0);
     std::vector<std::thread> workers;
     for (size_t i = 0; i < fx.names.size(); ++i) {
       workers.emplace_back([&, i] {
@@ -585,12 +636,26 @@ PRISM_TEST("reader_pool.four_concurrent_extractions_each_get_their_own_bytes") {
         ok[i] = one.ok;
         size[i] = one.bytes;
         sha[i] = one.sha;
+        refused[i] = one.refused;
+        hr[i] = one.hr;
       });
     }
     for (std::thread& worker : workers) worker.join();
     PRISM_CHECK(!gate.timedOut.load());
     PRISM_CHECK_EQ(live.peak.load(), static_cast<int>(fx.names.size()));
     for (size_t i = 0; i < fx.names.size(); ++i) {
+      if (!ok[i]) {
+        // C50: the log has to say WHICH verdict failed and why. A C41 refusal
+        // means the pool shared a handler (conflicts > 0); an engine failure
+        // after a complete payload means the lease was fine and 7-Zip answered
+        // late (conflicts == 0). Never print just "ok[i] was false" again.
+        std::cout << "    worker " << i << " item=" << fx.names[i]
+                  << " bytes=" << size[i] << " sha=" << sha[i]
+                  << " expected=" << fx.expected[i]
+                  << " refused=" << (refused[i] ? 1 : 0) << " hr=0x" << std::hex << hr[i]
+                  << std::dec << std::endl;
+        PrintPoolDiagnostics(*pool, "four-way worker failure");
+      }
       PRISM_CHECK(ok[i]);
       PRISM_CHECK_EQ(size[i], kItemBytes);
       if (!kSharedHandlerMutant) PRISM_CHECK_EQ(sha[i], fx.expected[i]);
@@ -598,6 +663,10 @@ PRISM_TEST("reader_pool.four_concurrent_extractions_each_get_their_own_bytes") {
     PRISM_CHECK_EQ(pool->stats().maxConcurrent, fx.names.size());
     for (auto& lease : leases) lease->Release();
     PRISM_CHECK_EQ(pool->inUse(), size_t(0));
+    // C50 contract: normal load never makes the C41 guard fire. A non-zero
+    // value here is a shared lease, not an engine hiccup.
+    if (pool->operationConflicts() != 0) PrintPoolDiagnostics(*pool, "round end");
+    PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
   }
   PRISM_CHECK_EQ(pool->stats().distinctSlotsUsed, fx.names.size());
 }

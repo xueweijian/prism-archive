@@ -170,3 +170,201 @@ ctest --output-on-failure        # includes core.bench_sweep
 set PRISM_7Z_DLL=C:\Program Files\7-Zip\7z.dll
 ctest -R win.bench_solid --output-on-failure
 ```
+
+## ch.7.2 matrix, cell by cell (measured 2026-11-01)
+
+**Machine**: Windows 11 26200 (Home, zh-CN), Intel i5-8250U (4 cores / 8 threads),
+7-Zip 25.01 (`E:\DevTools\7-Zip\7z.dll`), VS 2022 17.14 (MSVC 14.44), Release.
+**The box is shared** with seven sibling worktrees compiling in parallel, so every
+disk-bound digit is a floor, not a best case; the cells where that matters say so.
+
+**Re-measured after rebasing onto `main`** (C1 lifecycle, C2 gates, C3
+distribution, C4 shell, C5 security, C6 glass, C11 scheduling all merged; the
+tables are the `2e278ff` run, then the branch was re-rebased onto `ca08457` for
+C4 -- C4 adds shell targets only, `ninja` reports `PrismArchive.exe` unchanged,
+so the black-box digits still describe the current sources). The tables carry
+the **17:3x-17:5x run**; where the earlier 16:0x run differs materially its digit
+is in parentheses, because the difference is machine state (sibling builds, page
+cache, AV scanning), not a code change. One cell changed for a real reason and
+says so: close latency, where C1's worker-join fix landed.
+A later re-run of startup/memory during a sibling-compile storm read 37.6 ms
+first frame / 517.2 ms close / 45.1 MB idle -- recorded as the load sensitivity
+of those cells, not used as their value.
+Reproduce with one command:
+
+```powershell
+tools/bench/run-perf.ps1            # build + run startup / memory / scale
+```
+
+Every suite prints one machine-readable line (`BENCH_STARTUP`, `BENCH_MEMORY`,
+`BENCH_SCALE`) and pins it with a ctest `PASS_REGULAR_EXPRESSION`, so a silent
+SKIP can never count as a pass (contract D1). **The digits are report-only**: the
+only duration assertions in the code are hang detectors (first frame < 5 s, list
+frame < 33 ms). A shared 4-core machine cannot gate a stopwatch.
+
+### 1. Startup
+
+| Metric | Measured | How |
+|---|---|---|
+| process start -> `main` | **313.6 ms** (earlier run 156.9 ms; coarse: `GetProcessTimes` FILETIME quantum is 15.6 ms) | `MsSinceProcessStart()` |
+| `RegisterClassExW` + `CreateWindowExW` | **5.0 ms** (3.2-27.1 ms across runs) | QPC around the calls |
+| window -> **first frame** (`BeginDraw`+`EndDraw`+`Present`+`Commit`, 3 glass islands, real D3D11 + D2D + DComp) | **22.7 ms** (earlier run 34.3 ms) | QPC around the 3-island paint |
+| second frame (steady state, one island) | **11.1 ms** (12.1 ms) | same path |
+| 7z.dll `LoadLibrary` (first use in process) | **0.88 ms** (1.31 ms) | `SevenZipLibrary::Load` |
+| format table (`GetNumberOfFormats`, 60 formats) | **< 0.001 ms** | QPC |
+| **engine first touch**: `CreateObject(IInArchive)` then `Open` | **4.9 ms + 1.8 ms = 6.7 ms** this run; earlier 84.1 ms inside `Open`, and 2377.7 ms in `CreateObject` + 2.0 ms in `Open` on another | see the note below |
+| `ReadCatalog` (7 items, no payload) | **0.057 ms** | QPC |
+
+**The 6.7 ms vs 2.4 s split is a finding, not a footnote.** The same total work
+(create the 7z handler + parse the header) was observed as **6.7 ms** in this
+run (warm image, quiet box), as **84 ms** inside `Open` on one earlier run, and
+as **2.4 s** in `CreateObject` + 2 ms in `Open` on another. The first touch of
+the engine image is dominated by page faults / AV scanning when the box is busy,
+and *which* call pays for it moves. Conclusion recorded for the next pass: the
+engine's cold first touch spans **6.7 ms - 2.4 s** and cannot be attributed to
+our code from these runs; a dedicated machine (or an ETW/latency trace) is
+needed -- and it is the single biggest obstacle to the 12 ms right-click cell.
+
+Verdicts:
+
+* **first frame <= 60 ms (ADR-001 target)**: **22.7 ms -> 达标** on a quiet box
+  (34.3 ms on the earlier run). Under full disk saturation by the sibling builds
+  the same measurement reads 347.7 ms; the number is an idle-machine floor and is
+  labelled as such.
+* **cold start <= 25 ms (blueprint Phase 4)**: **313.6 ms -> 未达标** (156.9 ms on
+  the earlier run). The process is not in `main` until 157-314 ms after
+  `CreateProcess`, before a single line of ours runs: loader + import resolution
+  (d3d11/d2d1/dcomp/dwrite/windowcodecs + 7z) plus the machine's AV scanning the
+  image. Our own first frame is 22.7 ms. Reaching 25 ms end-to-end needs the
+  blueprint's pre-warmed resident process ("后台常驻轻量预热"), which does not
+  exist. That is the reason, not a shrug.
+* **right-click < 12 ms (7.2 row 2)**: **未达标 / 不在本卡**. The shell-extension
+  lane (`PrismShellExt`) belongs to card c2. What is measured here is the engine
+  decomposition a right-click pays: 0.88 ms load + 60-format table (<1 us) +
+  handler creation + `Open` = **6.7 ms on a warm image, 84 ms - 2.4 s cold**.
+  The warm floor alone would fit in 12 ms, but the cold path does not, and the
+  shell-side cost is not measured here -- so the cell is not claimed.
+* **close latency**: `WM_CLOSE` -> process gone on the SHIPPED
+  `PrismArchive.exe` = **153.0 ms** (measured 17:4x on the current binary), down
+  from **778 ms** quiet / 1766 / 2318 / 3122 ms under disk saturation in the
+  pre-fix build, measured black-box (`PostMessageW(WM_CLOSE)` to the real
+  window, then wait on the process handle). The 500 ms product budget asserted
+  by `test_app_lifecycle` (`WM_CLOSE` -> `Run()` returns) is met, and this is
+  the stricter end-to-end version (process gone, not just `Run()` returned).
+  Under sibling compile load the same probe read **517.2 ms**, so the budget is
+  met on an idle box, not guaranteed under full load -- both digits recorded
+  rather than only the friendly one.
+  The improvement is C1's worker-join fix (PR #21), now in `main`. The window
+  appears **800.8 ms** after `CreateProcess` on this run (497 ms when the disk
+  was idle, 1106 ms when not). The exit-time `CrashRpt1500.dll_unloaded` fault
+  recorded against the pre-fix build (BEX64 / 0xc0000005) does **not** appear in
+  the Application log for any of this run's launches.
+
+### 2. Memory
+
+| Metric | Measured | Note |
+|---|---|---|
+| idle working set, engine untouched (benchmark process) | **6.6 MB** | `GetProcessMemoryInfo`, 300 ms after start |
+| **idle working set, shipped `PrismArchive.exe`** | **58.4 MB** (earlier run 47.2 MB) | black box: launch on a 7-item archive, 20 samples after 2 s |
+| `Open` + catalog of the 100 MB archive | 9.7 MB peak (9.8 MB) | sampled every 2 ms |
+| 100 MB archive, **full extract to disk** | **10.6 MB peak**, 104 864 781 bytes (9 files), **423.5 ms** (approx 248 MB/s; earlier run 262.9 ms) | streams through `DiskOutStream` |
+| sweep peak, **1 MiB** payload | **10.5 MB**, 6.0 ms (11.8 MB, 16.9 ms) | one solid block, 8 thumbnails decoded |
+| sweep peak, **100 MiB** payload | **9.9 MB**, 18.1 ms (11.0 MB, 36.6 ms) | same 8 thumbnails, 100x the payload |
+| process peak working set (whole run) | 11.8 MB (11.9 MB) | `PeakWorkingSetSize` |
+
+Verdicts:
+
+* **空闲内存 <= 24/25 MB (ADR-001 / Phase 4)**: **58.4 MB -> 未达标** (47.2 MB
+  before the Liquid Glass UI landed, i.e. the glass layer added ~11 MB). Where it
+  goes: D2D1 + DComp + DWrite + WIC factories, the 7z.dll image and codec tables,
+  the catalog copy, the renderer's resources. The benchmark process itself sits
+  at 6.6 MB, so ~52 MB is the real UI stack, not bloat removable by deleting
+  code. The number is now a recorded baseline -- exactly what ADR-001 asked for
+  instead of the old "<= 24 MB" promise.
+* **extract 100 MB peak**: **10.7 MB -> 达标** (the promise is "streams, does not
+  slurp"; there is no blueprint bound).
+* **thumbnail scan peak independent of block size (C2)**: **11.8 MB vs 11.0 MB**
+  (a 0.8 MB *decrease* with a 100x payload) across the same 8 thumbnails ->
+  **达标**. Proven bit-exactly by `core.bench_sweep` (fake decoder, 1 MB vs
+  100 MB block); here it is confirmed on the real 7z.dll. Two honest limitations:
+  (a) with `-mx0` (store) the copy coder lets 7-Zip **skip** the unrequested
+  100 MiB item by seeking, so that payload never enters our `ScratchStream`
+  (visible in the JSON as `sweep_*_drained_mb: 0` -- the content check for these
+  arms is the decoded-thumbnail count, 8/8, not the drained bytes); (b) the
+  block-buffering mutant proves the predicate is sharp, not that the item
+  streamed.
+
+### 3. Scale
+
+| Metric | Measured | Note |
+|---|---|---|
+| **10 000-entry** archive `Open` | **7.5 ms** (earlier run 4.0 ms; 21.6 ms under load) | 10 000 real files packed by `7z.exe` |
+| **10 000-entry** `ReadCatalog` | **7.1 ms** (earlier 3.6 ms; 9.3 ms under load) | 0.71 us/entry; the catalog count is asserted == 10 000 |
+| **4 GiB** archive `Open` (one stored item) | **78.5 s** (earlier 53.5 s) | suspected: the ZIP candidate probe scans the file; see below |
+| **4 GiB** archive, full sweep | **73.5 s** (earlier 93.5 s) | 4 GiB drained through 7z.dll |
+| **4 GiB** archive, full extract to disk | **176.6 s** (approx 24.3 MB/s; earlier 244.0 s) | 4 294 967 296 bytes written |
+| files created in a **controlled `%TEMP%`** during the 4 GiB extract | **0 -> 0** | `TEMP`/`TMP` redirected to a dedicated empty dir; full tree snapshot (paths + sizes) before/after |
+| **100 000-row** list, real `GalleryRenderer`, 1200x800 software target | **7.9 ms/frame** median, p95 15.6 ms -> **125.9 FPS** CPU-side (earlier 5.6 ms / p95 8.0 / 178.2 FPS) | 120 frames spread across the whole list |
+| **1 000-row** list, same harness | 7.8 ms/frame (5.8 ms) | the point: the cost does **not** depend on N |
+| rows drawn per frame at 1 000 vs 100 000 rows | **25 vs 25** (viewport bound) | asserted equal; virtualization is exact |
+
+Verdicts:
+
+* `ReadCatalog` is **7.5 ms for 10 000 entries** (4.0 ms on the earlier run),
+  not the "about a millisecond for 50 000" the header comment in
+  `PrismEngineBridge.hpp` promises -- roughly a 10-40x gap. The read itself is
+  linear and payload-free (0 bytes decompressed). The comment is not this card's
+  file: recorded so the claim gets corrected or the code gets faster.
+* **Opening the 4 GiB archive takes 78.5 s -> 未达标** for any interactive
+  promise (ADR-001's 60 ms first frame is irrelevant if the catalog is not
+  there). 78.5 s for a 4 GiB file is ~55 MB/s of sequential read, i.e. exactly a
+  whole-file scan at this disk's speed (the earlier run read 53.5 s, ~80 MB/s).
+  The arithmetic points at the candidate-handler order: `Open` tries the ZIP
+  handler first (`openTrace` shows `Zip.Open hr=0x00000001` = S_FALSE). That is
+  a hypothesis with arithmetic evidence, not a proven cause -- the next step is
+  to instrument each candidate's `Open` separately (`PrismEngineBridge.hpp`,
+  not this card's file) and to bound or reorder the probe by magic bytes
+  (blueprint 7.2 row 2 actually asks for exactly that prefilter).
+* **100 000 rows / 120 FPS (Phase 3)**: **CPU-side 125.9 FPS median (7.9 ms/frame,
+  p95 15.6 ms)** on this run; the earlier run read 178.2 FPS (5.6 ms, p95 8.0).
+  The 8.3 ms budget for 120 Hz is met at the median but the **p95 misses it in
+  both runs** (8.0 / 15.6 ms), and this is a SOFTWARE D2D target (a GPU target
+  would change this either way), so the cell stays **未达标** with a number
+  rather than being rounded up. **Presented FPS is still 未支持**: the window has
+  no benchmark injection point (`GalleryWindow` belongs to c1), so
+  vsync/composition is not measured. What IS proven is the virtualization: 25
+  rows drawn per frame at 1 000 and at 100 000 rows, identically, and the
+  per-frame cost does not grow with N. The run-to-run spread (5.6-11.5 ms across
+  four runs, including a loaded one) is the machine, not the code.
+* **zero-%TEMP% (Phase 3)**: **0 entries before and after a 4 GiB extraction** ->
+  **达标**. The mutation that stages the archive through `%TEMP%` turns the cell
+  red, so the zero is a guard, not a coincidence of a clean run.
+
+### 4. Not measured, and why (no adjectives, no placeholders)
+
+| Blueprint claim | Status |
+|---|---|
+| 80 000 x 2 KB small-file write, 42 s -> 6.8 s (IORING + directory pre-create pool) | **未实现，未测**. The IORING writer and the directory pre-create pool do not exist; extraction uses 7-Zip's own output stream. A number here would measure 7-Zip, not us. |
+| large pages (`SetLargePageMode`) +11~16% throughput | **未启用，未测**. `7z.dll` exports `SetLargePageMode` and `SevenZipLibrary::EnableLargePages` calls it, but this account holds no `SeLockMemoryPrivilege` (`whoami /priv` lists none; not an administrator), and `MEM_LARGE_PAGES` allocations fail without it -- the export would be a no-op. A prerequisite, not a result. |
+| long paths / reserved names, 100% compatible | Not a timing cell: covered by `core.test_windows_name` / `core.test_path_safety`. |
+| 4K 120 Hz, 120 FPS | **presented FPS 未支持**; CPU-side 125.9-178.2 FPS median measured (see above; p95 misses the 8.3 ms budget). |
+| right-click 12 ms | **不在本卡** (card c2); engine decomposition above. |
+
+### 5. Negative controls (how each guard is broken on purpose)
+
+Every claim ships with a mutant that must fail the SAME assertion. They are
+`WILL_FAIL` ctest targets, so "the guard is real" is itself checkable. Local
+runs, exit codes as observed:
+
+| Mutant | What it injects | What went red |
+|---|---|---|
+| `mutation.bench_startup.timer_scale` | every reported duration x 1000 | `Sleep(50) measured 56413.300 ms`, `FAIL ... timer is not calibrated`, exit 1 (re-verified 17:4x on the rebased tree: `54228.800 ms`, exit 1) |
+| `mutation.bench_memory.block_buffer` | extract every item into memory and keep it (the naive implementation) | `sweep peak follows block size (219811840 vs 13402112 bytes)`, exit 1 (re-verified 17:4x: `206254080 vs 10592256`, exit 1) |
+| `mutation.bench_scale.temp_write` | stage the archive through the controlled `%TEMP%` before extracting | `temp entries 0 -> 1` (`temp: staging.7z`), `FAIL: the pipeline wrote into %TEMP%`, exit 1 (source unchanged by the rebase; not re-run because it re-writes 4 GiB) |
+
+A fourth, unplanned negative control came out of this work and is worth
+recording: the first scale run printed its digits and then died with 0xC0000005
+**after** `ALL SCALE BENCH CHECKS PASSED`, because `CoUninitialize()` ran before
+the last `ComPtr`s were released. The exit code is part of a ctest verdict, so
+the suite was red even with the marker present (contract D1's conjunction doing
+its job). Fixed with an RAII apartment guard declared first in `main`.

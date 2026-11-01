@@ -89,10 +89,15 @@ function Test-RegKey {
 }
 
 function Open-RegKey {
+    <# Read paths must not require write access: OpenSubKey(name, writable:true)
+       throws for a missing key on some runtimes (CI Windows runner), while a
+       half-uninstalled machine is full of missing keys. #>
     param([string]$Path, [switch]$Create)
     $h = Get-Hive $Path
     if ($Create) { return $h[0].CreateSubKey($h[1], $true) }
-    return $h[0].OpenSubKey($h[1], $true)
+    try { return $h[0].OpenSubKey($h[1], $true) } catch { }
+    try { return $h[0].OpenSubKey($h[1]) } catch { }
+    return $null
 }
 
 function Get-RegValue {

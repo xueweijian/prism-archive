@@ -130,10 +130,17 @@ function Test-RegKey {
 }
 
 function Open-RegKey {
+    <# Never let a read path depend on write access: on some runtimes
+       OpenSubKey(name, writable:true) throws SecurityException ("requested
+       registry access is not allowed") for a key that does not exist yet, which
+       is exactly the state a first install reads from. CI found this on the
+       Windows runner while the dev box silently returned $null. #>
     param([string]$Path, [switch]$Create)
     $h = Get-Hive $Path
     if ($Create) { return $h[0].CreateSubKey($h[1], $true) }
-    return $h[0].OpenSubKey($h[1], $true)
+    try { return $h[0].OpenSubKey($h[1], $true) } catch { }
+    try { return $h[0].OpenSubKey($h[1]) } catch { }
+    return $null
 }
 
 function Get-RegValue {
@@ -945,6 +952,16 @@ function Invoke-SelfTest {
     $script:EnvRoot = Get-EnvRootPath $root
     Assert-Equal 'real scope places the engine override at HKCU\Environment' 'HKCU:\Environment' (Get-EnvRootPath 'HKCU:\Software')
     Assert-Equal 'scratch scope keeps its override inside the scope' ($root + '\Environment') (Get-EnvRootPath $root)
+
+    # -- 0b. read paths must tolerate missing keys --------------------------
+    # CI's Windows runner throws SecurityException for OpenSubKey(name, writable)
+    # on a key that does not exist, while the dev box returns $null. A first
+    # install reads nothing but missing keys, so this class must be asserted, not
+    # assumed (CONTRACTS B3: when local != CI the CI behaviour is the truth).
+    Assert-Equal 'reading a missing key returns null, not an error' $null (Get-RegValue ($root + '\NoSuchKey\Deeper') 'Value')
+    Assert-Equal 'a missing key is reported as missing' $false (Test-RegKey ($root + '\NoSuchKey'))
+    Remove-RegValue ($root + '\NoSuchKey') 'Value'
+    Assert-True 'deleting from a missing key is a no-op' (-not (Test-RegKey ($root + '\NoSuchKey')))
 
     # -- 1. dry run changes nothing ----------------------------------------
     $script:Wrote = 0

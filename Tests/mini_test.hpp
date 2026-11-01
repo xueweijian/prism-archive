@@ -4,11 +4,15 @@
 // (and a phone sandbox) can compile and run the suite in seconds.
 #pragma once
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace prism::test {
@@ -39,9 +43,81 @@ struct Registrar {
   Registrar(const char* name, TestFn fn) { Registry().push_back({name, fn}); }
 };
 
+// --- Mutation verdicts (CONTRACTS D27) -------------------------------------
+//
+// A mutation build's verdict must be printed at the FIRST assertion failure and
+// the process must leave immediately. Printing it after the suite returns is a
+// race teardown wins: the mutant keeps running into code that assumes its
+// premise, dies there, and CTest reports "required regular expression not
+// found" while the FAIL lines above were correct (C34 no-archive-switch, C25
+// shared_reader, C35, C39 -- 2026-11-02).
+//
+// The prefix is supplied by the caller: every card already pins its own marker
+// ("C34 MUTATION CAUGHT: no_archive_switch", ...), so the harness must not
+// invent one. Exit 0 on purpose: the CTest entries decide with
+// PASS_REGULAR_EXPRESSION (D26), and a non-zero code would lose to the same
+// teardown crash this mechanism exists to survive.
+struct MutationVerdictState {
+  bool armed = false;
+  std::string prefix;
+  // Empty = "the injection compiled in" is the only proof available (the
+  // single-argument arming). When set, CAUGHT is printed only if this says the
+  // injected defect really fired -- CONTRACTS D3: a mutant build can go red for
+  // an unrelated reason, and that run must stay RED without a false CAUGHT.
+  std::function<bool()> injectionActive;
+  std::atomic<bool> printed{false};
+};
+
+inline MutationVerdictState& MutationVerdict() {
+  static MutationVerdictState state;
+  return state;
+}
+
+// Arm the verdict with the caller's complete marker prefix plus the runtime
+// proof that the injected defect fired. nullptr disarms.
+inline void SetMutationVerdict(const char* prefix, std::function<bool()> injectionActive) {
+  MutationVerdictState& state = MutationVerdict();
+  state.prefix = prefix != nullptr ? prefix : "";
+  state.injectionActive = std::move(injectionActive);
+  state.printed.store(false, std::memory_order_relaxed);
+  state.armed = prefix != nullptr;
+}
+
+// Arm without a runtime predicate: the build-time mutation flag is the proof.
+inline void SetMutationVerdict(const char* prefix) {
+  SetMutationVerdict(prefix, std::function<bool()>());
+}
+
+inline void ClearMutationVerdict() {
+  MutationVerdictState& state = MutationVerdict();
+  state.armed = false;
+  state.prefix.clear();
+  state.injectionActive = nullptr;
+  state.printed.store(false, std::memory_order_relaxed);
+}
+
+inline bool MutationVerdictArmed() { return MutationVerdict().armed; }
+
 inline void ReportFailure(const char* file, int line, const std::string& what) {
   ++FailureCount();
   std::cout << "    FAIL  " << file << ":" << line << "  " << what << std::endl;
+  MutationVerdictState& verdict = MutationVerdict();
+  if (!verdict.armed) return;
+  // CONTRACTS D3: red does not by itself mean CAUGHT. When the caller supplied
+  // a predicate, only a failure that provably came from the injected defect may
+  // produce the verdict; otherwise fall through to the ordinary failure path
+  // (record and continue, exit 1 at the end) without ever printing CAUGHT.
+  if (verdict.injectionActive && !verdict.injectionActive()) return;
+  // Only the first failure prints: a worker thread failing at the same time
+  // must not append a second marker (or half a line) to a CAUGHT run.
+  if (verdict.printed.exchange(true, std::memory_order_acq_rel)) return;
+  std::cout << verdict.prefix << " (first failure at " << file << ":" << line
+            << "; exiting 0 now so teardown cannot swallow the verdict)" << std::endl;
+  // _Exit, not exit: static destructors and atexit handlers ARE the teardown
+  // that ate the verdict. _Exit does not flush, so flush both layers first.
+  std::cout.flush();
+  std::fflush(nullptr);
+  std::_Exit(0);
 }
 
 template <class A, class B>

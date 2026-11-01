@@ -311,7 +311,13 @@ def find_expected_red(text, macro):
 # nothing is injected" is asserted, not assumed. Such an entry MUST be allowed
 # to have no macro -- and must never carry one (a control that is also a mutant
 # is neither).
-CONTROL_RE = re.compile(r"(?:^|[._-])(clean|unarmed|control)(?:$|[._-])", re.I)
+#
+# The role word must be the LAST token, not merely present: C46 named a mutant
+# "ignore_clean_shutdown" (a real injected defect about the clean-shutdown flag)
+# and the old substring rule classified it as a control, then complained that a
+# control carried a macro. A control is named for its role at the end
+# ("..._clean_build_unarmed", "..._control"), so anchor on the tail.
+CONTROL_RE = re.compile(r"(?:^|[._-])(clean|unarmed|control)$", re.I)
 
 
 def is_control_entry(test, target):

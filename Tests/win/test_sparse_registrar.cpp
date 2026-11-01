@@ -570,12 +570,17 @@ void RunClassicSection(const std::wstring& classicDll) {
   FILE* file = nullptr;
   if (_wfopen_s(&file, sample.c_str(), L"wb") == 0 && file) fclose(file);
 
-  // The direct-COM checks below do not need a running shell; the merged-menu
-  // check does (the shell aggregates SystemFileAssociations handlers itself).
-  // A Windows Server CI runner has no Explorer, so that part is a precise SKIP
-  // there instead of a false red -- and a false green is impossible because the
-  // marker/pass regex never prints on the skip path.
-  const bool interactiveShell = ::GetShellWindow() != nullptr;
+  // The merged-menu check needs a real desktop session: shell32 only aggregates
+  // SystemFileAssociations shellex handlers for a live shell, and a CI runner
+  // does not give us one (measured 2026-11-01: Windows Server runner returns a
+  // shell window but never merges the handler, while Windows 11 26200 merges it
+  // and the 5 titles match the model byte for byte). So it is OPT-IN:
+  //     $env:PRISM_SHELL_INTERACTIVE = '1'
+  // Without it the section prints SKIP and the process exits 77 -- the merged
+  // path is never claimed as passed. The exported handler itself is exercised
+  // through CoCreateInstance on every run and does not need a shell.
+  const wchar_t* const shellOptIn = _wgetenv(L"PRISM_SHELL_INTERACTIVE");
+  const bool interactiveShell = shellOptIn != nullptr && std::wstring(shellOptIn) == L"1";
 
   std::vector<std::wstring> titles;
   const bool visible = CollectPrismSubmenu(sample.wstring(), titles);
@@ -607,9 +612,9 @@ void RunClassicSection(const std::wstring& classicDll) {
 
   if (!interactiveShell) {
     g_skips.push_back(
-        "classic:no-interactive-shell (Explorer is not running, so the merged "
-        "IContextMenu path cannot be exercised; the exported handler was still "
-        "created through CoCreateInstance and its menu/verbs were asserted)");
+        "classic:merged-menu-not-asserted (set PRISM_SHELL_INTERACTIVE=1 in a real "
+        "desktop session; the exported handler was still created through "
+        "CoCreateInstance and its menu/verbs were asserted)");
   }
 
   std::error_code ignored;

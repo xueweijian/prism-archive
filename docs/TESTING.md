@@ -2,8 +2,8 @@
 
 > 一句话结论（2026-11-01 本机实测）：
 > **行覆盖 76.4%（10533/13781）、函数覆盖 79.2%（1174/1483），54 个模块**；
-> **67 个变异体分布在 16 个 suite 文件，全部可枚举、可校验**；
-> 一轮自动负向控制里 **58 个变异体全部 CAUGHT**（注入证据 in-build + 套件红 + 干净对照绿）；
+> **88 个条目 = 87 个变异体 + 1 个干净对照，分布在 23 个 suite 文件，全部可枚举、可校验**；
+> 一轮自动负向控制里 **变异体全部 CAUGHT、对照全部 CONTROL-PASS**（注入证据 in-build + 套件红 + 干净对照绿）；
 > 故意把宏拼错 → 工具报 **NOT-IN-EFFECT**，不是绿。
 
 本卡只新增工具与注册，不改产品代码、不改 ci.yml、不改 PROGRESS/ROADMAP/CONTRACTS。
@@ -154,7 +154,18 @@ python tools/mutation/mutant_matrix.py --markdown out/matrix.md --results out/ne
 - **必须红**：`WILL_FAIL` 形态要求退出码非 0；`MARKER` 形态（D26 安全形状）要求合取 marker（红 + 注入计数 > 0）；
 - **干净对照**：同一 target 不带宏必须绿（否则永久红的套件会让所有 WILL_FAIL 看起来都「被抓住」）。
 
-### 3.2 全部 67 个变异体（状态为上面这一轮实测）
+### 3.1.1 对照条目（C22 教训）
+
+C22 的 `mutation.fuzz.clean_build_unarmed` 是**故意的反例**：同一个源文件、**不注入任何宏**，用来证明「没注入时不会出现 MUTANT ACTIVE 横幅」。矩阵因此区分两种角色：
+
+| 角色 | 判定规则 |
+|---|---|
+| MUTANT | 必须有注入宏；否则 PROBLEM（保持严格） |
+| CONTROL（测试名/目标名含 `clean` / `unarmed` / `control` 词元） | 允许无宏，并自动与**同 source 的变异体**配对（`paired_with`）；**带宏反而报错**（既当运动员又当裁判） |
+
+这条规则本身有回归自检：`mutant_matrix.py --selftest` 在合成树上跑三个场景——合法对照（允许且配对）、**自称对照但实际带宏（必须报错）**、非对照缺宏（必须报错）。已注册为 `c23.mutation.matrix.selftest`。
+
+### 3.2 全部 88 个条目（87 变异体 + 1 对照；状态为实测）
 
 | 测试 | 注入宏 / 注入点 | 预期红断言 | 注册方式 | 状态 |
 |---|---|---|---|---|
@@ -194,8 +205,29 @@ python tools/mutation/mutant_matrix.py --markdown out/matrix.md --results out/ne
 | `mutation.theme.swap_theme` | `PRISM_C15_MUTANT_SWAP_THEME` | 实测首红: `3.3:` | WILL_FAIL | CAUGHT |
 | `mutation.crash_dump.no_redaction` | `PRISM_C16_MUTANT_NO_REDACTION` | 实测首红: `crash.writer_emits_a_real_minidump_and_a_redacted_tail` | WILL_FAIL | CAUGHT |
 | `mutation.log.no_redaction` | `PRISM_C16_MUTANT_NO_REDACTION` | 实测首红: `log.wire_format_is_byte_stable_and_redacted` | WILL_FAIL | CAUGHT |
+| `mutation.compress_dialog.tar_encrypt_allowed` | `PRISM_CD_MUTANT_TAR_ENCRYPT_ALLOWED` | 实测首红: `state:` | WILL_FAIL | CAUGHT |
+| `mutation.compress_dialog.zip_solid` | `PRISM_CD_MUTANT_ZIP_SOLID_ALLOWED` | 实测首红: `state:` | MARKER | CAUGHT |
+| `mutation.compress_dialog.zip_solid_allowed` | `PRISM_CD_MUTANT_ZIP_SOLID_ALLOWED` | 实测首红: `state:` | WILL_FAIL | CAUGHT |
+| `mutation.i18n.no-fallback` | `PRISM_C19_MUTANT_NO_FALLBACK` | 实测首红: `lookup:` | WILL_FAIL | CAUGHT |
+| `mutation.i18n.no-fallback.injected` | `PRISM_C19_MUTANT_NO_FALLBACK` | — | MARKER | CAUGHT |
+| `mutation.i18n.no-missing-tracking` | `PRISM_C19_MUTANT_NO_MISSING_TRACKING` | 实测首红: `lookup:` | WILL_FAIL | CAUGHT |
+| `mutation.i18n.no-missing-tracking.injected` | `PRISM_C19_MUTANT_NO_MISSING_TRACKING` | — | MARKER | CAUGHT |
+| `mutation.i18n.no-placeholder` | `PRISM_C19_MUTANT_NO_PLACEHOLDER` | 实测首红: `catalog:` | WILL_FAIL | CAUGHT |
+| `mutation.i18n.no-placeholder.injected` | `PRISM_C19_MUTANT_NO_PLACEHOLDER` | — | MARKER | CAUGHT |
 | `mutation.dragout.getdata_notimpl` | `PRISM_C20_MUTANT_GETDATA_NOTIMPL` | 实测首红: `expected true: hr == S_OK` | WILL_FAIL | CAUGHT |
 | `mutation.dragout.size_lie` | `PRISM_C20_MUTANT_SIZE_LIE` | 实测首红: `expected true: stat.cbSize.QuadPart == expected[lindex].size` | WILL_FAIL | CAUGHT |
+| `mutation.preview_plan.keep_long_lines` | `PRISM_PREVIEW_MUTANT_KEEP_LONG_LINES` | 实测首红: `text` | WILL_FAIL | CAUGHT |
+| `mutation.preview_plan.utf8_always` | `PRISM_PREVIEW_MUTANT_UTF8_ALWAYS` | 实测首红: `magic` | WILL_FAIL | CAUGHT |
+| `mutation.fuzz.accept_all` | `PRISM_FUZZ_MUTANT_ACCEPT_ALL` | 实测首红: `invariants:` | WILL_FAIL | CAUGHT |
+| `mutation.fuzz.clean_build_unarmed` | （无：对照，故意不注入） | — | CONTROL(no injection) | CONTROL-PASS |
+| `mutation.fuzz.injection_armed` | `PRISM_FUZZ_MUTANT_ACCEPT_ALL` | — | MARKER | CAUGHT |
+| `mutation.fuzz.valid_rejected` | `PRISM_FUZZ_MUTANT_VALID_REJECTED` | 实测首红: `negative` | WILL_FAIL | CAUGHT |
+| `mutation.release.dropshellextclassic` | `-Mutate DropShellExtClassic` | — | MARKER | CAUGHT |
+| `mutation.release.extra7zdll` | `-Mutate Extra7zDll` | — | MARKER | CAUGHT |
+| `mutation.release.sumgap` | `-Mutate SumGap` | — | MARKER | CAUGHT |
+| `mutation.app_wiring.no_motw` | `PRISM_C25_MUTANT_NO_MOTW` | 实测首红: `wiring.extracted_files_inherit_the_zone_identifier_verbatim` | MARKER | CAUGHT |
+| `mutation.app_wiring.shared_reader` | `PRISM_C25_MUTANT_SHARED_READER` | 实测首红: `wiring.sweep_and_extract_own_distinct_handlers` | MARKER | CAUGHT |
+| `mutation.extract_failure.ignore_opresult` | `PRISM_C26_MUTANT_IGNORE_OPRESULT` | 实测首红: `unsupported` | MARKER | CAUGHT |
 | `mutation.installer.envundersoftware` | `-Mutate EnvUnderSoftware` | — | MARKER | not-run |
 | `mutation.installer.nobackup` | `-Mutate NoBackup` | — | MARKER | not-run |
 | `mutation.installer.norestore` | `-Mutate NoRestore` | — | MARKER | not-run |
@@ -226,9 +258,7 @@ python tools/mutation/mutant_matrix.py --markdown out/matrix.md --results out/ne
 | `mutation.write_archive.dir_as_file` | `PRISM_CW_MUTANT_DIR_AS_FILE` | the callback tells 7z folders are files | MARKER | CAUGHT |
 | `mutation.write_archive.no_size` | `PRISM_CW_MUTANT_NO_SIZE` | the callback refuses to answer kpidSize | MARKER | CAUGHT |
 
-
-
-未跑的是 4 个 installer 运行时变异体（`-Mutate` 走 pwsh 安装脚本，不在本轮范围）和 3 个 bench 变异体（长基准，见 2.4）。它们的注册仍由 `matrix --check` 静态校验。
+未跑的 9 个：6 个 installer 运行时变异体（`-Mutate` 走 pwsh 安装脚本）和 3 个 bench 变异体（长基准，见 2.4）。它们的注册仍由 `matrix --check` 静态校验；其余 **78 个变异体 + 1 个对照全部实测**。
 
 ### 3.3 状态含义
 
@@ -267,11 +297,11 @@ C23 NEGCTL PROBE: CAUGHT  exe=c23_mutant_probe_active.exe macro=PRISM_C23_MUTANT
 `c23.mutation.negctl.control` / `.caught` / `.dead_injection`。
 它们**只设 PASS_REGULAR_EXPRESSION、不设 WILL_FAIL**——正是 CONTRACTS D26 要求的形状：marker 是「判定结果」本身，退出码仍是 0，二者合取。
 
-另外 `matrix --check` 静态抓 D26 的两种事故：`WILL_FAIL + PASS_REGULAR_EXPRESSION`（永远红）、`WILL_FAIL + SKIP_RETURN_CODE`（SKIP 变假绿）。当前 67 个变异体 0 违规（这条检查本身已进 ctest）。
+另外 `matrix --check` 静态抓 D26 的两种事故：`WILL_FAIL + PASS_REGULAR_EXPRESSION`（永远红）、`WILL_FAIL + SKIP_RETURN_CODE`（SKIP 变假绿）。当前 88 个条目 0 违规（这条检查本身已进 ctest）。
 
 ## 五、CI 接入建议（由集成者决定，本卡不改 ci.yml）
 
-ctest 已经自带 6 条 `c23.*` 自检（matrix / 三个 negctl / 快测 round / coverage selftest），**推上去就生效，不需要改 workflow**。若要采集数字：
+ctest 已经自带 7 条 `c23.*` 自检（matrix / matrix selftest / 三个 negctl / 快测 round / coverage selftest），**推上去就生效，不需要改 workflow**。若要采集数字：
 
 Linux lane（2 步，~1 分钟）：
 ```yaml

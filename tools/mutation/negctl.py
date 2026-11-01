@@ -50,8 +50,10 @@ SKIPPED = "SKIPPED"
 TIMEOUT = "TIMEOUT"
 NOT_BUILT = "NOT-BUILT"
 ERROR = "ERROR"
+CONTROL_PASS = "CONTROL-PASS"
+CONTROL_FAIL = "CONTROL-FAIL"
 
-FAIL_VERDICTS = {NOT_IN_EFFECT, GREEN_HOLE, RED_NO_INJECTION, ERROR, TIMEOUT}
+FAIL_VERDICTS = {NOT_IN_EFFECT, GREEN_HOLE, RED_NO_INJECTION, ERROR, TIMEOUT, CONTROL_FAIL}
 
 
 def run_process(cmd, timeout, cwd=None, env=None, input_text=None):
@@ -222,6 +224,37 @@ def run_one(entry, tests, build_dir, do_build, timeout_default):
     cwd = Path(build_dir) / "Tests"
     if not cwd.is_dir():
         cwd = Path(build_dir)
+
+    if entry.get("role") == "CONTROL":
+        # A control must be GREEN and unarmed. "Caught" would be nonsense here:
+        # it proves the opposite direction (no injection => no banner, checks pass).
+        if do_build and entry["target"]:
+            rc, out, timed = run_process(
+                ["cmake", "--build", str(build_dir), "--target", entry["target"]], 1800
+            )
+            if timed or rc != 0:
+                return {"test": name, "verdict": ERROR,
+                        "evidence": "control build failed: %s" % out[-300:]}
+        rc, out, timed = run_process(command, timeout, cwd=cwd, env=env)
+        if timed:
+            return {"test": name, "verdict": TIMEOUT,
+                    "evidence": "exceeded %ss" % timeout, "rc": rc}
+        marker = entry.get("pass_regex") or ""
+        marker_hit = bool(marker) and re.search(marker, out) is not None
+        armed = "MUTANT ACTIVE" in out
+        ok = rc == 0 and (not marker or marker_hit) and not armed
+        return {
+            "test": name,
+            "verdict": CONTROL_PASS if ok else CONTROL_FAIL,
+            "evidence": "rc=%s marker=%s armed=%s" % (
+                rc, "present" if marker_hit else ("missing" if marker else "n/a"),
+                "yes" if armed else "no"),
+            "injection": "n/a",
+            "rc": rc,
+            "first_red": "",
+            "expected_hit": "",
+            "mode": "CONTROL",
+        }
 
     if do_build and entry["target"]:
         targets = [entry["target"]]

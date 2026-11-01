@@ -87,6 +87,14 @@ add_test(NAME c23.mutation.round
 set_tests_properties(c23.mutation.round PROPERTIES TIMEOUT 1200
     PASS_REGULAR_EXPRESSION "C23 NEGCTL: OK")
 
+# Calibrates the matrix rules themselves: a control may be unarmed, a control
+# that carries a macro must be rejected, and an unarmed non-control mutant must
+# still be rejected. This is the regression test for the C22 false positive.
+add_test(NAME c23.mutation.matrix.selftest
+         COMMAND "${C23_PY}" "${C23_MUT}/mutant_matrix.py" --selftest)
+set_tests_properties(c23.mutation.matrix.selftest PROPERTIES TIMEOUT 120
+    PASS_REGULAR_EXPRESSION "C23 MUTATION MATRIX SELFTEST: OK")
+
 add_test(NAME c23.coverage.selftest
          COMMAND "${C23_PY}" "${C23_COV}/coverage.py" selftest)
 set_tests_properties(c23.coverage.selftest PROPERTIES TIMEOUT 120

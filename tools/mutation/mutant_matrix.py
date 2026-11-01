@@ -22,6 +22,7 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -131,20 +132,39 @@ def unquote(s):
     return s
 
 
-def expand(body, env):
-    return re.sub(
+def expand(body, env, depth=0):
+    # Values can reference other values (set(mutant_exe "...${mutant_lc}")), so
+    # substitute until stable instead of one pass.
+    if depth > 5:
+        return body
+    new = re.sub(
         r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
         lambda m: env.get(m.group(1), m.group(0)),
         body,
     )
+    return new if new == body else expand(new, env, depth + 1)
 
 
 def eval_commands(cmds, env=None, out=None):
-    env = env or {}
+    env = env if env is not None else {}
     out = out if out is not None else []
     i = 0
     while i < len(cmds):
         name, body = cmds[i]
+        if name == "set":
+            args = split_args(body)
+            if len(args) >= 2:
+                env[args[0]] = " ".join(unquote(a) for a in args[1:])
+            i += 1
+            continue
+        if name == "string":
+            args = [unquote(a) for a in split_args(body)]
+            if len(args) >= 5 and args[0].upper() == "REPLACE":
+                # string(REPLACE <match> <replace> <out-var> <input>)
+                before, after, outvar, value = args[1], args[2], args[3], args[4]
+                env[outvar] = expand(value, env).replace(expand(before, env), expand(after, env))
+            i += 1
+            continue
         if name == "foreach":
             m = re.match(r"\s*([A-Za-z_]\w*)\s+IN\s+(ITEMS|LISTS)\s+(.*)", body, re.S)
             if not m:
@@ -286,6 +306,18 @@ def find_expected_red(text, macro):
     return None
 
 
+# A control entry proves the ABSENCE of an injection: C22 registers the clean
+# binary itself as "mutation.fuzz.clean_build_unarmed" so that "no banner when
+# nothing is injected" is asserted, not assumed. Such an entry MUST be allowed
+# to have no macro -- and must never carry one (a control that is also a mutant
+# is neither).
+CONTROL_RE = re.compile(r"(?:^|[._-])(clean|unarmed|control)(?:$|[._-])", re.I)
+
+
+def is_control_entry(test, target):
+    return bool(CONTROL_RE.search(test) or (target and CONTROL_RE.search(target)))
+
+
 def build_matrix(root, results=None):
     model = parse_model(root)
     mutants, problems, warnings = [], [], []
@@ -297,6 +329,7 @@ def build_matrix(root, results=None):
         props = model["props"].get(test, {})
         target = command[0] if command else ""
         macro = source = runtime = None
+        control = is_control_entry(test, target)
 
         source_path = None
         if target in model["targets"]:
@@ -310,7 +343,15 @@ def build_matrix(root, results=None):
             sources = model["targets"][target]["sources"]
             source = sources[0] if sources else None
             source_path = resolve_source(root, source)
-            if not macro:
+            if control:
+                # Allowed to be unarmed. Armed => contradiction, which is a
+                # structural problem, not a "mutant without a clean control".
+                if macro:
+                    problems.append(
+                        "%s: control entry carries injection macro %s -- "
+                        "a control must stay unarmed" % (test, macro)
+                    )
+            elif not macro:
                 problems.append("%s: no injection macro on target %s" % (test, target))
             if source and not source_path:
                 problems.append("%s: source missing: %s" % (test, source))
@@ -324,6 +365,12 @@ def build_matrix(root, results=None):
             source = next((a for a in command if a.endswith((".ps1", ".py"))), None)
             source_path = resolve_source(root, source)
 
+        # A test name that still contains a CMake variable never registered
+        # under the name the suite author intended (C19's string(REPLACE) used to
+        # land here) -- that is a wiring bug, not a runtime mutator.
+        if "${" in test:
+            problems.append("%s: unexpanded CMake variable in the test name" % test)
+
         will_fail = str(props.get("WILL_FAIL", "")).upper() == "TRUE"
         pass_regex = props.get("PASS_REGULAR_EXPRESSION")
         skip_code = props.get("SKIP_RETURN_CODE")
@@ -333,8 +380,10 @@ def build_matrix(root, results=None):
             problems.append("%s: D26/D1 -- WILL_FAIL turns SKIP %s into fake green" % (test, skip_code))
 
         mode = "MARKER" if (pass_regex and not will_fail) else ("WILL_FAIL" if will_fail else "PLAIN")
+        if control and will_fail:
+            problems.append("%s: control registered WILL_FAIL (a control must be green)" % test)
         clean = None
-        if source_path:
+        if not control and source_path:
             for t in model["order"]:
                 if t.startswith("mutation."):
                     continue
@@ -344,14 +393,14 @@ def build_matrix(root, results=None):
                     if other and resolve_source(root, other[0]) == source_path:
                         clean = t
                         break
-        if not clean:
+        if not control and not clean:
             warnings.append("%s: no clean control for target %s" % (test, target))
         pass_marker = model["props"].get(clean, {}).get("PASS_REGULAR_EXPRESSION") if clean else None
 
         text = source_path.read_text(encoding="utf-8", errors="replace") if source_path else None
-        banner = find_banner(text, macro) if text else None
-        expected = find_expected_red(text, macro) if text else None
-        if mode == "WILL_FAIL" and not banner:
+        banner = find_banner(text, macro) if (text and macro) else None
+        expected = find_expected_red(text, macro) if (text and macro) else None
+        if not control and mode == "WILL_FAIL" and not banner:
             warnings.append("%s: no MUTANT ACTIVE banner (weaker injection proof)" % test)
 
         mutants.append({
@@ -360,6 +409,8 @@ def build_matrix(root, results=None):
             "source": rel(root, source_path) if source_path else "",
             "macro": macro or "",
             "runtime_injection": runtime or "",
+            "role": "CONTROL" if control else "MUTANT",
+            "paired_with": [],
             "mode": mode,
             "will_fail": will_fail,
             "pass_regex": pass_regex or "",
@@ -381,11 +432,25 @@ def build_matrix(root, results=None):
                 m["verdict"] = hit.get("verdict", "")
                 m["first_red"] = hit.get("first_red", "")
 
+    # Pair each control with the mutants that share its source file. A control
+    # with no mutant counterpart is still legal, but it proves nothing about a
+    # mutation, so say so out loud.
+    for c in [m for m in mutants if m["role"] == "CONTROL"]:
+        c["paired_with"] = sorted(
+            m["test"] for m in mutants
+            if m["role"] == "MUTANT" and c["source"] and m["source"] == c["source"]
+        )
+        if c["source"] and not c["paired_with"]:
+            warnings.append("%s: control shares no source with any mutant" % c["test"])
+
     mutants.sort(key=lambda m: (m["suite_file"], m["test"]))
+    controls = [m for m in mutants if m["role"] == "CONTROL"]
     return {
         "root": str(root),
         "generated_by": "tools/mutation/mutant_matrix.py",
         "count": len(mutants),
+        "mutants_count": len(mutants) - len(controls),
+        "controls_count": len(controls),
         "files": sorted({m["suite_file"] for m in mutants}),
         "mutants": mutants,
         "problems": problems,
@@ -396,16 +461,97 @@ def build_matrix(root, results=None):
 def markdown(matrix):
     lines = ["| 测试 | 注入宏 / 注入点 | 预期红断言 | 注册方式 | 状态 |", "|---|---|---|---|---|"]
     for m in matrix["mutants"]:
-        inject = m["macro"] or m["runtime_injection"]
+        inject = m["macro"] or m["runtime_injection"] or (
+            "(none: control)" if m["role"] == "CONTROL" else "")
         red = m["expected_red"] or (
             ("实测首红: `%s`" % m["first_red"]) if m.get("first_red") else "—"
         )
         red = red.replace("|", "\\|")
+        reg = "CONTROL(no injection)" if m["role"] == "CONTROL" else m["mode"]
         lines.append(
             "| `%s` | `%s` | %s | %s | %s |"
-            % (m["test"], inject, red, m["mode"], m["verdict"] or "not-run")
+            % (m["test"], inject, red, reg, m["verdict"] or "not-run")
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# selftest -- calibrate the RULES themselves on a synthetic tree (D4). The
+# control rule is the one that just produced a false positive on C22, so it
+# gets three cases: legal control, control that is secretly armed (must be
+# rejected), and a plain mutant with no macro (must stay rejected).
+# ---------------------------------------------------------------------------
+SELFTEST_MUTANT = """add_executable(test_mut demo.cpp)
+target_compile_definitions(test_mut PRIVATE PRISM_DEMO_MUTANT_ON=1)
+add_test(NAME mutation.demo.injected COMMAND test_mut)
+set_tests_properties(mutation.demo.injected PROPERTIES WILL_FAIL TRUE)"""
+
+SELFTEST_CLEAN = """add_executable(test_clean demo.cpp)
+add_test(NAME mutation.demo.clean_build_unarmed COMMAND test_clean)
+set_tests_properties(mutation.demo.clean_build_unarmed PROPERTIES PASS_REGULAR_EXPRESSION "ALL DEMO CHECKS PASSED")"""
+
+SELFTEST_ARMED_CONTROL = """add_executable(test_sneaky demo.cpp)
+target_compile_definitions(test_sneaky PRIVATE PRISM_DEMO_MUTANT_SNEAK=1)
+add_test(NAME mutation.demo.control_but_injected COMMAND test_sneaky)
+set_tests_properties(mutation.demo.control_but_injected PROPERTIES PASS_REGULAR_EXPRESSION "ALL DEMO CHECKS PASSED")"""
+
+SELFTEST_ORPHAN = """add_executable(test_orphan demo.cpp)
+add_test(NAME mutation.demo.orphan COMMAND test_orphan)"""
+
+SELFTEST_MUTANT_VARS = """add_executable(test_vars demo.cpp)
+target_compile_definitions(test_vars PRIVATE PRISM_DEMO_MUTANT_VARS=1)
+set(demo_exe "test_vars")
+string(REPLACE "vars" "vars_id" demo_id "vars")
+add_test(NAME "mutation.demo.${demo_id}" COMMAND "${demo_exe}")
+set_tests_properties("mutation.demo.${demo_id}" PROPERTIES WILL_FAIL TRUE)"""
+
+
+
+def _selftest_matrix(blocks):
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "Tests").mkdir()
+        (root / "Tests" / "demo.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+        (root / "Tests" / "CMakeLists.txt").write_text(
+            "\n\n".join(blocks) + "\n", encoding="utf-8"
+        )
+        return build_matrix(root)
+
+
+def selftest():
+    legal = _selftest_matrix([SELFTEST_MUTANT, SELFTEST_CLEAN])
+    armed = _selftest_matrix([SELFTEST_MUTANT, SELFTEST_ARMED_CONTROL])
+    orphan = _selftest_matrix([SELFTEST_MUTANT, SELFTEST_ORPHAN])
+    variables = _selftest_matrix([SELFTEST_MUTANT_VARS, SELFTEST_CLEAN])
+
+    ctrl = next((m for m in legal["mutants"] if m["role"] == "CONTROL"), None)
+    ok = True
+    if legal["problems"]:
+        ok = False
+    if not ctrl or ctrl["paired_with"] != ["mutation.demo.injected"]:
+        ok = False
+    if len(armed["problems"]) != 1 or "carries injection macro" not in armed["problems"][0]:
+        ok = False
+    if any("no injection macro" in p for p in armed["problems"]):
+        ok = False
+    if len(orphan["problems"]) != 1 or "no injection macro" not in orphan["problems"][0]:
+        ok = False
+    # set()/string(REPLACE) indirection must resolve to a real test name, not
+    # leave a literal CMake variable that silently never registers.
+    if variables["problems"] or not any(
+        m["test"] == "mutation.demo.vars_id" for m in variables["mutants"]
+    ):
+        ok = False
+
+    print("C23 MUTATION MATRIX SELFTEST: %s (clean control allowed+paired, "
+          "armed control rejected, unarmed mutant rejected)"
+          % ("OK" if ok else "FAILED"))
+    if not ok:
+        for label, mat in (("legal", legal), ("armed-control", armed), ("orphan", orphan)):
+            for p in mat["problems"]:
+                print("  %s PROBLEM: %s" % (label, p))
+        print("  paired_with: %s" % (ctrl["paired_with"] if ctrl else None))
+    return 0 if ok else 1
 
 
 def main(argv=None):
@@ -415,7 +561,11 @@ def main(argv=None):
     ap.add_argument("--json")
     ap.add_argument("--markdown")
     ap.add_argument("--results")
+    ap.add_argument("--selftest", action="store_true",
+                    help="calibrate the matrix rules on a synthetic tree (D4)")
     args = ap.parse_args(argv)
+    if args.selftest:
+        return selftest()
 
     root = Path(args.root).resolve()
     results = json.loads(Path(args.results).read_text(encoding="utf-8")) if args.results else None
@@ -441,8 +591,10 @@ def main(argv=None):
             print("C23 MUTATION MATRIX: FAILED (%d problems)" % len(matrix["problems"]))
             return 1
         print(
-            "C23 MUTATION MATRIX: OK (%d mutants across %d suite files, 0 problems)"
-            % (matrix["count"], len(matrix["files"]))
+            "C23 MUTATION MATRIX: OK (%d entries = %d mutants + %d controls across "
+            "%d suite files, 0 problems)"
+            % (matrix["count"], matrix["mutants_count"], matrix["controls_count"],
+               len(matrix["files"]))
         )
     return 0
 

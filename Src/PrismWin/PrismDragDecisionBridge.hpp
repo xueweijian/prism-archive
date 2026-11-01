@@ -654,14 +654,24 @@ class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
       ok = reader_->ExtractBatch({index_}, &callback);
     }
     sink->Release();
-    std::lock_guard<std::mutex> lock(mutex_);
-    eof_ = true;
-    // A restart abort is a normal way to die; anything else is a failure the
-    // stream must surface instead of serving a silently short file.
-    // itemError_ is checked FIRST: a decode that reports a bad item and then
-    // returns "ok" is exactly the case that produced a 1.088 MB "success" out
-    // of a 1.2 MB item.
-    failed_ = (itemError_ != 0) || (!ok && !abort_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      eof_ = true;
+      // A restart abort is a normal way to die; anything else is a failure the
+      // stream must surface instead of serving a silently short file.
+      // itemError_ is checked FIRST: a decode that reports a bad item and then
+      // returns "ok" is exactly the case that produced a 1.088 MB "success" out
+      // of a 1.2 MB item.
+      failed_ = (itemError_ != 0) || (!ok && !abort_);
+    }
+    // C20: wake a consumer already parked in Next(). The flag was set with no
+    // notification, so the FINAL pull -- the one that arrives after the decoder
+    // delivered its last chunk and exits -- waited forever: the queue is empty,
+    // eof_ is true, and nobody signals the condvar. Measured as a hard hang in
+    // the C20 D3 size-lie control (declared size one byte past the payload);
+    // in production it is the "copy stalls at the very end and never finishes"
+    // shape, which no timeout would explain.
+    waitReadable_.notify_all();
   }
 
   // SetOperationResult's non-zero codes arrive on the sink's thread; record the

@@ -54,6 +54,17 @@ jobs:
         # the runner (libstdc++ version difference). This gate is lexical and
         # deterministic, so it cannot drift.
         run: sh tools/check_headers.sh
+      - name: Windows-TU typecheck gate
+        # The PrismWin headers compiled against tools/win_stub's vocabulary:
+        # catches the MSVC-facing class of error (wrong override signature,
+        # unparenthesized std::min, missing <cstdint>, a std::function from a
+        # nullptr literal) in two seconds instead of a Windows round.
+        #
+        # This step is NEW in the sense that matters: the script and the stub it
+        # needs were added in PR #13 but the stub directory never made it into
+        # the tree, so the gate could not run -- and nothing noticed, because
+        # nothing called it. A gate nobody runs is not a gate.
+        run: sh tools/check_windows_tu.sh
       - name: Test
         working-directory: build
         run: ctest --output-on-failure --no-tests=error

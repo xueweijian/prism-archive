@@ -247,3 +247,20 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties(win.dnd_seek PROPERTIES TIMEOUT 600
       PASS_REGULAR_EXPRESSION "ALL DND-SEEK CHECKS PASSED")
 endif()
+
+# ---------------------------------------------------------------------------
+# Parallel-development suite registration (2026-11-01).
+#
+# Every parallel agent branch used to append its registration block to THIS
+# file, so 20+ branches conflicted on the tail. Each card now drops ONE file in
+# Tests/suites/ and never touches this list; the glob picks it up. Suite files
+# are included in this scope, so every target and variable defined above
+# (prism_core, prism_win_bridge, PRISM_BUILD_WIN_LAYER, ...) is visible.
+#
+# Rule: one card = one file = one registration block. See suites/README.md.
+# ---------------------------------------------------------------------------
+file(GLOB PRISM_SUITE_FILES CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/suites/*.cmake")
+foreach(prism_suite IN LISTS PRISM_SUITE_FILES)
+  include("${prism_suite}")
+endforeach()

@@ -241,8 +241,10 @@ PRISM_TEST("only ExtractTo and Compress own a dropdown") {
     const bool owns = !DropdownItems(spec.id).empty();
     PRISM_CHECK_EQ(owns, spec.hasDropdown);
   }
-  PRISM_CHECK_EQ(DropdownItems(ActionId::ExtractTo).size(), 3);
-  PRISM_CHECK_EQ(DropdownItems(ActionId::Compress).size(), 3);
+  // size() is size_t: comparing against a literal int trips -Werror=sign-compare
+  // on the GCC lane (MSVC does not warn). Cast rather than lowering the warning.
+  PRISM_CHECK_EQ(DropdownItems(ActionId::ExtractTo).size(), static_cast<std::size_t>(3));
+  PRISM_CHECK_EQ(DropdownItems(ActionId::Compress).size(), static_cast<std::size_t>(3));
   // No empty labels (an empty row is an invisible click target).
   for (const DropdownItem& item : DropdownItems(ActionId::Compress)) {
     PRISM_CHECK(!item.label.empty());

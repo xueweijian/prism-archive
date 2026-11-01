@@ -22,6 +22,7 @@
 // Tests/CMakeLists.txt registers PASS_REGULAR_EXPRESSION on the marker.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -104,6 +105,19 @@ PRISM_TEST("7z.dll discovery: env wins, order is the documented one") {
 
   // (c) order with no override in the way: app dir first, then 7-Zip's own
   //     registry answer (when the machine has one), then the two probes.
+  //
+  // Restore the override on EVERY exit path below. The rest of this file (and
+  // every later case in the same process) needs PRISM_7Z_DLL, because the
+  // fixture locates 7z.exe BESIDE the dll. Clearing it here and not restoring
+  // made "closing cancels the whole-archive scan" fail on the runner with an
+  // empty fixture path while passing locally -- the dev box re-set the variable
+  // by way of case (a), the runner did not. CI caught it on 2026-11-01.
+  struct EnvRestore {
+    std::wstring value;
+    ~EnvRestore() {
+      if (!value.empty()) SetEnvironmentVariableW(L"PRISM_7Z_DLL", value.c_str());
+    }
+  } env_restore{realDll};
   SetEnvironmentVariableW(L"PRISM_7Z_DLL", nullptr);
   const prism::win::SevenZipDllLookup ordered = prism::win::Resolve7zDll();
   if (!PRISM_CHECK(ordered.candidates.size() >= 2)) return;
@@ -111,12 +125,20 @@ PRISM_TEST("7z.dll discovery: env wins, order is the documented one") {
                    JoinPath(prism::win::ExecutableDirectory(), L"7z.dll"))) {
     return;
   }
-  // The two Program Files probes are the LAST resort and are always tried, in
-  // this order (they are also the only candidates a registry-less install can
-  // match).
+  // The Program Files probes are the LAST resort, and the x86 one is last of
+  // all (they are also the only candidates a registry-less install can match).
+  //
+  // Assert the CONTRACT, not a literal index. On a machine whose 7-Zip lives in
+  // "C:\\Program Files\\7-Zip" the registry answer IS that path, so the dedupe
+  // collapses the probe into the registry entry and c[size-2] is no longer the
+  // probe: pinning the index was green on the dev box (7-Zip on E:) and red on
+  // the runner (7-Zip on C:). CI caught it on 2026-11-01.
   const std::vector<std::wstring>& c = ordered.candidates;
-  if (!PRISM_CHECK(c[c.size() - 2] == L"C:\\Program Files\\7-Zip\\7z.dll")) return;
   if (!PRISM_CHECK(c.back() == L"C:\\Program Files (x86)\\7-Zip\\7z.dll")) return;
+  const bool has_program_files_x64 =
+      std::find(c.begin(), c.end(), std::wstring(L"C:\\Program Files\\7-Zip\\7z.dll")) !=
+      c.end();
+  if (!PRISM_CHECK(has_program_files_x64)) return;
   // If this machine DOES register 7-Zip, its own InstallDir must be among the
   // candidates and must win over the probes -- that is the non-default-drive
   // case this card exists for (a 7-Zip at E:\DevTools\7-Zip used to be

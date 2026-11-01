@@ -1,0 +1,120 @@
+{
+  "_comment": "C23 coverage policy. critical+min_line => LOW/CRITICAL (blocks a clean verdict when below); watch+watch_max => LOW/WATCH (reported, not blocking): silent-failure paths (error branches, security, concurrency) deserve a higher bar than the global total.",
+  "default_min_line": 60,
+  "modules": {
+    "PrismWin/PrismEngineBridge": {
+      "critical": true,
+      "min_line": 70,
+      "watch": true,
+      "watch_max": 95,
+      "note": "7z 引擎唯一出口：Open/GetStream/UpdateItems 的错误路径静默返回时，产品会“成功”产出空归档；本 run 有 120 行未命中，错误分支是首要嫌疑"
+    },
+    "PrismWin/ArchiveWriter": {
+      "critical": true,
+      "min_line": 70,
+      "watch": true,
+      "watch_max": 85,
+      "note": "写入路径：kpidIsDir/kpidSize/SetProperties 错一位就是错误归档（C9 两个变异体守着）"
+    },
+    "PrismWin/CrashDump": {
+      "critical": true,
+      "min_line": 80,
+      "note": "D25：脱敏必须发生在格式化之前，任何 sink 都不得见明文"
+    },
+    "PrismCore/Log": {
+      "critical": true,
+      "min_line": 80,
+      "note": "D25 脱敏 + 限流；变异体 no_redaction 必须红"
+    },
+    "PrismCore/PathSafety": {
+      "critical": true,
+      "min_line": 85,
+      "note": "Zip-Slip / UNC / 设备名边界；绕过即写入任意路径"
+    },
+    "PrismCore/SecurityGuard": {
+      "critical": true,
+      "min_line": 80,
+      "note": "AMSI/MOTW 策略：拒绝码必须沿调用链回溯（D11）"
+    },
+    "PrismCore/PasswordRing": {
+      "critical": true,
+      "min_line": 75,
+      "note": "口令环：脱敏在格式化前（D3 第一次突变没生效就是在这里）"
+    },
+    "PrismCore/OpenFlow": {
+      "critical": true,
+      "min_line": 75,
+      "note": "打开流程判定（WrongPassword vs NeedPassword），负向控制见 mutation_openflow.sh"
+    },
+    "PrismCore/DragDrop": {
+      "critical": true,
+      "min_line": 60,
+      "note": "C5：拒绝必带 DenyReason；128 组合"
+    },
+    "PrismWin/DpapiVault": {
+      "watch": true,
+      "watch_max": 80,
+      "note": "凭据加密：本 run 0%（对应套件未纳入），任何一行未跑都是风险"
+    },
+    "PrismWin/ReaderPool": {
+      "watch": true,
+      "watch_max": 90,
+      "note": "D24 并发契约：峰值必须在 7z 回调内会合；本 run 只跑到 64.6%"
+    },
+    "PrismWin/GlassIslandHost": {
+      "watch": true,
+      "watch_max": 90,
+      "note": "Liquid Glass 宿主：本 run 只跑到 0.2%（win.gallery_snapshot 被排除），这块只能靠快照套件"
+    },
+    "PrismWin/GalleryRenderer": {
+      "watch": true,
+      "watch_max": 80,
+      "note": "渲染器：48.6%，像素级契约（A5/C1）只能由快照套件证明"
+    },
+    "PrismWin/CompanionWindow": {
+      "watch": true,
+      "watch_max": 90,
+      "note": "伴随窗口：10.6%，窗口生命周期（D20）相关分支未被本 run 触达"
+    },
+    "PrismWin/SparsePackageRegistrar": {
+      "watch": true,
+      "watch_max": 80,
+      "note": "MSIX 稀疏注册：51.7%，安装期关键路径"
+    },
+    "PrismWin/VirtualTreeExecutor": {
+      "watch": true,
+      "watch_max": 85,
+      "note": "虚拟树执行器：69.3%，写入/删除回滚路径"
+    },
+    "PrismWin/VolumeStream": {
+      "watch": true,
+      "watch_max": 85,
+      "note": "分卷流：75.5%，D23 卷回调错误路径"
+    },
+    "PrismWin/SettingsFile": {
+      "watch": true,
+      "watch_max": 85,
+      "note": "设置落盘：67.4%，并发读写（C14 变异体）"
+    },
+    "PrismWin/PrismVirtualDragDrop": {
+      "watch": true,
+      "watch_max": 80,
+      "note": "虚拟拖拽：33.3%，CFSTR_FILECONTENTS 路径"
+    },
+    "PrismCore/ArchiveCatalog": {
+      "watch": true,
+      "watch_max": 90,
+      "note": "目录读取：25%，A1/A3 PROPID 语义只能由真 7z 集成测试覆盖"
+    },
+    "PrismCore/PasswordVault": {
+      "watch": true,
+      "watch_max": 85,
+      "note": "口令库：63.5%，DPAPI 边界"
+    },
+    "PrismCore/Shortcuts": {
+      "watch": true,
+      "watch_max": 85,
+      "note": "快捷键：66.7%，保留键/缩放钳制（C8 变异体）"
+    }
+  }
+}

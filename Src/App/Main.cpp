@@ -257,6 +257,11 @@ struct AppContext {
   std::atomic<bool> shuttingDown{false};
   std::atomic<prism::win::ArchiveReader*> sweepReader{nullptr};
   std::atomic<prism::win::ArchiveReader*> extractReader{nullptr};
+  // C34: bumped every time the session switches archives. The one-shot sweep
+  // captured CATALOG INDICES from the archive it started on; a result that lands
+  // after a switch belongs to a different file and must be discarded, not
+  // painted (the window's rows are the new archive's).
+  std::atomic<uint64_t> archiveGeneration{0};
   std::wstring archivePath;
   prism::app::ExtractionPlan plan;
 };
@@ -814,6 +819,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // different file: the old store would paint the previous archive's pixels into
     // the new rows. Drop it; sweeping the new archive is the follow-up this card
     // does not pretend to do.
+    ++app->archiveGeneration;
     window.SetThumbs(nullptr);
     window.SetItems(&app->items);
     window.SetRootLabel(FileNameWide(app->archivePath));
@@ -870,6 +876,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // run on two leases instead of racing on one (docs/PROGRESS known debt).
   std::thread worker([app, &window, sweepIndices, sweepSizes]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // The indices below belong to the archive that was open when this thread
+    // started; a switch while we decode makes them meaningless (C34).
+    const uint64_t generation = app->archiveGeneration.load();
     prism::win::sweep::WicThumbDecoder wic;
     if (wic.Initialize() && !sweepIndices.empty()) {
       auto store = std::make_shared<prism::gallery::ThumbStore>(64ull << 20);
@@ -886,8 +895,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         app->ops->Finish(*task, true);
         // SetThumbs takes its own mutex and touches nothing else (documented
         // worker-safe); the repaint is a posted message, never a direct call.
-        window.SetThumbs(store);
-        PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+        // A generation bump means the session switched archives while we were
+        // decoding: these pixels are indexed against a file nobody is showing.
+        if (app->archiveGeneration.load() == generation) {
+          window.SetThumbs(store);
+          PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+        } else {
+          std::fprintf(stderr, "sweep discarded: the session switched archives
+");
+        }
       } else {
         std::fprintf(stderr, "sweep refused: %s\n", why.c_str());
       }

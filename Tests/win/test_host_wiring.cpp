@@ -89,6 +89,11 @@ constexpr const char* kMutation = nullptr;
 // mutant that could not run must never look like a caught mutation).
 bool g_noWindowStation = false;
 bool g_noComposition = false;
+// Set when ANOTHER process (a stray PrismArchive.exe from a bench, or a
+// developer's running app) already owns the session-wide preview section. The
+// channel is "Local" by design, so this suite cannot prove the no-reader
+// premise in that state -- it says so and skips instead of reporting a false red.
+bool g_foreignCompanion = false;
 
 struct Fixture {
   std::wstring dllPath;
@@ -155,7 +160,12 @@ bool SetupFixture() {
     fx.why = "7z.dll/7z.exe not available";
     return false;
   }
-  const fs::path root = fs::temp_directory_path() / "prism_c34_host";
+  // UNIQUE per run (card + process id): the Windows lane is serial today, and it
+  // will be parallel again -- eight suites that shell out to 7z.exe against ONE
+  // shared %TEMP% folder is exactly what broke win.reader_pool. A fixture folder
+  // nobody else can name cannot collide.
+  const fs::path root = fs::temp_directory_path() /
+                        ("prism_c34_host_" + std::to_string(::GetCurrentProcessId()));
   std::error_code ec;
   fs::remove_all(root, ec);
   fs::create_directories(root, ec);
@@ -250,7 +260,12 @@ PRISM_TEST("companion: the exe owns the channel, stays hidden, wakes into a 12-r
   // The premise: nothing owns the section yet, so the shell's probe says "no
   // companion" and every right-click takes the NoReader path. This is the state
   // the whole card exists to end.
-  PRISM_CHECK(!companion::CompanionPreviewPresent());
+  if (companion::CompanionPreviewPresent()) {
+    std::cout << "  [skip] another process owns the preview section (stray PrismArchive.exe?)"
+              << std::endl;
+    g_foreignCompanion = true;
+    return;
+  }
 
   app::CompanionHost host;
   app::CompanionHost::Config config;
@@ -539,10 +554,11 @@ int main(int argc, char** argv) {
   }
 
   if (rc != 0) return rc;
-  if (g_noWindowStation || g_noComposition) {
-    std::cout << "C34 SKIP: this window station cannot exercise the window path (window="
+  if (g_foreignCompanion || g_noWindowStation || g_noComposition) {
+    std::cout << "C34 SKIP: this machine cannot exercise the wiring end to end (window="
               << (g_noWindowStation ? "no" : "yes")
-              << " composition=" << (g_noComposition ? "no" : "yes") << ")" << std::endl;
+              << " composition=" << (g_noComposition ? "no" : "yes")
+              << " section_free=" << (g_foreignCompanion ? "no" : "yes") << ")" << std::endl;
     return 77;
   }
   std::cout << "ALL HOST-WIRING CHECKS PASSED (" << prism::test::CheckCount() << " checks)"

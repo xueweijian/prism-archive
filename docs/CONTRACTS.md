@@ -62,13 +62,13 @@
 | D17 | **容量与承诺必须逐字节相等**：任何"窗口/预算/容量"参数，实际可用量必须等于对外承诺的量。按块淘汰的环形缓冲天然只能兑现 `capacity - chunk`，而 Planner 按 `capacity` 授予命中权 → 授予成功、读取时才失败 | 有界的"窗口"类容器必须断言 `residentBytes() == capacity()` | `RecentByteRing` 4 MiB 窗口实际只留 4 MiB − 64 KiB，`END − 4 MiB` 白重解 966656 B（2026-11-01，PR #13） |
 | D18 | **声明"某路径必然失败"前，先证明它够得着**：断言里的期望值也要能被测试路径真实产生。`CUR by (kGamma − 64)` 从 `kGamma` 出发解析到越界，永远拿不到"重解码预算耗尽"这条消息，所以那条断言断言的是不存在的行为 | 每条"期望特定的拒绝/错误"断言，必须同时断言它期望的那条路径可达（或改用能让该路径可达的构造） | 拖拽 seek 字节预算用例（2026-11-01）；同源教训见 D12 |
 | D19 | **本地模型与真实对象冲突时，先怀疑模型**：纯函数重放器能廉价验证算术，但它必须复刻真实夹具的**状态前提**（冷/热流、是否预热过缓冲）。模型与真实对象不一致时，默认模型错了——把它改成忠实复刻，并写进注释 | 重放器每个 block 必须显式声明初始状态（cold/warm） | 我的重放器把上一块的 `ReadAll` 预热带进下一块，据此把冷流断言写成"免费命中"，CI 才纠正（2026-11-01） |
-
 | D20 | **进程生命周期必须用真 HWND + 真 WM_CLOSE + `Run()` 返回三者一起证明**：只测"窗口能创建"或"消息循环能启动"抓不到 UI 线程死在 `DispatchMessageW` 里的情形 | Win32 消息泵语义 | `win.app_lifecycle`（真窗口、真 POST、断言 `Run()` 在 500ms 内返回） | `PrismArchive.exe` 从未调 `GalleryRenderer::Initialize()` → 首帧走空 vtable → AV → `WM_QUIT` 无人取 → 窗口消失、进程永生。项目此前**从未成功渲染过一帧**（2026-11-01，C1/PR #21） |
 | D21 | **断言契约，不断言字面值**：安装路径、候选索引、探测项"必须都存在"都是环境耦合；绿在开发机、红在 runner 是测试的错，不是产品的错 | 跨机器可复现性 | main CI（两种安装布局都会跑到） | `win.app_lifecycle` 连红两轮：①断言 `c[size-2] == C:\Program Files\7-Zip\7z.dll`（runner 的 7-Zip 就在 Program Files，注册表答案与该探测同串、去重后索引移位）②断言 x86 探测"必须存在"（runner 只装 x64）（2026-11-01） |
 | D22 | **D2D 自定义效果的 XML 不接受自定义属性**（该 SDK 上 float/vector4/blob 全 `E_INVALIDARG`）；常量必须由拥有 `ID2D1Effect` 的一方每帧重建节点下发，且中间节点必须显式 `SetInputEffect` | 实测（六种变体单独验证） | `win.gallery_snapshot` 像素断言 + `fxc --strict` | 未违反；若不重建节点，外部改常量不触发 `PrepareForRender`；漏接中间节点只在 `EndDraw` 报 `D2DERR_INVALID_GRAPH_CONFIGURATION`（2026-11-01，C6/PR #24） |
 | D23 | **可选 COM 接口一律靠 QI 可达**，含 `IArchiveOpenVolumeCallback`：继承并实现方法不等于引擎看得见 | 7-Zip 只用 `QI` 取可选接口（同 D10） | `win.volumes`（真 7z.dll 分卷） | 与 D10 同源；分卷回调若不答 IID，卷永远拼不起来（2026-11-01，C10/PR #27） |
 | D24 | **并发断言必须在引擎回调内部会合**：证明"两个线程都启动了"没有意义，要证明两次解压在 7z 的 `GetStream` 里真的重叠 | 7-Zip handler 非线程安全 | `win.reader_pool`（`peak==2` / `peak==4` 在回调内计数）+ 共享 handler 的变异必须红 | 共享 reader 时读出 0 字节、`distinctSlotsUsed=1/4`（2026-11-01，C11/PR #26） |
 | D25 | **脱敏必须发生在格式化之前**：否则任何 sink（环形、文件、崩溃转储）都拿得到明文 | 安全审计常识 | `win.crash_dump`（转储与报告里不得出现口令）+ `no_redaction` 变异 | 未违反；顺序写成构造保证：过滤→脱敏→限流→格式化→环形→sink（2026-11-01，C16/PR #31） |
+| D26 | **`PASS_REGULAR_EXPRESSION` 与 `WILL_FAIL` 不能叠在同一个测试上**：设了正则后「正则命中即通过、退出码被忽略」；再叠 `WILL_FAIL` 会把这次通过反转成红 → 永远红。反之只设 `WILL_FAIL` 而无正则时，SKIP 的退出码 0 会被当成「预期失败」而变绿 → 假绿。变异测试的正确形状：让 marker 本身成为合取（跑红了且注入计数 > 0 才打印 CAUGHT），正常构建挂在该 marker 下必须是红 | ctest 属性语义（本机与 CI 双向实测） | `win.write_archive` 两个引擎侧 mutant（不用 WILL_FAIL，marker 即合取）+ 探针工程证明「注入停止生效 → 红」 | C9 实测：`WILL_FAIL` + 失败 marker 正则 = 永远红；照抄这个形状的卡会得到一条永远红的测试（2026-11-01，C9/PR #33） |
 
 ## E. 待登记（下批次会触碰）
 

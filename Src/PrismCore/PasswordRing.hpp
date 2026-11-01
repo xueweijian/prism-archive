@@ -319,6 +319,13 @@ struct ProbeOutcome {
   std::string diagnostics;
   int attemptsMade = 0;
   int64_t elapsedMs = 0;
+  // Set when the run stopped because the caller asked it to (not because it
+  // ran out of candidates). Distinguishing the two is what lets the open flow
+  // say "cancelled" instead of "all 12 passwords were wrong" -- a cancelled
+  // run has NOT tried everything, so calling it exhausted would be a lie.
+  // `found` still wins: a hit that landed in the same instant as the cancel
+  // gives the user the archive rather than a shrug.
+  bool cancelled = false;
 };
 
 // Flattened candidate texts, in plan order -- the secret list for redaction.
@@ -344,9 +351,14 @@ inline std::vector<std::string> CandidateTexts(
 //      exhausted without a hit => found=false, attemptsMade==ordered.size();
 //   d. diagnostics never contain candidate plaintext (RedactSecrets);
 //   e. elapsedMs is a real steady-clock measurement.
+//   f. shouldCancel() is polled BEFORE claiming each candidate: once it turns
+//      true no NEW attempt starts, already-running ones finish (abandoning a
+//      half-done 7z Open would leak a stream), and `cancelled` is set. A hit
+//      that already landed keeps `found` true.
 template <typename OpenFn>
 ProbeOutcome Probe(const prism::pwd::PasswordRing::AttemptPlan& plan, OpenFn tryOpen,
-                   std::function<void(int done, int total)> progress) {
+                   std::function<void(int done, int total)> progress,
+                   std::function<bool()> shouldCancel = {}) {
   const auto started = std::chrono::steady_clock::now();
   ProbeOutcome outcome;
   const int total = static_cast<int>(plan.ordered.size());
@@ -359,11 +371,20 @@ ProbeOutcome Probe(const prism::pwd::PasswordRing::AttemptPlan& plan, OpenFn try
   std::mutex gate;                // orders progress + attempt bookkeeping
   std::atomic<int> next{0};       // next candidate index to claim
   std::atomic<bool> stop{false};  // set on hit: no NEW attempt may start
+  std::atomic<bool> userStop{false};  // set on cancel: no NEW attempt may start
   std::string failureNotes;       // untrusted exception text, redacted later
 
   auto worker = [&]() {
     for (;;) {
       if (stop.load(std::memory_order_relaxed)) return;
+      // Cancel is checked before the claim, so a cancelled run cannot start a
+      // candidate it never reports (the count stays honest). Checked under the
+      // same predicate that the caller's UI thread flips, so the last observed
+      // state is always the one the user asked for.
+      if (shouldCancel && shouldCancel()) {
+        userStop.store(true, std::memory_order_relaxed);
+        return;
+      }
       const int idx = next.fetch_add(1, std::memory_order_relaxed);
       if (idx >= total) return;
 
@@ -413,6 +434,11 @@ ProbeOutcome Probe(const prism::pwd::PasswordRing::AttemptPlan& plan, OpenFn try
       prism::pwd::BuildDiagnostics(plan, outcome.attemptsMade, outcome.found,
                                    elapsedMs)
           .diagnostics;
+  // Nothing is left to try only if every candidate was actually attempted; a
+  // cancelled run stopped early, so it is NOT exhausted (see ProbeOutcome).
+  outcome.cancelled =
+      !outcome.found && (userStop.load() || (shouldCancel && shouldCancel())) &&
+      outcome.attemptsMade < total;
   if (!failureNotes.empty()) {
     // The redaction here is load-bearing, not decorative: failureNotes is
     // built from foreign exception text. Mutating this line away must turn

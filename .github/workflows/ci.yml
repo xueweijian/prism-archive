@@ -1,8 +1,20 @@
 name: CI
 
+# Two jobs per run, on purpose.
+#
+# GitHub Free gives a public repo ~20 concurrent jobs. Eight parallel cards each
+# pushing a card branch is 8 runs; with three lanes per run that is 24 jobs and
+# everything queues behind everything. So the two Linux lanes (gcc-release and
+# asan+ubsan) live in ONE job as two serial steps, and the run is exactly:
+#
+#     gates (Linux: core in Release, then core in ASan/UBSan)   +   windows
+#
+# 8 branches => 16 jobs => inside the quota, and CI -- not the 4-core dev box --
+# is the authority on red/green (tools/local_gates.ps1 is the same gate locally,
+# for the cases where waiting for a runner is the more expensive option).
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -10,73 +22,109 @@ on:
 permissions:
   contents: read
 
+# Same branch, new push: cancel the stale run instead of stacking them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # -------------------------------------------------------------------------
-  # PrismCore: the platform-neutral brain. Builds and tests on Linux in seconds
-  # so every rule (smart extraction, Zip Slip, bomb fuse, CJK repair, CoW tree)
-  # is verified without a Windows host.
-  # -------------------------------------------------------------------------
-  core:
-    name: PrismCore (${{ matrix.name }})
+  # ===========================================================================
+  # gates: the whole Linux side. Core is built twice (Release gcc, then Debug
+  # clang with ASan+UBSan) because a sanitizer run is a different question about
+  # the same code, not a different machine.
+  # ===========================================================================
+  gates:
+    name: Gates + PrismCore (Linux)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: gcc-release
-            build-type: Release
-            cxx: g++
-            configure-args: ""
-          - name: asan+ubsan
-            build-type: Debug
-            cxx: clang++
-            configure-args: >-
-              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPRESS: 1
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: >
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
-          -DPRISM_BUILD_WIN_LAYER=OFF
-          ${{ matrix.configure-args }}
-      - name: Build
-        run: cmake --build build --parallel
-      - name: Preflight gate (contracts as deterministic checks)
-        # docs/CONTRACTS.md entries as greps: B1/B2/B5/B6/ARCH/D1. Runs in
-        # seconds and keeps the repeat error classes from ever costing a CI
-        # round again (30/60 red runs this session; half were repeat classes).
-        run: python3 tools/preflight.py
-      - name: Header self-containment gate
-        # A header must compile alone AND include what it uses: relying on a
-        # transitive <regex> pull-in for <cstdint> passes locally and fails on
-        # the runner (libstdc++ version difference). This gate is lexical and
-        # deterministic, so it cannot drift.
-        run: sh tools/check_headers.sh
-      - name: Windows-TU typecheck gate
-        # The PrismWin headers compiled against tools/win_stub's vocabulary:
-        # catches the MSVC-facing class of error (wrong override signature,
-        # unparenthesized std::min, missing <cstdint>, a std::function from a
-        # nullptr literal) in two seconds instead of a Windows round.
-        #
-        # This step is NEW in the sense that matters: the script and the stub it
-        # needs were added in PR #13 but the stub directory never made it into
-        # the tree, so the gate could not run -- and nothing noticed, because
-        # nothing called it. A gate nobody runs is not a gate.
-        run: sh tools/check_windows_tu.sh
-      - name: Test
-        working-directory: build
-        run: ctest --output-on-failure --no-tests=error
 
-  # -------------------------------------------------------------------------
-  # Windows: real MSVC build of the 7z.dll bridge + Win11 shell extension,
-  # plus a real round-trip against the 7-Zip DLL shipped in the runner image,
-  # plus fxc.exe compilation of the Liquid Glass HLSL.
-  # -------------------------------------------------------------------------
+      # ccache across runs: PrismCore is header-only, so almost every TU is a
+      # full re-parse of 21 headers. Nothing else about this lane is expensive.
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('Src/**/*.hpp', 'Tests/**', 'CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      # ---- lane 1: Release (gcc) ------------------------------------------
+      - name: Configure (release-gcc preset, ccache launcher)
+        run: >
+          cmake --preset release-gcc -B build
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build (Release)
+        run: cmake --build build --parallel
+
+      # ONE gate step. This used to be four separate steps (preflight, header
+      # self-containment, Windows-TU typecheck, ctest). They are now the same
+      # command a developer or agent runs locally:
+      #
+      #     pwsh -File tools/local_gates.ps1
+      #
+      # Why: the local script and the CI steps drifted apart twice -- a gate CI
+      # ran that nobody ran locally (three Windows rounds), and a gate that
+      # existed locally but was wired into nothing (tools/check_windows_tu.sh was
+      # broken on main for a whole PR because no job called it). One entry point
+      # cannot drift from itself (CONTRACTS D1).
+      - name: Local gates (preflight + shell gates + manifest + ctest)
+        run: >
+          pwsh -NoProfile -File tools/local_gates.ps1
+          -BuildDir build
+          -Only presets,ctest,preflight,manifest,headers,windows_tu
+
+      # ---- lane 2: Debug + ASan/UBSan (clang) ------------------------------
+      - name: Configure (asan-clang preset)
+        run: cmake --preset asan-clang -B build-asan -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build (ASan/UBSan)
+        run: cmake --build build-asan --parallel
+      - name: Test (ASan/UBSan)
+        run: ctest --test-dir build-asan --output-on-failure --no-tests=error
+
+      # ---- diagnostics: a red run has to be readable from the run page ----
+      - name: Failed test names -> step summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Failed tests'
+            echo '~~~'
+            grep -hE '^\s*[0-9]+/[0-9]+ Test' build/Testing/Temporary/LastTest.log 2>/dev/null | grep -i 'failed' || true
+            grep -hE '\*\*\*Failed|Failed +[0-9]' build/Testing/Temporary/LastTest.log 2>/dev/null | head -40 || true
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-linux
+          if-no-files-found: ignore
+          retention-days: 5
+          path: |
+            build/local-gates/*.log
+            build/Testing/Temporary/LastTest.log
+            build-asan/Testing/Temporary/LastTest.log
+
+      - name: ccache stats -> step summary
+        if: always()
+        run: ccache --show-stats | head -20 >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # windows: real MSVC build of the 7z.dll bridge + Win11 shell extension, a
+  # real round-trip against the 7-Zip DLL in the runner image, under
+  # AddressSanitizer, plus fxc.exe compilation of the Liquid Glass HLSL.
+  # ===========================================================================
   windows:
-    name: Windows (MSVC + 7z.dll + HLSL)
+    name: Windows (MSVC + ASan + 7z.dll + HLSL)
     runs-on: windows-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -84,8 +132,21 @@ jobs:
       # its own; this puts cl.exe + the SDK on PATH for the Ninja generator.
       - uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi /EHsc" -DCMAKE_EXE_LINKER_FLAGS="/InferAsanLibraries"
+      # sccache, backed by the GitHub Actions cache. NOTE: this lane builds with
+      # /fsanitize=address (see CMakePresets.json asan-msvc); sccache refuses to
+      # cache ASan compiles on MSVC, so the launcher is deliberately NOT set here
+      # -- a launcher that silently falls back to direct compilation would only
+      # add a process hop. The Windows proof that matters is the build + the
+      # 7z.dll suites below, and they are not slowed down by this.
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      # The ASan flags are NOT spelled inline any more: they live in
+      # CMakePresets.json's asan-msvc preset, which is the same preset a
+      # developer runs locally (tools/local_gates.ps1 -Preset asan-msvc).
+      # A preset that CI does not use rots; this lane is its proof.
+      - name: Configure (asan-msvc preset)
+        run: cmake --preset asan-msvc -B build
 
       - name: Probe SDK declaration of the COM entry points
         shell: pwsh
@@ -121,12 +182,46 @@ jobs:
         run: |
           ctest --output-on-failure --no-tests=error 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
+
+      # The Windows half of the same local gate: proves CMakePresets.json parses
+      # on a real MSVC host and that preflight runs there too. The two POSIX
+      # shell gates cannot run on a Windows runner without WSL -- the gates job
+      # above runs them for real. Cheap on purpose: the expensive Windows proofs
+      # are the build + ctest above.
+      - name: "Local gates (Windows side: presets + preflight)"
+        run: pwsh -NoProfile -File tools/local_gates.ps1 -BuildDir build -Only presets,preflight
+
       - name: Upload the runnable app (batch A)
         uses: actions/upload-artifact@v4
         with:
           name: PrismArchive-exe
           path: build/Src/PrismWin/PrismArchive.exe
           if-no-files-found: error
+
+      # Diagnostics: failed test names + the raw log, so a red run is readable
+      # from the run page without anyone re-running it locally.
+      - name: Failed test names -> step summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Failed tests'
+            echo '~~~'
+            grep -E '^\s*[0-9]+/[0-9]+ Test' "$RUNNER_TEMP/prism_test.log" 2>/dev/null | grep -Ei 'failed|timeout' || true
+            grep -E 'Failed|\*\*\*' "$RUNNER_TEMP/prism_test.log" 2>/dev/null | head -40 || true
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-windows
+          if-no-files-found: ignore
+          retention-days: 5
+          path: |
+            ${{ runner.temp }}/prism_test.log
+            build/Testing/Temporary/LastTest.log
 
       # Headless design review: the gallery renderer paints the real D2D code
       # path to PNGs; uploaded as artifacts so the design is reviewable
@@ -156,7 +251,9 @@ jobs:
           $log = Get-Content "$env:RUNNER_TEMP/prism_test.log" -Raw -ErrorAction SilentlyContinue
           if (-not $log) { exit 0 }
           $tail = $log.Substring([Math]::Max(0, $log.Length - 3500))
-          $body = "Windows test output (tail):`n``````text`n$tail`n``````"
+          $fence = ([string][char]96) * 3
+          $nl = [Environment]::NewLine
+          $body = "Windows test output (tail):" + $nl + $fence + "text" + $nl + $tail + $nl + $fence
           $json = @{ body = $body } | ConvertTo-Json
           $json | gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -X POST --input - | Out-Null
         env:
@@ -169,8 +266,7 @@ jobs:
 
       # Performance benchmark (blueprint ch. 7.2): the real solid-sweep vs
       # per-item numbers, appended to the run summary so every CI visitor sees
-      # digits instead of adjectives. Appended AFTER the existing steps -- the
-      # lane structure above is untouched.
+      # digits instead of adjectives.
       - name: Performance benchmark -> step summary
         working-directory: build
         shell: bash
@@ -178,10 +274,11 @@ jobs:
           set -o pipefail
           ./Tests/win_bench_solid.exe | tee "$RUNNER_TEMP/prism_bench.log"
           status=${PIPESTATUS[0]}
+          fence=$(printf '\140\140\140')
           {
             echo "### Solid sweep benchmark (Windows lane)"
-            echo '```json'
+            echo "$fence""json"
             grep -E '^BENCH \{' "$RUNNER_TEMP/prism_bench.log" | sed 's/^BENCH //'
-            echo '```'
+            echo "$fence"
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status

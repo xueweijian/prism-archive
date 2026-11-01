@@ -176,3 +176,74 @@ if(WIN32)
   # VirtualTree.hpp still carries the move-semantics UB the branch fixed
   # (SEGFAULT on MSVC, 2026-10-31) -- re-register when B1 lands as a unit.
 endif()
+# ---------------------------------------------------------------------------
+# M4 dnd-seek batch (APPENDED; no registration above was touched or reordered).
+# The delayed-extract seek planner plus three of its own negative controls --
+# each mutant must go red on the SAME suite, and WILL_FAIL makes ctest green
+# only when it does.
+# ---------------------------------------------------------------------------
+add_executable(test_dnd_seek test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek PRIVATE prism_core)
+add_test(NAME "core.test_dnd_seek" COMMAND test_dnd_seek)
+# A hanging seek test must die loud, not block the lane forever; ctest prints
+# the partial output on timeout so the stall is diagnosable from the log.
+set_tests_properties(core.test_dnd_seek PROPERTIES TIMEOUT 240)
+
+add_executable(test_dnd_seek_mutant_forward_only test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek_mutant_forward_only PRIVATE prism_core)
+target_compile_definitions(test_dnd_seek_mutant_forward_only
+                           PRIVATE PRISM_DND_MUTANT_SEEK_FORWARD_ONLY=1)
+add_test(NAME "mutation.dnd_seek.forward_only"
+         COMMAND test_dnd_seek_mutant_forward_only)
+set_tests_properties(mutation.dnd_seek.forward_only PROPERTIES WILL_FAIL TRUE)
+
+add_executable(test_dnd_seek_mutant_ignore_budget test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek_mutant_ignore_budget PRIVATE prism_core)
+target_compile_definitions(test_dnd_seek_mutant_ignore_budget
+                           PRIVATE PRISM_DND_MUTANT_SEEK_IGNORE_BUDGET=1)
+add_test(NAME "mutation.dnd_seek.ignore_budget"
+         COMMAND test_dnd_seek_mutant_ignore_budget)
+set_tests_properties(mutation.dnd_seek.ignore_budget PROPERTIES WILL_FAIL TRUE)
+
+add_executable(test_dnd_seek_mutant_lookback_off_by_one test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek_mutant_lookback_off_by_one PRIVATE prism_core)
+target_compile_definitions(test_dnd_seek_mutant_lookback_off_by_one
+                           PRIVATE PRISM_DND_MUTANT_SEEK_LOOKBACK_OFF_BY_ONE=1)
+add_test(NAME "mutation.dnd_seek.lookback_off_by_one"
+         COMMAND test_dnd_seek_mutant_lookback_off_by_one)
+set_tests_properties(mutation.dnd_seek.lookback_off_by_one PROPERTIES WILL_FAIL TRUE)
+
+# The ring must re-anchor after a forward skip. Without it, the retained window
+# still claims its pre-skip start, so the next read indexes past the retained
+# bytes -- PR8's Read() had exactly this hole (dropped bytes were counted in
+# the frontier but never removed from the ring).
+add_executable(test_dnd_seek_mutant_ring_keep_skipped test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek_mutant_ring_keep_skipped PRIVATE prism_core)
+target_compile_definitions(test_dnd_seek_mutant_ring_keep_skipped
+                           PRIVATE PRISM_DND_MUTANT_RING_KEEP_SKIPPED=1)
+add_test(NAME "mutation.dnd_seek.ring_keep_skipped"
+         COMMAND test_dnd_seek_mutant_ring_keep_skipped)
+set_tests_properties(mutation.dnd_seek.ring_keep_skipped PROPERTIES WILL_FAIL TRUE)
+
+# The ring may only serve what it holds. Serving from the wrong base is the
+# "successful read of the wrong bytes" failure mode the old skeleton had.
+add_executable(test_dnd_seek_mutant_serve_unresident test_dnd_seek.cpp)
+target_link_libraries(test_dnd_seek_mutant_serve_unresident PRIVATE prism_core)
+target_compile_definitions(test_dnd_seek_mutant_serve_unresident
+                           PRIVATE PRISM_DND_MUTANT_SERVE_UNRESIDENT=1)
+add_test(NAME "mutation.dnd_seek.serve_unresident"
+         COMMAND test_dnd_seek_mutant_serve_unresident)
+set_tests_properties(mutation.dnd_seek.serve_unresident PROPERTIES WILL_FAIL TRUE)
+
+# Windows lane: the real 7z.dll served through a real CFSTR_FILECONTENTS
+# IDataObject. The stdout marker is part of the verdict (contract D1).
+if(WIN32 AND PRISM_BUILD_WIN_LAYER)
+  add_executable(win_dnd_seek_test win/test_dnd_seek.cpp)
+  target_link_libraries(win_dnd_seek_test PRIVATE prism_core prism_win_bridge
+                                                   user32.lib gdi32.lib ole32.lib
+                                                   oleaut32.lib windowscodecs.lib)
+  target_compile_options(win_dnd_seek_test PRIVATE /WX-)
+  add_test(NAME "win.dnd_seek" COMMAND win_dnd_seek_test)
+  set_tests_properties(win.dnd_seek PROPERTIES TIMEOUT 600
+      PASS_REGULAR_EXPRESSION "ALL DND-SEEK CHECKS PASSED")
+endif()

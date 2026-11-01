@@ -22,6 +22,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <ostream>
@@ -684,6 +686,538 @@ class StreamPumpPlan {
   Producer producer_;
   StreamError error_ = StreamError::None;
   std::string message_;
+};
+
+// ---------------------------------------------------------------------------
+// Delayed-extract seek planning (M4: the streaming completion of channel B).
+//
+// A solid 7z block decodes strictly forward: file N's bytes follow files
+// 1..N-1. This is not an implementation detail of ours -- it is what 7-Zip
+// itself does, and it is why the format has no random-access promise:
+//
+//   * 7zExtract.cpp:325  fileIndex = _db.FolderStartFileIndex[folderIndex]
+//     -- every extract call for an item inside a solid folder rewinds to the
+//     FIRST item of that folder, never to the item requested.
+//   * 7zExtract.cpp:330-337  the requested indices are walked forward and the
+//     entries in between are handed askMode kSkip, so the decoder still runs
+//     over their bytes and we simply do not keep them.
+//   * 7zExtract.cpp:260-272  SetTotal reports that whole discarded prefix as
+//     "importantTotalUnpacked", i.e. 7-Zip itself counts the prefix as the
+//     honest price of the extraction.
+//   * 7zFolderInStream.cpp:GetSubStreamSize answers only about a stream it is
+//     *currently* reading: it reports S_FALSE / estimates for anything past
+//     _pos. There is no ICompressGetSubStreamSize on CFolderOutStream at all
+//     (7zExtract.cpp:22 has it commented out), so nothing in 7z.dll claims a
+//     solid folder can be seeked into.
+//
+// So an IStream handed to Explorer (which seeks freely) must pay for every
+// backward step somewhere. We plan each seek into exactly three kinds:
+//   CursorOnly     -- forward seek: skip ahead, or land inside the ring.
+//   LookbackHit    -- small backward seek served from the recent-bytes ring
+//                     (no decoder work at all).
+//   RestartDecode  -- rewind the decoder to the block start and re-decode,
+//                     dropping everything before the target (the honest solid
+//                     cost, recorded in the stream diagnostics).
+// A stream that cannot afford a restart is REFUSED with a reason a user can
+// act on: re-decoding a multi-GB solid block on every back-step is worse than
+// telling them to use the right-click extract once.
+//
+// PlanSeek is a pure function: the caller's mutable state (restarts and bytes
+// already spent) travels in the SeekPolicy snapshot, so the same inputs always
+// yield the same plan (contract C4's determinism discipline).
+// ---------------------------------------------------------------------------
+namespace mutation {
+#if defined(PRISM_DND_MUTANT_SEEK_FORWARD_ONLY)
+constexpr bool kSeekForwardOnly = true;
+#else
+constexpr bool kSeekForwardOnly = false;
+#endif
+#if defined(PRISM_DND_MUTANT_SEEK_IGNORE_BUDGET)
+constexpr bool kSeekIgnoreBudget = true;
+#else
+constexpr bool kSeekIgnoreBudget = false;
+#endif
+#if defined(PRISM_DND_MUTANT_SEEK_LOOKBACK_OFF_BY_ONE)
+constexpr bool kSeekLookbackOffByOne = true;
+#else
+constexpr bool kSeekLookbackOffByOne = false;
+#endif
+// PR8's Read() dropped the bytes of a forward skip WITHOUT re-anchoring the
+// ring, so after a skip the retained window still claimed to start where it
+// did before and the next read copied from ring_.data() + offset with
+// offset >= ring_.size() -- a heap over-read that serves garbage (or traps).
+// This mutant reproduces exactly that; the "forward skip" case must go red.
+#if defined(PRISM_DND_MUTANT_RING_KEEP_SKIPPED)
+constexpr bool kRingKeepSkipped = true;
+#else
+constexpr bool kRingKeepSkipped = false;
+#endif
+// The ring may only serve bytes it actually holds. PR8's DelayedExtractStream
+//::Read went straight to producer_(count) and advanced position_ by what came
+// back, so a seek that did not restart the decoder served the WRONG BYTES while
+// reporting success -- the worst possible failure for a copy engine. This
+// mutant makes the cursor skip the residency check and trust the frontier; the
+// lookback cases must go red.
+#if defined(PRISM_DND_MUTANT_SERVE_UNRESIDENT)
+constexpr bool kServeUnresident = true;
+#else
+constexpr bool kServeUnresident = false;
+#endif
+}  // namespace mutation
+
+// Default lookback ring = 4 MiB. Measured, not invented (see
+// Tests/test_dnd_seek.cpp "measured:" cases and the table in the report):
+// serving a back-step from the ring is a memcpy at ~15.8 GiB/s, i.e. 0.063 ms
+// per MiB, while re-decoding the same bytes costs 16.54 ms per MiB of LZMA2
+// text and 1.40 ms per MiB of stored data -- 22x to 262x more. 4 MiB covers
+// the read-ahead prefix a real drop target issues before seeking back to 0
+// (Explorer and every format sniffer read a few hundred KiB at most) while
+// costing 4 MiB of RAM per live stream, which is the same order as the 4 MiB
+// pipe high-water mark the producer already holds.
+inline constexpr size_t kDefaultSeekLookbackBytes = 4u * 1024 * 1024;
+
+// Default re-decode byte budget = 16 MiB. PR8 bounded restarts by COUNT (2),
+// and a count cannot bound latency: two restarts into a 256 MiB solid block
+// are 2 x 256 x 16.54 ms = 8.5 s of decode before the target sees a byte.
+// A byte budget bounds it directly. 16 MiB of discarded prefix measured
+// 264 ms worst case (LZMA2 text) and 22 ms best case (stored), which is the
+// most we are willing to make a drop target wait before it gets an answer at
+// all -- past that the honest answer is "extract it, don't drag it".
+inline constexpr size_t kDefaultRestartDecodeBudgetBytes = 16u * 1024 * 1024;
+
+struct SeekPolicy {
+  bool useLookback = true;
+  size_t lookbackBytes = kDefaultSeekLookbackBytes;  // recent-bytes ring the stream keeps
+  // Two independent budgets; BOTH must hold. maxRestarts is the cheap guard
+  // against a pathological seek storm (each restart also costs a pipe flush),
+  // restartDecodeBudget is the one that bounds wall-clock time.
+  size_t maxRestarts = 2;  // after this many re-decodes, refuse with a reason
+  size_t restartDecodeBudget = kDefaultRestartDecodeBudgetBytes;
+  // State snapshot supplied by the stream owner: what this stream already
+  // spent. Kept here (not as a PlanSeek parameter) so the plan function stays
+  // signature-stable and pure.
+  size_t restartsUsed = 0;
+  size_t restartBytesUsed = 0;
+};
+
+struct SeekPlan {
+  enum Kind : uint8_t { CursorOnly, LookbackHit, RestartDecode };
+  Kind kind = CursorOnly;
+  // CursorOnly: forward bytes to skip before serving.
+  // RestartDecode: bytes to re-decode and drop after rewinding (= target).
+  // LookbackHit: 0 -- nothing is decoded.
+  int64_t discardBytes = 0;
+  bool refused = false;
+  std::string reason;  // mandatory when refused; names the escape for the user
+};
+
+inline const char* ToString(SeekPlan::Kind kind) {
+  switch (kind) {
+    case SeekPlan::CursorOnly: return "CursorOnly";
+    case SeekPlan::LookbackHit: return "LookbackHit";
+    case SeekPlan::RestartDecode: return "RestartDecode";
+  }
+  return "Unknown";
+}
+
+// PRISM_CHECK_EQ prints operands on failure (contract B6).
+inline std::ostream& operator<<(std::ostream& os, SeekPlan::Kind kind) {
+  return os << ToString(kind);
+}
+
+inline SeekPlan PlanSeek(int64_t current, int64_t target, int64_t streamSize,
+                         const SeekPolicy& policy) {
+  SeekPlan plan;
+  if (target < 0) {
+    plan.refused = true;
+    plan.reason = "seek refused: target offset is negative";
+    return plan;
+  }
+  if (streamSize >= 0 && target > streamSize) {
+    plan.refused = true;
+    plan.reason = "seek refused: target offset is beyond the declared stream size";
+    return plan;
+  }
+  // Forward (and in-place) seeks never touch the decoder's past: skip or
+  // no-op. The forward-only mutant makes backward seeks plan as CursorOnly
+  // with a negative discard -- nonsense the tests must catch.
+  if (mutation::kSeekForwardOnly || target >= current) {
+    plan.kind = SeekPlan::CursorOnly;
+    plan.discardBytes = target - current;
+    return plan;
+  }
+  const int64_t backBytes = current - target;
+  // Inclusive boundary: a rewind of exactly lookbackBytes still hits the ring.
+  // The off-by-one mutant turns this into a strict '<' and the boundary case
+  // in the suite goes red.
+  const bool inRing = mutation::kSeekLookbackOffByOne
+                          ? backBytes < static_cast<int64_t>(policy.lookbackBytes)
+                          : backBytes <= static_cast<int64_t>(policy.lookbackBytes);
+  if (policy.useLookback && inRing) {
+    plan.kind = SeekPlan::LookbackHit;
+    plan.discardBytes = 0;
+    return plan;
+  }
+  // Both budgets are checked BEFORE granting, so a refusal never moves the
+  // cursor and never starts a decode it cannot finish.
+  const bool budgetOk = mutation::kSeekIgnoreBudget
+                            ? true
+                            : (policy.restartBytesUsed + static_cast<size_t>(target) <=
+                               policy.restartDecodeBudget);
+  if (policy.restartsUsed >= policy.maxRestarts) {
+    plan.refused = true;
+    plan.reason = "seek refused: solid-decoder restart budget exhausted (" +
+                  std::to_string(policy.restartsUsed) + "/" +
+                  std::to_string(policy.maxRestarts) +
+                  " restarts spent); re-decoding the whole solid block again is too "
+                  "expensive -- extract this file with the right-click menu instead";
+    return plan;
+  }
+  if (!budgetOk) {
+    plan.refused = true;
+    plan.reason =
+        "seek refused: solid re-decode budget exhausted (re-decoding " +
+        std::to_string(target) + " bytes would spend " +
+        std::to_string(policy.restartBytesUsed + static_cast<size_t>(target)) +
+        " of " + std::to_string(policy.restartDecodeBudget) +
+        " byte budget); this solid block is too large to seek within -- extract "
+        "this file with the right-click menu instead";
+    return plan;
+  }
+  plan.kind = SeekPlan::RestartDecode;
+  plan.discardBytes = target;  // re-decode from the block start, drop to target
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
+// Recent-byte ring: the "lookback" half of the seek story.
+//
+// PR8 kept the ring in a std::string and called ring_.erase(0, excess) on every
+// append past capacity, which is an O(capacity) memmove per chunk once the ring
+// is full -- 0.25 ms per 64 KiB read at 4 MiB (memmove measured at 15.8 GiB/s
+// on this machine), i.e. +40% on a 4 MiB sequential read. Tests/test_dnd_seek.cpp
+// measures both and asserts the chunked ring wins; the chunked form below is
+// O(1) amortised because a chunk that falls out of the window is simply popped.
+//
+// Invariant: end() - base() == retained bytes; Copy() clamps to what is
+// resident, and the caller (DelayedSeekCursor) treats a short copy as
+// "not resident" rather than guessing.
+// ---------------------------------------------------------------------------
+class RecentByteRing {
+ public:
+  explicit RecentByteRing(size_t capacity) : capacity_(capacity) {}
+
+  void Clear() {
+    chunks_.clear();
+    base_ = 0;
+    end_ = 0;
+  }
+
+  // Drop everything and re-anchor at `offset` (used when the decoder skipped
+  // forward: those bytes were never retained and must not appear resident).
+  void ResetTo(uint64_t offset) {
+    chunks_.clear();
+    base_ = offset;
+    end_ = offset;
+  }
+
+  void Append(std::string chunk) {
+    if (chunk.empty()) return;
+    end_ += chunk.size();
+    chunks_.push_back(std::move(chunk));
+    // Evict whole chunks from the front. A ring smaller than one chunk keeps
+    // that chunk (a short window is worse than an oversized one).
+    while (chunks_.size() > 1 && (end_ - base_) > capacity_) {
+      base_ += chunks_.front().size();
+      chunks_.pop_front();
+    }
+    if (end_ - base_ > capacity_ && chunks_.size() == 1) {
+      // One oversized chunk: keep only its tail.
+      const size_t excess = static_cast<size_t>(end_ - base_ - capacity_);
+      chunks_.front().erase(0, excess);
+      base_ += excess;
+    }
+  }
+
+  // Copy the retained bytes starting at absolute offset `start`. Returns the
+  // number actually copied (0 when `start` is not resident).
+  size_t Copy(uint64_t start, uint8_t* out, size_t count) const {
+    if (count == 0 || start < base_ || start >= end_) return 0;
+    size_t skip = static_cast<size_t>(start - base_);
+    size_t copied = 0;
+    for (const std::string& chunk : chunks_) {
+      if (skip >= chunk.size()) {
+        skip -= chunk.size();
+        continue;
+      }
+      const size_t avail = chunk.size() - skip;
+      const size_t n = avail < (count - copied) ? avail : (count - copied);
+      std::memcpy(out + copied, chunk.data() + skip, n);
+      copied += n;
+      skip = 0;
+      if (copied == count) break;
+    }
+    return copied;
+  }
+
+  bool Holds(uint64_t offset) const { return offset >= base_ && offset <= end_; }
+  uint64_t base() const { return base_; }
+  uint64_t end() const { return end_; }
+  size_t capacity() const { return capacity_; }
+  // Retained bytes plus chunk bookkeeping -- what the ring actually costs.
+  size_t residentBytes() const {
+    size_t total = 0;
+    for (const std::string& c : chunks_) total += c.size();
+    return total;
+  }
+
+ private:
+  size_t capacity_;
+  std::deque<std::string> chunks_;
+  uint64_t base_ = 0;
+  uint64_t end_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// DelayedSeekCursor: the pure state machine behind IStream::Read/Seek.
+//
+// The Windows class (PrismWin/PrismVirtualDragDrop.hpp) is a COM shell around
+// this, so byte-exactness, ring residency and restart accounting are all
+// verifiable on Linux in milliseconds instead of one Windows CI round each.
+//
+// Invariants (asserted by the Linux suite against a synthetic solid block):
+//   * position() <= totalSize(); ring.end() == frontier()
+//   * a Read never serves a byte it did not pull or retain
+//   * a refused Seek never moves position() and never spends a restart
+//   * restartBytesUsed() is booked from the PLAN, before the decode runs, so an
+//     abandoned re-decode can never look free
+// ---------------------------------------------------------------------------
+class DelayedSeekCursor {
+ public:
+  // Next sequential bytes from the decoder frontier; empty means "decoder
+  // ended or failed before the declared size" (latched loudly).
+  using PullFn = std::function<std::string(size_t)>;
+  // Rewind the decoder to stream offset 0, keeping the session alive.
+  using RestartFn = std::function<bool()>;
+
+  struct ReadOutcome {
+    size_t served = 0;
+    bool eof = false;
+    bool failed = false;
+  };
+
+  // Default-constructible so a COM wrapper can hold one as a plain member; an
+  // un-initialised cursor reports a zero-length, already-EOF stream.
+  DelayedSeekCursor() : ring_(SeekPolicy{}.lookbackBytes) {}
+
+  DelayedSeekCursor(uint64_t totalSize, PullFn pull, RestartFn restart,
+                    SeekPolicy policy = {})
+      : totalSize_(totalSize),
+        ring_(policy.lookbackBytes),
+        pull_(std::move(pull)),
+        restart_(std::move(restart)),
+        policy_(policy) {
+    policy_.restartsUsed = 0;
+    policy_.restartBytesUsed = 0;
+  }
+
+  // Decoder pull granularity. Small enough that the ring never trails the
+  // frontier by more than one chunk, so a lookback window inside the ring is
+  // always fully resident.
+  static constexpr size_t kPullChunkBytes = 64 * 1024;
+
+  ReadOutcome Read(uint8_t* out, size_t count) {
+    ReadOutcome result;
+    if (failed_) {
+      result.failed = true;
+      return result;
+    }
+    if (count == 0 || position_ >= totalSize_) {
+      result.eof = position_ >= totalSize_;
+      return result;
+    }
+    size_t served = 0;
+    // (1) Serve what the cursor still covers from the recent-bytes ring.
+    while (served < count && position_ < frontier_) {
+      const size_t avail = static_cast<size_t>(
+          (frontier_ - position_) < (count - served) ? (frontier_ - position_)
+                                                     : (count - served));
+      const size_t got = mutation::kServeUnresident
+                             ? ring_.Copy(ring_.base(), out + served, avail)
+                             : ring_.Copy(position_, out + served, avail);
+      if (got == 0) {
+        LatchFailure("lookback ring gap at offset " + std::to_string(position_));
+        break;
+      }
+      served += got;
+      position_ += got;
+      if (got < avail) {
+        LatchFailure("lookback ring short at offset " + std::to_string(position_));
+        break;
+      }
+    }
+    // (2) Align the decoder: a previous seek may have parked the cursor ahead
+    // of the frontier (forward skip) or rewound the decoder to zero (restart
+    // prefix). Drop exactly (position_ - frontier_) decoded bytes, recomputed
+    // from absolute positions every read so no seek can desynchronise it.
+    // Dropped bytes are NOT retained -- the ring re-anchors at the frontier,
+    // otherwise frontier_-relative offsets would read past the retained bytes.
+    int64_t toDrop = static_cast<int64_t>(position_) - static_cast<int64_t>(frontier_);
+    while (served < count && !failed_ && toDrop > 0) {
+      const size_t want = static_cast<size_t>(toDrop) < kPullChunkBytes
+                              ? static_cast<size_t>(toDrop) : kPullChunkBytes;
+      const std::string chunk = pull_ ? pull_(want) : std::string();
+      if (chunk.empty()) {
+        LatchFailure("decoder ended while skipping to offset " + std::to_string(position_));
+        break;
+      }
+      frontier_ += chunk.size();
+      if (!mutation::kRingKeepSkipped) ring_.ResetTo(frontier_);
+      if (droppingForRestart_) {
+        wastedBytes_ += chunk.size();  // re-decoded purely to reach the target
+      } else {
+        skippedBytes_ += chunk.size();  // forward-skip cost of a solid block
+      }
+      toDrop -= static_cast<int64_t>(chunk.size());
+    }
+    if (toDrop <= 0) droppingForRestart_ = false;
+    // (3) Pull fresh bytes and retain them for small back-steps.
+    while (served < count && !failed_ && position_ < totalSize_) {
+      const size_t want = (count - served) < kPullChunkBytes ? (count - served)
+                                                             : kPullChunkBytes;
+      std::string chunk = pull_ ? pull_(want) : std::string();
+      if (chunk.empty()) {
+        LatchFailure("decoder ended early at frontier " + std::to_string(frontier_));
+        break;
+      }
+      const size_t n = chunk.size() < (count - served) ? chunk.size() : (count - served);
+      std::memcpy(out + served, chunk.data(), n);
+      frontier_ += chunk.size();
+      ring_.Append(std::move(chunk));
+      served += n;
+      position_ += n;
+    }
+    result.served = served;
+    result.failed = failed_;
+    result.eof = !failed_ && position_ >= totalSize_;
+    return result;
+  }
+
+  // Absolute seek (the COM layer resolves STREAM_SEEK_SET/CUR/END first).
+  // A refusal leaves position() untouched and spends nothing.
+  bool Seek(int64_t target, std::string* reason) {
+    if (failed_) {
+      if (reason) *reason = "stream is in a failed state";
+      return false;
+    }
+    const int64_t current = static_cast<int64_t>(position_);
+    policy_.restartsUsed = static_cast<size_t>(restarts_);
+    policy_.restartBytesUsed = static_cast<size_t>(restartBytesUsed_);
+    const SeekPlan plan =
+        PlanSeek(current, target, static_cast<int64_t>(totalSize_), policy_);
+    if (plan.refused) {
+      // Budget refusals surface here with the planner's reason (which names
+      // the right-click-extract escape hatch); the cursor stays untouched.
+      diagnostics_ += plan.reason + "; ";
+      if (reason) *reason = plan.reason;
+      return false;
+    }
+    switch (plan.kind) {
+      case SeekPlan::CursorOnly:
+        // No decoder action now: Read() lazily drops (position_ - frontier_)
+        // bytes on the next demand, so seeking across an unexplored solid
+        // block stays O(1) until bytes are actually pulled.
+        position_ = static_cast<uint64_t>(target);
+        return true;
+      case SeekPlan::LookbackHit:
+        if (ring_.Holds(static_cast<uint64_t>(target))) {
+          position_ = static_cast<uint64_t>(target);  // served from the ring
+          return true;
+        }
+        // The planner's window is cursor-relative, the ring is
+        // frontier-relative; when the planned window is not resident (a
+        // back-step after a back-step), pay the honest restart instead of
+        // guessing at bytes that left the ring. The fallback is re-planned
+        // through the SAME pure function with lookback disabled, so it is
+        // still budget-checked -- it can refuse, it can never over-spend.
+        {
+          SeekPolicy noRing = policy_;
+          noRing.useLookback = false;
+          const SeekPlan fallback =
+              PlanSeek(current, target, static_cast<int64_t>(totalSize_), noRing);
+          if (fallback.refused) {
+            diagnostics_ += fallback.reason + "; ";
+            if (reason) *reason = fallback.reason;
+            return false;
+          }
+          if (!DoRestartDecode(fallback.discardBytes)) {
+            if (reason) *reason = "decoder restart failed";
+            return false;
+          }
+          position_ = static_cast<uint64_t>(target);
+          return true;
+        }
+      case SeekPlan::RestartDecode:
+        if (!DoRestartDecode(plan.discardBytes)) {
+          if (reason) *reason = "decoder restart failed";
+          return false;
+        }
+        position_ = static_cast<uint64_t>(target);
+        return true;
+    }
+    return false;
+  }
+
+  uint64_t position() const { return position_; }
+  uint64_t frontier() const { return frontier_; }
+  uint64_t totalSize() const { return totalSize_; }
+  bool failed() const { return failed_; }
+  uint64_t restarts() const { return restarts_; }
+  uint64_t restartBytesUsed() const { return restartBytesUsed_; }
+  uint64_t wastedBytes() const { return wastedBytes_; }
+  uint64_t skippedBytes() const { return skippedBytes_; }
+  const RecentByteRing& ring() const { return ring_; }
+  const std::string& diagnostics() const { return diagnostics_; }
+
+ private:
+  // Rewind the producer to the stream start on the SAME session. `prefixBytes`
+  // is what the planner said this restart will discard, and it is what the byte
+  // budget is charged for -- booked up front (see the class invariant).
+  bool DoRestartDecode(int64_t prefixBytes) {
+    if (!restart_ || !restart_()) {
+      LatchFailure("decoder restart failed");
+      return false;
+    }
+    ++restarts_;
+    if (prefixBytes > 0) restartBytesUsed_ += static_cast<uint64_t>(prefixBytes);
+    ring_.ResetTo(0);
+    frontier_ = 0;
+    droppingForRestart_ = true;
+    diagnostics_ += "restart#" + std::to_string(restarts_) + "(" +
+                    std::to_string(prefixBytes) + "B); ";
+    return true;
+  }
+
+  void LatchFailure(const std::string& what) {
+    if (failed_) return;
+    failed_ = true;
+    diagnostics_ += what + "; ";
+  }
+
+  uint64_t totalSize_ = 0;
+  uint64_t position_ = 0;  // the caller's cursor -- never advanced speculatively
+  uint64_t frontier_ = 0;  // absolute offset of the decoder's next byte
+  RecentByteRing ring_;
+  PullFn pull_;
+  RestartFn restart_;
+  SeekPolicy policy_;
+  bool droppingForRestart_ = false;
+  uint64_t restarts_ = 0;
+  uint64_t restartBytesUsed_ = 0;
+  uint64_t wastedBytes_ = 0;
+  uint64_t skippedBytes_ = 0;
+  bool failed_ = false;
+  std::string diagnostics_;
 };
 
 }  // namespace prism::dnd

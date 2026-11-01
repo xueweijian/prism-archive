@@ -16,14 +16,21 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "../../Src/PrismCore/DragDrop.hpp"
+#include "PrismEngineBridge.hpp"
 #include "PrismVirtualDragDrop.hpp"
 
 namespace prism::win::dragdrop {
@@ -291,11 +298,46 @@ class VirtualFileDataObject final
     return DV_E_FORMATETC;
   }
 
-  IFACEMETHODIMP GetDataHere(FORMATETC*, STGMEDIUM*) override {
-    // Explorer's copy engine uses GetData; a caller-managed destination
-    // IStream is not supported by this skeleton on purpose (no silent
-    // half-copies), so we refuse loudly instead.
-    return E_NOTIMPL;
+  // Caller-managed destination medium. Where the old skeleton refused this
+  // wholesale, the seek-capable stream now lets us copy INTO the caller's
+  // medium: FILEDESCRIPTORW into the caller's HGLOBAL, FILECONTENTS pumped
+  // into the caller's IStream. Every failure mode carries its specific
+  // HRESULT -- a blanket E_NOTIMPL would hide which side broke.
+  IFACEMETHODIMP GetDataHere(FORMATETC* etc, STGMEDIUM* medium) override {
+    if (!etc || !medium) return E_POINTER;
+    if (etc->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
+    if (etc->cfFormat == cfDescriptor_) {
+      if (!(etc->tymed & TYMED_HGLOBAL) || !medium->hGlobal) return DV_E_TYMED;
+      if (etc->lindex != -1) return DV_E_LINDEX;  // descriptors are one group blob
+      const SIZE_T needed = GlobalSize(descriptorBlob_);
+      if (GlobalSize(medium->hGlobal) < needed) return STG_E_MEDIUMFULL;
+      const void* src = GlobalLock(descriptorBlob_);
+      void* dst = GlobalLock(medium->hGlobal);
+      if (!src || !dst) {
+        if (dst) GlobalUnlock(medium->hGlobal);
+        if (src) GlobalUnlock(descriptorBlob_);
+        return E_FAIL;
+      }
+      memcpy(dst, src, needed);
+      GlobalUnlock(medium->hGlobal);
+      GlobalUnlock(descriptorBlob_);
+      return S_OK;
+    }
+    if (etc->cfFormat == cfContents_) {
+      if (!(etc->tymed & TYMED_ISTREAM) || !medium->pstm) return DV_E_TYMED;
+      if (etc->lindex < 0 || static_cast<size_t>(etc->lindex) >= files_.size()) {
+        return DV_E_LINDEX;
+      }
+      const size_t index = static_cast<size_t>(etc->lindex);
+      if (files_[index].isDirectory) return E_INVALIDARG;
+      if (!streamFor_) return E_NOTIMPL;
+      Microsoft::WRL::ComPtr<IStream> source = streamFor_(index);
+      if (!source) return E_FAIL;  // the target sees a failure, never silent zeros
+      // Write at the caller's stream position; the medium's pstm stays
+      // caller-owned (we neither AddRef nor Release it).
+      return PumpStreamTo(source.Get(), files_[index].size, medium->pstm);
+    }
+    return DV_E_FORMATETC;
   }
 
   IFACEMETHODIMP QueryGetData(FORMATETC* etc) override {
@@ -343,6 +385,27 @@ class VirtualFileDataObject final
   IFACEMETHODIMP EnumDAdvise(IEnumSTATDATA**) override { return OLE_E_ADVISENOTSUPPORTED; }
 
  private:
+  // Pump a fresh source stream into the caller's IStream. A short source is
+  // an STG_E_READFAULT -- handing out a silently truncated file would corrupt
+  // the user's copy while "succeeding".
+  static HRESULT PumpStreamTo(IStream* source, uint64_t bytes, IStream* dest) {
+    if (!source || !dest) return E_POINTER;
+    uint8_t buffer[16 * 1024];
+    uint64_t remaining = bytes;
+    while (remaining > 0) {
+      const ULONG want = remaining < sizeof(buffer) ? static_cast<ULONG>(remaining)
+                                                    : static_cast<ULONG>(sizeof(buffer));
+      ULONG got = 0;
+      if (FAILED(source->Read(buffer, want, &got)) || got == 0) return STG_E_READFAULT;
+      ULONG written = 0;
+      const HRESULT hrWrite = dest->Write(buffer, got, &written);
+      if (FAILED(hrWrite)) return hrWrite;
+      if (written != got) return STG_E_WRITEFAULT;
+      remaining -= written;
+    }
+    return S_OK;
+  }
+
   CLIPFORMAT cfDescriptor_ = 0;
   CLIPFORMAT cfContents_ = 0;
   HGLOBAL descriptorBlob_ = nullptr;
@@ -361,6 +424,306 @@ inline HRESULT CreateVirtualFileDataObject(const prism::dnd::GroupDescriptor& gr
   if (FAILED(hr)) return hr;
   *out = object.Detach();
   return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Restartable pull-producer over one archive item (channel B payload).
+//
+// 7z.dll PUSHES decoded bytes; DelayedExtractStream PULLS on demand. This
+// adapter bridges the two with a bounded pipe: a worker thread drives ONE
+// Extract call on the reader's IInArchive, the pipe sink parks chunks until
+// Next() drains them, and back-pressure makes the sink wait (with an abort
+// escape so a restart can always unblock it). Restart() aborts the running
+// extraction and starts a fresh Extract on the SAME session -- no re-Open,
+// no catalog re-parse; the solid dictionary cost is paid in decode time only,
+// which is what 7-Zip itself does per call (7zExtract.cpp:325 rewinds to
+// FolderStartFileIndex on the already-open archive).
+//
+// Lifetime: the reader must stay Open and untouched for the producer's whole
+// life; the producer is the only thing allowed to call Extract on it.
+// ---------------------------------------------------------------------------
+class ArchiveItemStreamProducer final : public DelayedExtractStream::Producer {
+ public:
+  ArchiveItemStreamProducer(prism::win::ArchiveReader* reader, uint32_t itemIndex,
+                            size_t pipeHighWaterBytes = 4u * 1024 * 1024)
+      : reader_(reader), index_(itemIndex), highWater_(pipeHighWaterBytes) {}
+
+  ~ArchiveItemStreamProducer() override { StopWorker(); }
+
+  ArchiveItemStreamProducer(const ArchiveItemStreamProducer&) = delete;
+  ArchiveItemStreamProducer& operator=(const ArchiveItemStreamProducer&) = delete;
+
+  std::string Next(size_t maxBytes) override {
+    if (maxBytes == 0) return {};
+    EnsureWorker();
+    std::unique_lock<std::mutex> lock(mutex_);
+    // pending_ MUST be part of the readiness condition. It holds the tail of a
+    // chunk the consumer has not finished taking; treating "chunks_ is empty"
+    // as "nothing left" discarded that tail whenever eof_ landed mid-chunk.
+    // Measured: a 1228800-byte item delivered 1114112 bytes -- exactly one
+    // 64 KiB chunk plus a 49152-byte remainder stranded in pending_.
+    waitReadable_.wait(lock, [this] {
+      return !chunks_.empty() || !pending_.empty() || eof_ || failed_;
+    });
+    if (chunks_.empty() && pending_.empty()) return {};  // eof_/failed_
+    if (pending_.empty()) {
+      pending_ = std::move(chunks_.front());
+      queuedBytes_ -= pending_.size();
+      chunks_.pop_front();
+      waitWritable_.notify_all();  // one chunk slot freed
+    }
+    const size_t take = maxBytes < pending_.size() ? maxBytes : pending_.size();
+    std::string out = pending_.substr(0, take);
+    pending_.erase(0, take);
+    return out;
+  }
+
+  bool Restart() override {
+    StopWorker();  // abort + join the current Extract (same IInArchive kept)
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      chunks_.clear();
+      pending_.clear();
+      queuedBytes_ = 0;
+      eof_ = false;
+      failed_ = false;
+      started_ = false;
+      ++restarts_;
+    }
+    EnsureWorker();  // fresh Extract on the kept-open session
+    return true;
+  }
+
+  // Evidence accessors: a red CI run must say WHICH side starved.
+  // itemErrorCode is the per-item verdict from SetOperationResult -- reporting
+  // it is what turns "the file came up short" into "the engine said the item
+  // was bad", which are very different bugs.
+  prism::win::abi::Int32 itemErrorCode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return itemError_;
+  }
+  bool workerFailed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return failed_;
+  }
+  uint64_t producedBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return producedBytes_;
+  }
+  uint64_t restarts() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return restarts_;
+  }
+
+ private:
+  // Bounded pipe sink: parks chunks for Next(), waits under back-pressure,
+  // and returns E_ABORT the moment a restart asks the extraction to stop.
+  class PipeSink final : public prism::win::abi::ISequentialOutStream {
+   public:
+    explicit PipeSink(ArchiveItemStreamProducer* owner) : owner_(owner) {}
+
+    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+      if (!out) return E_POINTER;
+      if (iid == IID_IUnknown || iid == prism::win::abi::IID_ISequentialOutStream) {
+        *out = static_cast<prism::win::abi::ISequentialOutStream*>(this);
+        AddRef();
+        return S_OK;
+      }
+      *out = nullptr;
+      return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }
+    STDMETHODIMP_(ULONG) Release() override {
+      const ULONG r = InterlockedDecrement(&refs_);
+      if (r == 0) delete this;
+      return r;
+    }
+
+    STDMETHODIMP Write(const void* data, prism::win::abi::UInt32 size,
+                       prism::win::abi::UInt32* processed) override {
+      if (processed) *processed = 0;
+      if (!data && size != 0) return E_POINTER;
+      if (size == 0) return S_OK;  // a zero-length write must not build a null-range string
+      auto canAccept = [this] {
+        return owner_->abort_ || owner_->queuedBytes_ < owner_->highWater_;
+      };
+      {
+        std::unique_lock<std::mutex> lock(owner_->mutex_);
+        // Bounded wait with an abort escape: a blocked writer must always be
+        // woken by StopWorker, otherwise a restart would deadlock here.
+        owner_->waitWritable_.wait_for(lock, std::chrono::milliseconds(50), canAccept);
+        if (owner_->abort_) return E_ABORT;
+        owner_->chunks_.emplace_back(static_cast<const char*>(data),
+                                     static_cast<const char*>(data) + size);
+        owner_->queuedBytes_ += size;
+        owner_->producedBytes_ += size;
+      }
+      owner_->waitReadable_.notify_all();
+      if (processed) *processed = size;
+      return S_OK;
+    }
+
+   private:
+    ArchiveItemStreamProducer* owner_;
+    LONG refs_ = 1;
+  };
+
+  // Single-index extract callback: hands the dll the pipe sink and answers the
+  // 7-Zip IArchiveExtractCallback vtable (QIs IID_IArchiveExtractCallback --
+  // contract D10: a complete vtable that QI does not answer is invisible).
+  class SingleItemCallback final : public prism::win::abi::IArchiveExtractCallback {
+   public:
+    SingleItemCallback(prism::win::abi::ISequentialOutStream* sink,
+                       ArchiveItemStreamProducer* owner)
+        : sink_(sink), owner_(owner) {
+      sink_->AddRef();
+    }
+    // No `override` on the destructor: the raw 7z ABI structs declare no
+    // virtual destructor (same rule as the engine bridge's callbacks).
+    ~SingleItemCallback() { sink_->Release(); }
+
+    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+      if (!out) return E_POINTER;
+      if (iid == IID_IUnknown || iid == prism::win::abi::IID_IArchiveExtractCallback) {
+        *out = static_cast<prism::win::abi::IArchiveExtractCallback*>(this);
+        AddRef();
+        return S_OK;
+      }
+      *out = nullptr;
+      return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }
+    STDMETHODIMP_(ULONG) Release() override {
+      const ULONG r = InterlockedDecrement(&refs_);
+      if (r == 0) delete this;
+      return r;
+    }
+    STDMETHODIMP SetTotal(prism::win::abi::UInt64) override { return S_OK; }
+    STDMETHODIMP SetCompleted(const prism::win::abi::UInt64*) override { return S_OK; }
+    STDMETHODIMP GetStream(prism::win::abi::UInt32, prism::win::abi::ISequentialOutStream** out,
+                           prism::win::abi::Int32 mode) override {
+      if (!out) return E_POINTER;
+      *out = nullptr;
+      if (mode == prism::win::abi::kExtract) {
+        *out = sink_;
+        sink_->AddRef();
+      }
+      return S_OK;
+    }
+    STDMETHODIMP PrepareOperation(prism::win::abi::Int32) override { return S_OK; }
+    // The operation result is the ENGINE'S VERDICT on this item, and it was
+    // being discarded: returning S_OK for every code made a partial/failed
+    // decode indistinguishable from a clean one. The worker then set eof_ and
+    // the stream reported a short file as complete -- a 1.2 MB item delivered
+    // 1.088 MB and "succeeded". Latch it and let the worker fail loudly (D1:
+    // a success marker must be part of the verdict).
+    // Verbatim the semantics of 7-Zip's own Client7z.cpp:512-518: kOK (0) is
+    // the only clean code, everything else is a per-item failure to RECORD.
+    // Upstream keeps extracting (it counts NumErrors and moves on), so we do
+    // too -- but the count reaches the stream, which is what we were missing:
+    // returning S_OK unconditionally made a 1.2 MB item that delivered 1.088 MB
+    // look like a clean success.
+    STDMETHODIMP SetOperationResult(prism::win::abi::Int32 opResult) override {
+      if (opResult != 0) owner_->noteItemError(opResult);  // 0 == kOK
+      return S_OK;
+    }
+
+   private:
+    prism::win::abi::ISequentialOutStream* sink_;
+    ArchiveItemStreamProducer* owner_;
+    LONG refs_ = 1;
+  };
+
+  void EnsureWorker() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (started_) return;
+    started_ = true;
+    abort_ = false;
+    worker_ = std::thread([this] { RunExtract(); });
+  }
+
+  void RunExtract() {
+    // One explicit reference of our own plus the callback's: the sink must
+    // outlive the callback (the dll may still write while it unwinds), and the
+    // final Release below is what frees it -- a nested-class ref count left at
+    // 1 would leak one sink per restart.
+    PipeSink* sink = new PipeSink(this);
+    bool ok = false;
+    {
+      SingleItemCallback callback(sink, this);
+      ok = reader_->ExtractBatch({index_}, &callback);
+    }
+    sink->Release();
+    std::lock_guard<std::mutex> lock(mutex_);
+    eof_ = true;
+    // A restart abort is a normal way to die; anything else is a failure the
+    // stream must surface instead of serving a silently short file.
+    // itemError_ is checked FIRST: a decode that reports a bad item and then
+    // returns "ok" is exactly the case that produced a 1.088 MB "success" out
+    // of a 1.2 MB item.
+    failed_ = (itemError_ != 0) || (!ok && !abort_);
+  }
+
+  // SetOperationResult's non-zero codes arrive on the sink's thread; record the
+  // first one so the worker reports a real cause instead of a short read.
+  void noteItemError(int32_t code) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (itemError_ == 0) itemError_ = code;
+    }
+    waitReadable_.notify_all();
+  }
+
+  void StopWorker() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      abort_ = true;
+    }
+    waitWritable_.notify_all();
+    waitReadable_.notify_all();
+    if (worker_.joinable()) worker_.join();
+    std::lock_guard<std::mutex> lock(mutex_);
+    queuedBytes_ = 0;
+  }
+
+  prism::win::ArchiveReader* reader_;
+  uint32_t index_;
+  size_t highWater_;
+  std::thread worker_;
+  mutable std::mutex mutex_;
+  std::condition_variable waitReadable_;
+  std::condition_variable waitWritable_;
+  std::deque<std::string> chunks_;
+  std::string pending_;
+  size_t queuedBytes_ = 0;
+  bool started_ = false;
+  bool eof_ = false;
+  int32_t itemError_ = 0;  // first non-zero SetOperationResult code
+  uint64_t producedBytes_ = 0;
+  bool failed_ = false;
+  bool abort_ = false;
+  uint64_t restarts_ = 0;
+};
+
+// Factory: one restartable stream for one archive item, wired through the
+// seek planner with the caller's policy. This is the production path for
+// CFSTR_FILECONTENTS lindex->IStream.
+inline Microsoft::WRL::ComPtr<IStream> CreateDelayedExtractStream(
+    prism::win::ArchiveReader* reader, uint32_t itemIndex, uint64_t totalSize,
+    const prism::dnd::SeekPolicy& policy) {
+  if (!reader) return nullptr;
+  auto producer = std::make_shared<ArchiveItemStreamProducer>(reader, itemIndex);
+  Microsoft::WRL::ComPtr<DelayedExtractStream> stream;
+  if (FAILED(Microsoft::WRL::MakeAndInitialize<DelayedExtractStream>(
+          &stream, producer, totalSize, policy))) {
+    return nullptr;
+  }
+  // Explicit As() rather than relying on ComPtr<T>->ComPtr<U> implicit
+  // upcast: the local Windows-TU stub does not model that conversion, and
+  // being explicit costs nothing while keeping the header checkable here.
+  Microsoft::WRL::ComPtr<IStream> out;
+  if (FAILED(stream.As(&out))) return nullptr;
+  return out;
 }
 
 }  // namespace prism::win::dragdrop

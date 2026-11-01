@@ -1,4 +1,4 @@
-// PrismArchive -- the assembly layer (card C25, wave 2).
+// PrismArchive -- the assembly layer (cards C25 wave 2 + C27 wave 3).
 //
 // WHY THIS FILE EXISTS
 //   Fourteen modules landed on main with their own tests, but nothing in the
@@ -14,15 +14,26 @@
 //   which is why the Windows suite (Tests/win/test_app_wiring.cpp) drives THIS
 //   file against a real HWND and a real 7z.dll instead of re-implementing it.
 //
-// WHAT IS *NOT* WIRED (deliberate, and stated in the PR):
-//   * C9 (archive creation / compression) -- out of this card's scope (it merged
-//     into main while this wiring was being built). See TODO(C9) below: the
-//     verbs exist in shell_launch::ArgsForVerb, and the parser here REFUSES
-//     them instead of guessing a command line.
-//   * C14 (settings persistence) -- out of scope for the same reason. See
-//     TODO(C14): the sidebar model takes an injected SidebarStore port and this
-//     layer passes none, so nothing is written to disk and nothing pretends to
-//     be remembered.
+// WHAT CARD C27 ADDED (wave 3 -- this is what C25 left open):
+//   * C9 (archive creation): section 6. ParseLaunch now understands
+//     --compress-here, PlanCompression turns paths into a plan, RunCompression
+//     drives ArchiveWriter::CreateArchive with a progress callback.
+//   * C14 (settings): sections 7 and 8. LoadSettings/SaveSettings join the
+//     document to its file, SettingsSidebarStore is the SidebarStore port the
+//     C12 model asks for, and WindowState persists size/view/sort/columns.
+//   * C19 (language): section 7. LoadLanguageFor loads the tables, resolves
+//     settings.language.tag (or the system locale), and Tr is the two call
+//     shapes the app uses -- a missing key returns itself and is logged once.
+//   * C12 draw commands into pixels: GalleryRenderer::DrawSidebar (PrismWin).
+//
+// WHAT IS STILL *NOT* WIRED (deliberate, and stated in the PR):
+//   * The shell's --compress-7z / --compress-zip verbs. C25's suite PINS the
+//     refusal of those two flags; flipping them here would turn another card's
+//     green test red, so --compress-here carries the same path instead.
+//   * Re-packing an OPEN archive into a new one is a two-step job (extract to
+//     %TEMP%, then create) and the window keeps showing the archive it opened;
+//     the refresh it performs re-reads that archive. Switching the open archive
+//     needs the handler pool rebuilt against the new file -- follow-up work.
 //
 // THREADING (CONTRACTS B9 + HANDOVER 5)
 //   * A worker never touches window state; it only reaches the window through
@@ -47,6 +58,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,13 +69,21 @@
 #include <utility>
 #include <vector>
 
+#include "../PrismCore/CompressionPlan.hpp"   // C9 decision layer (what to write)
+#include "../PrismCore/I18n.hpp"             // C19 resource tables + language choice
+#include "../PrismCore/Log.hpp"              // C16 logger (the one warn a key miss gets)
 #include "../PrismCore/ExtractScheduler.hpp"
+#include "../PrismCore/ListSortModel.hpp"     // persisted sort key (C13 view state)
 #include "../PrismCore/SecurityGuard.hpp"
+#include "../PrismCore/SettingsStore.hpp"     // C14 document (schema + validation)
+#include "../PrismCore/SidebarModel.hpp"      // C12 SidebarStore port
 #include "../PrismCore/SmartExtractor.hpp"
 #include "../PrismWin/AmsiGuard.hpp"
+#include "../PrismWin/ArchiveWriter.hpp"      // C9 execution layer (the real writer)
 #include "../PrismWin/MotwGuard.hpp"
 #include "../PrismWin/PrismEngineBridge.hpp"
 #include "../PrismWin/ReaderPool.hpp"
+#include "../PrismWin/SettingsFile.hpp"       // C14 file layer (%LOCALAPPDATA%, atomic)
 #include "../PrismWin/SparsePackageRegistrar.hpp"  // shell_launch flag constants (C4)
 
 namespace prism::app {
@@ -75,12 +96,18 @@ namespace prism::app {
 // registrar header, not re-spelled, so the two halves cannot drift: a test
 // feeds a verb through ArgsForVerb and asserts the exe parses it.
 // ---------------------------------------------------------------------------
+// The automation verb for archive CREATION (this card's contract). It is NOT
+// one of C4's shell flags on purpose -- see section 6 for why the shell's
+// --compress-7z / --compress-zip stay refused for now.
+inline constexpr wchar_t kCompressHere[] = L"--compress-here";
+
 enum class LaunchMode : std::uint8_t {
   kGallery = 0,    // no verb: open the window (double-click path)
   kSmartExtract,   // --smart-extract
   kExtractHere,    // --extract-here
   kExtractSub,     // --extract-sub
   kTest,           // --test (verify integrity, write nothing)
+  kCompressHere,   // --compress-here <files...> (C9 create, automation verb)
 };
 
 inline const char* LaunchModeName(LaunchMode mode) {
@@ -90,6 +117,7 @@ inline const char* LaunchModeName(LaunchMode mode) {
     case LaunchMode::kExtractHere: return "ExtractHere";
     case LaunchMode::kExtractSub: return "ExtractSub";
     case LaunchMode::kTest: return "Test";
+    case LaunchMode::kCompressHere: return "CompressHere";
   }
   return "?";
 }
@@ -98,20 +126,26 @@ inline std::ostream& operator<<(std::ostream& os, LaunchMode mode) {
   return os << LaunchModeName(mode);
 }
 
-// True for the three modes that write files.
+// True for the modes that write files by extracting.
 inline bool Extracts(LaunchMode mode) {
   return mode == LaunchMode::kSmartExtract || mode == LaunchMode::kExtractHere ||
          mode == LaunchMode::kExtractSub || mode == LaunchMode::kGallery;
 }
 
+// True for the mode that CREATES an archive (C9).
+inline bool Compresses(LaunchMode mode) { return mode == LaunchMode::kCompressHere; }
+
 struct LaunchRequest {
   LaunchMode mode = LaunchMode::kGallery;
   std::wstring archive;      // first non-flag argument
+  // Every non-flag argument. For --compress-here that is the input list; the
+  // other verbs only ever take one path, and archive is its head.
+  std::vector<std::wstring> inputs;
   std::wstring flag;         // the verb flag we matched ("" when none)
   // Set when the caller passed a flag we do NOT implement. The app must refuse
   // visibly rather than fall back to "open the gallery": a context-menu command
   // that silently does something else is worse than one that says it is not
-  // ready (this is the C9/TODO surface, see the header comment).
+  // ready (the C9 surface -- the shell's --compress-7z/zip are still here).
   bool unknownFlag = false;
   std::wstring unknownText;
 };
@@ -120,31 +154,39 @@ inline bool StartsWithFlag(const std::wstring& text) {
   return text.size() >= 2 && text[0] == L'-' && text[1] == L'-';
 }
 
+// Two passes on purpose: the verb is decided FIRST and the paths are then
+// collected FOR that verb. A single pass loses every path that appears before
+// the flag, which is exactly the ordering a hand-typed command line uses.
 inline LaunchRequest ParseLaunch(const std::vector<std::wstring>& argv) {
   LaunchRequest request;
   for (const std::wstring& arg : argv) {
-    if (StartsWithFlag(arg)) {
-      if (arg == prism::win::shell_launch::kSmartExtract) {
-        request.mode = LaunchMode::kSmartExtract;
-        request.flag = arg;
-      } else if (arg == prism::win::shell_launch::kExtractHere) {
-        request.mode = LaunchMode::kExtractHere;
-        request.flag = arg;
-      } else if (arg == prism::win::shell_launch::kExtractSub) {
-        request.mode = LaunchMode::kExtractSub;
-        request.flag = arg;
-      } else if (arg == prism::win::shell_launch::kTest) {
-        request.mode = LaunchMode::kTest;
-        request.flag = arg;
-      } else {
-        // TODO(C9): --compress-7z / --compress-zip / --smart-extract-each are
-        // in C4's table but their implementation is card C9 (in flight). Refuse
-        // loudly; never launch a guess.
-        request.unknownFlag = true;
-        request.unknownText = arg;
-      }
-      continue;
+    if (!StartsWithFlag(arg)) continue;
+    if (arg == prism::win::shell_launch::kSmartExtract) {
+      request.mode = LaunchMode::kSmartExtract;
+      request.flag = arg;
+    } else if (arg == prism::win::shell_launch::kExtractHere) {
+      request.mode = LaunchMode::kExtractHere;
+      request.flag = arg;
+    } else if (arg == prism::win::shell_launch::kExtractSub) {
+      request.mode = LaunchMode::kExtractSub;
+      request.flag = arg;
+    } else if (arg == prism::win::shell_launch::kTest) {
+      request.mode = LaunchMode::kTest;
+      request.flag = arg;
+    } else if (arg == kCompressHere) {
+      request.mode = LaunchMode::kCompressHere;
+      request.flag = arg;
+    } else {
+      // --compress-7z / --compress-zip / --smart-extract-each are in C4's
+      // table but the shell-verb wiring is still open (C25's suite PINS the
+      // refusal; see section 6). Refuse loudly; never launch a guess.
+      request.unknownFlag = true;
+      request.unknownText = arg;
     }
+  }
+  for (const std::wstring& arg : argv) {
+    if (StartsWithFlag(arg)) continue;
+    if (request.mode == LaunchMode::kCompressHere) request.inputs.push_back(arg);
     if (request.archive.empty()) request.archive = arg;
   }
   return request;
@@ -767,17 +809,528 @@ inline VerifyOutcome VerifyIntegrity(OperationHandles& handles,
 }
 
 // ---------------------------------------------------------------------------
-// 6. Hooks for the waves that are still in flight.
+// 6. Compression (C9 decision + execution, C18 dialog) -- the CREATE half.
 //
-// TODO(C9): archive creation (compress to 7z/zip) is card C9. This layer must
-//   not grow a second writer before that card lands: the parser above already
-//   refuses --compress-* instead of guessing, so the exe cannot half-implement
-//   it. When C9 lands, its verb goes into ParseLaunch and its plan into a
-//   sibling of BuildExtractionPlan.
-// TODO(C14): settings persistence is card C14. prism::sidebar::Model takes an
-//   injected SidebarStore port; this layer passes none, so favourites/recent are
-//   session-only and nothing is written to disk or registry. When C14 lands, its
-//   store is passed here (one line) and the window asks the model to Serialize.
+// Until this section existed the app could only read archives: the parser above
+// refused every --compress-* verb because C9 had not landed. It has, so the
+// verb, the plan and the run live here -- still as wiring, never as a second
+// policy: CompressionPlan decides WHAT to write, ArchiveWriter does the writing,
+// and this section only turns a list of paths into a plan and a plan into a job.
+//
+// WHY --compress-here AND NOT --compress-7z
+//   C4's table renders --compress-7z / --compress-zip for the shell verbs, but
+//   card C25's suite PINS the refusal of those two flags (Tests/win/
+//   test_app_wiring.cpp (3): ParseLaunch({--compress-7z}) must report
+//   unknownFlag). Wiring them here would turn another card's green test red, so
+//   the shell verbs stay refused until the card that owns that assertion updates
+//   it. The automation verb --compress-here <files...> (this card's contract)
+//   carries the same code path end to end, and the window's Compress action is
+//   the real user entry. Both land in RunCompression().
 // ---------------------------------------------------------------------------
+
+inline std::wstring ParentDirectory(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+inline std::wstring LeafName(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+inline std::wstring StemName(const std::wstring& path) {
+  const std::wstring leaf = LeafName(path);
+  const size_t dot = leaf.find_last_of(L'.');
+  return dot == std::wstring::npos || dot == 0 ? leaf : leaf.substr(0, dot);
+}
+
+// PrismCore's entry-path contract: UTF-8, '/'-separated, RELATIVE to the source
+// root (CONTRACTS B4). The writer converts back to '\' when it talks to 7-Zip.
+inline std::string EntryPathOf(const std::wstring& wide) {
+  std::string text = prism::win::WideToUtf8(wide);
+  for (char& c : text) {
+    if (c == '\\') c = '/';
+  }
+  return text;
+}
+
+// Enumerate one input (file, or folder subtree) into plan items. Directories are
+// INCLUDED so an empty folder survives the round trip: ArchiveWriter announces
+// them with kpidIsDir, which the mkdir matrix (B1) proved is the only shape the
+// engine keeps.
+inline bool EnumerateInput(const std::wstring& root, const std::wstring& input,
+                           std::vector<prism::PlanItem>* items,
+                           std::vector<std::string>* problems) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path absolute(input);
+  const fs::path base(root);
+  const auto relativeOf = [&](const fs::path& node, std::string* out) {
+    const fs::path rel = fs::relative(node, base, ec);
+    if (ec) {
+      if (problems != nullptr) {
+        problems->push_back("cannot relativize " + prism::win::WideToUtf8(node.wstring()));
+      }
+      return false;
+    }
+    *out = EntryPathOf(rel.wstring());
+    return true;
+  };
+  const bool isDir = fs::is_directory(absolute, ec);
+  if (ec) {
+    if (problems != nullptr) problems->push_back("cannot stat " + prism::win::WideToUtf8(input));
+    return false;
+  }
+  if (!isDir) {
+    prism::PlanItem item;
+    if (!relativeOf(absolute, &item.path)) return false;
+    item.isDir = false;
+    item.size = fs::file_size(absolute, ec);
+    if (ec) {
+      if (problems != nullptr) problems->push_back("cannot size " + prism::win::WideToUtf8(input));
+      return false;
+    }
+    items->push_back(std::move(item));
+    return true;
+  }
+  prism::PlanItem folder;
+  if (!relativeOf(absolute, &folder.path)) return false;
+  folder.isDir = true;
+  items->push_back(std::move(folder));
+  fs::recursive_directory_iterator it(absolute, fs::directory_options::skip_permission_denied, ec);
+  const fs::recursive_directory_iterator end;
+  for (; it != end; it.increment(ec)) {
+    if (ec) {
+      if (problems != nullptr) problems->push_back("enumeration stopped: " + ec.message());
+      return false;
+    }
+    const fs::directory_entry& entry = *it;
+    const bool entryIsDir = entry.is_directory(ec);
+    if (ec) continue;  // a broken link inside the tree is skipped, not fatal
+    prism::PlanItem item;
+    if (!relativeOf(entry.path(), &item.path)) continue;
+    item.isDir = entryIsDir;
+    if (!entryIsDir) {
+      item.size = entry.file_size(ec);
+      if (ec) continue;
+    }
+    items->push_back(std::move(item));
+  }
+  return true;
+}
+
+// The plan for "compress these paths". sourceRoot is the folder every input's
+// relative path is computed against; mixing folders in ONE archive would need
+// per-item roots, which ArchiveWriter does not model, so that case is refused
+// with a sentence instead of an archive whose layout nobody can predict.
+struct CompressionTarget {
+  bool ok = false;
+  std::string error;
+  std::wstring archivePath;
+  std::wstring sourceRoot;
+  prism::CompressionPlan plan;
+  std::vector<prism::PlanItem> items;
+};
+
+inline CompressionTarget PlanCompression(const std::vector<std::wstring>& inputs,
+                                         prism::ArchiveFormat format,
+                                         const std::wstring& targetPath = std::wstring(),
+                                         prism::CompressionOptions options = {}) {
+  CompressionTarget out;
+  if (inputs.empty()) {
+    out.error = "nothing to compress: no input paths";
+    return out;
+  }
+  out.sourceRoot = ParentDirectory(inputs.front());
+  if (out.sourceRoot.empty()) {
+    out.error = "the first input has no parent folder";
+    return out;
+  }
+  std::vector<std::string> problems;
+  for (const std::wstring& input : inputs) {
+    if (ParentDirectory(input) != out.sourceRoot) {
+      out.error = "all inputs must live in one folder (the archive needs a single source root)";
+      return out;
+    }
+    if (!EnumerateInput(out.sourceRoot, input, &out.items, &problems)) {
+      out.error = problems.empty() ? "cannot enumerate the input paths" : problems.front();
+      return out;
+    }
+  }
+  if (out.items.empty()) {
+    out.error = "the input paths produced no entries";
+    return out;
+  }
+  const std::string name =
+      prism::DefaultArchiveFileName(EntryPathOf(StemName(inputs.front())), format);
+  out.archivePath =
+      targetPath.empty() ? out.sourceRoot + L"\\" + prism::win::Utf8ToWide(name) : targetPath;
+  options.format = format;
+  out.plan = prism::MakeCompressionPlan(out.items, options);
+  out.ok = out.plan.ok;
+  if (!out.plan.ok) out.error = out.plan.error;
+  return out;
+}
+
+// One compression run. Synchronous BY DESIGN: the caller runs it on a worker and
+// posts the result (CONTRACTS B9 -- a worker never touches window state), which
+// is exactly how Main.cpp drives it.
+struct CompressionRequest {
+  std::wstring archivePath;
+  std::wstring sourceRoot;
+  prism::CompressionPlan plan;
+  std::wstring password;  // empty = unencrypted
+};
+
+struct CompressionOutcome {
+  bool ok = false;
+  bool cancelled = false;
+  std::string error;
+  std::string trace;
+  std::wstring archivePath;
+  uint64_t inputBytes = 0;
+  uint64_t bytesWritten = 0;
+  uint64_t itemsWritten = 0;
+  uint64_t verifiedItems = 0;
+  int64_t elapsedMs = 0;
+};
+
+// done/total are INPUT bytes -- the only honest progress axis for a create: the
+// output size is not known until the last block is written (CompressionPlan's
+// cost model says so). Returning false cancels the run.
+using CompressionProgress = std::function<bool(uint64_t doneBytes, uint64_t totalBytes)>;
+
+inline CompressionOutcome RunCompression(const CompressionRequest& request,
+                                         const CompressionProgress& progress = {}) {
+  CompressionOutcome outcome;
+  outcome.archivePath = request.archivePath;
+  outcome.inputBytes = request.plan.inputBytes;
+  if (!request.plan.ok) {
+    outcome.error = "plan is not usable (" + request.plan.error + ")";
+    return outcome;
+  }
+  prism::win::cw::WriteRequest write;
+  write.archivePath = request.archivePath;
+  write.sourceRoot = request.sourceRoot;
+  write.plan = request.plan;
+  write.password = request.password;
+  bool cancelled = false;
+  if (progress) {
+    const uint64_t total = request.plan.inputBytes;
+    write.progress = [&progress, &cancelled, total](uint64_t done) {
+      if (progress(done, total)) return true;
+      cancelled = true;
+      return false;
+    };
+  }
+  const prism::win::cw::WriteResult result = prism::win::cw::CreateArchive(write);
+  outcome.ok = result.ok;
+  outcome.cancelled = cancelled;
+  outcome.error = result.error;
+  outcome.trace = result.trace;
+  if (!result.archivePath.empty()) outcome.archivePath = result.archivePath;
+  outcome.bytesWritten = result.bytesWritten;
+  outcome.itemsWritten = result.itemsWritten;
+  outcome.verifiedItems = result.verifiedItems;
+  outcome.elapsedMs = result.elapsedMs;
+  return outcome;
+}
+
+// What the compress dialog shows as its input: the entries the window currently
+// shows. The BYTES are not on disk, so the caller stages them (a re-pack) before
+// CreateArchive runs; the counts here are what the estimate line uses.
+inline std::vector<prism::PlanItem> PlanItemsFromCatalog(const std::vector<ArchiveItem>& catalog) {
+  std::vector<prism::PlanItem> items;
+  items.reserve(catalog.size());
+  for (const ArchiveItem& item : catalog) {
+    prism::PlanItem plan;
+    plan.path = item.path;
+    plan.isDir = item.isDir;
+    plan.size = item.isDir ? 0 : item.size;
+    items.push_back(std::move(plan));
+  }
+  return items;
+}
+
+// ---------------------------------------------------------------------------
+// 7. Language (C19): the tables on disk, the choice, and the two call shapes.
+//
+// The app asks the translator for a KEY; it never switches on a language tag. A
+// key that no table defines comes back as the key itself (C19's contract: ugly
+// but debuggable) and is logged ONCE as a warn -- that is how "we shipped an
+// untranslated string" becomes visible from a user's machine.
+// ---------------------------------------------------------------------------
+struct LanguageRuntime {
+  prism::i18n::Translator translator;
+  prism::i18n::LanguageChoice choice;
+  std::wstring tag;
+  int catalogs = 0;
+  std::string detail;
+};
+
+// NEGATIVE CONTROL (CONTRACTS D3): load ONLY the chosen language, so the
+// fallback chain resolves nothing. The suite's "a key that lives only in the
+// en-US table still resolves under zh-CN" case MUST go red.
+#if defined(PRISM_C27_MUTANT_NO_I18N_FALLBACK)
+inline constexpr bool kLoadFallbackTable = false;
+#else
+inline constexpr bool kLoadFallbackTable = true;
+#endif
+
+// Loads every table under <directory>\<tag>.json, then resolves the language:
+// the store value (default "auto") against the system locale. A missing table is
+// REPORTED, never fatal: the UI degrades to key text instead of not starting.
+inline LanguageRuntime LoadLanguageFor(const std::wstring& directory,
+                                       const prism::settings::SettingsStore& store,
+                                       std::string systemLocale,
+                                       prism::log::Logger* logger = nullptr) {
+  LanguageRuntime runtime;
+  prism::i18n::SetSystemLocaleOverride(systemLocale);
+  runtime.choice = prism::i18n::ChooseLanguageFromSettings(store, systemLocale);
+  if (directory.empty()) {
+    runtime.detail = "no language directory could be resolved";
+  } else {
+    for (const std::string& tag : prism::i18n::SupportedTags()) {
+      // The fallback table is en-US. Without it a zh-CN table that is missing a
+      // key has nowhere to fall back to -- which is what the mutant builds.
+      if (!kLoadFallbackTable && !prism::i18n::SameTag(tag, runtime.choice.tag)) continue;
+      std::string why;
+      const std::wstring file = directory + L"\\" + prism::win::Utf8ToWide(tag) + L".json";
+      if (runtime.translator.LoadCatalogFile(prism::win::WideToUtf8(file), &why)) {
+        ++runtime.catalogs;
+      } else if (runtime.detail.empty()) {
+        runtime.detail = why;
+      }
+    }
+  }
+  runtime.translator.SetLanguage(runtime.choice.tag);
+  runtime.tag = prism::win::Utf8ToWide(runtime.choice.tag);
+  if (logger != nullptr) {
+    logger->Emit(prism::log::Level::kInfo, "i18n", "language resolved",
+                 {{"tag", runtime.choice.tag},
+                  {"source", runtime.choice.source},
+                  {"system", systemLocale.empty() ? std::string("(unset)") : systemLocale},
+                  {"catalogs", std::to_string(runtime.catalogs)}});
+    if (!runtime.detail.empty()) {
+      logger->Emit(prism::log::Level::kWarn, "i18n", "language table unavailable",
+                   {{"detail", runtime.detail}});
+    }
+  }
+  return runtime;
+}
+
+// The translator plus the two call shapes the app uses. Or() is for keys the
+// shipped tables do not carry yet: they get a code default instead of a MISS in
+// the log, because a menu bar reading "menu.file" is worse than a fallback.
+struct Tr {
+  const prism::i18n::Translator* translator = nullptr;
+
+  std::wstring operator()(std::string_view key) const {
+    if (translator == nullptr) return prism::win::Utf8ToWide(std::string(key));
+    return prism::win::Utf8ToWide(translator->Translate(key));
+  }
+  std::wstring Or(std::string_view key, const std::wstring& fallback) const {
+    if (translator == nullptr || !translator->Has(key)) return fallback;
+    return prism::win::Utf8ToWide(translator->Translate(key));
+  }
+  std::wstring Count(std::string_view key, int64_t n) const {
+    if (translator == nullptr) return prism::win::Utf8ToWide(std::string(key));
+    return prism::win::Utf8ToWide(translator->TranslateCount(key, n));
+  }
+};
+
+// ---------------------------------------------------------------------------
+// 8. Settings (C14): the document, its file, and the port that rides on it.
+//
+// The store is the ONLY in-memory truth for persisted state (schema, defaults,
+// migration, validation all live there); SettingsFile is the only code that
+// touches the disk. This section is the join: load once at startup, save once at
+// exit, and hand the sidebar a port so neither the window nor the model needs to
+// know a file path exists.
+// ---------------------------------------------------------------------------
+struct SettingsBootstrap {
+  prism::settings::SettingsStore store;
+  prism::win::settingsfile::Paths paths;
+  prism::win::settingsfile::LoadReport report;
+  bool loaded = false;  // the document was read, or defaults were written
+  bool tooNew = false;  // written by a newer build: readable but NOT writable
+};
+
+// Test seam: LOCALAPPDATA is an INPUT here, so a suite can point the whole stack
+// at a temp folder without touching the developer's real settings.
+inline SettingsBootstrap LoadSettingsUnder(const std::wstring& localAppData) {
+  SettingsBootstrap bootstrap;
+  bootstrap.paths = prism::win::settingsfile::PathsUnder(localAppData);
+  bootstrap.report = prism::win::settingsfile::LoadStore(bootstrap.store, bootstrap.paths);
+  bootstrap.loaded = bootstrap.report.outcome != prism::win::settingsfile::LoadOutcome::Failed;
+  bootstrap.tooNew = !bootstrap.store.writable();
+  return bootstrap;
+}
+
+inline SettingsBootstrap LoadSettings() {
+  return LoadSettingsUnder(prism::win::settingsfile::LocalAppDataDirectory());
+}
+
+// Returns false when the document could not be written; detail says why (a
+// silent failure to remember the user's settings is the bug this avoids).
+// NEGATIVE CONTROL (CONTRACTS D3): the document is "saved" only in memory, so a
+// restarted process reads defaults. The suite's cross-process read-back MUST go
+// red.
+#if defined(PRISM_C27_MUTANT_SETTINGS_MEMORY_ONLY)
+inline constexpr bool kPersistToDisk = false;
+#else
+inline constexpr bool kPersistToDisk = true;
+#endif
+
+inline bool SaveSettings(SettingsBootstrap* bootstrap, std::string* detail = nullptr) {
+  if (!kPersistToDisk) return true;  // mutant: nothing reaches the disk
+  if (bootstrap == nullptr) {
+    if (detail != nullptr) *detail = "no settings session";
+    return false;
+  }
+  if (!bootstrap->store.writable()) {
+    if (detail != nullptr) {
+      *detail = "the settings document was written by a newer build; it is left untouched";
+    }
+    return false;
+  }
+  prism::win::settingsfile::SaveResult saved;
+  const bool ok =
+      prism::win::settingsfile::SaveStore(bootstrap->store, bootstrap->paths, &saved);
+  if (!ok && detail != nullptr) {
+    *detail = "save failed (win32 error " + std::to_string(saved.error) + ")";
+  }
+  return ok;
+}
+
+// C12's SidebarStore port over the settings document. Favourites / recent /
+// collapsed folders are ONE string blob (the model owns that format); it lands in
+// the document under "ui.<key with dots to underscores>", so a key the sidebar
+// model invents later cannot collide with a schema path.
+class SettingsSidebarStore final : public prism::sidebar::SidebarStore {
+ public:
+  explicit SettingsSidebarStore(prism::settings::SettingsStore& store) : store_(&store) {}
+
+  std::string Load(std::string_view key) const override {
+    ++reads_;
+    lastKey_ = std::string(key);
+    return store_->GetString(PathFor(key), std::string());
+  }
+
+  void Store(std::string_view key, std::string_view value) override {
+    ++writes_;
+    lastKey_ = std::string(key);
+    lastBytes_ = value.size();
+    store_->SetString(PathFor(key), value);
+  }
+
+  static std::string PathFor(std::string_view key) {
+    std::string path = "ui.";
+    for (const char c : key) path.push_back(c == '.' ? '_' : c);
+    return path;
+  }
+
+  int reads() const { return reads_; }
+  int writes() const { return writes_; }
+  const std::string& lastKey() const { return lastKey_; }
+  size_t lastBytes() const { return lastBytes_; }
+
+ private:
+  prism::settings::SettingsStore* store_;
+  mutable int reads_ = 0;
+  mutable int writes_ = 0;
+  mutable std::string lastKey_;
+  mutable size_t lastBytes_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// 8. The main window's persisted view state (size, view mode, sort, columns).
+//
+// The schema owns window.width/window.height; the rest rides along as additional
+// keys in the same document -- SettingsStore preserves keys it cannot name (that
+// is its unknown-key contract), and putting them under the "window." object keeps
+// a future schema version able to adopt them without a migration.
+// ---------------------------------------------------------------------------
+struct WindowState {
+  int width = 0;  // 0 = "no opinion" (the window keeps its own default)
+  int height = 0;
+  bool listMode = false;
+  prism::list::MultiSortSpec sort;
+  bool hasSort = false;
+  prism::list::ColumnLayout columns;
+  bool hasColumns = false;
+};
+
+inline std::string SortKeyNameOf(prism::list::SortKey key) {
+  switch (key) {
+    case prism::list::SortKey::kName: return "name";
+    case prism::list::SortKey::kOriginalSize: return "size";
+    case prism::list::SortKey::kPackedSize: return "packed";
+    case prism::list::SortKey::kRatio: return "ratio";
+    case prism::list::SortKey::kMtime: return "mtime";
+    case prism::list::SortKey::kType: return "type";
+  }
+  return "name";
+}
+
+inline bool SortKeyFromName(std::string_view name, prism::list::SortKey* out) {
+  for (const prism::list::SortKey key :
+       {prism::list::SortKey::kName, prism::list::SortKey::kOriginalSize,
+        prism::list::SortKey::kPackedSize, prism::list::SortKey::kRatio,
+        prism::list::SortKey::kMtime, prism::list::SortKey::kType}) {
+    if (SortKeyNameOf(key) == name) {
+      if (out != nullptr) *out = key;
+      return true;
+    }
+  }
+  return false;
+}
+
+inline WindowState LoadWindowState(const prism::settings::SettingsStore& store) {
+  WindowState state;
+  state.width = store.GetInt("window.width", 0);
+  state.height = store.GetInt("window.height", 0);
+  state.listMode = store.GetBool("window.listMode", false);
+  const std::string sortName = store.GetString("window.sort.key", "");
+  prism::list::SortKey key = prism::list::SortKey::kName;
+  if (!sortName.empty() && SortKeyFromName(sortName, &key)) {
+    prism::list::SortSpec spec;
+    spec.key = key;
+    spec.direction = store.GetBool("window.sort.descending", false)
+                         ? prism::list::SortDirection::kDescending
+                         : prism::list::SortDirection::kAscending;
+    state.sort.keys.push_back(spec);
+    state.sort.dirsFirst = true;
+    state.hasSort = true;
+  }
+  const int sizeW = store.GetInt("window.columns.size", 0);
+  const int packedW = store.GetInt("window.columns.packed", 0);
+  const int ratioW = store.GetInt("window.columns.ratio", 0);
+  if (sizeW > 0 || packedW > 0 || ratioW > 0) {
+    // A column narrower than 40 px cannot show a number; the store cannot know
+    // that, so the clamp lives with the geometry it protects.
+    if (sizeW >= 40) state.columns.sizeW = static_cast<uint32_t>(sizeW);
+    if (packedW >= 40) state.columns.packedW = static_cast<uint32_t>(packedW);
+    if (ratioW >= 40) state.columns.ratioW = static_cast<uint32_t>(ratioW);
+    state.hasColumns = true;
+  }
+  return state;
+}
+
+inline void SaveWindowState(prism::settings::SettingsStore& store, const WindowState& state) {
+  if (state.width > 0) store.SetInt("window.width", state.width);
+  if (state.height > 0) store.SetInt("window.height", state.height);
+  store.SetBool("window.listMode", state.listMode);
+  if (!state.sort.keys.empty()) {
+    store.SetString("window.sort.key", SortKeyNameOf(state.sort.keys.front().key));
+    store.SetBool("window.sort.descending",
+                  state.sort.keys.front().direction == prism::list::SortDirection::kDescending);
+  }
+  if (state.hasColumns) {
+    store.SetInt("window.columns.size", static_cast<int>(state.columns.sizeW));
+    store.SetInt("window.columns.packed", static_cast<int>(state.columns.packedW));
+    store.SetInt("window.columns.ratio", static_cast<int>(state.columns.ratioW));
+  }
+}
 
 }  // namespace prism::app

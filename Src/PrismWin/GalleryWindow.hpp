@@ -68,6 +68,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../PrismCore/ActionBarModel.hpp"  // C-V2: action table + enable rules
 #include "../PrismCore/ArchiveTreeView.hpp"
 #include "../PrismCore/CommandPalette.hpp"  // palette ranker (C8 decision layer)
 #include "../PrismCore/FilterModel.hpp"     // list view filter (C13)
@@ -187,6 +188,7 @@ class GalleryWindow {
     history_.Clear();
     history_.Visit(nav_.Folder());  // the root is a real level (de-duped to no-op)
     RebuildFolderView();
+    SyncActionContext();  // a newly attached catalog makes the band legal
   }
 
   // Cache-policy handle kept for the compile contract (m3_compile_check); the
@@ -640,6 +642,35 @@ class GalleryWindow {
     return true;
   }
 
+  // ---------- card V2: the action band (DESIGN.md §2/§6) ----------
+  //
+  // The window owns exactly TWO pieces of the band: the CONTEXT (derived from
+  // the catalog and the navigator's selection -- never typed in by a widget)
+  // and the WIRING (a click or an Alt chord becomes a call). What each action
+  // means stays with the app: FireAction hands it over, so a test can count
+  // commands without starting an extraction.
+  const prism::actionbar::Model& ActionBarState() const { return actionBar_; }
+  prism::actionbar::Layout ActionBarLayout() const {
+    return prism::actionbar::Compute(WindowLayoutForClient());
+  }
+  void SetActionHandler(std::function<void(prism::actionbar::ActionId, int)> handler) {
+    onAction_ = std::move(handler);
+  }
+  // A read-only archive (opened from a CD or a mounted volume) turns the two
+  // destructive actions off BEFORE the user confirms something that can only
+  // fail. Default false: an archive opened from disk is writable.
+  void SetArchiveReadOnly(bool readOnly) {
+    if (readOnly_ == readOnly) return;
+    readOnly_ = readOnly;
+    SyncActionContext();
+    Invalidate();
+  }
+  bool ArchiveReadOnly() const { return readOnly_; }
+  // What the band believes right now (tests assert the derived context, not the
+  // three inputs, so a stale context cannot hide behind a green matrix).
+  prism::actionbar::Context ActionContext() const { return actionBar_.GetContext(); }
+  int ActionBarFocus() const { return actionBar_.FocusIndex(); }
+
   // The painted bar band (client pixels). Exposed so the Windows integration
   // test can aim a click at the bar it can SEE instead of guessing constants.
   // These four are LAZY: the island geometry is only measured when the crumbs
@@ -756,6 +787,11 @@ class GalleryWindow {
         // the pixel work) is now PrismCore's table. This case does ONE thing:
         // read the thread's modifier state, describe the stroke, and hand it to
         // the single router that also serves DispatchKeyStroke.
+        // CARD V2: the band gets first refusal on the keys it owns (Tab ring,
+        // Enter on a focused button, arrows inside a menu). Only keys it
+        // declines fall through to the gallery table below, so no existing
+        // chord changes meaning.
+        if (HandleActionBarKey(static_cast<UINT>(wparam))) return 0;
         prism::keys::Stroke stroke;
         stroke.key = static_cast<uint32_t>(wparam);
         stroke.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -793,11 +829,61 @@ class GalleryWindow {
       }
       case WM_ERASEBKGND:
         return 1;  // D2D paints the whole client area
+      // CARD V2: an Alt chord never reaches TranslateMessage as a plain key --
+      // it arrives as WM_SYSKEYDOWN. That is the ONLY door an Alt mnemonic can
+      // come through, which is why the window-level test dispatches THIS
+      // message instead of setting a synthetic Alt state.
+      case WM_SYSKEYDOWN: {
+        if (!palette_.IsOpen()) {
+          const UINT vk = static_cast<UINT>(wparam);
+          if (vk >= 'A' && vk <= 'Z') {
+            const prism::actionbar::Effect effect =
+                actionBar_.PressMnemonic(static_cast<char>(vk));
+            if (effect.action != prism::actionbar::ActionId::Count) {
+              ApplyActionEffect(effect);
+              Invalidate();
+              return 0;  // claimed: a disabled action still owns its chord
+            }
+          }
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+      }
+      case WM_MOUSEMOVE: {
+        const int index = ActionBarHit(MouseX(lparam), MouseY(lparam));
+        if (index != actionHover_) {
+          actionHover_ = index;
+          Invalidate();
+        }
+        if (!actionTracking_ && host_.hwnd) {
+          TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, host_.hwnd, 0};
+          actionTracking_ = TrackMouseEvent(&track) != FALSE;
+        }
+        return 0;
+      }
+      case WM_MOUSELEAVE: {
+        actionTracking_ = false;
+        if (actionHover_ != -1) {
+          actionHover_ = -1;
+          Invalidate();
+        }
+        return 0;
+      }
+      case WM_LBUTTONUP: {
+        if (actionPressed_ != -1) {
+          actionPressed_ = -1;
+          Invalidate();
+          return 0;
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+      }
       case WM_LBUTTONDBLCLK: {
         DoubleClickAt(MouseX(lparam), MouseY(lparam));
         return 0;
       }
       case WM_LBUTTONDOWN: {
+        // C-V2: the band is chrome ABOVE the rows: a button click must never
+        // also select the tile that happens to be behind it.
+        if (ActionBarClick(MouseX(lparam), MouseY(lparam))) return 0;
         ClickAt(MouseX(lparam), MouseY(lparam));
         return 0;
       }
@@ -863,10 +949,119 @@ class GalleryWindow {
   static int MouseX(LPARAM lparam) { return static_cast<short>(LOWORD(lparam)); }
   static int MouseY(LPARAM lparam) { return static_cast<short>(HIWORD(lparam)); }
 
+  // ---------- the action band's wiring (card V2) ----------
+  // What a click or a chord MEANS is the model's decision, not this file's: the
+  // Effect is already "invoke / open menu / move focus". This only translates
+  // it into "call the app" and "repaint".
+  void ApplyActionEffect(const prism::actionbar::Effect& effect) {
+    using prism::actionbar::Effect;
+    switch (effect.kind) {
+      case Effect::Kind::Invoke:
+        if (effect.enabled) FireAction(effect.action, effect.item);
+        return;
+      case Effect::Kind::None:
+      case Effect::Kind::OpenDropdown:
+      case Effect::Kind::CloseDropdown:
+      case Effect::Kind::MoveFocus:
+      case Effect::Kind::MoveDropdown:
+        return;
+    }
+  }
+
+  // The ONE exit of the band: the app owns what "extract" or "test" does, so a
+  // test can count commands without starting an extraction.
+  void FireAction(prism::actionbar::ActionId action, int item) {
+    if (onAction_) onAction_(action, item);
+  }
+
+  // Tab / Enter / arrows / Esc -- but only for the keys the band actually owns:
+  // a declined key returns false and the gallery table keeps its meaning.
+  bool HandleActionBarKey(UINT vk) {
+    using prism::actionbar::Effect;
+    switch (vk) {
+      case VK_TAB:
+        ApplyActionEffect(actionBar_.PressTab((GetKeyState(VK_SHIFT) & 0x8000) == 0));
+        return true;  // the ring always moves: that IS the traversal
+      case VK_RETURN:
+        if (actionBar_.FocusIndex() < 0 && !actionBar_.DropdownOpen()) return false;
+        ApplyActionEffect(actionBar_.PressEnter());
+        return true;
+      case VK_DOWN: {
+        const Effect effect = actionBar_.PressDown();
+        if (effect.Dropped()) return false;  // arrows still navigate the grid
+        ApplyActionEffect(effect);
+        return true;
+      }
+      case VK_UP: {
+        const Effect effect = actionBar_.PressUp();
+        if (effect.Dropped()) return false;
+        ApplyActionEffect(effect);
+        return true;
+      }
+      case VK_ESCAPE:
+        // Esc leaves the band (menu first, then the ring); with neither up the
+        // key belongs to Quick Look / the gallery exactly as before.
+        if (!actionBar_.DropdownOpen() && actionBar_.FocusIndex() < 0) return false;
+        ApplyActionEffect(actionBar_.PressEscape());
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  prism::actionbar::Layout BandLayout() const {
+    return prism::actionbar::Compute(WindowLayoutForClient());
+  }
+
+  int ActionBarHit(int x, int y) const { return BandLayout().Hit(x, y); }
+
+  // A press on a button: focus it, sink it, run its default variant -- unless
+  // the pixel is the arrow zone of a dropdown action, which opens the menu.
+  // Returning true means "the chrome consumed this click", including the
+  // island's own padding, so the tile behind it is never selected by accident.
+  bool ActionBarClick(int x, int y) {
+    const prism::actionbar::Layout layout = BandLayout();
+    const int index = layout.Hit(x, y);
+    if (index < 0) {
+      if (layout.island.Empty()) return false;
+      const prism::actionbar::Rect& r = layout.island;
+      return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+    }
+    const prism::actionbar::Button& button = layout.buttons[static_cast<size_t>(index)];
+    const prism::actionbar::Spec& spec = prism::actionbar::SpecOf(index);
+    actionBar_.SetFocusIndex(index);
+    actionPressed_ = index;
+    if (spec.hasDropdown && x >= button.rect.right - 16) {
+      ApplyActionEffect(actionBar_.OpenDropdownFor(button.id));
+    } else {
+      const prism::actionbar::Effect effect = actionBar_.PressAction(button.id);
+      if (effect.kind == prism::actionbar::Effect::Kind::Invoke && effect.enabled) {
+        FireAction(effect.action, effect.item);
+      }
+    }
+    Invalidate();
+    return true;
+  }
+
   // ---------- navigation plumbing ----------
   void ApplySelection(int selection) {
     selection_ = selection;
+    // C-V2: the selection IS the enable rule's input (Add/Delete/QuickLook).
+    // One call site, so a row selected by a click, an arrow or the palette all
+    // reach the band the same way.
+    SyncActionContext();
     Invalidate();
+  }
+
+  // Derive the band's context from the state the window already owns. Called
+  // from every mutation of "is there a catalog" / "is there a selection" so the
+  // band can never show a stale legality.
+  void SyncActionContext() {
+    prism::actionbar::Context context;
+    context.archiveOpen = catalog_ != nullptr;
+    context.hasSelection = selection_ >= 0 && selection_ < ItemCount();
+    context.readOnly = readOnly_;
+    actionBar_.SetContext(context);
   }
 
   // ---------- key routing (card C25) ----------
@@ -1183,6 +1378,7 @@ class GalleryWindow {
     RebuildListItems();
     RebuildLayout();
     selection_ = nav_.Selection();
+    SyncActionContext();  // the folder changed: the selection may have been cleared
     scrollTarget_ = 0.0;
     viewport_.SetScroll(0.0);
     scrollSpring_ = SpringAnimator(kScrollSpring, 0.0);  // snap, no glide back
@@ -1284,6 +1480,19 @@ class GalleryWindow {
     if (!barKnown_) const_cast<GalleryWindow*>(this)->MeasureNavIsland();
   }
 
+  // The ONE window layout, exactly as the renderer computes it (V1). Bands, grid
+  // metrics and the breadcrumb pill come from here, so the band's hit test and
+  // the painted band are the same rectangle by construction.
+  prism::layout::Layout WindowLayoutForClient() const {
+    int width = static_cast<int>(clientW_);
+    int height = static_cast<int>(clientH_);
+    if (width <= 0) width = 1280;  // headless default (pre-Create)
+    if (height <= 0) height = 800;
+    const bool rail = listMode_ && sidebarRailVisible_ &&
+                      GalleryRenderer::SidebarFits(static_cast<float>(width));
+    return prism::layout::Compute(width, height, rail, listMode_);
+  }
+
   void MeasureNavIsland() {
     if (clientW_ <= 0.0) {
       RECT rc{};
@@ -1291,18 +1500,15 @@ class GalleryWindow {
       clientW_ = static_cast<double>(rc.right);
       clientH_ = static_cast<double>(rc.bottom);
     }
-    int clientWidth = static_cast<int>(clientW_);
-    int clientHeight = static_cast<int>(clientH_);
-    if (clientWidth <= 0) clientWidth = 1280;   // headless default (pre-Create)
-    if (clientHeight <= 0) clientHeight = 800;
     // V1: the pill and its text run come from the layout, so the clickable span
     // is by construction the painted span.
-    const bool rail = listMode_ && sidebarRailVisible_ &&
-                      GalleryRenderer::SidebarFits(static_cast<float>(clientWidth));
-    const prism::layout::Layout layout =
-        prism::layout::Compute(clientWidth, clientHeight, rail, listMode_);
-    const prism::layout::Rect pill = prism::layout::NavPillRect(layout);
-    const prism::layout::Rect textRect = prism::layout::NavTextRect(layout);
+    const prism::layout::Layout layout = WindowLayoutForClient();
+    // C-V2: the SPLIT pill. The toolbar may have taken width back from it, and
+    // the renderer paints this same rectangle -- so the crumb the user clicks is
+    // by construction the crumb they see.
+    const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+    const prism::layout::Rect pill = band.navPill;
+    const prism::layout::Rect textRect = prism::actionbar::NavTextRect(band);
     barTop_ = pill.top;
     barBottom_ = pill.bottom;
     textLeft_ = textRect.left;
@@ -1389,6 +1595,11 @@ class GalleryWindow {
     // to read scene.listScroll (always 0) while clicks used the viewport.
     scene.listScroll = listMode_ ? static_cast<uint32_t>(viewport_.Scroll()) : 0u;
     scene.breadcrumb = breadcrumbText_;
+    // C-V2: the band. The model is the SAME object the click path hit-tests, so
+    // a button can never be painted somewhere it cannot be pressed.
+    scene.actions = &actionBar_;
+    scene.actionHover = actionHover_;
+    scene.actionPressed = actionPressed_;
     // C29: the rail's command list is a LAYOUT input; EnsureSidebar rebuilds it
     // only when the model is dirty, so this is a cache hit on every other frame.
     EnsureSidebar();
@@ -1632,6 +1843,14 @@ class GalleryWindow {
   prism::list::FilterSpec filter_;     // "" / nullopt everywhere == show everything
   prism::list::MultiSortSpec sortSpec_{
       {{prism::list::SortKey::kName, prism::list::SortDirection::kAscending}}, true};
+  // C-V2: the action band. The model owns the table/rules/geometry; the window
+  // owns only its context (see SyncActionContext) and its wiring.
+  prism::actionbar::Model actionBar_;
+  std::function<void(prism::actionbar::ActionId, int)> onAction_;
+  int actionHover_ = -1;
+  int actionPressed_ = -1;
+  bool actionTracking_ = false;
+  bool readOnly_ = false;
   // C8: the two authorities the window asks instead of deciding for itself.
   prism::win::palette::PaletteShell palette_;
   prism::history::Stack history_;

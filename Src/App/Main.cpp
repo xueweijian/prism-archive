@@ -205,7 +205,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     extractWorker = std::thread([app, &window]() {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       const uint64_t t0 = GalleryWindow::NowMs();
-      window.PostHudStart(std::wstring(L"\x667A\x80FD\x89E3\x538B"));
+      window.PostHudStart("\xe6\x99\xba\xe8\x83\xbd\xe8\xa7\xa3\xe5\x8e\x8b");
       namespace fs = std::filesystem;
       const std::string outDir = prism::win::WideToUtf8(
           fs::path(app->archivePath).parent_path().wstring());

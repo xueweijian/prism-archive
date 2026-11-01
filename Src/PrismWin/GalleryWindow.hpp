@@ -85,8 +85,9 @@ class GalleryWindow {
   // bytes); the UI thread feeds the HUD -- single-threaded by rule.
   static constexpr UINT kProgressMessage = WM_APP + 2;
   // Worker -> UI hand-off for the two pieces of state a worker used to touch
-  // directly (see PostHudStart): LPARAM is an owned std::wstring* that WndProc
-  // takes by value and deletes. A failed PostMessage deletes it at the source.
+  // directly (see PostHudStart): LPARAM is an owned std::string* (HUD headline,
+  // UTF-8) or std::wstring* (status line, wide) that WndProc takes by value and
+  // deletes. A failed PostMessage deletes it at the source.
   static constexpr UINT kHudStart = WM_APP + 3;
   static constexpr UINT kStatusText = WM_APP + 4;
 
@@ -195,9 +196,12 @@ class GalleryWindow {
   // detached thread could outlive the window: Main.cpp's `window` is a stack
   // object destroyed after Run() returns, so closing the app mid-extraction
   // left the worker writing into freed memory.
-  void PostHudStart(std::wstring labelMs) {
+  // HUD headline is UTF-8 (ProgressHud's convention); the status line is wide
+  // (the window paints it with DirectWrite). Two encodings on purpose -- the
+  // helpers are typed so a wrong one is a compile error, not a mojibake bug.
+  void PostHudStart(std::string headline) {
     if (!host_.hwnd) return;
-    auto* heap = new std::wstring(std::move(labelMs));
+    auto* heap = new std::string(std::move(headline));
     if (!PostMessageW(host_.hwnd, kHudStart, 0, reinterpret_cast<LPARAM>(heap))) {
       delete heap;  // the window is gone; nobody will free it for us
     }
@@ -461,8 +465,8 @@ class GalleryWindow {
       case kHudStart: {
         // Ownership transferred with the message: take it and free it. Even on
         // the discard paths below, the pointer must be deleted exactly once.
-        std::unique_ptr<std::wstring> label(reinterpret_cast<std::wstring*>(lparam));
-        if (label) hud_.OnStart(*label, NowMs());
+        std::unique_ptr<std::string> headline(reinterpret_cast<std::string*>(lparam));
+        if (headline) hud_.OnStart(*headline, NowMs());
         Invalidate();
         return 0;
       }

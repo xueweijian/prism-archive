@@ -56,12 +56,25 @@
 #include <string>
 #include <vector>
 
+#include <d2d1_3.h>
+#include <d2d1helper.h>
+#include <d3d11.h>
+#include <dcomp.h>
+#include <dxgi1_3.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
-#include "GlassIslandHost.hpp"
 #include "PrismEngineBridge.hpp"
 #include "SolidFixture.hpp"
+
+// NOTE: this benchmark deliberately does NOT include GlassIslandHost.hpp. That
+// class belongs to another card and its API changed underneath this file
+// (Initialize gained a shaderDir argument, PaintIsland gained GlassConstants +
+// a backdrop bitmap), which broke the Windows CI build of a benchmark that had
+// nothing to do with the change. What must stay stable is the PRIMITIVE the app
+// pays for -- D3D11 device, D2D device context, one DComp composition swapchain
+// per island, EndDraw + Present + Commit -- so the harness below builds exactly
+// that and nothing else. docs/PERF.md says which path produced each number.
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -261,6 +274,139 @@ uint32_t VerifyPainterPixels() {
   return (static_cast<uint32_t>(px[2]) << 16) | (static_cast<uint32_t>(px[1]) << 8) | px[0];
 }
 
+// --------------------------------------------------------------- frame harness
+// The composition path, built from the same primitives the app uses: one D3D11
+// device, one D2D device context, a DComp device/target/root visual, and one
+// premultiplied composition swapchain per island. Present(1, 0) + Commit is the
+// expensive, compositor-visible part -- that is the number the cell asks for.
+class FrameHarness {
+ public:
+  struct Island {
+    ComPtr<IDXGISwapChain1> swapchain;
+    ComPtr<ID2D1Bitmap1> bitmap;
+    ComPtr<IDCompositionVisual> visual;
+    UINT width = 0;
+    UINT height = 0;
+  };
+
+  bool Initialize(HWND hwnd) {
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                   D3D11_SDK_VERSION, d3d_.ReleaseAndGetAddressOf(), nullptr,
+                                   nullptr);
+    if (FAILED(hr)) {
+      hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+                             d3d_.ReleaseAndGetAddressOf(), nullptr, nullptr);
+      if (FAILED(hr)) return false;
+    }
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(d3d_.As(&dxgiDevice))) return false;
+    D2D1_FACTORY_OPTIONS options = {};
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
+                                 &options,
+                                 reinterpret_cast<void**>(
+                                     factory_.ReleaseAndGetAddressOf())))) {
+      return false;
+    }
+    if (FAILED(factory_->CreateDevice(dxgiDevice.Get(), device_.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    if (FAILED(device_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                                            context_.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    if (FAILED(DCompositionCreateDevice(dxgiDevice.Get(), __uuidof(IDCompositionDevice),
+                                        reinterpret_cast<void**>(
+                                            dcomp_.ReleaseAndGetAddressOf())))) {
+      return false;
+    }
+    if (FAILED(dcomp_->CreateTargetForHwnd(hwnd, TRUE, target_.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    if (FAILED(dcomp_->CreateVisual(root_.ReleaseAndGetAddressOf()))) return false;
+    if (FAILED(target_->SetRoot(root_.Get()))) return false;
+    // The three nav/context/telemetry pills the app lays out.
+    if (!AddIsland(560, 44) || !AddIsland(800, 48) || !AddIsland(560, 32)) return false;
+    return SUCCEEDED(dcomp_->Commit());
+  }
+
+  size_t IslandCount() const { return islands_.size(); }
+
+  // One island frame: position the visual, bind the D2D target, paint, EndDraw,
+  // Present, Commit -- exactly the sequence the app runs per island.
+  template <typename Paint>
+  bool Paint(size_t index, float x, float y, Paint&& paint) {
+    if (index >= islands_.size()) return false;
+    Island& island = islands_[index];
+    if (FAILED(island.visual->SetOffsetX(x)) || FAILED(island.visual->SetOffsetY(y))) {
+      return false;
+    }
+    context_->SetTarget(island.bitmap.Get());
+    context_->BeginDraw();
+    context_->Clear(D2D1::ColorF(0.0f, 0.0f));
+    paint(context_.Get(), static_cast<float>(island.width), static_cast<float>(island.height));
+    if (FAILED(context_->EndDraw())) return false;
+    if (FAILED(island.swapchain->Present(1, 0))) return false;
+    return SUCCEEDED(dcomp_->Commit());
+  }
+
+ private:
+  bool AddIsland(UINT width, UINT height) {
+    Island island;
+    island.width = width;
+    island.height = height;
+    DXGI_SWAP_CHAIN_DESC1 desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.Stereo = FALSE;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    ComPtr<IDXGIFactory2> dxgiFactory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory2),
+                                  reinterpret_cast<void**>(
+                                      dxgiFactory.ReleaseAndGetAddressOf())))) {
+      return false;
+    }
+    if (FAILED(dxgiFactory->CreateSwapChainForComposition(
+            d3d_.Get(), &desc, nullptr, island.swapchain.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    ComPtr<IDXGISurface> surface;
+    if (FAILED(island.swapchain->GetBuffer(0, __uuidof(IDXGISurface),
+                                           reinterpret_cast<void**>(
+                                               surface.ReleaseAndGetAddressOf())))) {
+      return false;
+    }
+    D2D1_BITMAP_PROPERTIES1 props = {};
+    props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    if (FAILED(context_->CreateBitmapFromDxgiSurface(surface.Get(), props,
+                                                     island.bitmap.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    if (FAILED(dcomp_->CreateVisual(island.visual.ReleaseAndGetAddressOf()))) return false;
+    if (FAILED(island.visual->SetContent(island.swapchain.Get()))) return false;
+    if (FAILED(root_->AddVisual(island.visual.Get(), FALSE, nullptr))) return false;
+    islands_.push_back(std::move(island));
+    return true;
+  }
+
+  ComPtr<ID3D11Device> d3d_;
+  ComPtr<ID2D1Factory1> factory_;
+  ComPtr<ID2D1Device> device_;
+  ComPtr<ID2D1DeviceContext> context_;
+  ComPtr<IDCompositionDevice> dcomp_;
+  ComPtr<IDCompositionTarget> target_;
+  ComPtr<IDCompositionVisual> root_;
+  std::vector<Island> islands_;
+};
+
 // ------------------------------------------------------------------ close probe
 
 struct CloseCheck {
@@ -439,7 +585,7 @@ int main(int argc, char** argv) {
   }
   std::printf("    window created in %.3f ms\n", window.createMs);
 
-  prism::win::glass::GlassIslandHost host;
+  FrameHarness host;
   const bool composited = host.Initialize(window.hwnd);
   std::printf("    paint path: %s\n", composited ? "dcomp" : "headless-d2d (no compositor)");
 
@@ -451,19 +597,16 @@ int main(int argc, char** argv) {
     Timer frame;
     frame.Begin();
     for (size_t island = 0; island < host.IslandCount(); ++island) {
-      const prism::glass::IslandRect rect{16u + 8u * static_cast<uint32_t>(island), 16u, 400u,
-                                          44u};
-      if (host.PaintIsland(island, rect, [](ID2D1DeviceContext* ctx, float w, float h) {
-            PaintProbe(ctx, w, h);
-          })) {
+      if (host.Paint(island, 16.0f + 8.0f * static_cast<float>(island), 16.0f,
+                     [](ID2D1DeviceContext* ctx, float w, float h) { PaintProbe(ctx, w, h); })) {
         ++presents;
       }
     }
     firstFrameMs = frame.Ms();  // CreateWindowEx -> first EndDraw+Present(+Commit)
     Timer frame2;
     frame2.Begin();
-    if (host.PaintIsland(0, prism::glass::IslandRect{16u, 16u, 400u, 44u},
-                         [](ID2D1DeviceContext* ctx, float w, float h) { PaintProbe(ctx, w, h); })) {
+    if (host.Paint(0, 16.0f, 16.0f,
+                   [](ID2D1DeviceContext* ctx, float w, float h) { PaintProbe(ctx, w, h); })) {
       ++presents;
     }
     secondFrameMs = frame2.Ms();

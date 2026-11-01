@@ -229,7 +229,9 @@ Verdicts:
   handler creation + `Open` = **84 ms at best, 2.4 s at worst**. Caching the DLL
   alone cannot reach 12 ms.
 * **close latency**: `WM_CLOSE` -> process gone on the SHIPPED
-  `PrismArchive.exe` = **778 ms** quiet / 1766 ms and 3122 ms under load,
+  `PrismArchive.exe` = **778 ms** quiet; 1766 / 2318 / 3122 ms while sibling
+  builds were saturating the disk (so the spread is the machine, and the cell is
+  still over budget even at its best: 778 ms),
   measured black-box (`PostMessageW(WM_CLOSE)` to the real window, then wait on
   the process handle). The window appears **497 ms** after `CreateProcess` when
   the disk is idle (1106 ms when it is not). This is card c1's bug (worker join
@@ -276,12 +278,12 @@ Verdicts:
 |---|---|---|
 | **10 000-entry** archive `Open` | **4.0 ms** (median of 3, quiet) / 21.6 ms (loaded) | 10 000 real files packed by `7z.exe` |
 | **10 000-entry** `ReadCatalog` | **3.6 ms** (quiet) / 9.3 ms (loaded) | 0.36 us/entry; the catalog count is asserted == 10 000 |
-| **4 GiB** archive `Open` (one stored item) | **64.0 s** | suspected: the ZIP candidate probe scans the file; see below |
-| **4 GiB** archive, full sweep | **52.4 s** | 4 GiB drained through 7z.dll |
-| **4 GiB** archive, full extract to disk | **190.0 s** (approx 22 MB/s) | 4 294 967 296 bytes written |
+| **4 GiB** archive `Open` (one stored item) | **53.5 s** | suspected: the ZIP candidate probe scans the file; see below |
+| **4 GiB** archive, full sweep | **93.5 s** | 4 GiB drained through 7z.dll |
+| **4 GiB** archive, full extract to disk | **244.0 s** (approx 17.6 MB/s) | 4 294 967 296 bytes written |
 | files created in a **controlled `%TEMP%`** during the 4 GiB extract | **0 -> 0** | `TEMP`/`TMP` redirected to a dedicated empty dir; full tree snapshot (paths + sizes) before/after |
-| **100 000-row** list, real `GalleryRenderer`, 1200x800 software target | **11.5 ms/frame** median (p95 19.5 ms) -> **86.8 FPS** CPU-side | 120 frames spread across the whole list |
-| **1 000-row** list, same harness | 12.8 ms/frame | the point: the cost does **not** depend on N |
+| **100 000-row** list, real `GalleryRenderer`, 1200x800 software target | **5.6 ms/frame** median (p95 8.0 ms) -> **178.2 FPS** CPU-side | 120 frames spread across the whole list |
+| **1 000-row** list, same harness | 5.8 ms/frame | the point: the cost does **not** depend on N |
 | rows drawn per frame at 1 000 vs 100 000 rows | **25 vs 25** (viewport bound) | asserted equal; virtualization is exact |
 
 Verdicts:
@@ -300,13 +302,15 @@ Verdicts:
   each candidate's `Open` separately (`PrismEngineBridge.hpp`, not this card's
   file) and to bound or reorder the probe by magic bytes (blueprint 7.2 row 2
   actually asks for exactly that prefilter).
-* **100 000 rows / 120 FPS (Phase 3)**: **CPU-side 86.8 FPS, 未达标 for 120**; and
-  **presented FPS 未支持** -- the window has no benchmark injection point
-  (`GalleryWindow` belongs to c1), so vsync/composition is not measured. What IS
-  proven is the virtualization: 25 rows drawn per frame at 1 000 and at 100 000
-  rows, identically, and the per-frame cost does not grow with N. Reaching 120 Hz
-  means getting the frame under 8.3 ms; 11.5 ms is 3.2 ms over, on a software D2D
-  target (a GPU target would change this), so the cell stays open with a number.
+* **100 000 rows / 120 FPS (Phase 3)**: **CPU-side 178.2 FPS median (5.6 ms/frame,
+  p95 8.0 ms)** -> the 8.3 ms budget for 120 Hz is met at the median and only just
+  at the tail, on a SOFTWARE D2D target (a GPU target would change this either
+  way). **Presented FPS is still 未支持**: the window has no benchmark injection
+  point (`GalleryWindow` belongs to c1), so vsync/composition is not measured.
+  What IS proven is the virtualization: 25 rows drawn per frame at 1 000 and at
+  100 000 rows, identically, and the per-frame cost does not grow with N.
+  The earlier, loaded run read 11.5 ms/frame (86.8 FPS) -- recorded here because
+  the difference between those two runs is the machine, not the code.
 * **zero-%TEMP% (Phase 3)**: **0 entries before and after a 4 GiB extraction** ->
   **达标**. The mutation that stages the archive through `%TEMP%` turns the cell
   red, so the zero is a guard, not a coincidence of a clean run.
@@ -331,7 +335,7 @@ runs, exit codes as observed:
 |---|---|---|
 | `mutation.bench_startup.timer_scale` | every reported duration x 1000 | `Sleep(50) measured 56413.300 ms`, `FAIL ... timer is not calibrated`, exit 1 |
 | `mutation.bench_memory.block_buffer` | extract every item into memory and keep it (the naive implementation) | `sweep peak follows block size (219811840 vs 13402112 bytes)`, exit 1 |
-| `mutation.bench_scale.temp_write` | stage the archive through the controlled `%TEMP%` before extracting | the zero-`%TEMP%` tree comparison goes non-empty, exit 1 |
+| `mutation.bench_scale.temp_write` | stage the archive through the controlled `%TEMP%` before extracting | `temp entries 0 -> 1` (`temp: staging.7z`), `FAIL: the pipeline wrote into %TEMP%`, exit 1 |
 
 A fourth, unplanned negative control came out of this work and is worth
 recording: the first scale run printed its digits and then died with 0xC0000005

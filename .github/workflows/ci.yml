@@ -226,10 +226,17 @@ jobs:
           #   green in the first -j 8 run, i.e. a scheduling race inside that
           #   suite, not a shared directory -- a RESOURCE_LOCK cannot fix it
           #   (only one instance runs) and the fix belongs to c30.
-          # That case now waits (bounded) for the leftovers to disappear before it
-          # asserts, so the lane goes back to -j 8: 286 s serial -> 150 s (168
-          # tests, measured on this box with the fixture work above in place).
-          ctest -j 8 --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
+          # Back to SERIAL, and this is the third measured statement about the same
+          # lane -- the fixture work is done (unique RAII dirs + a 7z.exe resource
+          # lock), but two suites keep timing budgets that a loaded runner blows:
+          #   - win.companion_preview: the cross-process case asserts all 25 writes
+          #     arrived (line 319) and the degradation case asserts the named
+          #     objects are gone (line 374). Under -j 8 the child process is simply
+          #     slower and both fail on TIMING, not on behaviour.
+          # The honest fix is to make those two budgets load-aware (wait on
+          # events, not on elapsed work), which is a card of its own. The fixtures
+          # and the lock stay: they are what makes that card possible.
+          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" 2>&1 | tee "$RUNNER_TEMP/prism_test.log"
           exit ${PIPESTATUS[0]}
 
       # The Windows half of the same local gate: proves CMakePresets.json parses

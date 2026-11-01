@@ -37,6 +37,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -45,6 +46,7 @@
 #include "PrismEngineBridge.hpp"
 #include "ReaderPool.hpp"
 #include "SolidFixture.hpp"
+#include "UniqueTempDir.hpp"
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "ole32.lib")
@@ -106,17 +108,15 @@ bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>* out) {
   return true;
 }
 
-// Distinct fixture directory PER PROCESS (CONTRACTS: test fixtures must be
-// isolated). The old fixed name let two suite binaries delete and re-pack the
-// same archive under each other -- measured on 2026-11-02: the loser of that
-// race died with 0xC0000409 or decoded a half-written archive. A path that no
-// other process can name is the only concurrency-safe fixture.
-fs::path UniqueWorkDir() {
-  return fs::temp_directory_path() /
-         ("prism_c41_pool_race_" + std::to_string(GetCurrentProcessId()));
-}
-
+// C36's scratch-directory policy (Tests/win/UniqueTempDir.hpp): unique per
+// process AND per allocation, removed by RAII. A fixed "%TEMP%" constant is
+// exactly what let two ctest processes wipe and re-pack the same archive under
+// each other (measured 2026-11-02: the loser died with 0xC0000409 or decoded a
+// half-written archive into the 0-byte "success" this card is about).
 struct Fixture {
+  // Declared FIRST so it is destroyed LAST: every reader/handle is closed
+  // before the tree is removed.
+  std::unique_ptr<prism::testtmp::UniqueDir> scratch;
   std::wstring dir;
   std::wstring archivePath;
   win::SevenZipLibrary library;
@@ -152,10 +152,13 @@ bool SetupFixture() {
     std::cout << "    FAIL: " << fx.why << std::endl;
     return false;
   }
-  const fs::path work = UniqueWorkDir();
-  std::error_code ec;
-  fs::remove_all(work, ec);
-  fs::create_directories(work, ec);
+  fx.scratch = std::make_unique<prism::testtmp::UniqueDir>(L"c41", L"pool_race");
+  if (!fx.scratch->ok()) {
+    fx.why = "cannot create the fixture directory: " + fx.scratch->error();
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  const fs::path& work = fx.scratch->path();
   fx.dir = work.wstring();
   fx.archivePath = (work / "race.7z").wstring();
 

@@ -15,9 +15,12 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <functional>
 #include <map>
 #include <set>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,6 +49,67 @@ inline std::string WideToUtf8(std::wstring_view wide) {
   std::string out(static_cast<size_t>(needed), '\0');
   WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), needed,
                       nullptr, nullptr);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Engine format table (card C26: extension -> CLSID routing)
+// ---------------------------------------------------------------------------
+// 7z.dll publishes its own handler table through GetHandlerProperty2(): name,
+// class id, and the extensions each handler claims. Reading it back is the only
+// authoritative way to learn the CLSID of a format that is not in the official
+// Guid.txt -- zstd (7-Zip 25.x) and fork-only lz4/brotli handlers live there,
+// and a guessed GUID fails CreateObject with no useful diagnostic (CONTRACTS A4).
+struct EngineFormatInfo {
+  std::string name;                     // as the DLL spells it: "7z", "zstd"
+  GUID clsid{};                         // handler class id
+  bool hasClsid = false;                // the DLL answered kClassID
+  std::vector<std::string> extensions;  // lowercase, no dot: {"zst", "tzst"}
+};
+
+// CPP/7zip/Archive/IArchive.h -- NArchive::NHandlerPropID.
+enum : PROPID {
+  kHandlerPropName = 0,
+  kHandlerPropClassId = 1,
+  kHandlerPropExt = 2,
+  kHandlerPropAddExt = 3,
+};
+
+inline std::string LowerAscii(std::string text) {
+  for (char& c : text) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return text;
+}
+
+// "zst tzst" / "* .tar" / "(.tar)" -> {"zst","tzst","tar"}. Anything that is
+// not a plain extension (signature fragments, "~.swf") is dropped: routing on
+// a bogus token would hand the wrong handler to a file we can identify.
+inline std::vector<std::string> ParseExtensionList(std::string_view raw) {
+  std::vector<std::string> out;
+  std::string token;
+  auto flush = [&out, &token]() {
+    std::string ext;
+    for (char c : token) {
+      if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ext.push_back(c);
+    }
+    token.clear();
+    if (ext.empty() || ext.size() > 10) return;
+    for (const std::string& existing : out) {
+      if (existing == ext) return;
+    }
+    out.push_back(ext);
+  };
+  for (char raw_c : raw) {
+    char c = raw_c;
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    if (c == ' ' || c == '\t') {
+      if (!token.empty()) flush();
+    } else {
+      token.push_back(c);
+    }
+  }
+  if (!token.empty()) flush();
   return out;
 }
 
@@ -198,6 +262,10 @@ class SevenZipLibrary {
     setLargePageMode_ =
         reinterpret_cast<abi::FnSetLargePageMode>(GetProcAddress(module_, "SetLargePageMode"));
     if (createObject_) path_ = dllPath;
+    // Scan the handler table HERE, not lazily on first Open(): Load() is a
+    // single-threaded startup step, while Open() may race with the reader pool
+    // (D24). The table is what routes an extension to its CLSID.
+    if (createObject_) ScanFormats();
     return createObject_ != nullptr;
   }
 
@@ -221,13 +289,102 @@ class SevenZipLibrary {
     return count;
   }
 
+  // The engine's own handler table (card C26). Scanned once and cached: the
+  // table is immutable for the module's lifetime and Open() runs per file.
+  // An empty result means the DLL would not answer -- callers fall back to the
+  // pinned CLSIDs instead of treating "unknown" as "unsupported".
+  const std::vector<EngineFormatInfo>& formats() {
+    if (!formatsScanned_) ScanFormats();
+    return formats_;
+  }
+
+  // Every handler CLSID that claims `extension` (lowercase, no dot), in the
+  // DLL's own order. ".rar" legitimately answers twice (Rar and Rar5), and the
+  // Rar handler declines a Rar5 archive -- both must be tried.
+  std::vector<GUID> ClsidsForExtension(std::string_view extension) {
+    std::vector<GUID> out;
+    for (const EngineFormatInfo& format : formats()) {
+      if (!format.hasClsid) continue;
+      for (const std::string& ext : format.extensions) {
+        if (ext == extension) {
+          out.push_back(format.clsid);
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  const EngineFormatInfo* FormatNamed(std::string_view name) {
+    const std::string wanted = LowerAscii(std::string(name));
+    for (const EngineFormatInfo& format : formats()) {
+      if (LowerAscii(format.name) == wanted) return &format;
+    }
+    return nullptr;
+  }
+
  private:
+  std::string HandlerPropString(abi::UInt32 index, PROPID propId) const {
+    if (!getHandlerProperty2_) return {};
+    PROPVARIANT value{};
+    PropVariantInit(&value);
+    std::string out;
+    if (SUCCEEDED(getHandlerProperty2_(index, propId, &value)) && value.vt == VT_BSTR &&
+        value.bstrVal) {
+      out = WideToUtf8(value.bstrVal);
+    }
+    PropVariantClear(&value);
+    return out;
+  }
+
+  void ScanFormats() {
+    formatsScanned_ = true;
+    if (!getNumberOfFormats_ || !getHandlerProperty2_) return;
+    abi::UInt32 count = 0;
+    if (FAILED(getNumberOfFormats_(&count))) return;
+    formats_.reserve(count);
+    for (abi::UInt32 i = 0; i < count; ++i) {
+      EngineFormatInfo info;
+      info.name = HandlerPropString(i, kHandlerPropName);
+      if (info.name.empty()) continue;
+      PROPVARIANT value{};
+      PropVariantInit(&value);
+      if (SUCCEEDED(getHandlerProperty2_(i, kHandlerPropClassId, &value)) &&
+          value.vt == VT_BSTR && value.bstrVal) {
+        // 7-Zip hands the CLSID back as a BSTR whose eight wchar_t ARE the 16
+        // GUID bytes -- NOT the "{...}" text form (measured against 7z.dll
+        // 25.01, card C26: first bytes 69 0F 17 23 ...). The copy is validated
+        // by the 7-Zip GUID prefix instead of SysStringLen(), which keeps this
+        // header compilable by the SDK-vocabulary gate (tools/win_stub).
+        GUID parsed{};
+        std::memcpy(&parsed, value.bstrVal, sizeof(GUID));
+        if (parsed.Data1 == 0x23170F69 && parsed.Data2 == 0x40C1 && parsed.Data3 == 0x278A) {
+          info.clsid = parsed;
+          info.hasClsid = true;
+        }
+      }
+      PropVariantClear(&value);
+      info.extensions = ParseExtensionList(HandlerPropString(i, kHandlerPropExt));
+      for (const std::string& added :
+           ParseExtensionList(HandlerPropString(i, kHandlerPropAddExt))) {
+        bool seen = false;
+        for (const std::string& ext : info.extensions) {
+          if (ext == added) seen = true;
+        }
+        if (!seen) info.extensions.push_back(added);
+      }
+      formats_.push_back(std::move(info));
+    }
+  }
+
   HMODULE module_ = nullptr;
   std::wstring path_;
   abi::FnCreateObject createObject_ = nullptr;
   abi::FnGetNumberOfFormats getNumberOfFormats_ = nullptr;
   abi::FnGetHandlerProperty2 getHandlerProperty2_ = nullptr;
   abi::FnSetLargePageMode setLargePageMode_ = nullptr;
+  std::vector<EngineFormatInfo> formats_;
+  bool formatsScanned_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -529,6 +686,64 @@ class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICrypto
 };
 
 // ---------------------------------------------------------------------------
+// Per-item extraction result (7-Zip's NArchive::NExtract::NOperationResult)
+// ---------------------------------------------------------------------------
+// IInArchive::Extract() answers S_OK even when an item could not be decoded:
+// the verdict arrives out of band, in SetOperationResult(opResult). The pre-C26
+// code looked only at the HRESULT, so a .7z compressed with a method this
+// 7z.dll does not implement (zstd) was reported as a successful extraction of
+// zero bytes -- the file on disk was empty and nothing said why
+// (2026-11-01, card C17 / C26).
+//
+// The numeric values are 7-Zip's (CPP/7zip/Archive/IArchive.h):
+enum class OpResult : abi::Int32 {
+  kOk = 0,
+  kUnsupportedMethod = 1,
+  kDataError = 2,
+  kCrcError = 3,
+  kUnavailable = 4,
+  kUnexpectedEnd = 5,
+  kDataAfterEnd = 6,
+  kIsNotArc = 7,
+  kHeadersError = 8,
+  kWrongPassword = 9,
+  kUnknown = -1,
+};
+
+inline const char* ToString(OpResult result) {
+  switch (result) {
+    case OpResult::kOk: return "kOk";
+    case OpResult::kUnsupportedMethod: return "kUnsupportedMethod";
+    case OpResult::kDataError: return "kDataError";
+    case OpResult::kCrcError: return "kCrcError";
+    case OpResult::kUnavailable: return "kUnavailable";
+    case OpResult::kUnexpectedEnd: return "kUnexpectedEnd";
+    case OpResult::kDataAfterEnd: return "kDataAfterEnd";
+    case OpResult::kIsNotArc: return "kIsNotArc";
+    case OpResult::kHeadersError: return "kHeadersError";
+    case OpResult::kWrongPassword: return "kWrongPassword";
+    case OpResult::kUnknown: break;
+  }
+  return "kUnknown";
+}
+
+inline std::ostream& operator<<(std::ostream& os, OpResult result) {
+  return os << ToString(result);
+}
+
+// Negative control (CONTRACTS D3): a build that reproduces the pre-C26 defect
+// on purpose -- the engine's per-item verdict is read and thrown away, so an
+// unsupported method looks exactly like a 0-byte success. The hit counter is
+// what proves the injection actually fired: a mutation whose source no longer
+// matches must not be able to look "sharp" by staying green.
+#ifdef PRISM_C26_MUTANT_IGNORE_OPRESULT
+inline int& MutantIgnoredOpResultHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Extract callback: smart path rewriting + Zip Slip guard + bomb fuse
 // ---------------------------------------------------------------------------
 class SmartExtractCallback final : public abi::IArchiveExtractCallback {
@@ -541,11 +756,32 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     std::string guardReason;
     std::string fuseReason;
     std::vector<std::string> writtenPaths;
+    // C26: per-item engine verdicts. Extract() returns S_OK while items fail,
+    // so "0 bytes written, no error" used to be indistinguishable from an empty
+    // archive. failedItems is the fact; failureReason is the actionable text.
+    uint64_t failedItems = 0;
+    OpResult firstFailure = OpResult::kOk;  // engine code of the FIRST failure
+    std::vector<uint32_t> failedIndices;
+    std::vector<std::string> failedPaths;
+    std::string failureReason;  // empty when nothing failed
+    bool failed() const { return failedItems != 0; }
   };
 
+  // The engine reports a failure as a bare number; naming the compression
+  // method needs kpidMethod from the archive, which only ArchiveReader holds.
+  // Called at most once per FAILED item -- never on the success path.
+  using MethodNameLookup = std::function<std::string(uint32_t index)>;
+
   SmartExtractCallback(const std::vector<ArchiveItem>& catalog, const SmartPlan& plan,
-                       const std::string& targetRoot, BombFuse* fuse = nullptr)
-      : catalog_(catalog), plan_(plan), guard_(targetRoot), fuse_(fuse) {}
+                       const std::string& targetRoot, BombFuse* fuse = nullptr,
+                       MethodNameLookup methodLookup = {},
+                       std::vector<uint32_t> requestedIndices = {})
+      : catalog_(catalog),
+        plan_(plan),
+        guard_(targetRoot),
+        fuse_(fuse),
+        methodLookup_(std::move(methodLookup)),
+        requestedIndices_(std::move(requestedIndices)) {}
 
   const Result& result() const { return result_; }
   void SetFreeDiskBytes(uint64_t freeBytes) { freeDiskBytes_ = freeBytes; }
@@ -623,6 +859,15 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       return E_ABORT;
     }
     currentPath_ = finalPath;
+    currentIndex_ = item.index;
+    // Self-healing cursor: whatever PrepareOperation guessed, a real GetStream
+    // tells us the exact index, so the next unattributed failure starts after
+    // this one.
+    while (nextRequested_ < requestedIndices_.size() &&
+           requestedIndices_[nextRequested_] != item.index) {
+      ++nextRequested_;
+    }
+    if (nextRequested_ < requestedIndices_.size()) ++nextRequested_;
     // TWO references are needed and they are different things:
     //   * outStream  -- handed to 7z, which OWNS it and will Release it once
     //                   the item is written;
@@ -637,23 +882,122 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     return S_OK;
   }
 
-  STDMETHODIMP PrepareOperation(abi::Int32) override { return S_OK; }
+  // An item whose method the engine cannot create a coder for NEVER reaches
+  // GetStream -- 7-Zip reports it straight through PrepareOperation +
+  // SetOperationResult(kUnsupportedMethod). Without this cursor the failure
+  // would be attributed to whatever item was decoded last (measured on 7z.dll
+  // 25.01, card C26), so the actionable message would name the wrong file.
+  STDMETHODIMP PrepareOperation(abi::Int32) override {
+    if (currentPath_.empty() && nextRequested_ < requestedIndices_.size()) {
+      currentIndex_ = requestedIndices_[nextRequested_];
+      ++nextRequested_;
+    }
+    return S_OK;
+  }
 
+  // THE contract this card exists for: opResult is the engine's per-item
+  // verdict and it is NOT part of the Extract() HRESULT. A non-zero value means
+  // "this item did not decode" -- typically kUnsupportedMethod for an archive
+  // compressed with a method the loaded 7z.dll does not implement.
   STDMETHODIMP SetOperationResult(abi::Int32 operationResult) override {
-    if (operationResult == 0 && !currentPath_.empty()) {
-      ++result_.filesWritten;
-      result_.writtenPaths.push_back(currentPath_);
-      if (currentSink_) result_.bytesWritten += currentSink_->written();
+#ifdef PRISM_C26_MUTANT_IGNORE_OPRESULT
+    ++MutantIgnoredOpResultHits();
+    operationResult = 0;  // the pre-C26 defect, injected on purpose
+#endif
+    if (operationResult == 0) {
+      if (!currentPath_.empty()) {
+        ++result_.filesWritten;
+        result_.writtenPaths.push_back(currentPath_);
+        if (currentSink_) result_.bytesWritten += currentSink_->written();
+      }
+    } else {
+      RecordFailure(operationResult);
     }
     // Drop OUR reference (see GetStream); the engine drops its own when it is
     // done with the stream. Without this the AddRef above would leak.
     if (currentSink_) currentSink_->Release();
     currentSink_ = nullptr;
     currentPath_.clear();
+    currentIndex_ = 0;
     return S_OK;
   }
 
  private:
+  // Naming an unknown coder: 7-Zip reports it by its hex method id. 04F71101 is
+  // zstd (7-Zip Zstandard), the method that produced this card's fixture.
+  static std::string FriendlyMethodName(const std::string& raw) {
+    if (raw == "04F71101" || raw == "04f71101") return "zstd (04F71101)";
+    return raw;
+  }
+
+  static std::string DescribeFailure(OpResult code, const std::string& path,
+                                     const std::string& methodRaw) {
+    const std::string item = path.empty() ? std::string("<unknown item>") : path;
+    const std::string method = FriendlyMethodName(methodRaw);
+    std::string head;
+    switch (code) {
+      case OpResult::kUnsupportedMethod:
+        head = "unsupported compression method";
+        if (!method.empty()) head += " '" + method + "'";
+        head +=
+            ": this 7z.dll cannot decode it -- install 7-Zip ZS (zstd/lz4/brotli)"
+            " or update the engine";
+        break;
+      case OpResult::kWrongPassword:
+        head = "wrong password (or an encrypted header this engine cannot read)";
+        break;
+      case OpResult::kDataError:
+        head = "the archive data is corrupt";
+        break;
+      case OpResult::kCrcError:
+        head = "CRC mismatch -- the extracted data is not what the archive claims";
+        break;
+      case OpResult::kUnexpectedEnd:
+        head = "the archive ends before the item does (truncated download?)";
+        break;
+      case OpResult::kUnavailable:
+        head = "the engine reports this item as unavailable";
+        break;
+      case OpResult::kDataAfterEnd:
+        head = "unexpected data after the end of the archive";
+        break;
+      case OpResult::kIsNotArc:
+        head = "the engine no longer recognises this file as an archive";
+        break;
+      case OpResult::kHeadersError:
+        head = "the archive header is damaged";
+        break;
+      default:
+        head = "engine reported per-item result " +
+               std::to_string(static_cast<int>(code)) + " (" + ToString(code) + ")";
+        break;
+    }
+    return head + " [item '" + item + "']";
+  }
+
+  // The item an unattributed failure belongs to. When the engine skipped
+  // GetStream there is no final on-disk path yet, but the catalog entry still
+  // names the file the user asked for -- which is what the message must say.
+  const std::string& FailedItemLabel() const {
+    if (!currentPath_.empty()) return currentPath_;
+    static const std::string kUnknown = "<unknown item>";
+    if (currentIndex_ < catalog_.size()) return catalog_[currentIndex_].path;
+    return kUnknown;
+  }
+
+  void RecordFailure(abi::Int32 operationResult) {
+    ++result_.failedItems;
+    const OpResult code = static_cast<OpResult>(operationResult);
+    if (result_.failedItems == 1) {  // the first failure is the headline
+      result_.firstFailure = code;
+      result_.failureReason = DescribeFailure(
+          code, FailedItemLabel(),
+          methodLookup_ ? methodLookup_(currentIndex_) : std::string());
+    }
+    result_.failedIndices.push_back(currentIndex_);
+    result_.failedPaths.push_back(FailedItemLabel());
+  }
+
   static void CreateParentDirectories(const std::wstring& fullPathRaw) {
     const std::wstring fullPath = ToBackslashes(fullPathRaw);
     for (size_t i = 0; i < fullPath.size(); ++i) {
@@ -670,6 +1014,12 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   BombFuse* fuse_ = nullptr;
   Result result_;
   std::string currentPath_;
+  uint32_t currentIndex_ = 0;  // catalog index of the item being decoded
+  MethodNameLookup methodLookup_;
+  // Indices handed to Extract(), in the engine's reporting order. PrepareOperation
+  // consumes this cursor when GetStream never runs (unsupported method).
+  std::vector<uint32_t> requestedIndices_;
+  size_t nextRequested_ = 0;
   DiskOutStream* currentSink_ = nullptr;
   uint64_t packedSoFar_ = 0;
   uint64_t fedPacked_ = 0;
@@ -678,6 +1028,79 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   abi::UInt64 total_ = 0;
   LONG refs_ = 1;
 };
+
+// ---------------------------------------------------------------------------
+// Extension -> handler routing (card C26)
+// ---------------------------------------------------------------------------
+// Before C26, Open() brute-forced two handlers (Zip, 7z) and nothing else, so a
+// bare .zst / .tar / .gz could never open even on an engine that supports them
+// (7-Zip 25.x decodes .zst natively -- a capability we got for free the moment
+// the extension was routed instead of probed). The table below is the contract:
+// these extensions are routed. The CLSID itself comes from the engine's own
+// handler table when it claims the extension (authoritative, and the only way
+// to learn fork-only GUIDs); pinnedClsid is the fallback for formats whose
+// class ids are hard-coded in SevenZipAbi.hpp. Anything else -- unknown
+// extension, or a routed handler that declines -- falls back to the pre-C26
+// "try the candidates in turn" loop.
+//
+// Pinned handler CLSIDs, pattern {23170F69-40C1-278A-1000-000110xx0000}
+// (7-Zip Guid.txt). Tests/win/test_extract_failure.cpp cross-checks every one
+// of these against the engine's kClassID table, so a typo here is a red test,
+// not a silent degradation to the probe path.
+constexpr GUID kClsidBzip2 = {0x23170F69, 0x40C1, 0x278A,
+                              {0x10, 0x00, 0x00, 0x01, 0x10, 0x02, 0x00, 0x00}};
+constexpr GUID kClsidRar = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0x03, 0x00, 0x00}};
+constexpr GUID kClsidXz = {0x23170F69, 0x40C1, 0x278A,
+                           {0x10, 0x00, 0x00, 0x01, 0x10, 0x0C, 0x00, 0x00}};
+constexpr GUID kClsidTar = {0x23170F69, 0x40C1, 0x278A,
+                            {0x10, 0x00, 0x00, 0x01, 0x10, 0xEE, 0x00, 0x00}};
+constexpr GUID kClsidGzip = {0x23170F69, 0x40C1, 0x278A,
+                             {0x10, 0x00, 0x00, 0x01, 0x10, 0xEF, 0x00, 0x00}};
+
+struct FormatRoute {
+  const wchar_t* extension;  // lowercase, with the dot: L".7z"
+  const char* handler;       // engine handler name: diagnostics + intent
+  const GUID* pinnedClsid;   // nullptr: engine-only (fork formats: zstd/lz4/br)
+};
+
+// ".ZST" -> L".zst"; a dot in a directory name is not an extension.
+inline std::wstring PathExtensionLower(std::wstring_view path) {
+  const size_t dot = path.find_last_of(L'.');
+  if (dot == std::wstring_view::npos) return {};
+  const size_t separator = path.find_last_of(L"\\/");
+  if (separator != std::wstring_view::npos && dot < separator) return {};
+  std::wstring extension(path.substr(dot));
+  for (wchar_t& c : extension) {
+    if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+  }
+  return extension;
+}
+
+inline const FormatRoute* FindFormatRoute(std::wstring_view path) {
+  static const FormatRoute kRoutes[] = {
+      {L".7z", "7z", &abi::CLSID_CFormat7z},
+      {L".zip", "zip", &abi::CLSID_CFormatZip},
+      {L".rar", "rar", &kClsidRar},
+      {L".tar", "tar", &kClsidTar},
+      {L".gz", "gzip", &kClsidGzip},
+      {L".tgz", "gzip", &kClsidGzip},
+      {L".bz2", "bzip2", &kClsidBzip2},
+      {L".tbz2", "bzip2", &kClsidBzip2},
+      {L".xz", "xz", &kClsidXz},
+      {L".txz", "xz", &kClsidXz},
+      {L".zst", "zstd", nullptr},
+      {L".tzst", "zstd", nullptr},
+      {L".lz4", "lz4", nullptr},
+      {L".br", "br", nullptr},
+  };
+  const std::wstring extension = PathExtensionLower(path);
+  if (extension.empty()) return nullptr;
+  for (const FormatRoute& route : kRoutes) {
+    if (extension == route.extension) return &route;
+  }
+  return nullptr;
+}
 
 // ---------------------------------------------------------------------------
 // ArchiveReader: central-directory snapshot + the two extraction entry points
@@ -709,12 +1132,50 @@ class ArchiveReader {
       return false;
     }
 
-    // Try candidate handlers in order: no registry, no sniffing table needed --
-    // the handler itself rejects anything it cannot parse.
-    for (const GUID* clsid : {&abi::CLSID_CFormatZip, &abi::CLSID_CFormat7z}) {
+    // C26: route by extension first. The extension decides WHICH handlers are
+    // worth asking; the engine's own table decides their CLSIDs. The old
+    // two-handler probe survives as the fallback below, so a mislabeled file
+    // (a .zip named .7z, an archive with no extension at all) still opens.
+    const std::wstring extension = PathExtensionLower(archivePath);
+    const FormatRoute* route = FindFormatRoute(archivePath);
+    openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
+    openTrace_ += route ? (" route=" + std::string(route->handler) + "; ")
+                        : std::string(" route=probe; ");
+
+    struct Candidate {
+      GUID clsid;
+      const char* label;
+    };
+    std::vector<Candidate> candidates;
+    auto addCandidate = [&candidates](const GUID& clsid, const char* label) {
+      for (const Candidate& existing : candidates) {
+        // memcmp, not IsEqualGUID: this header must stay compilable by the
+        // SDK-vocabulary gate (tools/check_windows_tu.sh), which does not
+        // declare every guiddef.h helper.
+        if (std::memcmp(&existing.clsid, &clsid, sizeof(GUID)) == 0) return;
+      }
+      candidates.push_back({clsid, label});
+    };
+    if (route) {
+      const std::vector<GUID> fromEngine = library_.ClsidsForExtension(WideToUtf8(extension.substr(1)));
+      for (const GUID& clsid : fromEngine) addCandidate(clsid, route->handler);
+      if (fromEngine.empty()) {
+        if (route->pinnedClsid) {
+          addCandidate(*route->pinnedClsid, route->handler);
+        } else {
+          openTrace_ += "(engine claims no handler for this extension) ";
+        }
+      }
+    }
+    // The pre-C26 candidate list, always last: unknown extensions land here by
+    // definition, and so does a routed handler that declined the file.
+    addCandidate(abi::CLSID_CFormatZip, "Zip");
+    addCandidate(abi::CLSID_CFormat7z, "7z");
+
+    for (const Candidate& slot : candidates) {
       abi::IInArchive* candidate = nullptr;
-      const char* name = (clsid == &abi::CLSID_CFormatZip) ? "Zip" : "7z";
-      if (FAILED(hr(name, library_.CreateObject(*clsid, abi::IID_IInArchive,
+      const char* name = slot.label;
+      if (FAILED(hr(name, library_.CreateObject(slot.clsid, abi::IID_IInArchive,
                                                 reinterpret_cast<void**>(&candidate)))) ||
           !candidate) {
         openTrace_ += "(no object) ";
@@ -885,12 +1346,21 @@ class ArchiveReader {
       indices.push_back(item.index);
     }
     if (indices.empty()) return true;
-    auto* callback = new SmartExtractCallback(catalog, plan, targetRoot, fuse);
+    // kpidMethod is what turns an opaque opResult=1 into "the archive uses
+    // zstd". The lambda runs only for a FAILED item (see RecordFailure).
+    auto* callback = new SmartExtractCallback(
+        catalog, plan, targetRoot, fuse,
+        [this](uint32_t index) { return GetString(index, abi::kpidMethod); },
+        std::vector<uint32_t>(indices.begin(), indices.end()));
     const HRESULT hr =
         archive_->Extract(indices.data(), static_cast<abi::UInt32>(indices.size()), 0, callback);
     if (resultOut) *resultOut = callback->result();
+    // C26: SUCCEEDED(hr) is NOT the verdict. The engine reports "this item did
+    // not decode" through SetOperationResult while Extract() still answers
+    // S_OK -- the exact shape that reported an unsupported method as a
+    // successful 0-byte extraction.
     const bool ok = SUCCEEDED(hr) && !callback->result().guardTripped &&
-                    !callback->result().fuseTripped;
+                    !callback->result().fuseTripped && !callback->result().failed();
     callback->Release();
     return ok;
   }

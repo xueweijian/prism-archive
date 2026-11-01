@@ -42,7 +42,7 @@
 
 ## 三、剩余作战计划（四批次，每批有硬验收）
 
-### 批次 A：装配出 PrismArchive.exe（UI 主线，解锁"能跑"）　**★ 增量 1-4 已落地；事故恢复完成（2026-10-31 凌晨）**
+### 批次 A：装配出 PrismArchive.exe（UI 主线，解锁"能跑"）　**★ 1-5 全部落地（PR #3/#10/#11）**
 
 > **PrismArchive.exe 第一次存在**：CI 构建 + 上传 artifact（`PrismArchive-exe`，PE 头验证 x64 GUI 子系统）。GalleryWindow 已改为纯宿主（全部像素走 GalleryRenderer::Scene，双绘制路径 drift 隐患清除）；缩略图经互斥指针交换从扫描线程交接（只有 UI 线程碰可见 store，LRU recency 单线程化 by construction）。装配契约在 Main.cpp 文件头注。
 > **增量 2-4**：单击选择（网格/列表命中测试）+ 双击智能解压真接线（SmartExtractionPlanner → ExtractWithPlan → HUD 进度）+ Quick Look（空格开玻璃卡、Esc 关、流式徽标）+ 键盘导航（方向键按视口几何步进、Home/End、Enter 激活）+ ArchiveTreeView 文件夹导航决策件（6 例 TDD：目录子项/目录先序/面包屑链/UpFrom/名字前缀防误配）。
@@ -51,17 +51,16 @@
 2. GalleryWindow 换血：删旧 DrawTile，全量消费 GalleryRenderer（Scene 驱动）
 3. 三事件源接线：catalog 载入 → 视口；sweep 进度 → ProgressHud；空格 → QuickLookSession
 4. 鼠标：滚轮弹簧、命中测试选中、双击智能解压；键盘：Ctrl+1/2、方向键、空格/Esc
-5. （进行中）ArchiveTreeView 接窗：当前文件夹状态 + 面包屑点击 + 双击目录钻入 + Backspace 上级
+5. ~~ArchiveTreeView 接窗：当前文件夹状态 + 面包屑点击 + 双击目录钻入 + Backspace 上级~~ **✅ 已落地（2026-11-01，PR #10）**——`win.tree_nav` 进主线 CI；过程中修出两个真实产品缺陷（懒测量返回过期几何、点导航条空白会把选择清空）
 **验收**：exe 双击打开 .7z/.zip → 网格/列表切换 → 真缩略图 → 弹簧滚动 → QuickLook 卡片 → 文件夹导航。CI 快照对比无回归。
 
-### 批次 B：引擎执行层补全（并行线 1）
+### 批次 B：引擎执行层补全（并行线 1）　**★ 1-3 全部落地（PR #9/#13/#11）**
 1. ~~VirtualTree 执行器：UpdateItems 真接线（诚实成本模型：全量拷贝语义，UI 必须显示进度）~~ **✅ 已落地（2026-11-01，PR #9）**——CommitTree 端到端：计划→备份→UpdateItems→重开验证→原子替换；矩阵 8 变体验证目录节点；`win.vtree_exec` / `win.mkdir_matrix` / `win.com_qi_contract` 三套件进主线 CI
 2. ~~拖拽流随机访问：DelayedExtractStream 的 Seek 真实现（依赖 7z.dll 的块内随机解码）~~ **✅ 已落地（2026-11-01，PR #13）**——纯状态机 `DelayedSeekCursor`（Planner 纯函数：CursorOnly/LookbackHit/RestartDecode，双预算重启前拒绝）+ COM 包装 + 真 7z.exe 5 文件固实包 e2e；`core.test_dnd_seek`（22 例）+ 4 个变异构建 + `win.dnd_seek` 进主线 CI
-3. 密码试错执行器：消费 PasswordRing 决策，并发探针 + "匹配中 3/12" 进度回调
+3. ~~密码试错执行器：消费 PasswordRing 决策，并发探针 + "匹配中 3/12" 进度回调~~ **✅ 已落地（2026-11-01，PR #11）**——`OpenFlow`（Idle/Opening/NeedPassword/Probing/Opened/Exhausted）+ `pwd::Probe` 探针策略 + `PowerShellProbe`/`PasswordProbe.hpp`；36 用例 / 201 checks，明确避开 D16 陷阱
 **验收**：包内重命名在真 7z.dll 上落盘成功且可再打开（✅）；Explorer 从虚拟流真拉到文件；AES 包试错出真实结果。
 
-### 批次 C：Shell 真机验证 + 产品化（并行线 2）
-1. MSIX Sparse 真注册（CI runner 上 AddPackageByUriAsync 真跑 + 证据截图/日志）
+### 批次 C：Shell 真机验证 + 产品化（并行线 2）1. MSIX Sparse 真注册（CI runner 上 AddPackageByUriAsync 真跑 + 证据截图/日志）
 2. 右键延迟实测 lane（< 12ms 目标，出数字）
 3. MoTW 继承 + AMSI 预检接主流程（SecurityGuard 已有守卫）
 4. 图标资源、设置持久化、en/zh 资源表、安装器（先进 Inno Setup 或 MSIX 直发）
@@ -78,8 +77,15 @@
 主线（我）+ ≤3 subagent。批次 A 期间：subagent 1 承接 B1（VirtualTree 执行器）、subagent 2 承接 B3（密码执行器）、subagent 3 承接 C2（延迟实测 lane）。批次边界重新分派。
 
 ## 五、已知债务（不挡路，但要记账）
-
 - ~~DelayedExtractStream::Seek 只挪游标（拖拽真拉取前必须补）~~ **已补（2026-11-01，PR #13）**：真 e2e 在 7z.dll 上验证冷/热流、窗口边界、双预算拒绝
+- ~~`Src/App/Main.cpp` 的激活处理器用 detached 线程触碰 UI 线程状态~~ **已修（2026-11-01，PR #15）**：
+  三处缺陷——① 在 detached 线程里调 `window.Hud().OnStart()`，而 `hud_` 无锁、由 WndProc 在 UI 线程喂
+  ② `window` 是 `wWinMain` 栈对象，detached 线程按引用持有 → 解压中途关窗口 = UAF
+  ③ `extracting` 永不复位 → 线程走不到完成路径就永久锁死后续双击。
+  改法是 API 形状：`PostHudStart/PostStatus/PostProgress` 只 PostMessage 不碰成员，worker 改为 joinable 并 join。
+  同时补上 `tools/win_stub/`（此前从未推上去，导致 `check_windows_tu.sh` 在 main 上一直坏）并把该门禁接进 CI，
+  新增 preflight **B9**（静态锁死"worker 不得碰 UI 状态"，已做负向控制：注入原 bug 精确报三条）
+- **`sweep` 与 `extract` 两个工作线程共用同一个 `ArchiveReader`**（PR #15 查出，未修）：7z.dll 的 handler 不是线程安全的，7-Zip 自己的规则是"每个并发操作一个 handler"。两个线程现在都已 join，**生命周期**问题解决了，但如果扫描还在跑（大归档要数秒）时用户双击解压，就是真实交叠。修法需要第二个 reader/handle，是实打实的一块工作，不塞进本次
 - PrismVirtualDragDrop 的 GetDataHere 保守拒绝
 - 部分蓝图性能承诺已按 ADR.md 降级（25ms 冷启动等），ch7.2 验收以 ADR 为准
 - ROADMAP 部分 checkbox 滞后于实际（以本文档为准，分批同步）

@@ -19,7 +19,8 @@ set(PRISM_CORE_TESTS
     test_pwd_probe_core.cpp
     test_windows_name.cpp
     bench_sweep.cpp
-    test_archive_tree.cpp)
+    test_archive_tree.cpp
+    test_open_flow.cpp)
 
 foreach(source IN LISTS PRISM_CORE_TESTS)
   get_filename_component(name "${source}" NAME_WE)
@@ -30,6 +31,8 @@ endforeach()
 # The probe core drives a thread-pool plan; link Threads explicitly.
 find_package(Threads REQUIRED)
 target_link_libraries(test_pwd_probe_core PRIVATE Threads::Threads)
+# OpenFlow drives the same pool (cancellation + hit-stops-the-run cases).
+target_link_libraries(test_open_flow PRIVATE Threads::Threads)
 
 # Deliberate rule mutations are expected to fail the same assertions. WILL_FAIL
 # makes the mutation check itself green only when the test suite catches it;

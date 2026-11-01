@@ -1640,6 +1640,11 @@ class CompanionHost {
       channel_.Close();
       return false;
     }
+    // C48: the flyout paints through a DirectComposition island now, and its
+    // geometry is DPI-scaled. The host is the only place that knows this window
+    // is per-monitor DPI aware, so the opt-in happens HERE -- Create() never
+    // guesses (a 125% desktop must not silently move a test's 96-dpi rows).
+    window_.SetDpiFromWindow();
     return true;
   }
 

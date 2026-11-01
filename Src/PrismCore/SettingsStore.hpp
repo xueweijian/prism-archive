@@ -74,41 +74,57 @@ struct JsonValue {
   bool boolean = false;
   double number = 0.0;
   std::string text;
+  // Object members. Each node carries its own member name; a vector of
+  // std::pair<std::string, JsonValue> would require a COMPLETE JsonValue while
+  // the class is still being declared, which libstdc++ 15 rejects
+  // (std::pair needs complete types; std::vector of an incomplete T does not).
+  std::string key;
   std::vector<JsonValue> items;
-  std::vector<std::pair<std::string, JsonValue>> members;
+  std::vector<JsonValue> members;
 
   bool IsObject() const { return type == JsonType::Object; }
   bool IsString() const { return type == JsonType::String; }
   bool IsNumber() const { return type == JsonType::Number; }
 
-  const JsonValue* Find(std::string_view key) const {
-    for (const std::pair<std::string, JsonValue>& member : members) {
-      if (std::string_view(member.first) == key) return &member.second;
+  const JsonValue* Find(std::string_view name) const {
+    for (const JsonValue& member : members) {
+      if (std::string_view(member.key) == name) return &member;
     }
     return nullptr;
   }
 
-  JsonValue* Find(std::string_view key) {
-    for (std::pair<std::string, JsonValue>& member : members) {
-      if (std::string_view(member.first) == key) return &member.second;
+  JsonValue* Find(std::string_view name) {
+    for (JsonValue& member : members) {
+      if (std::string_view(member.key) == name) return &member;
     }
     return nullptr;
   }
 
   // Sets a key in place when it exists (order is preserved) and appends it
   // otherwise. Unknown keys therefore keep the position the document gave them.
-  JsonValue& SetMember(std::string_view key, JsonValue value) {
-    if (JsonValue* existing = Find(key)) {
+  JsonValue& SetMember(std::string_view name, JsonValue value) {
+    if (JsonValue* existing = Find(name)) {
       *existing = std::move(value);
+      existing->key = std::string(name);
       return *existing;
     }
-    members.emplace_back(std::string(key), std::move(value));
-    return members.back().second;
+    value.key = std::string(name);
+    members.push_back(std::move(value));
+    return members.back();
   }
 
-  bool EraseMember(std::string_view key) {
+  // Replaces a node's VALUE while keeping the member name that addresses it in
+  // its parent. This cannot live in operator=: container operations (erase,
+  // rotate, vector growth) MUST move the name together with the value.
+  static void AssignValue(JsonValue& slot, JsonValue value) {
+    std::string name = std::move(slot.key);
+    slot = std::move(value);
+    slot.key = std::move(name);
+  }
+
+  bool EraseMember(std::string_view name) {
     for (std::size_t i = 0; i < members.size(); ++i) {
-      if (std::string_view(members[i].first) == key) {
+      if (std::string_view(members[i].key) == name) {
         members.erase(members.begin() + static_cast<std::ptrdiff_t>(i));
         return true;
       }
@@ -118,9 +134,9 @@ struct JsonValue {
 
   // Puts an EXISTING member first (schemaVersion reads better on top). A
   // missing key is left missing: callers decide when to create it.
-  bool MoveMemberToFront(std::string_view key) {
+  bool MoveMemberToFront(std::string_view name) {
     for (std::size_t i = 0; i < members.size(); ++i) {
-      if (std::string_view(members[i].first) != key) continue;
+      if (std::string_view(members[i].key) != name) continue;
       if (i == 0) return true;
       std::rotate(members.begin(), members.begin() + static_cast<std::ptrdiff_t>(i),
                   members.begin() + static_cast<std::ptrdiff_t>(i) + 1);
@@ -545,10 +561,10 @@ inline void SerializeInto(const JsonValue& value, const JsonWriteOptions& option
           out.push_back('\n');
           AppendIndent(options, depth + 1, out);
         }
-        AppendEscapedString(value.members[i].first, out);
+        AppendEscapedString(value.members[i].key, out);
         out.push_back(':');
         if (options.pretty) out.push_back(' ');
-        SerializeInto(value.members[i].second, options, depth + 1, out);
+        SerializeInto(value.members[i], options, depth + 1, out);
       }
       if (options.pretty) {
         out.push_back('\n');
@@ -589,9 +605,9 @@ inline bool JsonEquals(const JsonValue& a, const JsonValue& b) {
     }
     case JsonType::Object: {
       if (a.members.size() != b.members.size()) return false;
-      for (const std::pair<std::string, JsonValue>& member : a.members) {
-        const JsonValue* other = b.Find(member.first);
-        if (other == nullptr || !JsonEquals(member.second, *other)) return false;
+      for (const JsonValue& member : a.members) {
+        const JsonValue* other = b.Find(member.key);
+        if (other == nullptr || !JsonEquals(member, *other)) return false;
       }
       return true;
     }
@@ -871,7 +887,7 @@ class SettingsStore {
     for (const SettingSpec& spec : SettingsSpecs()) {
       if (spec.removedInVersion != 0) continue;
       JsonValue* leaf = EnsureMutableLeaf(spec.path);
-      if (leaf != nullptr) *leaf = DefaultValueOf(spec);
+      if (leaf != nullptr) JsonValue::AssignValue(*leaf, DefaultValueOf(spec));
     }
     SetSchemaVersionInDocument();
     schemaVersion_ = kSchemaVersion;
@@ -946,7 +962,7 @@ class SettingsStore {
     if (!writable_) return false;
     JsonValue* leaf = EnsureMutableLeaf(path);
     if (leaf == nullptr) return false;
-    *leaf = MakeBool(value);
+    JsonValue::AssignValue(*leaf, MakeBool(value));
     return true;
   }
 
@@ -954,7 +970,7 @@ class SettingsStore {
     if (!writable_) return false;
     JsonValue* leaf = EnsureMutableLeaf(path);
     if (leaf == nullptr) return false;
-    *leaf = MakeNumber(static_cast<double>(value), std::to_string(value));
+    JsonValue::AssignValue(*leaf, MakeNumber(static_cast<double>(value), std::to_string(value)));
     return true;
   }
 
@@ -962,7 +978,7 @@ class SettingsStore {
     if (!writable_) return false;
     JsonValue* leaf = EnsureMutableLeaf(path);
     if (leaf == nullptr) return false;
-    *leaf = MakeNumber(value, FormatJsonNumber(value));
+    JsonValue::AssignValue(*leaf, MakeNumber(value, FormatJsonNumber(value)));
     return true;
   }
 
@@ -970,7 +986,7 @@ class SettingsStore {
     if (!writable_) return false;
     JsonValue* leaf = EnsureMutableLeaf(path);
     if (leaf == nullptr) return false;
-    *leaf = MakeString(std::string(value));
+    JsonValue::AssignValue(*leaf, MakeString(std::string(value)));
     return true;
   }
 
@@ -999,7 +1015,7 @@ class SettingsStore {
     for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
       JsonValue* child = node->Find(parts[i]);
       if (child == nullptr) child = &node->SetMember(parts[i], MakeObject());
-      if (!child->IsObject()) *child = MakeObject();
+      if (!child->IsObject()) JsonValue::AssignValue(*child, MakeObject());
       node = child;
     }
     JsonValue* leaf = node->Find(parts.back());
@@ -1069,7 +1085,7 @@ class SettingsStore {
       // A v2 writer may already have written the new key. It wins: migration
       // moves data forward, it never rolls a newer value back.
       JsonValue* leaf = EnsureMutableLeaf("language.tag");
-      if (leaf != nullptr) *leaf = MakeString(carried);
+      if (leaf != nullptr) JsonValue::AssignValue(*leaf, MakeString(carried));
     }
     // The v1 spelling is deleted either way: a v2 file must not keep a key that
     // a later migration would trip over.
@@ -1093,7 +1109,7 @@ class SettingsStore {
     if (intensity == nullptr || intensity->type != JsonType::Number) return;
     if (intensity->number > 1.0) {
       const double fraction = intensity->number / 100.0;
-      *intensity = MakeNumber(fraction, FormatJsonNumber(fraction));
+      JsonValue::AssignValue(*intensity, MakeNumber(fraction, FormatJsonNumber(fraction)));
     }
   }
 
@@ -1131,7 +1147,7 @@ class SettingsStore {
         JsonValue* child = node->Find(parts[i]);
         if (child == nullptr) child = &node->SetMember(parts[i], MakeObject());
         if (!child->IsObject()) {
-          *child = MakeObject();
+          JsonValue::AssignValue(*child, MakeObject());
           repairs_.push_back({JoinPath(parts, i + 1), "structure",
                               "an object was expected; the subtree was rebuilt"});
         }
@@ -1161,7 +1177,7 @@ class SettingsStore {
         if (leaf.type != JsonType::Bool) {
           repairs_.push_back({spec.path, "type",
                               std::string("expected bool, got ") + JsonTypeName(leaf.type)});
-          leaf = DefaultValueOf(spec);
+          JsonValue::AssignValue(leaf, DefaultValueOf(spec));
         }
         return;
       }
@@ -1170,23 +1186,23 @@ class SettingsStore {
         if (leaf.type != JsonType::Number) {
           repairs_.push_back({spec.path, "type",
                               std::string("expected number, got ") + JsonTypeName(leaf.type)});
-          leaf = DefaultValueOf(spec);
+          JsonValue::AssignValue(leaf, DefaultValueOf(spec));
           return;
         }
         if (spec.type == SettingType::Int && std::trunc(leaf.number) != leaf.number) {
           const double truncated = std::trunc(leaf.number);
           repairs_.push_back({spec.path, "type", "a whole number was expected"});
-          leaf = MakeNumber(truncated, FormatJsonNumber(truncated));
+          JsonValue::AssignValue(leaf, MakeNumber(truncated, FormatJsonNumber(truncated)));
         }
         const double value = leaf.number;
         if (value < spec.minValue) {
           repairs_.push_back({spec.path, "range",
                               "below the documented minimum " + FormatJsonNumber(spec.minValue)});
-          leaf = MakeNumber(spec.minValue, FormatJsonNumber(spec.minValue));
+          JsonValue::AssignValue(leaf, MakeNumber(spec.minValue, FormatJsonNumber(spec.minValue)));
         } else if (value > spec.maxValue) {
           repairs_.push_back({spec.path, "range",
                               "above the documented maximum " + FormatJsonNumber(spec.maxValue)});
-          leaf = MakeNumber(spec.maxValue, FormatJsonNumber(spec.maxValue));
+          JsonValue::AssignValue(leaf, MakeNumber(spec.maxValue, FormatJsonNumber(spec.maxValue)));
         }
         return;
       }
@@ -1195,13 +1211,13 @@ class SettingsStore {
         if (leaf.type != JsonType::String) {
           repairs_.push_back({spec.path, "type",
                               std::string("expected string, got ") + JsonTypeName(leaf.type)});
-          leaf = DefaultValueOf(spec);
+          JsonValue::AssignValue(leaf, DefaultValueOf(spec));
           return;
         }
         if (!SettingAllowsValue(spec, leaf.text)) {
           repairs_.push_back({spec.path, "not-allowed",
                               "\"" + leaf.text + "\" is not a documented value"});
-          leaf = DefaultValueOf(spec);
+          JsonValue::AssignValue(leaf, DefaultValueOf(spec));
           return;
         }
         if (spec.maxLength != 0 && leaf.text.size() > spec.maxLength) {

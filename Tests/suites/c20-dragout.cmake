@@ -1,3 +1,4 @@
+if(WIN32 AND PRISM_BUILD_WIN_LAYER)
 # c20-dragout: the drag-out chain (blueprint ch. 4.4 / ch. 8.1), real 7z.dll.
 #
 # The test builds a genuine SOLID 7z with the real 7z.exe, turns a catalog
@@ -50,3 +51,4 @@ target_compile_options(win_dragout_mutant_size_lie PRIVATE /WX-)
 target_compile_definitions(win_dragout_mutant_size_lie PRIVATE PRISM_C20_MUTANT_SIZE_LIE=1)
 add_test(NAME "mutation.dragout.size_lie" COMMAND win_dragout_mutant_size_lie)
 set_tests_properties(mutation.dragout.size_lie PROPERTIES WILL_FAIL TRUE TIMEOUT 300)
+endif()

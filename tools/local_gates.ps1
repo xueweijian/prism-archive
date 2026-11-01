@@ -440,9 +440,14 @@ function Initialize-ShellStage {
     if ($script:ShellStage) { return $script:ShellStage }
     $stage = "/tmp/prism-local-gates-$PID"
     $inputs = 'Src tools/check_headers.sh tools/check_windows_tu.sh tools/win_stub'
+    # The sed is not cosmetic: on a core.autocrlf=true checkout the .sh files
+    # arrive with CRLF and dash dies on its 'set -eu' line ("Illegal option").
+    # .gitattributes pins eol=lf for *.sh, but a worktree checked out before
+    # that commit keeps its CRLF, so normalise the mirror too.
     $shCommand = 'set -e; rm -rf ' + $stage + ' ' + $stage + '.tar; mkdir -p ' + $stage +
                  '; tar -cf ' + $stage + '.tar ' + $inputs +
-                 '; tar -C ' + $stage + ' -xf ' + $stage + '.tar'
+                 '; tar -C ' + $stage + ' -xf ' + $stage + '.tar' +
+                 '; find ' + $stage + ' -name "*.sh" -exec sed -i "s/\r$//" {} +'
     $wslArgs = @()
     if ($Distro) { $wslArgs += @('--distribution', $Distro) }
     $wslArgs += @('--cd', $Worktree, '--exec', 'sh', '-c', $shCommand)

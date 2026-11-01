@@ -24,6 +24,7 @@
     "status.files.other": "{n} 个文件",
     "status.folders.one": "{n} 个文件夹",
     "status.folders.other": "{n} 个文件夹",
+    "status.items.count": "共 {n} 项",
     "status.refreshDeferred": "已写入；当前操作结束后刷新",
     "action.extract": "解压",
     "action.compress": "压缩",

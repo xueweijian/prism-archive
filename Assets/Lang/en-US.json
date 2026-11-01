@@ -24,6 +24,7 @@
     "status.files.other": "{n} FILES",
     "status.folders.one": "{n} FOLDER",
     "status.folders.other": "{n} FOLDERS",
+    "status.items.count": "{n} items",
     "status.refreshDeferred": "Saved; the view refreshes when the running operation finishes",
     "action.extract": "Extract",
     "action.compress": "Compress",

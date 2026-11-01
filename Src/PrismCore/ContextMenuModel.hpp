@@ -6,8 +6,10 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "I18n.hpp"
 #include "PathSafety.hpp"
 
 namespace prism {
@@ -21,7 +23,29 @@ struct MenuCommand {
 
 class ContextMenuModel {
  public:
-  static std::vector<MenuCommand> Build(const std::vector<std::string>& selectedPaths) {
+  // C40: the labels are the resource table's, not this header's. The verb id IS
+  // the key ("menu." + verb), so a verb can never ship without its string (C19's
+  // audit case) and a translator that lacks the key keeps the English default --
+  // a shell host with no Assets/Lang still gets a usable menu, not "menu.x.y".
+  //
+  // The translator is a parameter, not a member: the model stays a pure function
+  // of (selection, language), which is what lets the suite assert the CHINESE
+  // text of all twelve labels without a global.
+  static std::vector<MenuCommand> Build(const std::vector<std::string>& selectedPaths,
+                                        const prism::i18n::Translator* translator = nullptr) {
+    std::vector<MenuCommand> items = BuildDefault(selectedPaths);
+    if (translator == nullptr) return items;
+    for (MenuCommand& item : items) {
+      const std::string key = std::string("menu.") + item.verb;
+      if (!translator->Has(key)) continue;
+      item.title = translator->Translate(key, {{"name", item.titleArgument}});
+    }
+    return items;
+  }
+
+  // The English defaults, verb by verb. Kept as its own function so the table's
+  // en-US values and these literals can be compared byte for byte (they are).
+  static std::vector<MenuCommand> BuildDefault(const std::vector<std::string>& selectedPaths) {
     std::vector<MenuCommand> items;
     if (selectedPaths.empty()) return items;
 
@@ -59,6 +83,18 @@ class ContextMenuModel {
       items.push_back({"compress.to.zip", "Compress to a .zip archive", "", false});
     }
     return items;
+  }
+
+  // C40: where a SHELL HOST finds the tables. explorer.exe owns the process, so
+  // "the executable's directory" would be C:\Windows -- the tables live next to
+  // the MODULE that renders the menu (<dll dir>\Assets\Lang), which is also the
+  // flat layout "cmake --install" produces. Pure string work so the rule is
+  // assertable without a shell.
+  static std::string LanguageDirectoryForModuleDir(std::string_view moduleDirectoryUtf8) {
+    std::string dir(moduleDirectoryUtf8);
+    while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+    if (dir.empty()) return std::string();
+    return dir + "\\Assets\\Lang";
   }
 
   static bool IsArchivePath(const std::string& path) {

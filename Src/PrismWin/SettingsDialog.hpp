@@ -632,6 +632,7 @@ inline bool DialogState::ApplyTo(prism::settings::SettingsStore& store) const {
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <windowsx.h>
 #include <shlobj.h>
 
 #include <functional>
@@ -639,6 +640,7 @@ inline bool DialogState::ApplyTo(prism::settings::SettingsStore& store) const {
 #include <utility>
 #include <vector>
 
+#include "DialogChrome.hpp"
 #include "SettingsFile.hpp"
 
 #pragma comment(lib, "shell32.lib")
@@ -727,12 +729,14 @@ class SettingsDialog {
       lastError_ = GetLastError();
       if (lastError_ != ERROR_CLASS_ALREADY_EXISTS) return false;
     }
-    RECT frame{0, 0, kClientWidth, kClientHeight};
-    AdjustWindowRectEx(&frame, WS_CAPTION | WS_SYSMENU | WS_OVERLAPPED, FALSE, WS_EX_DLGMODALFRAME);
+    // V3: borderless card; DialogChrome paints the title bar (drag + close).
+    dpi_ = chrome::CurrentDpi(nullptr);
+    const float scale = static_cast<float>(dpi_) / 96.0f;
+    const int windowWidth = static_cast<int>(std::lround(kClientWidth * scale));
+    const int windowHeight = static_cast<int>(std::lround(kClientHeight * scale));
     hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, title.c_str(),
-                            WS_CAPTION | WS_SYSMENU | WS_OVERLAPPED | WS_CLIPCHILDREN,
-                            CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left,
-                            frame.bottom - frame.top, nullptr, nullptr, instance, this);
+                            WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                            windowWidth, windowHeight, nullptr, nullptr, instance, this);
     if (hwnd_ == nullptr) lastError_ = GetLastError();
     return hwnd_ != nullptr;
   }
@@ -905,6 +909,182 @@ class SettingsDialog {
     return ok ? std::wstring(path) : std::wstring();
   }
 
+
+  // -------------------------------------------------------------------------
+  // V3 chrome model. The stock controls stay as invisible adapters (C31's
+  // assertions drive them by handle); the pixels are DialogChrome's.
+  // -------------------------------------------------------------------------
+  chrome::ChromeModel BuildModel() const {
+    using chrome::WidgetKind;
+    chrome::ChromeModel model;
+    model.variant = prism::theme::Variant::Midnight;
+    model.dpi = dpi_;
+    model.width = static_cast<float>(kClientWidth);
+    model.height = static_cast<float>(kClientHeight);
+    model.title = L"Settings";
+
+    auto label = [&model](const wchar_t* text, float x, float y, float w, float h) {
+      chrome::Widget widget;
+      widget.kind = WidgetKind::Label;
+      widget.rect = D2D1::RectF(x, y, x + w, y + h);
+      widget.label = text;
+      model.widgets.push_back(std::move(widget));
+    };
+    auto hint = [&model](const std::wstring& text, float x, float y, float w, float h,
+                         bool error) {
+      chrome::Widget widget;
+      widget.kind = WidgetKind::Hint;
+      widget.rect = D2D1::RectF(x, y, x + w, y + h);
+      widget.label = text;
+      widget.error = error;
+      model.widgets.push_back(std::move(widget));
+    };
+    auto visual = [this](int id, bool enabled, bool empty = false) {
+      return chrome::ResolveState(enabled, hot_ == id, pressed_ == id, empty);
+    };
+    auto add = [&model](chrome::Widget widget) { model.widgets.push_back(std::move(widget)); };
+
+    // DESIGN.md section 2/4: title 32 + pad 16; row pitch 56 = 32 control +
+    // 8 gap + 16 hint; content pad 16; action bar 56.
+    constexpr float kLabelX = 16.0f;
+    constexpr float kControlX = 176.0f;
+    constexpr float kRow = 56.0f;
+    constexpr float kTop = 48.0f;
+    const auto rowY = [](int row) { return kTop + kRow * row; };
+
+    label(L"Language", kLabelX, rowY(0) + 8.0f, 160.0f, 22.0f);
+    label(L"Theme", kLabelX, rowY(1) + 8.0f, 160.0f, 22.0f);
+    label(L"Default extraction folder", kLabelX, rowY(2) + 8.0f, 160.0f, 22.0f);
+    label(L"Thumbnail cache cap", kLabelX, rowY(3) + 8.0f, 160.0f, 22.0f);
+    label(L"Log level", kLabelX, rowY(4) + 8.0f, 160.0f, 22.0f);
+    label(L"Mark-of-the-Web", kLabelX, rowY(5) + 8.0f, 160.0f, 22.0f);
+
+    chrome::Widget language;
+    language.id = ids::kLanguage;
+    language.kind = WidgetKind::Combo;
+    language.rect = D2D1::RectF(kControlX, rowY(0), kControlX + 240.0f, rowY(0) + 32.0f);
+    language.value = WideFromUtf8(state_.languageTag());
+    language.enabled = true;
+    language.state = visual(ids::kLanguage, true);
+    add(language);
+
+    chrome::Widget theme;
+    theme.id = ids::kTheme;
+    theme.kind = WidgetKind::Combo;
+    theme.rect = D2D1::RectF(kControlX, rowY(1), kControlX + 240.0f, rowY(1) + 32.0f);
+    theme.value = WideFromUtf8(ThemeName(state_.theme()));
+    theme.enabled = true;
+    theme.state = visual(ids::kTheme, true);
+    add(theme);
+
+    chrome::Widget extract;
+    extract.id = ids::kExtractDir;
+    extract.kind = WidgetKind::TextField;
+    extract.rect = D2D1::RectF(kControlX, rowY(2), kControlX + 330.0f, rowY(2) + 32.0f);
+    extract.label = L"C:\\Users\\you\\Extracted";
+    extract.value = WideFromUtf8(state_.extractDirText());
+    extract.enabled = true;
+    extract.state = visual(ids::kExtractDir, true, state_.extractDirText().empty());
+    add(extract);
+
+    chrome::Widget browse;
+    browse.id = ids::kBrowse;
+    browse.kind = WidgetKind::Button;
+    browse.rect = D2D1::RectF(kControlX + 340.0f, rowY(2), kControlX + 430.0f, rowY(2) + 32.0f);
+    browse.label = L"Browse...";
+    browse.enabled = true;
+    browse.state = visual(ids::kBrowse, true);
+    add(browse);
+
+    chrome::Widget thumbnail;
+    thumbnail.id = ids::kThumbnail;
+    thumbnail.kind = WidgetKind::TextField;
+    thumbnail.rect = D2D1::RectF(kControlX, rowY(3), kControlX + 110.0f, rowY(3) + 32.0f);
+    thumbnail.label = L"512";
+    thumbnail.value = WideFromUtf8(state_.thumbnailText());
+    thumbnail.enabled = true;
+    thumbnail.state = visual(ids::kThumbnail, true, state_.thumbnailText().empty());
+    add(thumbnail);
+
+    chrome::Widget unit;
+    unit.id = ids::kUnit;
+    unit.kind = WidgetKind::Combo;
+    unit.rect = D2D1::RectF(kControlX + 122.0f, rowY(3), kControlX + 202.0f, rowY(3) + 32.0f);
+    unit.value = WideFromUtf8(SizeUnitName(state_.thumbnailUnit()));
+    unit.enabled = true;
+    unit.state = visual(ids::kUnit, true);
+    add(unit);
+
+    chrome::Widget logLevel;
+    logLevel.id = ids::kLogLevel;
+    logLevel.kind = WidgetKind::Combo;
+    logLevel.rect = D2D1::RectF(kControlX, rowY(4), kControlX + 240.0f, rowY(4) + 32.0f);
+    logLevel.value = WideFromUtf8(LogLevelLabel(state_.logLevel()));
+    logLevel.enabled = true;
+    logLevel.state = visual(ids::kLogLevel, true);
+    add(logLevel);
+
+    chrome::Widget motw;
+    motw.id = ids::kMotw;
+    motw.kind = WidgetKind::CheckBox;
+    motw.rect = D2D1::RectF(kControlX, rowY(5), kControlX + 420.0f, rowY(5) + 32.0f);
+    motw.label = L"Inherit Mark-of-the-Web from the archive";
+    motw.checked = state_.inheritMotw();
+    motw.enabled = true;
+    motw.state = visual(ids::kMotw, true);
+    add(motw);
+
+    const Field fields[] = {Field::Language, Field::Theme, Field::ExtractDir,
+                            Field::ThumbnailLimit, Field::LogLevel, Field::Motw};
+    for (int row = 0; row < 6; ++row) {
+      const std::string issue = state_.IssueFor(fields[row]);
+      if (!issue.empty()) {
+        hint(WideFromUtf8(issue), kControlX, rowY(row) + 32.0f,
+             static_cast<float>(kClientWidth) - kControlX - 16.0f, 16.0f, true);
+      }
+    }
+
+    const std::string summary = SummaryLine();
+    hint(WideFromUtf8(summary), kLabelX, rowY(6), static_cast<float>(kClientWidth) - 32.0f,
+         28.0f, !state_.Valid() || !loadError_.empty());
+
+    chrome::Widget save;
+    save.id = ids::kSave;
+    save.kind = WidgetKind::Button;
+    save.rect = D2D1::RectF(static_cast<float>(kClientWidth) - 200.0f,
+                           static_cast<float>(kClientHeight) - 44.0f,
+                           static_cast<float>(kClientWidth) - 116.0f,
+                           static_cast<float>(kClientHeight) - 12.0f);
+    save.label = L"Save";
+    save.primary = true;
+    save.enabled = state_.SaveEnabled();
+    save.state = visual(ids::kSave, save.enabled);
+    add(save);
+
+    chrome::Widget cancel;
+    cancel.id = ids::kCancel;
+    cancel.kind = WidgetKind::Button;
+    cancel.rect = D2D1::RectF(static_cast<float>(kClientWidth) - 104.0f,
+                             static_cast<float>(kClientHeight) - 44.0f,
+                             static_cast<float>(kClientWidth) - 20.0f,
+                             static_cast<float>(kClientHeight) - 12.0f);
+    cancel.label = L"Cancel";
+    cancel.enabled = true;
+    cancel.state = visual(ids::kCancel, true);
+    add(cancel);
+
+    model.FocusIndex(focus_);
+    return model;
+  }
+
+  int FocusIndexOfModel() const { return BuildModel().FocusIndex(); }
+  int FocusedControlId() const { return BuildModel().FocusedId(); }
+  int HotControlId() const { return hot_; }
+  bool DispatchKey(UINT vk, bool shift) { return OnKeyDown(vk, shift); }
+  void RefreshChrome() {
+    if (hwnd_ != nullptr) InvalidateRect(hwnd_, nullptr, FALSE);
+  }
+
  private:
   static LRESULT CALLBACK ProcThunk(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* self = reinterpret_cast<SettingsDialog*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -930,6 +1110,309 @@ class SettingsDialog {
   void FocusFirstIssue();
   static void SetTextIfDifferent(HWND control, const std::wstring& text);
 
+  // ---- V3 input / paint ------------------------------------------------
+  int FocusableIndex(int id) const {
+    const chrome::ChromeModel model = BuildModel();
+    int index = 0;
+    for (const chrome::Widget& widget : model.widgets) {
+      if (!widget.Focusable()) continue;
+      if (widget.id == id) return index;
+      ++index;
+    }
+    return -1;
+  }
+
+  void SetFocusToId(int id) {
+    const int index = FocusableIndex(id);
+    if (index >= 0) {
+      focus_ = index;
+      RefreshChrome();
+    }
+  }
+
+  void ActivateWidget(int id) {
+    switch (id) {
+      case ids::kLanguage:
+      case ids::kTheme:
+      case ids::kUnit:
+      case ids::kLogLevel: {
+        HWND box = nullptr;
+        switch (id) {
+          case ids::kLanguage: box = languageBox_; break;
+          case ids::kTheme: box = themeBox_; break;
+          case ids::kUnit: box = unitBox_; break;
+          default: box = logBox_; break;
+        }
+        const int count = static_cast<int>(SendMessageW(box, CB_GETCOUNT, 0, 0));
+        const int current = static_cast<int>(SendMessageW(box, CB_GETCURSEL, 0, 0));
+        if (count <= 0) return;
+        const int next = (current + 1) % count;
+        SendMessageW(box, CB_SETCURSEL, static_cast<WPARAM>(next), 0);
+        OnCommand(id, CBN_SELCHANGE, box);
+        break;
+      }
+      case ids::kMotw:
+        SendMessageW(motwCheck_, BM_CLICK, 0, 0);
+        break;
+      case ids::kBrowse:
+        SendMessageW(browseButton_, BM_CLICK, 0, 0);
+        break;
+      case ids::kSave:
+        SendMessageW(saveButton_, BM_CLICK, 0, 0);
+        break;
+      case ids::kCancel:
+        SendMessageW(cancelButton_, BM_CLICK, 0, 0);
+        break;
+      case ids::kExtractDir:
+      case ids::kThumbnail:
+        SetFocusToId(id);
+        break;
+      default:
+        break;
+    }
+  }
+
+  bool OnKeyDown(UINT vk, bool shift) {
+    const chrome::ChromeModel model = BuildModel();
+    const chrome::Widget* focused = model.Focused();
+    const bool combo = focused != nullptr && focused->kind == chrome::WidgetKind::Combo;
+    const chrome::KeyCommand command = chrome::ClassifyKey(vk, shift, false, combo);
+    switch (command) {
+      case chrome::KeyCommand::Next:
+        focus_ = chrome::NextFocus(focus_, model.FocusCount(), false);
+        RefreshChrome();
+        return true;
+      case chrome::KeyCommand::Previous:
+        focus_ = chrome::NextFocus(focus_, model.FocusCount(), true);
+        RefreshChrome();
+        return true;
+      case chrome::KeyCommand::Cancel:
+        SendMessageW(hwnd_, WM_CLOSE, 0, 0);
+        return true;
+      case chrome::KeyCommand::Activate:
+        if (focused == nullptr) return false;
+        if (focused->kind == chrome::WidgetKind::TextField) {
+          if (state_.SaveEnabled()) SendMessageW(saveButton_, BM_CLICK, 0, 0);
+          return true;
+        }
+        ActivateWidget(focused->id);
+        return true;
+      case chrome::KeyCommand::Increase:
+      case chrome::KeyCommand::Decrease: {
+        if (focused == nullptr || !combo) return false;
+        HWND box = nullptr;
+        switch (focused->id) {
+          case ids::kLanguage: box = languageBox_; break;
+          case ids::kTheme: box = themeBox_; break;
+          case ids::kUnit: box = unitBox_; break;
+          case ids::kLogLevel: box = logBox_; break;
+          default: return false;
+        }
+        const int count = static_cast<int>(SendMessageW(box, CB_GETCOUNT, 0, 0));
+        const int current = static_cast<int>(SendMessageW(box, CB_GETCURSEL, 0, 0));
+        if (count <= 0) return true;
+        int next = current + (command == chrome::KeyCommand::Increase ? 1 : -1);
+        if (next < 0) next = count - 1;
+        if (next >= count) next = 0;
+        SendMessageW(box, CB_SETCURSEL, static_cast<WPARAM>(next), 0);
+        OnCommand(focused->id, CBN_SELCHANGE, box);
+        return true;
+      }
+      case chrome::KeyCommand::None:
+        break;
+    }
+    return false;
+  }
+
+  bool OnCharTyped(wchar_t ch) {
+    const chrome::ChromeModel model = BuildModel();
+    const chrome::Widget* focused = model.Focused();
+    if (focused == nullptr || focused->kind != chrome::WidgetKind::TextField) return false;
+    HWND target = nullptr;
+    switch (focused->id) {
+      case ids::kExtractDir: target = extractEdit_; break;
+      case ids::kThumbnail: target = thumbEdit_; break;
+      default: return false;
+    }
+    std::wstring text = ControlText(focused->id);
+    if (ch == L'\b') {
+      if (text.empty()) return true;
+      text.pop_back();
+    } else if (ch >= 0x20 && ch != 0x7F) {
+      text.push_back(ch);
+    } else {
+      return true;
+    }
+    SetWindowTextW(target, text.c_str());
+    OnCommand(focused->id, EN_CHANGE, target);
+    return true;
+  }
+
+  void PaintChrome() {
+    PAINTSTRUCT paint{};
+    HDC dc = BeginPaint(hwnd_, &paint);
+    bool painted = false;
+    if (SUCCEEDED(chromePainter_.Initialize())) {
+      if (!chromeTarget_) {
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        const D2D1_SIZE_U size = D2D1::SizeU(
+            static_cast<UINT32>(client.right - client.left),
+            static_cast<UINT32>(client.bottom - client.top));
+        const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+        const D2D1_HWND_RENDER_TARGET_PROPERTIES hwndProperties =
+            D2D1::HwndRenderTargetProperties(hwnd_, size, D2D1_PRESENT_OPTIONS_NONE);
+        if (SUCCEEDED(chromePainter_.Factory()->CreateHwndRenderTarget(
+                properties, hwndProperties, chromeTarget_.ReleaseAndGetAddressOf()))) {
+          chromeTarget_->SetDpi(96.0f, 96.0f);
+        }
+      }
+      if (chromeTarget_) {
+        chromeTarget_->BeginDraw();
+        chromePainter_.Draw(chromeTarget_.Get(), BuildModel());
+        if (SUCCEEDED(chromeTarget_->EndDraw())) painted = true;
+      }
+    }
+    if (!painted) {
+      RECT client{};
+      GetClientRect(hwnd_, &client);
+      const HBRUSH brush = CreateSolidBrush(RGB(11, 12, 16));
+      FillRect(dc, &client, brush);
+      DeleteObject(brush);
+    }
+    EndPaint(hwnd_, &paint);
+  }
+
+  void TrackMouseLeave() {
+    TRACKMOUSEEVENT track{};
+    track.cbSize = sizeof(track);
+    track.dwFlags = TME_LEAVE;
+    track.hwndTrack = hwnd_;
+    TrackMouseEvent(&track);
+  }
+
+  LRESULT OnChromeMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+      case WM_PAINT:
+        PaintChrome();
+        return 0;
+      case WM_ERASEBKGND:
+        return 1;
+      case WM_DPICHANGED: {
+        dpi_ = HIWORD(wparam);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+          SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,
+                       suggested->right - suggested->left, suggested->bottom - suggested->top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        chromeTarget_.Reset();
+        RefreshChrome();
+        return 0;
+      }
+      case WM_SIZE:
+        if (chromeTarget_) {
+          chromeTarget_->Resize(D2D1::SizeU(static_cast<UINT32>(LOWORD(lparam)),
+                                            static_cast<UINT32>(HIWORD(lparam))));
+        }
+        RefreshChrome();
+        return DefWindowProcW(hwnd_, message, wparam, lparam);
+      case WM_MOUSEMOVE: {
+        TrackMouseLeave();
+        const int x = GET_X_LPARAM(lparam);
+        const int y = GET_Y_LPARAM(lparam);
+        const chrome::ChromeModel model = BuildModel();
+        const bool closeHover = chrome::HitCloseScreen(model, static_cast<float>(x),
+                                                       static_cast<float>(y));
+        const int hot = chrome::HitTestScreen(model, static_cast<float>(x), static_cast<float>(y));
+        if (hot != hot_ || closeHover != closeHover_) {
+          hot_ = hot;
+          closeHover_ = closeHover;
+          RefreshChrome();
+        }
+        return 0;
+      }
+      case WM_MOUSELEAVE:
+        hot_ = -1;
+        closeHover_ = false;
+        pressed_ = -1;
+        RefreshChrome();
+        return 0;
+      case WM_LBUTTONDOWN: {
+        SetCapture(hwnd_);
+        const int x = GET_X_LPARAM(lparam);
+        const int y = GET_Y_LPARAM(lparam);
+        const chrome::ChromeModel model = BuildModel();
+        if (chrome::HitCloseScreen(model, static_cast<float>(x), static_cast<float>(y))) {
+          closePressed_ = true;
+          pressed_ = -2;
+          RefreshChrome();
+          return 0;
+        }
+        if (chrome::HitTitleScreen(model, static_cast<float>(x), static_cast<float>(y))) {
+          ReleaseCapture();
+          SendMessageW(hwnd_, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+          return 0;
+        }
+        const int hit = chrome::HitTestScreen(model, static_cast<float>(x), static_cast<float>(y));
+        if (hit >= 0) {
+          pressed_ = hit;
+          SetFocusToId(hit);
+          RefreshChrome();
+        }
+        return 0;
+      }
+      case WM_LBUTTONUP: {
+        const int x = GET_X_LPARAM(lparam);
+        const int y = GET_Y_LPARAM(lparam);
+        const chrome::ChromeModel model = BuildModel();
+        const bool wasClose = closePressed_;
+        closePressed_ = false;
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        if (wasClose && chrome::HitCloseScreen(model, static_cast<float>(x),
+                                               static_cast<float>(y))) {
+          pressed_ = -1;
+          SendMessageW(hwnd_, WM_CLOSE, 0, 0);
+          return 0;
+        }
+        const int hit = chrome::HitTestScreen(model, static_cast<float>(x), static_cast<float>(y));
+        const int pressed = pressed_;
+        pressed_ = -1;
+        if (hit >= 0 && hit == pressed) ActivateWidget(hit);
+        RefreshChrome();
+        return 0;
+      }
+      case WM_KEYDOWN:
+        if (!syncing_) {
+          const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+          if (OnKeyDown(static_cast<UINT>(wparam), shift)) return 0;
+        }
+        break;
+      case WM_CHAR:
+        if (!syncing_ && OnCharTyped(static_cast<wchar_t>(wparam))) return 0;
+        break;
+      case WM_NCHITTEST: {
+        if (hwnd_ != nullptr) {
+          const LRESULT base = DefWindowProcW(hwnd_, message, wparam, lparam);
+          POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+          ScreenToClient(hwnd_, &point);
+          const chrome::ChromeModel model = BuildModel();
+          if (chrome::HitTitleScreen(model, static_cast<float>(point.x),
+                                     static_cast<float>(point.y))) {
+            return HTCAPTION;
+          }
+          return base;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    return DefWindowProcW(hwnd_, message, wparam, lparam);
+  }
+
   HINSTANCE instance_ = nullptr;
   HWND hwnd_ = nullptr;
   HWND owner_ = nullptr;
@@ -948,6 +1431,14 @@ class SettingsDialog {
   int missingControlId_ = 0;
   bool syncing_ = false;
   bool saved_ = false;
+  int dpi_ = 96;
+  int focus_ = 0;
+  int hot_ = -1;
+  int pressed_ = -1;
+  bool closeHover_ = false;
+  bool closePressed_ = false;
+  chrome::ChromePainter chromePainter_;
+  Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> chromeTarget_;
   std::string loadError_;
   settingsfile::Paths paths_;
   prism::settings::SettingsStore store_;
@@ -1030,8 +1521,10 @@ inline void SettingsDialog::SyncControls() {
 
 inline HWND SettingsDialog::MakeControl(const wchar_t* klass, const wchar_t* text, DWORD style,
                                         int id, int x, int y, int width, int height) {
+  // V3: invisible adapters. C31 drives them by handle; the user sees the
+  // DialogChrome pixels instead of the system combo/edit/button chrome.
   const HWND control = CreateWindowExW(
-      0, klass, text, WS_CHILD | WS_VISIBLE | style, x, y, width, height, hwnd_,
+      0, klass, text, WS_CHILD | style, x, y, width, height, hwnd_,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
   if (control == nullptr) {
     // "The dialog did not open" is not diagnosable; "control 4005 (edit) failed"
@@ -1200,8 +1693,23 @@ inline void SettingsDialog::OnCommand(int id, int code, HWND control) {
 inline LRESULT SettingsDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
                                              LPARAM lparam) {
   switch (message) {
+    // V3 chrome owns these: the stock controls are adapters, never painted.
+    case WM_PAINT:
+    case WM_ERASEBKGND:
+    case WM_DPICHANGED:
+    case WM_SIZE:
+    case WM_MOUSEMOVE:
+    case WM_MOUSELEAVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_KEYDOWN:
+    case WM_CHAR:
+    case WM_NCHITTEST:
+      return OnChromeMessage(message, wparam, lparam);
     case WM_CREATE:
-      return CreateChildren() ? 0 : -1;
+      if (!CreateChildren()) return -1;
+      focus_ = 0;
+      return 0;
     case WM_COMMAND:
       if (!syncing_) OnCommand(LOWORD(wparam), HIWORD(wparam), reinterpret_cast<HWND>(lparam));
       return 0;
@@ -1211,6 +1719,8 @@ inline LRESULT SettingsDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wpa
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      chromeTarget_.Reset();
+      chromePainter_.ResetDeviceResources();
       hwnd_ = nullptr;
       return 0;
     default:

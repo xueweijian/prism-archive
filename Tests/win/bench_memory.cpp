@@ -306,7 +306,19 @@ int main(int argc, char** argv) {
   // Unbuffered: a benchmark that hangs must show which step it reached (and CI
   // logs must keep the digits even if the process is killed by the timeout).
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+  // COM apartment guard, declared FIRST so it is destroyed LAST: every ComPtr in
+  // this function must be released while the apartment is still alive. The
+  // reverse order crashed the scale benchmark at exit with 0xC0000005 AFTER its
+  // digits were printed -- and a ctest PASS_REGULAR_EXPRESSION cannot see that,
+  // because the exit code is part of the verdict.
+  struct ComApartment {
+    HRESULT hr = E_FAIL;
+    ComApartment() { hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
+    ~ComApartment() {
+      if (SUCCEEDED(hr)) CoUninitialize();
+    }
+  } apartment;
+  if (FAILED(apartment.hr)) {
     std::printf("    FAIL: COM init\n");
     return 1;
   }
@@ -509,6 +521,5 @@ int main(int argc, char** argv) {
       Mb(bigArm.peakBytes), Mb(smallArm.drainedBytes), Mb(bigArm.drainedBytes), bigArm.ms,
       Mb(extractPeak), extractMs, Mb(pmc.PeakWorkingSetSize), static_cast<int>(kBigPayload >> 20));
   std::printf("ALL MEMORY BENCH CHECKS PASSED\n");
-  CoUninitialize();
   return 0;
 }

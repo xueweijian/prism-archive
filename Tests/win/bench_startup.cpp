@@ -372,7 +372,19 @@ int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   const double exeToMainMs = MsSinceProcessStart();  // first thing we do
 
-  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+  // COM apartment guard, declared FIRST so it is destroyed LAST: every ComPtr in
+  // this function must be released while the apartment is still alive. The
+  // reverse order crashed the scale benchmark at exit with 0xC0000005 AFTER its
+  // digits were printed -- and a ctest PASS_REGULAR_EXPRESSION cannot see that,
+  // because the exit code is part of the verdict.
+  struct ComApartment {
+    HRESULT hr = E_FAIL;
+    ComApartment() { hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); }
+    ~ComApartment() {
+      if (SUCCEEDED(hr)) CoUninitialize();
+    }
+  } apartment;
+  if (FAILED(apartment.hr)) {
     std::printf("    FAIL: COM init\n");
     return 1;
   }
@@ -583,6 +595,5 @@ int main(int argc, char** argv) {
       Reported(openMs), Reported(catalogMs), kItems, close.launchToWindowMs,
       close.exited ? close.closeMs : -1.0, close.exited ? "true" : "false");
   std::printf("ALL STARTUP BENCH CHECKS PASSED\n");
-  CoUninitialize();
   return 0;
 }

@@ -306,7 +306,19 @@ int main(int argc, char** argv) {
   // Unbuffered: a benchmark that hangs must show which step it reached (and CI
   // logs must keep the digits even if the process is killed by the timeout).
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+  // COM apartment guard, declared FIRST so it is destroyed LAST: every ComPtr in
+  // this function must be released while the apartment is still alive. The
+  // reverse order crashed the scale benchmark at exit with 0xC0000005 AFTER its
+  // digits were printed -- and a ctest PASS_REGULAR_EXPRESSION cannot see that,
+  // because the exit code is part of the verdict.
+  struct ComApartment {
+    HRESULT hr = E_FAIL;
+    ComApartment() { hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
+    ~ComApartment() {
+      if (SUCCEEDED(hr)) CoUninitialize();
+    }
+  } apartment;
+  if (FAILED(apartment.hr)) {
     std::printf("    FAIL: COM init\n");
     return 1;
   }
@@ -423,7 +435,21 @@ int main(int argc, char** argv) {
   const uint64_t bigBytes = static_cast<uint64_t>(bigGb) << 30;
   const fs::path bigFile = work / "big.bin";
   const fs::path archiveBig = work / ("big" + std::to_string(bigGb) + "gb.7z");
-  if (!fs::exists(archiveBig, ec)) {
+  // The fixture is cached across runs (packing 4 GiB is minutes), but a cached
+  // file is only reusable if it actually OPENS: an interrupted pack leaves a
+  // truncated archive, and reusing one silently turns every cell below into a
+  // failure of the fixture rather than of the product. Validate, then repack.
+  bool bigFixtureReady = false;
+  if (fs::exists(archiveBig, ec)) {
+    prism::win::ArchiveReader probe(library);
+    bigFixtureReady = probe.Open(archiveBig.wstring());
+    probe.Close();
+    if (!bigFixtureReady) {
+      std::printf("    stale %s does not open -- repacking\n", archiveBig.string().c_str());
+      fs::remove(archiveBig, ec);
+    }
+  }
+  if (!bigFixtureReady) {
     if (!BENCH_CHECK(WriteZeros(bigFile, bigBytes))) {
       std::printf("    FAIL: cannot author %u GB payload\n", bigGb);
       return 1;
@@ -435,7 +461,9 @@ int main(int argc, char** argv) {
       return 1;
     }
     fs::remove(bigFile, ec);  // the archive carries the payload now
+    bigFixtureReady = true;
   }
+  (void)bigFixtureReady;
 
   // Controlled %TEMP%: an empty directory owned by this arm.
   const fs::path controlledTemp = work / "temp_probe";
@@ -549,6 +577,5 @@ int main(int argc, char** argv) {
       rows1k.medianMs, rows100k.medianMs, rows100k.p95Ms,
       rows100k.medianMs > 0.0 ? 1000.0 / rows100k.medianMs : 0.0, rows100k.maxRows);
   std::printf("ALL SCALE BENCH CHECKS PASSED\n");
-  CoUninitialize();
   return 0;
 }

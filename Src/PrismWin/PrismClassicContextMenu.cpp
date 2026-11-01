@@ -28,10 +28,9 @@
 #include <vector>
 
 #include "../PrismCore/ContextMenuModel.hpp"
-#include "../PrismCore/I18n.hpp"       // C40: the menu text is the app's tables
 #include "CompanionPreviewBridge.hpp"  // C30 inline-preview IPC (fire-and-forget)
 #include "PrismEngineBridge.hpp"       // WideToUtf8 / Utf8ToWide
-#include "SettingsFile.hpp"            // C40: the user's language.tag
+#include "ShellTranslator.hpp"         // C47: the tables both shell DLLs share
 #include "SparsePackageRegistrar.hpp"
 
 using namespace Microsoft::WRL;
@@ -59,74 +58,14 @@ std::wstring VerbWide(const std::string& verb) { return Utf8ToWide(verb); }
 // The shell does NOT enumerate the archive: listing entries belongs to the
 // companion process (PrismCore), never to explorer's UI thread. entries stays
 // empty and kFlagNeedsCatalogScan asks the companion to fill the first N itself.
-// C40 -- THE MENU SPEAKS THE USER'S LANGUAGE.
+// C40 -- THE MENU SPEAKS THE USER'S LANGUAGE; C47 moved the resolution out.
 //
-// Two facts decide the shape of this block:
-//   * explorer.exe owns the process, so "the executable's directory" is
-//     C:\Windows. The tables live next to the DLL that renders the menu, and the
-//     install layout puts that DLL in the same folder as PrismArchive.exe.
-//   * the language is the user's, not the process's: it comes from the same
-//     settings document the app reads (language.tag), resolved ONCE per DLL
-//     lifetime -- a context menu must not parse JSON on every right-click.
-// Any failure (no tables, no settings, an unreadable file) leaves the translator
-// null, and ContextMenuModel::Build then keeps its English defaults: a menu with
-// English labels is usable, a menu with "menu.extract.here" is not.
-std::wstring ModuleDirectory() {
-  HMODULE module = nullptr;
-  if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&ModuleDirectory), &module) == FALSE) {
-    return std::wstring();
-  }
-  wchar_t buffer[MAX_PATH] = {};
-  const DWORD length = ::GetModuleFileNameW(module, buffer, MAX_PATH);
-  if (length == 0 || length >= MAX_PATH) return std::wstring();
-  const std::wstring path(buffer, static_cast<size_t>(length));
-  const size_t slash = path.find_last_of(L"\\/");
-  return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
-}
-
-std::string SystemLocaleUtf8() {
-  wchar_t locale[LOCALE_NAME_MAX_LENGTH] = {};
-  const int length = ::GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH);
-  return length > 1
-             ? WideToUtf8(std::wstring(locale, static_cast<size_t>(length - 1)))
-             : std::string();
-}
-
-std::string RequestedLanguage() {
-  prism::settings::SettingsStore store;
-  const prism::win::settingsfile::LoadReport report =
-      prism::win::settingsfile::LoadStore(store, prism::win::settingsfile::DefaultPaths());
-  static_cast<void>(report);  // a missing/corrupt document means "auto"
-  return store.GetString("language.tag", "auto");
-}
-
-const prism::i18n::Translator* ShellTranslator() {
-  struct State {
-    prism::i18n::Translator translator;
-    bool ready = false;
-  };
-  // Function-local static: thread-safe initialisation (C++11), one parse per
-  // DLL lifetime, no allocation that outlives the module.
-  static const State state = [] {
-    State loaded;
-    const std::wstring directory =
-        prism::win::Utf8ToWide(prism::ContextMenuModel::LanguageDirectoryForModuleDir(
-            WideToUtf8(ModuleDirectory())));
-    if (directory.empty()) return loaded;
-    for (const std::string& tag : prism::i18n::SupportedTags()) {
-      const std::wstring file = directory + L"\\" + Utf8ToWide(tag) + L".json";
-      if (loaded.translator.LoadCatalogFile(WideToUtf8(file))) loaded.ready = true;
-    }
-    if (!loaded.ready) return loaded;
-    const prism::i18n::LanguageChoice choice =
-        prism::i18n::ChooseLanguage(RequestedLanguage(), SystemLocaleUtf8());
-    loaded.translator.SetLanguage(choice.tag);
-    return loaded;
-  }();
-  return state.ready ? &state.translator : nullptr;
-}
+// The rule (module directory -> Assets\Lang, language.tag -> active table, one
+// parse per DLL lifetime) now lives in ShellTranslator.hpp and is shared with the
+// Win11 IExplorerCommand handler, so the two DLLs cannot disagree about which
+// language the user asked for. What stays here is the reason it must be that
+// rule: explorer.exe owns the process, so the executable's directory would be
+// C:\Windows; the tables follow the DLL that renders the menu.
 
 void PublishInlinePreview(const std::vector<std::string>& selected) noexcept {
   if (selected.empty()) return;
@@ -185,7 +124,7 @@ class ClassicMenu final
     // submenu here would hijack double-click.
     if (flags & CMF_DEFAULTONLY) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 
-    model_ = prism::ContextMenuModel::Build(selected_, ShellTranslator());
+    model_ = prism::win::shelli18n::BuildMenuModel(selected_);
     if (model_.empty()) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
 
     HMENU popup = ::CreatePopupMenu();
@@ -222,7 +161,7 @@ class ClassicMenu final
 
   STDMETHODIMP InvokeCommand(CMINVOKECOMMANDINFO* info) override {
     if (!info) return E_INVALIDARG;
-    if (model_.empty()) model_ = prism::ContextMenuModel::Build(selected_, ShellTranslator());
+    if (model_.empty()) model_ = prism::win::shelli18n::BuildMenuModel(selected_);
     if (model_.empty()) return E_UNEXPECTED;
 
     std::string verb;
@@ -258,7 +197,7 @@ class ClassicMenu final
 
   STDMETHODIMP GetCommandString(UINT_PTR idCmd, UINT type, UINT*, CHAR* buffer,
                                 UINT count) override {
-    if (model_.empty()) model_ = prism::ContextMenuModel::Build(selected_, ShellTranslator());
+    if (model_.empty()) model_ = prism::win::shelli18n::BuildMenuModel(selected_);
     const size_t offset = static_cast<size_t>(idCmd);
     if (type == GCS_VALIDATEA || type == GCS_VALIDATEW) {
       return offset < model_.size() ? S_OK : S_FALSE;

@@ -23,7 +23,7 @@
 
 ### 2. 引擎桥接层 —— 78%
 **已交付**：Open（S_OK 纪律+候选回绕）· 目录（PROPID 集合发现，kpidBlock=27）· ExtractToMemory · 智能解压落盘 · 固实单趟扫描（ExtractBatch）· GBK 修复集成 · **`IOutArchive::UpdateItems` 真接线**（`VirtualTreeExecutor.hpp`：CommitTree / 目录提交 / 包内重命名 / 诚实成本模型 / 重开验证闸门）
-**缺**：拖拽流的随机访问 Seek · 压缩/打包方向 · 大页
+**缺**：压缩/打包方向 · 大页
 
 > **B1 落地（2026-11-01，PR #9）**：真因是 `DiskOutStream` 继承了 `IOutStream`、实现了 `SetSize`，却没在 `QueryInterface` 里应答 `IID_IOutStream` —— 7-Zip 只用 QI 拿可选接口（`7zUpdate.cpp` `Z7_DECL_CMyComPtr_QI_FROM(IOutStream, ...)`，失败即 `E_NOTIMPL`），对象在 C++ 层面完美、在 COM 层面自称"我不是"。**18 轮 CI 全打在这上面**（CONTRACTS D10-D13）。
 > 顺带挖出三个产品级 bug：`PropertyId` 用属性发现集合做门 → **所有 7z 目录被读成 0 字节文件**（D16）；`~SevenZipLibrary` 卸 7z.dll 毒化下次加载；`SmartExtractCallback::GetStream` 一个引用给两个主人 → heap-use-after-free（D15）。
@@ -56,7 +56,7 @@
 
 ### 批次 B：引擎执行层补全（并行线 1）
 1. ~~VirtualTree 执行器：UpdateItems 真接线（诚实成本模型：全量拷贝语义，UI 必须显示进度）~~ **✅ 已落地（2026-11-01，PR #9）**——CommitTree 端到端：计划→备份→UpdateItems→重开验证→原子替换；矩阵 8 变体验证目录节点；`win.vtree_exec` / `win.mkdir_matrix` / `win.com_qi_contract` 三套件进主线 CI
-2. 拖拽流随机访问：DelayedExtractStream 的 Seek 真实现（依赖 7z.dll 的块内随机解码）
+2. ~~拖拽流随机访问：DelayedExtractStream 的 Seek 真实现（依赖 7z.dll 的块内随机解码）~~ **✅ 已落地（2026-11-01，PR #13）**——纯状态机 `DelayedSeekCursor`（Planner 纯函数：CursorOnly/LookbackHit/RestartDecode，双预算重启前拒绝）+ COM 包装 + 真 7z.exe 5 文件固实包 e2e；`core.test_dnd_seek`（22 例）+ 4 个变异构建 + `win.dnd_seek` 进主线 CI
 3. 密码试错执行器：消费 PasswordRing 决策，并发探针 + "匹配中 3/12" 进度回调
 **验收**：包内重命名在真 7z.dll 上落盘成功且可再打开（✅）；Explorer 从虚拟流真拉到文件；AES 包试错出真实结果。
 
@@ -79,7 +79,7 @@
 
 ## 五、已知债务（不挡路，但要记账）
 
-- DelayedExtractStream::Seek 只挪游标（拖拽真拉取前必须补）
+- ~~DelayedExtractStream::Seek 只挪游标（拖拽真拉取前必须补）~~ **已补（2026-11-01，PR #13）**：真 e2e 在 7z.dll 上验证冷/热流、窗口边界、双预算拒绝
 - PrismVirtualDragDrop 的 GetDataHere 保守拒绝
 - 部分蓝图性能承诺已按 ADR.md 降级（25ms 冷启动等），ch7.2 验收以 ADR 为准
 - ROADMAP 部分 checkbox 滞后于实际（以本文档为准，分批同步）

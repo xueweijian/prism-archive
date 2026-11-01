@@ -1,0 +1,49 @@
+C31 patch A -- open the settings dialog from a menu (5 lines in GalleryWindow.hpp, 2 in Main.cpp).
+Generated with git diff against main@35bb3be and verified with "git apply --check".
+Apply:  git apply tools/patches/c31-settings-from-menu.patch
+GalleryWindow.hpp and Main.cpp belong to C27/C29 and C25, so this is a patch, not an edit:
+whoever lands first takes it verbatim. The dialog owns Store/SettingsFile, so no other file
+has to learn where settings live.
+diff --git a/Src/App/Main.cpp b/Src/App/Main.cpp
+index df4faaa..8c36a97 100644
+--- a/Src/App/Main.cpp
++++ b/Src/App/Main.cpp
+@@ -80,6 +80,7 @@
+ #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
+ #include "../PrismCore/ThumbStore.hpp"
+ #include "../PrismWin/GalleryWindow.hpp"
++#include "../PrismWin/SettingsDialog.hpp"  // C31: Settings... menu + dialog
+ #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
+ #include "../PrismWin/SolidSweeper.hpp"
+ 
+@@ -343,6 +344,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+   // "which level did that click hit?") is answered by PrismCore.
+   window.SetItems(&app->items);
+   window.SetRootLabel(FileNameWide(archive));
++  prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd());  // C31
+   // C12: the sidebar's telemetry pill needs the engine facts the catalog cannot
+   // derive. v1 knows the encryption bit from the catalog itself; the method and
+   // dictionary names have no accessor in the bridge yet (kept honest, not faked).
+diff --git a/Src/PrismWin/GalleryWindow.hpp b/Src/PrismWin/GalleryWindow.hpp
+index 723389e..026eb52 100644
+--- a/Src/PrismWin/GalleryWindow.hpp
++++ b/Src/PrismWin/GalleryWindow.hpp
+@@ -69,6 +69,7 @@
+ #include "../PrismCore/SpringAnimator.hpp"
+ #include "../PrismCore/ThumbStore.hpp"
+ #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
++#include "SettingsDialog.hpp"               // C31: the settings screen (menu below)
+ #include "GalleryRenderer.hpp"
+ #include "SidebarView.hpp"                  // sidebar draw commands (C12)
+ 
+@@ -525,6 +526,10 @@ class GalleryWindow {
+         ClickAt(MouseX(lparam), MouseY(lparam));
+         return 0;
+       }
++      case WM_COMMAND:  // C31: the menu bar one item (Settings, id 0x4B31)
++        if (LOWORD(wparam) == prism::win::settingsui::SettingsDialog::kMenuSettingsId)
++          prism::win::settingsui::SettingsDialog().OpenModal(GetModuleHandleW(nullptr), host_.hwnd);
++        return 0;
+       case kProgressMessage: {
+         hud_.OnProgress(NowMs(), static_cast<uint64_t>(wparam),
+                         static_cast<uint64_t>(lparam));

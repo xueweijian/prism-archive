@@ -36,6 +36,16 @@ enum class ArchiveFormat : std::uint8_t {
   kZstd,
   kLz4,
   kBrotli,
+  // Card C43: the formats that used to fall through to "probe every handler".
+  kIso,       // ISO9660 / UDF bridge: "CD001" at sector 16 (offset 0x8001)
+  kCab,       // Microsoft cabinet: "MSCF"
+  kWim,       // Windows Imaging Format: "MSWIM\0"
+  kCompound,  // OLE compound document: D0CF11E0A1B11AE1 (the .msi container)
+  kChm,       // HTML Help: "ITSF"
+  kCpio,      // POSIX cpio: "070701" (newc) / "070702" (crc) / "070707" (odc)
+  kArj,       // ARJ: 0x60 0xEA
+  kLzh,       // LHA/LZH: "-lh5-" at offset 2 of a level-0/1/2 header
+  kDmg,       // Apple disk image: "koly" in the LAST 512-byte block
 };
 
 // How much the bytes PROVE.
@@ -53,6 +63,12 @@ struct Window {
   std::size_t headSize = 0;
   const std::uint8_t* tail = nullptr;  // last bytes of the file
   std::size_t tailSize = 0;
+  // Bytes AT file offset 0x8000 (sector 16, 2048-byte sectors). ISO9660 puts
+  // its primary volume descriptor there, 32 KiB into the file -- far outside a
+  // 512-byte head, so it is a separate, explicitly-offset probe (C43). The
+  // caller reads only the few bytes this rule needs.
+  const std::uint8_t* sector16 = nullptr;
+  std::size_t sector16Size = 0;
   std::uint64_t fileSize = 0;
   // Lowercase extension WITHOUT the dot, empty when the name has none. Used
   // ONLY as a tie-break for formats that carry no signature: a real magic byte
@@ -109,6 +125,15 @@ inline const char* FormatName(ArchiveFormat format) {
     case ArchiveFormat::kZstd: return "zstd";
     case ArchiveFormat::kLz4: return "lz4";
     case ArchiveFormat::kBrotli: return "br";
+    case ArchiveFormat::kIso: return "iso";
+    case ArchiveFormat::kCab: return "cab";
+    case ArchiveFormat::kWim: return "wim";
+    case ArchiveFormat::kCompound: return "compound";
+    case ArchiveFormat::kChm: return "chm";
+    case ArchiveFormat::kCpio: return "cpio";
+    case ArchiveFormat::kArj: return "arj";
+    case ArchiveFormat::kLzh: return "lzh";
+    case ArchiveFormat::kDmg: return "dmg";
     case ArchiveFormat::kUnknown: break;
   }
   return "unknown";
@@ -138,6 +163,17 @@ inline const char* FormatExtension(ArchiveFormat format) {
     case ArchiveFormat::kZstd: return "zst";
     case ArchiveFormat::kLz4: return "lz4";
     case ArchiveFormat::kBrotli: return "br";
+    case ArchiveFormat::kIso: return "iso";
+    case ArchiveFormat::kCab: return "cab";
+    case ArchiveFormat::kWim: return "wim";
+    // The engine calls the handler "Compound"; the extension that routes to it
+    // in an installer context is .msi (it also claims msp/doc/xls/ppt).
+    case ArchiveFormat::kCompound: return "msi";
+    case ArchiveFormat::kChm: return "chm";
+    case ArchiveFormat::kCpio: return "cpio";
+    case ArchiveFormat::kArj: return "arj";
+    case ArchiveFormat::kLzh: return "lzh";
+    case ArchiveFormat::kDmg: return "dmg";
     case ArchiveFormat::kUnknown: break;
   }
   return nullptr;
@@ -260,6 +296,65 @@ inline Finding Sniff(const Window& window) {
       BytesAre(h, n, 0, {0x02, 0x21, 0x4C, 0x18})) {
     return MakeFinding(ArchiveFormat::kLz4, Confidence::kMagic,
                        "head=" + HexBytes(h, n < 4 ? n : 4));
+  }
+
+  // 1b. Card C43: the formats the extension table did not cover. Each one is a
+  //     signature the container itself writes, so a hit is proof (kMagic): the
+  //     router asks ONE handler and never walks the file looking for another.
+  if (BytesAre(h, n, 0, {0x4D, 0x53, 0x43, 0x46})) {  // "MSCF"
+    return MakeFinding(ArchiveFormat::kCab, Confidence::kMagic, "head=4d534346");
+  }
+  // WIM header magic is "MSWIM" followed by two NUL bytes; the first NUL is
+  // part of the eight-byte magic and is what keeps "MSWIMX" out.
+  if (BytesAre(h, n, 0, {0x4D, 0x53, 0x57, 0x49, 0x4D, 0x00})) {
+    return MakeFinding(ArchiveFormat::kWim, Confidence::kMagic,
+                       "head=" + HexBytes(h, n < 6 ? n : 6));
+  }
+  // OLE Compound File Binary: the container of .msi (and .doc/.xls/.ppt).
+  if (BytesAre(h, n, 0, {0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1})) {
+    return MakeFinding(ArchiveFormat::kCompound, Confidence::kMagic, "head=d0cf11e0a1b11ae1");
+  }
+  if (BytesAre(h, n, 0, {0x49, 0x54, 0x53, 0x46})) {  // "ITSF"
+    return MakeFinding(ArchiveFormat::kChm, Confidence::kMagic, "head=49545346");
+  }
+  // cpio writes its magic as ASCII: newc "070701", crc "070702", odc "070707".
+  if (BytesAre(h, n, 0, {'0', '7', '0', '7', '0', '1'}) ||
+      BytesAre(h, n, 0, {'0', '7', '0', '7', '0', '2'}) ||
+      BytesAre(h, n, 0, {'0', '7', '0', '7', '0', '7'})) {
+    return MakeFinding(ArchiveFormat::kCpio, Confidence::kMagic,
+                       "head=" + HexBytes(h, n < 6 ? n : 6));
+  }
+  if (BytesAre(h, n, 0, {0x60, 0xEA})) {
+    return MakeFinding(ArchiveFormat::kArj, Confidence::kMagic, "head=60ea");
+  }
+  // LHA/LZH level-0/1/2 header: byte 0 is the header size, then "-lh<d>-".
+  // Requiring the closing '-' (not just "-lh") is what stops a text file whose
+  // third character happens to be '-' from routing here.
+  if (n >= 7 && h[2] == '-' && h[3] == 'l' && h[4] == 'h' && h[5] >= '0' && h[5] <= '9' &&
+      h[6] == '-') {
+    return MakeFinding(ArchiveFormat::kLzh, Confidence::kMagic,
+                       "method=" + std::string(reinterpret_cast<const char*>(h + 2), 4));
+  }
+  // ISO9660: the primary volume descriptor at sector 16 starts with type 0x01
+  // and carries "CD001" at +1. A UDF-only image keeps "BEA01" there instead, so
+  // this rule fires only on the ISO9660 descriptor.
+#ifndef PRISM_C43_MUTANT_NO_ISO_SNIFF
+  if (window.sector16 && BytesAre(window.sector16, window.sector16Size, 1,
+                                  {'C', 'D', '0', '0', '1'})) {
+    return MakeFinding(ArchiveFormat::kIso, Confidence::kMagic, "cd001@32769");
+  }
+#endif  // PRISM_C43_MUTANT_NO_ISO_SNIFF -- negative control (CONTRACTS D3):
+        // the rule is deleted ON PURPOSE so the iso fixture falls back to the
+        // extension route + the legacy probe, which walks the whole file.
+  // Apple disk image: the "koly" trailer occupies the LAST 512-byte block, so
+  // the signature must sit exactly at tailSize-512 -- finding it anywhere else
+  // in the tail is a payload coincidence, not a disk image.
+  if (window.tail && window.fileSize >= 512 && window.tailSize >= 512) {
+    const std::size_t koly = window.tailSize - 512;
+    if (BytesAre(window.tail, window.tailSize, koly, {'k', 'o', 'l', 'y'})) {
+      return MakeFinding(ArchiveFormat::kDmg, Confidence::kMagic,
+                         "koly@" + std::to_string(window.fileSize - 512));
+    }
   }
 
   // 2. Structural evidence, which is a HINT, not proof.

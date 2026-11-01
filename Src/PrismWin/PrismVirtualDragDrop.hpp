@@ -16,9 +16,14 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
+
+#include "../PrismCore/DragDrop.hpp"  // SeekPolicy / PlanSeek / DelayedSeekCursor
 
 using namespace Microsoft::WRL;
 
@@ -91,43 +96,80 @@ class ExplorerDropTargetResolver {
 
 // Channel B: delayed-render virtual file stream. The decompressor only runs
 // when the drop target actually asks for bytes.
+//
+// M4 seek completion: Explorer treats the handed-out IStream as seekable and
+// seeks freely (its copy engine probes the tail; format sniffers re-read from
+// 0 after a prefix). The stream delegates every decision to
+// prism::dnd::DelayedSeekCursor -- the pure state machine that the Linux suite
+// exercises with 115 assertions (byte-exactness across SET/CUR/END seeks, ring
+// residency, restart budgets, refusal semantics). This class is only the COM
+// shell: it resolves the seek origin, forwards bytes, and maps a refusal to the
+// HRESULT Explorer expects. That split exists because the Windows TU cannot be
+// compiled locally (CONTRACTS D8) while the logic underneath already is.
+//
+// All the solid-decoder facts the cursor encodes come from 7-Zip itself:
+// 7zExtract.cpp:325 rewinds to FolderStartFileIndex and decodes forward, and
+// 7zFolderInStream's GetSubStreamSize only ever answers about the stream it is
+// currently reading -- there is no random-access promise to inherit, so an
+// honest restart (on the SAME open session) is the only correct answer.
 class DelayedExtractStream final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IStream> {
  public:
-  // producer(bytesRequested) returns the next decompressed chunk.
-  using Producer = std::function<std::string(size_t)>;
+  // Restartable pull-producer over one sequential decoder (the solid block).
+  class Producer {
+   public:
+    virtual ~Producer() = default;
+    // Next sequential chunk of the decoder frontier (<= maxBytes). An empty
+    // return means the decoder ended or failed before the declared stream
+    // size; the stream latches that loudly instead of faking a short file.
+    virtual std::string Next(size_t maxBytes) = 0;
+    // Rewind the decoder to the stream start, KEEPING the underlying session.
+    // false = the stream refuses further service (failing loudly) rather than
+    // ever serving bytes from an undefined decoder state.
+    virtual bool Restart() = 0;
+  };
+  using ProducerPtr = std::shared_ptr<Producer>;
 
-  HRESULT RuntimeClassInitialize(Producer producer, uint64_t totalSize) {
+  HRESULT RuntimeClassInitialize(ProducerPtr producer, uint64_t totalSize,
+                                 prism::dnd::SeekPolicy policy = {}) {
+    if (!producer) return E_INVALIDARG;
     producer_ = std::move(producer);
     totalSize_ = totalSize;
+    cursor_ = prism::dnd::DelayedSeekCursor(
+        totalSize,
+        [this](size_t n) { return producer_ ? producer_->Next(n) : std::string(); },
+        [this] { return producer_ ? producer_->Restart() : false; }, policy);
     return S_OK;
   }
 
   IFACEMETHODIMP Read(void* buffer, ULONG count, ULONG* read) override {
     if (!buffer) return E_POINTER;
     if (read) *read = 0;
-    if (position_ >= totalSize_ || count == 0) return S_FALSE;
-    const std::string chunk = producer_ ? producer_(count) : std::string();
-    if (chunk.empty()) return S_FALSE;
-    // No min() macro: TUs that define NOMINMAX (project convention) would not compile.
-    const size_t bytes = chunk.size() < static_cast<size_t>(count) ? chunk.size()
-                                                                   : static_cast<size_t>(count);
-    memcpy(buffer, chunk.data(), bytes);
-    position_ += bytes;
-    if (read) *read = static_cast<ULONG>(bytes);
+    if (count == 0) return S_FALSE;
+    const auto outcome = cursor_.Read(static_cast<uint8_t*>(buffer), count);
+    if (read) *read = static_cast<ULONG>(outcome.served);
+    if (outcome.failed) return STG_E_READFAULT;
+    if (outcome.served == 0 && outcome.eof) return S_FALSE;
     return S_OK;
   }
   IFACEMETHODIMP Write(const void*, ULONG, ULONG*) override { return STG_E_ACCESSDENIED; }
   IFACEMETHODIMP Seek(LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER* newPos) override {
-    uint64_t target = position_;
+    if (cursor_.failed()) return STG_E_READFAULT;
+    const int64_t current = static_cast<int64_t>(cursor_.position());
+    int64_t target = 0;
     if (origin == STREAM_SEEK_SET) {
-      target = static_cast<uint64_t>(move.QuadPart);
+      target = move.QuadPart;
     } else if (origin == STREAM_SEEK_CUR) {
-      target = position_ + static_cast<uint64_t>(move.QuadPart);
+      target = current + move.QuadPart;
     } else if (origin == STREAM_SEEK_END) {
-      target = totalSize_ + static_cast<uint64_t>(move.QuadPart);
+      target = static_cast<int64_t>(totalSize_) + move.QuadPart;
+    } else {
+      return STG_E_INVALIDFUNCTION;
     }
-    position_ = target;
-    if (newPos) newPos->QuadPart = position_;
+    // A refused plan (range, restart count, or re-decode byte budget) leaves
+    // the cursor where it was and says why in diagnostics(); STG_E_INVALIDFUNCTION
+    // is the documented error for a seek the stream cannot honour.
+    if (!cursor_.Seek(target, nullptr)) return STG_E_INVALIDFUNCTION;
+    if (newPos) newPos->QuadPart = cursor_.position();
     return S_OK;
   }
   IFACEMETHODIMP SetSize(ULARGE_INTEGER) override { return E_NOTIMPL; }
@@ -140,8 +182,17 @@ class DelayedExtractStream final : public RuntimeClass<RuntimeClassFlags<Classic
   IFACEMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return E_NOTIMPL; }
   IFACEMETHODIMP Stat(STATSTG* stat, DWORD flags) override {
     if (!stat) return E_POINTER;
-    if (flags == STATFLAG_NONAME) return S_OK;
+    *stat = STATSTG{};
+    stat->type = STGTY_STREAM;
+    // cbSize must be filled regardless of STATFLAG_NONAME: the flag only
+    // suppresses the name, and receivers (Explorer's copy engine) size their
+    // progress UI from it. The old skeleton returned before setting cbSize,
+    // so every dragged file looked zero-length until it was actually read.
     stat->cbSize.QuadPart = totalSize_;
+    if (flags != STATFLAG_NONAME) {
+      // Name omitted on purpose: the virtual name lives in the
+      // FILEDESCRIPTORW, not in the stream, and a null pwcsName is legal.
+    }
     return S_OK;
   }
   IFACEMETHODIMP Clone(IStream** out) override {
@@ -149,10 +200,19 @@ class DelayedExtractStream final : public RuntimeClass<RuntimeClassFlags<Classic
     return E_NOTIMPL;
   }
 
+  // Diagnostics (numbers and planner reasons only -- no paths, no names).
+  uint64_t restarts() const { return cursor_.restarts(); }
+  uint64_t restartBytesUsed() const { return cursor_.restartBytesUsed(); }
+  uint64_t wastedBytes() const { return cursor_.wastedBytes(); }
+  uint64_t skippedBytes() const { return cursor_.skippedBytes(); }
+  uint64_t position() const { return cursor_.position(); }
+  const prism::dnd::DelayedSeekCursor& cursor() const { return cursor_; }
+  const std::string& diagnostics() const { return cursor_.diagnostics(); }
+
  private:
-  Producer producer_;
+  ProducerPtr producer_;
   uint64_t totalSize_ = 0;
-  uint64_t position_ = 0;
+  prism::dnd::DelayedSeekCursor cursor_;
 };
 
 // Channel A drop source: on mouse-up we try to short-circuit the Shell copy and

@@ -89,3 +89,56 @@
 - PrismVirtualDragDrop 的 GetDataHere 保守拒绝
 - 部分蓝图性能承诺已按 ADR.md 降级（25ms 冷启动等），ch7.2 验收以 ADR 为准
 - ROADMAP 部分 checkbox 滞后于实际（以本文档为准，分批同步）
+
+---
+
+## 六、2026-11-01 深夜：24 卡并行冲刺（14 张已合入 main）
+
+> 本节由集成者（父 agent）写。口径不变：**写了 ≠ 能用**；下面每一条都指向一个已合并的 PR 或一份实测数字。
+
+### 6.1 已合入的能力（按用户能感知的顺序）
+
+| 能力 | 卡 / PR | 证据 |
+|---|---|---|
+| 开窗即渲染、关窗即退出 | C1 #21 | `win.app_lifecycle` 20 checks；关窗 85ms、退出码 0；根因是 `GalleryRenderer::Initialize()` 从未被调用，首帧走空 vtable → UI 线程死在 `DispatchMessageW`。**此前 exe 从未成功渲染过一帧** |
+| 7z.dll 跨盘解析 | C1 #21 | env → exe 目录 → 注册表 `InstallDir`（HKLM/HKCU）→ 两个 Program Files；本机 E 盘安装从「弹找不到」变可用 |
+| 分卷读取/生成 | C10 #27 | 四族卷名、缺卷/乱序在**引擎之前**拒绝；7z.exe 造 3 卷 → 逐项 sha256 全等；顺手修了 `GetStream` 返回 `S_OK`+空流指针的真 bug |
+| 并发解压 | C11 #26 | `ReaderPool` + `ExtractScheduler`；同包并发 sweep+extract 不串数据（173 checks，`peak==4` 在 7z 回调内部会合）；4 个变异全红 |
+| 右键双栈 | C4 #18 | Win10 经典菜单在真 shell 可见（5 项与模型逐字一致，注销即消失）；Win11 MSIX 真跑到 `AddPackageByUriAsync`（本机缺 ROOT 信任证书，按 D1 显式 SKIP） |
+| 安装与关联 | C3 #23/#25 | 免管理员 HKCU 安装器、`.7z/.zip/.rar` 关联、多尺寸图标、`cmake --install` 扁平布局 |
+| 安全链路 | C5 #17 | MoTW 逐文件继承（ADS 写读回）、AMSI 三态（Unavailable 不静默放行）、炸弹熔断双条件；5 个编译期变异全红 |
+| 液态玻璃 | C6 #24 | 真 `ID2D1Effect` 效果图 + DComp 每岛合成；`bandDiff 0.86`，注入 `u_iorStrength=0` 后 3 条断言全红 |
+| 侧边栏 / 排序过滤 / 快捷键 | C12 #29、C13 #28、C8 #20 | 942 行侧栏模型、6 键多键排序 + 精确压缩率 + 6 个变异、蓝图 9.1 六组快捷键 + 13 条旅程 |
+| 门禁与 CI | C2 #22 | `local_gates.ps1` 一条命令 8 步；CI 压到 2 job/run（Linux 64s / Windows 133s） |
+
+### 6.2 实测性能（`docs/PERF.md`，卡片 C7 #19）
+
+| 指标 | 实测 | 判定 |
+|---|---|---|
+| 首帧 | **22.7 ms** | 达标（ADR-001 目标 60ms） |
+| 进程→main | 313.6 ms | 未达标（ADR 已把 25ms 降级） |
+| 常驻内存 | 58.4 MB | 未达标（目标 24–25MB；玻璃层 +11MB） |
+| 关闭延迟 | 153 ms（空闲）/ 517 ms（编译风暴） | C1 的 500ms 预算：空闲达标、满载超线 |
+| 1 万条目 Open | 7.5 ms | — |
+| 4 GiB Open | **78.5 s** | 未达标；约等于整文件顺序扫描（ZIP 候选先试），魔数前置筛选是最可能的解 |
+| 10 万行滚动 | 7.9 ms/帧，p95 15.6 ms ≈ 126 FPS | 120FPS 在 p95 未达标 |
+
+### 6.3 进度重估（本节口径）
+
+| 维度 | §一 旧值 | 现在 | 依据 |
+|---|---|---|---|
+| 可交付成品 | ~35% | **~55%** | exe 能开能关、能装能关联、右键可见；缺压缩与装配 |
+| 加权主数字 | 58% | **~68%** | Shell 集成 50→70（真机可见）、UI 35→55（侧栏/排序/快捷键决策层 + 玻璃真渲染）、产品化 10→40（安装器/关联/图标） |
+
+### 6.4 新增债务（当期记账，不掩盖）
+
+- **4 GiB 归档 Open 78.5s**：魔数前置筛选未做，是「右键 12ms」与「大包可用性」的共同拦路虎。
+- **常驻内存 58.4MB**：玻璃层（DComp 岛 + 效果图）贡献 +11MB，与 ADR 的 25MB 目标冲突，需在 ADR 里重新裁决或做分层惰性创建。
+- **`Log.hpp` 非线程安全**：与 `ExtractScheduler` 同约定，接多线程前必须由 owner 串行化或加锁。
+- **`ReaderPool` / `MoTW` / `AMSI` / `Shortcuts` / 侧栏 / 排序都还没接进 `Main.cpp`**：这正是波 2 装配卡（C25）在做的事。
+- `GlassIslandHost` 的 API 变动会打断直接引用它的外部 TU（C7 的 bench 已解耦，其他测试同样不要绑）。
+
+### 6.5 并行工作模式（已实证）
+
+24 张卡 / 8 个并发槽位 / 每卡独立 worktree + 分支；构建走 3 槽位编译锁，编译与测试以 GitHub Actions 为权威（2 job、约 2.5 分钟），本地只 `Build-Only` 自己的 target。
+合入门禁：每个 PR 必须 CI 绿 + preflight PASS + 新守卫有负向控制（D3）+ 会 SKIP 的测试钉 `PASS_REGULAR_EXPRESSION`（D1）。

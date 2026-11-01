@@ -9,12 +9,20 @@
 //     (reported, never used in an equality assertion).
 //
 //   * create_window_ms / first_frame_ms -- CreateWindowExW -> the first
-//     EndDraw + Present of the REAL composition path (GlassIslandHost: D3D11 +
-//     D2D1 device context + three DComp composition swapchains -- exactly what
-//     PrismArchive.exe builds). The app itself exposes no instrumentation hook
-//     and is owned by another card, so the first-frame path is reproduced here
-//     from the same header the app links. That is stated in docs/PERF.md
-//     instead of being papered over.
+//     EndDraw + Present of the REAL composition path: one D3D11 device, one D2D1
+//     device context, one DComp target/root visual, and one premultiplied
+//     composition swapchain per island -- the exact primitives (and the exact
+//     per-island sequence BeginDraw/paint/EndDraw/Present/Commit) that
+//     PrismArchive.exe pays for on its first frame.
+//
+//     Why a local harness instead of including the app's GlassIslandHost.hpp:
+//     that class belongs to another card and its API changed underneath this
+//     file (Initialize gained a shaderDir argument, PaintIsland gained
+//     GlassConstants + a backdrop bitmap), which broke the Windows CI build of
+//     a benchmark that had nothing to do with the change. A benchmark pinned to
+//     another card's UI class is a build break waiting to happen; pinning it to
+//     the D3D/D2D/DComp primitives measures the same cost and stays stable.
+//     docs/PERF.md states which path produced each number.
 //
 //   * first 7z.dll use -- LoadLibrary + GetNumberOfFormats (the 40-format
 //     table) + CreateObject(IInArchive) + Open(real .7z) + ReadCatalog, all

@@ -899,9 +899,17 @@ inline SeekPlan PlanSeek(int64_t current, int64_t target, int64_t streamSize,
 // measures both and asserts the chunked ring wins; the chunked form below is
 // O(1) amortised because a chunk that falls out of the window is simply popped.
 //
-// Invariant: end() - base() == retained bytes; Copy() clamps to what is
-// resident, and the caller (DelayedSeekCursor) treats a short copy as
-// "not resident" rather than guessing.
+// Invariant: end() - base() == residentBytes(); Copy copies exactly that many
+// bytes from `base()`, and the caller (DelayedSeekCursor) treats a short copy
+// as "not resident" rather than guessing.
+//
+// WINDOW PROMISE = FULL WINDOW. The ring must retain `capacity()` bytes, not
+// "capacity() minus the front chunk". The planner grants a LookbackHit for a
+// rewind of exactly lookbackBytes, so a ring that only ever held
+// capacity - chunk made that grant unpayable: the seek succeeded, then the
+// read reported a residency gap and poisoned the stream. Dropping the head
+// chunk whole is therefore wrong; the boundary chunk is TRIMMED to the exact
+// byte instead.
 // ---------------------------------------------------------------------------
 class RecentByteRing {
  public:
@@ -925,24 +933,13 @@ class RecentByteRing {
     if (chunk.empty()) return;
     end_ += chunk.size();
     chunks_.push_back(std::move(chunk));
-    // Evict whole chunks from the front. A ring smaller than one chunk keeps
-    // that chunk (a short window is worse than an oversized one).
-    while (chunks_.size() > 1 && (end_ - base_) > capacity_) {
-      base_ += chunks_.front().size();
-      chunks_.pop_front();
-    }
-    if (end_ - base_ > capacity_ && chunks_.size() == 1) {
-      // One oversized chunk: keep only its tail.
-      const size_t excess = static_cast<size_t>(end_ - base_ - capacity_);
-      chunks_.front().erase(0, excess);
-      base_ += excess;
-    }
+    Trim();
   }
 
-  // Copy the retained bytes starting at absolute offset `start`. Returns the
+  // Copy the resident bytes starting at absolute offset `start`. Returns the
   // number actually copied (0 when `start` is not resident).
   size_t Copy(uint64_t start, uint8_t* out, size_t count) const {
-    if (count == 0 || start < base_ || start >= end_) return 0;
+    if (count == 0 || start < base_ || start > end_) return 0;
     size_t skip = static_cast<size_t>(start - base_);
     size_t copied = 0;
     for (const std::string& chunk : chunks_) {
@@ -964,14 +961,31 @@ class RecentByteRing {
   uint64_t base() const { return base_; }
   uint64_t end() const { return end_; }
   size_t capacity() const { return capacity_; }
-  // Retained bytes plus chunk bookkeeping -- what the ring actually costs.
-  size_t residentBytes() const {
-    size_t total = 0;
-    for (const std::string& c : chunks_) total += c.size();
-    return total;
+  // Bytes actually retained. Endpoint identity with base()/end() is the whole
+  // point: a window that advertises more than it holds is how a lookback hit
+  // turns into a stream failure at read time.
+  size_t residentBytes() const { return static_cast<size_t>(end_ - base_); }
+
+  private:
+  // Shrink the window to exactly capacity(). Whole chunks behind the new base
+  // are popped; the boundary chunk is TRIMMED to the exact byte. The trim is one
+  // memmove bounded by a pull chunk (the cursor pulls 64 KiB at a time), never by
+  // capacity_ -- that is what keeps this O(1) per append while still promising
+  // the FULL window, unlike PR8's erase(0, excess) over the whole buffer.
+  void Trim() {
+    while ((end_ - base_) > capacity_ && !chunks_.empty()) {
+      const size_t excess = static_cast<size_t>((end_ - base_) - capacity_);
+      const size_t head = chunks_.front().size();
+      if (excess >= head) {
+        base_ += head;
+        chunks_.pop_front();
+        continue;
+      }
+      chunks_.front().erase(0, excess);
+      base_ += excess;
+    }
   }
 
- private:
   size_t capacity_;
   std::deque<std::string> chunks_;
   uint64_t base_ = 0;

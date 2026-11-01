@@ -129,15 +129,22 @@ bool CurrentPositionIs(IStream* stream, uint64_t want) {
 // Tiny ring on purpose: every path (hit, miss, budget refusal) is reachable
 // with a 1.2 MiB item instead of a multi-GB block.
 // Deliberately tight, but not absurd: 100 bytes of lookback (the first value
-// here) is smaller than a single Read() of most consumers, so the e2e case
-// degraded into "restart for every 100 bytes" and died at the frontier while
-// the producer was still ahead of it. The budgets exist to make the RESTART
-// path reachable, not to make ordinary sequential reads impossible -- so they
-// are tight in restart COUNT, realistic in lookback.
+// tried here) is smaller than a single Read() of most consumers, so the e2e
+// case degraded into "restart for every 100 bytes" and died at the frontier
+// while the producer was still ahead of it. The budgets exist to make the
+// RESTART path reachable, not to make ordinary sequential reads impossible --
+// so they are tight in restart COUNT and REALISTIC in lookback.
+//
+// Every boundary below is expressed in terms of kLookback, never as a magic
+// number: the earlier version hard-coded -101 from the 100-byte era and kept
+// asserting a restart for a rewind that was by then comfortably inside the
+// window. A constant tied to the policy cannot drift away from it.
+constexpr size_t kLookback = 256u * 1024u;
+
 prism::dnd::SeekPolicy TinyPolicy(size_t maxRestarts, size_t byteBudget) {
   prism::dnd::SeekPolicy policy;
   policy.useLookback = true;
-  policy.lookbackBytes = 256u * 1024u;
+  policy.lookbackBytes = kLookback;
   policy.maxRestarts = maxRestarts;
   policy.restartDecodeBudget = byteBudget;
   policy.restartsUsed = 0;
@@ -462,13 +469,40 @@ int main() {
     if (!PRISM_CHECK(ReadExactly(stream.Get(), 50, &tail))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ByteEquals(tail, contentGamma, kGamma - 50))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(0))) { RemoveDir(dir); return 1; }
-    // CUR, -101: exactly one byte past the ring -> honest restart instead.
-    if (!PRISM_CHECK(SeekTo(stream.Get(), -101, STREAM_SEEK_CUR))) { RemoveDir(dir); return 1; }
+    // CUR, -lookbackBytes: the INCLUSIVE boundary the planner grants. This is
+    // the case that used to break: with whole-chunk eviction the ring only
+    // held lookbackBytes - pullChunk, so the planner said "hit", the read then
+    // found a residency gap, and the stream FAILED where a restart was owed.
+    // Zero restarts AND byte-exact content is what "the window is as big as it
+    // claims" looks like from the outside.
+    if (!PRISM_CHECK(SeekTo(stream.Get(), -static_cast<int64_t>(kLookback), STREAM_SEEK_CUR))) {
+      RemoveDir(dir);
+      return 1;
+    }
+    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(0))) { RemoveDir(dir); return 1; }
+    std::string boundary;
+    if (!PRISM_CHECK(ReadExactly(stream.Get(), 4096, &boundary))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK(ByteEquals(boundary, contentGamma, kGamma - kLookback))) {
+      RemoveDir(dir);
+      return 1;
+    }
+    // ...and the cursor is back at the end, so ONE BYTE past the window needs
+    // an honest restart rather than a guess.
+    if (!PRISM_CHECK(SeekTo(stream.Get(), 0, STREAM_SEEK_END))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK(SeekTo(stream.Get(), -(static_cast<int64_t>(kLookback) + 1),
+                             STREAM_SEEK_CUR))) {
+      RemoveDir(dir);
+      return 1;
+    }
     if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(1))) { RemoveDir(dir); return 1; }
     std::string again;
-    if (!PRISM_CHECK(ReadExactly(stream.Get(), 101, &again))) { RemoveDir(dir); return 1; }
-    if (!PRISM_CHECK(ByteEquals(again, contentGamma, kGamma - 101))) { RemoveDir(dir); return 1; }
-    std::cout << "    lookback: -50 hit (0 restarts), -101 fell through to restart #1"
+    if (!PRISM_CHECK(ReadExactly(stream.Get(), 64, &again))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK(ByteEquals(again, contentGamma, kGamma - kLookback - 1))) {
+      RemoveDir(dir);
+      return 1;
+    }
+    std::cout << "    lookback: -" << kLookback << " hit (0 restarts), -"
+              << (kLookback + 1) << " fell through to restart #1"
               << std::endl;
   }
 
@@ -484,9 +518,15 @@ int main() {
     std::string got;
     if (!PRISM_CHECK(ReadAll(stream.Get(), &got, kGamma))) { RemoveDir(dir); return 1; }
     const uint64_t producedBefore = made.producer->producedBytes();
+    // Absolute target: a rewind this far back is outside the ring (so it is
+    // not a lookback hit) and re-decoding its 688 KiB prefix blows the 64 KiB
+    // budget. STREAM_SEEK_CUR would have been nonsense here -- the cursor is
+    // already at kGamma, so "back by kGamma - 64" resolves BEYOND the end and
+    // gets refused by the range check instead, which tests nothing about the
+    // budget.
     LARGE_INTEGER back{};
-    back.QuadPart = static_cast<LONGLONG>(kGamma) - 64;  // huge backward step
-    const HRESULT refused = stream->Seek(back, STREAM_SEEK_CUR, nullptr);
+    back.QuadPart = static_cast<LONGLONG>(kGamma - 2 * kLookback);
+    const HRESULT refused = stream->Seek(back, STREAM_SEEK_SET, nullptr);
     if (!PRISM_CHECK_EQ(refused, static_cast<HRESULT>(STG_E_INVALIDFUNCTION))) {
       RemoveDir(dir);
       return 1;
@@ -519,16 +559,15 @@ int main() {
     if (!PRISM_CHECK(ReadAll(stream.Get(), &got, kGamma))) { RemoveDir(dir); return 1; }
     // CUR, -50 lands inside the ring (no budget needed).
     if (!PRISM_CHECK(SeekTo(stream.Get(), -50, STREAM_SEEK_CUR))) { RemoveDir(dir); return 1; }
-    // Read only part of the way back toward the frontier: the cursor sits at
-    // kGamma-40 while the ring starts at kGamma-100.
     std::string partial;
     if (!PRISM_CHECK(ReadExactly(stream.Get(), 10, &partial))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ByteEquals(partial, contentGamma, kGamma - 50))) { RemoveDir(dir); return 1; }
-    // CUR, -61 -> target kGamma-101 is past ringStart_: planned LookbackHit,
-    // non-resident -> refused, cursor untouched, no restart spent.
-    LARGE_INTEGER back61{};
-    back61.QuadPart = -61;
-    if (!PRISM_CHECK_EQ(stream->Seek(back61, STREAM_SEEK_CUR, nullptr),
+    // CUR, -(kLookback+1) from kGamma-40: the target is one byte OUTSIDE the
+    // retained window, so the planner says restart -- and with zero restarts
+    // left that must be a clean refusal, not a decode and not a wrong byte.
+    LARGE_INTEGER outside{};
+    outside.QuadPart = -static_cast<LONGLONG>(kLookback + 1);
+    if (!PRISM_CHECK_EQ(stream->Seek(outside, STREAM_SEEK_CUR, nullptr),
                         static_cast<HRESULT>(STG_E_INVALIDFUNCTION))) {
       RemoveDir(dir);
       return 1;
@@ -552,11 +591,27 @@ int main() {
       RemoveDir(dir);
       return 1;
     }
-    // END - 262144: backward past the ring -> restart, small read at offset.
-    const int64_t kBack = 262144;
+    // END - kLookback: the inclusive window edge, served for FREE from the
+    // ring (zero decoder work), then END - (kLookback + 1) is one byte past it
+    // and must pay one honest restart. Together these two pin the boundary
+    // from both sides: an off-by-one in either the planner or the ring turns
+    // one of them red.
+    if (!PRISM_CHECK(SeekTo(stream.Get(), -static_cast<int64_t>(kLookback), STREAM_SEEK_END))) {
+      RemoveDir(dir);
+      return 1;
+    }
+    if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(0))) { RemoveDir(dir); return 1; }
+    std::string window;
+    if (!PRISM_CHECK(ReadExactly(stream.Get(), 32, &window))) { RemoveDir(dir); return 1; }
+    if (!PRISM_CHECK(ByteEquals(window, contentGamma,
+                                static_cast<size_t>(static_cast<int64_t>(kGamma) - kLookback)))) {
+      RemoveDir(dir);
+      return 1;
+    }
+    if (!PRISM_CHECK(SeekTo(stream.Get(), 0, STREAM_SEEK_END))) { RemoveDir(dir); return 1; }
+    const int64_t kBack = static_cast<int64_t>(kLookback) + 1;
     if (!PRISM_CHECK(SeekTo(stream.Get(), -kBack, STREAM_SEEK_END))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK_EQ(stream->restarts(), uint64_t(1))) { RemoveDir(dir); return 1; }
-    std::string window;
     if (!PRISM_CHECK(ReadExactly(stream.Get(), 32, &window))) { RemoveDir(dir); return 1; }
     if (!PRISM_CHECK(ByteEquals(window, contentGamma,
                                 static_cast<size_t>(static_cast<int64_t>(kGamma) - kBack)))) {
@@ -607,7 +662,7 @@ int main() {
     const bool seqOk = ReadAll(stream.Get(), &got, kGamma);
     QueryPerformanceCounter(&t1);
     const double seqSec = secondsSince(t0, t1);
-    // Back-step served by the ring (inside the 100-byte window).
+    // Back-step served by the ring (inside the lookback window).
     QueryPerformanceCounter(&t0);
     const bool ringSeekOk = SeekTo(stream.Get(), -50, STREAM_SEEK_CUR);
     std::string probeTail;

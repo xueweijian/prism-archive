@@ -457,6 +457,51 @@ PRISM_TEST("cursor: a spent byte budget refuses and leaves the cursor untouched"
   PRISM_CHECK(r.eof);
 }
 
+PRISM_TEST("ring: the window promises its FULL capacity, not capacity minus a chunk") {
+  // The bug this locks: the ring used to evict whole chunks only, so a 4 MiB
+  // window on a 64 KiB pull stream actually retained 4 MiB - 64 KiB. The
+  // planner, however, grants a LookbackHit for a rewind of exactly
+  // lookbackBytes, so the boundary rewind succeeded and then the read hit a
+  // residency gap -- a FAILED stream where an honest restart was expected.
+  // A window that advertises more than it holds is the defect; assert the
+  // endpoints the planner actually trusts, not just "<= capacity".
+  constexpr size_t kCap = 256 * 1024;
+  constexpr size_t kChunk = 64 * 1024;
+  prism::dnd::RecentByteRing ring(kCap);
+  const std::string chunk(kChunk, 'q');
+  for (size_t i = 0; i < 8; ++i) ring.Append(chunk);
+  PRISM_CHECK_EQ(ring.capacity(), kCap);
+  PRISM_CHECK_EQ(ring.end(), uint64_t(kChunk * 8));
+  // The whole window is resident: exactly capacity, not capacity - chunk.
+  PRISM_CHECK_EQ(ring.residentBytes(), kCap);
+  PRISM_CHECK_EQ(ring.end() - ring.base(), uint64_t(kCap));
+  // ...and it is byte-exact at BOTH edges: the oldest retained byte and the
+  // newest are both readable, so the boundary rewind really is payable.
+  std::string edge(1, '\0');
+  PRISM_CHECK_EQ(ring.Copy(ring.base(), reinterpret_cast<uint8_t*>(edge.data()), 1),
+                 size_t(1));
+  PRISM_CHECK_EQ(ring.Copy(ring.end() - 1, reinterpret_cast<uint8_t*>(edge.data()), 1),
+                 size_t(1));
+  // One byte before the window is honestly NOT resident (never a guess).
+  PRISM_CHECK_EQ(ring.Copy(ring.base() - 1, reinterpret_cast<uint8_t*>(edge.data()), 1),
+                 size_t(0));
+  // A multi-chunk copy spanning the whole window succeeds in one go -- the
+  // trimmed head chunk must be traversed correctly, not skipped.
+  std::string whole(kCap, '\0');
+  PRISM_CHECK_EQ(ring.Copy(ring.base(), reinterpret_cast<uint8_t*>(whole.data()), kCap),
+                 kCap);
+  PRISM_CHECK(whole == std::string(kCap, 'q'));
+  // An odd-sized append must still land on exactly capacity (trim is byte
+  // exact, not chunk exact).
+  ring.Append(std::string(1234, 'r'));
+  PRISM_CHECK_EQ(ring.residentBytes(), kCap);
+  PRISM_CHECK_EQ(ring.end() - ring.base(), uint64_t(kCap));
+  std::string tail(1234, '\0');
+  PRISM_CHECK_EQ(ring.Copy(ring.end() - 1234, reinterpret_cast<uint8_t*>(tail.data()), 1234),
+                 size_t(1234));
+  PRISM_CHECK(tail == std::string(1234, 'r'));
+}
+
 PRISM_TEST("ring: chunked ring is O(1) per append; the erase-front form is not") {
   // PR8 kept the ring as a std::string and called erase(0, excess) on every
   // append past capacity. That is a memmove of the whole capacity per chunk.

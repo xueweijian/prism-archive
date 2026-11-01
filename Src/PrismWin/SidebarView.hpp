@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "../PrismCore/I18n.hpp"        // C40: the four headings are table keys
 #include "../PrismCore/SidebarModel.hpp"
 
 namespace prism::win::sidebar {
@@ -174,6 +175,46 @@ struct Layout {
   float maxScroll = 0.0f;
 };
 
+// ------------------------------------------------------------------ labels
+// C40: the four section headings used to be literals in this header, so the
+// sidebar stayed English in a Chinese build even though sidebar.section.* and
+// sidebar.empty.noArchive had been in both tables since C19. They are now a
+// value the caller can hand in (or that the installed translator fills).
+struct Labels {
+  std::string favorites = "FAVORITES";
+  std::string recent = "RECENT";
+  std::string tree = "ARCHIVE TREE";
+  std::string noArchive = "NO ARCHIVE OPEN";
+};
+
+// The translator the app installs ONCE at startup (Main.cpp, before the window
+// exists). It is a slot rather than a Build() parameter because the renderer's
+// call site belongs to another card (V1/V3) and must not be edited by this one;
+// a null slot -- unit suites, the shell DLLs -- keeps the English literals.
+inline const prism::i18n::Translator*& TranslatorSlot() {
+  static const prism::i18n::Translator* translator = nullptr;
+  return translator;
+}
+
+inline void SetTranslator(const prism::i18n::Translator* translator) {
+  TranslatorSlot() = translator;
+}
+
+inline const prism::i18n::Translator* InstalledTranslator() { return TranslatorSlot(); }
+
+inline Labels LabelsFrom(const prism::i18n::Translator* translator) {
+  Labels labels;
+  if (translator == nullptr) return labels;
+  const auto pick = [translator](const char* key, const std::string& fallback) {
+    return translator->Has(key) ? translator->Translate(key) : fallback;
+  };
+  labels.favorites = pick("sidebar.section.favorites", labels.favorites);
+  labels.recent = pick("sidebar.section.recent", labels.recent);
+  labels.tree = pick("sidebar.section.tree", labels.tree);
+  labels.noArchive = pick("sidebar.empty.noArchive", labels.noArchive);
+  return labels;
+}
+
 // -------------------------------------------------------------- formatting
 inline std::string FormatBytes(std::uint64_t bytes) {
   if (bytes < 1024) return std::to_string(bytes) + " B";
@@ -234,7 +275,11 @@ inline Box TextBox(const Metrics& m, const Box& row, float textLeft) {
 }  // namespace detail
 
 // ------------------------------------------------------------------- build
-inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) {
+// The app's entry point: the installed translator decides the four headings.
+inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics);
+
+inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
+                    const Labels& labels) {
   using prism::sidebar::FocusTarget;
   using prism::sidebar::Section;
 
@@ -311,7 +356,7 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) 
 
   // --- FAVORITES -----------------------------------------------------------
   if (!model.Favorites().empty()) {
-    emitHeader(Section::Favorites, "FAVORITES");
+    emitHeader(Section::Favorites, labels.favorites);
     const auto& favorites = model.Favorites();
     for (std::size_t i = 0; i < favorites.size(); ++i) {
       const prism::sidebar::Favorite& favorite = favorites[i];
@@ -325,7 +370,7 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) 
 
   // --- RECENT --------------------------------------------------------------
   if (!model.Recent().empty()) {
-    emitHeader(Section::Recent, "RECENT");
+    emitHeader(Section::Recent, labels.recent);
     const auto& recent = model.Recent();
     for (std::size_t i = 0; i < recent.size(); ++i) {
       emitRow(Section::Recent, static_cast<int>(i), RowLabel({}, recent[i].path),
@@ -335,13 +380,13 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) 
   }
 
   // --- ARCHIVE TREE --------------------------------------------------------
-  emitHeader(Section::Tree, "ARCHIVE TREE");
+  emitHeader(Section::Tree, labels.tree);
   const auto& rows = model.Tree();
   if (rows.empty()) {
     const Box box{metrics.paddingX, y, metrics.width - metrics.paddingX,
                   y + metrics.rowHeight};
     if (visible(box)) {
-      push(Command{PrimKind::EmptyState, box, "NO ARCHIVE OPEN", "empty",
+      push(Command{PrimKind::EmptyState, box, labels.noArchive, "empty",
                    ColorToken::Muted, 0.7f, -1, Section::Tree});
     }
     y += metrics.rowHeight;
@@ -415,6 +460,10 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) 
                    lastLine.left + lastLine.Width() * fraction, lastLine.bottom - 2.0f},
                {}, {}, ColorToken::Accent, 0.9f, -1, Section::None});
   return layout;
+}
+
+inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) {
+  return Build(model, metrics, LabelsFrom(InstalledTranslator()));
 }
 
 }  // namespace prism::win::sidebar

@@ -78,6 +78,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -86,13 +87,16 @@
 #include "../PrismCore/Log.hpp"              // C16 logger (the one warn a key miss gets)
 #include "../PrismCore/ExtractScheduler.hpp"
 #include "../PrismCore/ListSortModel.hpp"     // persisted sort key (C13 view state)
+#include "../PrismCore/OpenFlow.hpp"          // C40: the measured E_ABORT password signal
 #include "../PrismCore/SecurityGuard.hpp"
 #include "../PrismCore/SettingsStore.hpp"     // C14 document (schema + validation)
 #include "../PrismCore/SidebarModel.hpp"      // C12 SidebarStore port
 #include "../PrismCore/SmartExtractor.hpp"
 #include "../PrismWin/AmsiGuard.hpp"
 #include "../PrismWin/ArchiveWriter.hpp"      // C9 execution layer (the real writer)
+#include "../PrismWin/DpapiVault.hpp"         // C40: the remember-me store (DPAPI)
 #include "../PrismWin/MotwGuard.hpp"
+#include "../PrismWin/PasswordDialog.hpp"     // C35: the password dialog (C40 wires it)
 #include "../PrismWin/PrismEngineBridge.hpp"
 #include "../PrismWin/ReaderPool.hpp"
 #include "../PrismWin/CompanionPreviewBridge.hpp"  // C30: the shell <-> companion channel
@@ -1151,7 +1155,90 @@ struct Tr {
     if (translator == nullptr) return prism::win::Utf8ToWide(std::string(key));
     return prism::win::Utf8ToWide(translator->TranslateCount(key, n));
   }
+  // C40: a key that carries placeholders AND may be missing from a shipped table
+  // (the tables on this branch predate several of them). Same fallback discipline
+  // as Or(): a missing key shows the caller's REAL sentence, never the key name,
+  // and Has() keeps the miss list clean.
+  std::wstring Sub(std::string_view key,
+                   const std::vector<prism::i18n::Substitution>& subs,
+                   const std::wstring& fallback) const {
+    if (translator == nullptr || !translator->Has(key)) return fallback;
+    return prism::win::Utf8ToWide(translator->Translate(key, subs));
+  }
 };
+
+// ---------------------------------------------------------------------------
+// 7b. The sentences the open/refresh flow shows (C40).
+//
+// WHY THIS IS A FUNCTION AND NOT AN INLINE tr.Or(...) IN wWinMain: C38's audit
+// found three fallbacks that had been DOUBLE-escaped ("\u5DF2\u5199..." in the
+// source), so a table that lacked the key put a literal "\u5DF2\u5199..." on the
+// user's status bar. A fallback that renders as escape text is worse than the key
+// name it was hiding. Keeping them here makes the bytes assertable from a suite
+// (the exe's own wWinMain is not reachable from a test), and the Chinese below is
+// written as SINGLE-escaped universal character names -- real text at runtime,
+// immune to the compiler's source-charset setting.
+//
+// NEGATIVE CONTROL (CONTRACTS D3): PRISM_C40_MUTANT_ESCAPED_FALLBACK puts the
+// refresh sentence back the way the audit found it; the suite's "a fallback
+// contains no backslash" case MUST go red.
+// ---------------------------------------------------------------------------
+#if defined(PRISM_C40_MUTANT_ESCAPED_FALLBACK)
+inline constexpr bool kFallbackIsEscaped = true;
+#else
+inline constexpr bool kFallbackIsEscaped = false;
+#endif
+
+// "Saved; the view refreshes when the running operation finishes."
+inline std::wstring RefreshDeferredStatus(const Tr& tr) {
+  const std::wstring fallback =
+      kFallbackIsEscaped
+          ? std::wstring(L"\\u5DF2\\u5199\\u5165\\uFF1B\\u5F53\\u524D"
+                         L"\\u64CD\\u4F5C\\u7ED3\\u675F\\u540E\\u5237"
+                         L"\\u65B0")
+          : std::wstring(
+                L"\u5DF2\u5199\u5165\uFF1B\u5F53\u524D\u64CD\u4F5C"
+                L"\u7ED3\u675F\u540E\u5237\u65B0");
+  return tr.Sub("status.refreshDeferred", {}, fallback);
+}
+
+// "Failed to open <name>" -- the table's error.open carries {name}. The fallback
+// names the file too: a table-less checkout must not lose the one fact the user
+// needs (which archive failed).
+inline std::wstring OpenFailedStatus(const Tr& tr, const std::wstring& archiveName) {
+  const std::wstring prefix =
+      kFallbackIsEscaped
+          ? std::wstring(L"\\u6253\\u5F00\\u5931\\u8D25")
+          : std::wstring(L"\u6253\u5F00\u5931\u8D25");
+  return tr.Sub("error.open", {{"name", prism::win::WideToUtf8(archiveName)}},
+                prefix + L" " + archiveName);
+}
+
+// "(the engine reported no reason)". Split from the composition below because a
+// WORKER must not touch the translator (its miss list is mutable): the UI thread
+// resolves the sentence once and hands it to the worker as a value.
+inline std::wstring EngineNoReasonText(const Tr& tr) {
+  return tr.Sub("error.engine.noReason", {},
+                std::wstring(L"\uFF08\u5F15\u64CE\u672A\u62A5\u544A"
+                             L"\u539F\u56E0\uFF09"));
+}
+
+// The second line of a failed compression: the engine's reason, or `noReason`
+// when it gave none. Pure string work, safe on any thread.
+inline std::wstring CompressFailureDetail(const std::wstring& noReason,
+                                          const std::string& engineError) {
+  return engineError.empty() ? noReason : prism::win::Utf8ToWide(engineError);
+}
+
+// "3 items" for the status bar. status.items.count does not ship yet (C38's audit
+// proposes it), so the fallback is the sentence the app already showed -- as real
+// text, not "\x5171 ... \x9879".
+inline std::wstring ItemsCountStatus(const Tr& tr, std::size_t count) {
+  const std::wstring number = std::to_wstring(count);
+  return tr.Sub("status.items.count", {{"n", std::to_string(count)}},
+                kFallbackIsEscaped ? std::wstring(L"\\x5171 ") + number + L" \\x9879"
+                                   : std::wstring(L"\u5171 ") + number + L" \u9879");
+}
 
 // ---------------------------------------------------------------------------
 // 8. Settings (C14): the document, its file, and the port that rides on it.
@@ -1693,5 +1780,192 @@ class CompanionHost {
   size_t refused_ = 0;
   size_t oversized_ = 0;
 };
+
+// ---------------------------------------------------------------------------
+// 11. The password gate (C40): C35's dialog meets the app's open flow.
+//
+// WHAT WAS MISSING: C5 built the ring, the open-flow state machine and the DPAPI
+// vault; C35 built the dialog. Nothing joined them, so an encrypted archive
+// produced "Failed to open" and no way to type a password.
+//
+// THE THREADING SHAPE IS THE CARD'S REAL CONTENT (CONTRACTS B9):
+//   * Submit runs on the UI thread (the dialog's own WM_COMMAND);
+//   * the PROBE runs on ONE worker (7z.dll Open can take seconds on a large
+//     header), and that worker's only way back is PostMessage;
+//   * FinishProbe runs on the UI thread, because it touches controls;
+//   * the vault write happens in the dialog's opened handler, i.e. after the UI
+//     thread has seen the hit -- never on the worker.
+// PasswordProbeRunner and PasswordResultWindow are the two halves of that hop,
+// and the suite drives BOTH (plus the dialog and the vault) end to end.
+// ---------------------------------------------------------------------------
+struct PasswordProbeResult {
+  bool found = false;
+  bool cancelled = false;
+  std::string password;     // filled from the attempt that opened the archive
+  std::string diagnostics;  // engine trace, redacted by the dialog's model
+};
+
+// One worker, one POST. Start() is UI-thread-only; Probe runs off it; Post is
+// called ON the worker and must not touch UI state (the app passes PostMessageW,
+// the suite passes PasswordResultWindow::Post).
+class PasswordProbeRunner {
+ public:
+  using Probe = std::function<bool(const std::string& password, std::string* diagnostics)>;
+  using Post = std::function<void(const PasswordProbeResult& result)>;
+
+  PasswordProbeRunner() = default;
+  ~PasswordProbeRunner() { Join(); }
+  PasswordProbeRunner(const PasswordProbeRunner&) = delete;
+  PasswordProbeRunner& operator=(const PasswordProbeRunner&) = delete;
+
+  // Returns false when a probe is already in flight: the dialog disables its OK
+  // button in that state, so this is the belt to that braces.
+  bool Start(const std::string& password, Probe probe, Post post) {
+    if (busy_.exchange(true)) return false;
+    if (worker_.joinable()) worker_.join();
+    worker_ = std::thread([this, password, probe = std::move(probe),
+                           post = std::move(post)]() {
+      // A mutable local, not the capture: the attempt is scrubbed the moment the
+      // engine has answered, so the worker's copy does not outlive the probe.
+      std::string attempt = password;
+      PasswordProbeResult result;
+      std::string diagnostics;
+      result.found = probe(attempt, &diagnostics);
+      result.diagnostics = std::move(diagnostics);
+      if (result.found) result.password = attempt;
+      prism::pwd::PasswordRing::SecureZero(attempt);
+      busy_.store(false);
+      post(result);  // POST only: the UI thread owns every window call
+    });
+    return true;
+  }
+
+  bool Busy() const { return busy_.load(); }
+  void Join() {
+    if (worker_.joinable()) worker_.join();
+  }
+
+ private:
+  std::thread worker_;
+  std::atomic<bool> busy_{false};
+};
+
+// A message-only window that turns "the worker posted a result" into "the UI
+// thread runs this handler". The payload is owned by the message: the receiver
+// frees it, and a failed PostMessage frees it immediately (nothing leaks when the
+// window is already gone).
+class PasswordResultWindow {
+ public:
+  static constexpr UINT kResultMessage = WM_APP + 0x40;
+  using Deliver = std::function<void(const PasswordProbeResult&)>;
+
+  PasswordResultWindow() = default;
+  ~PasswordResultWindow() { Destroy(); }
+  PasswordResultWindow(const PasswordResultWindow&) = delete;
+  PasswordResultWindow& operator=(const PasswordResultWindow&) = delete;
+
+  bool Create(HINSTANCE instance, Deliver deliver) {
+    deliver_ = std::move(deliver);
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &PasswordResultWindow::ProcThunk;
+    wc.hInstance = instance;
+    wc.lpszClassName = L"PrismPasswordProbeSink";
+    if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+      return false;
+    }
+    hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                            nullptr, instance, this);
+    return hwnd_ != nullptr;
+  }
+
+  void Destroy() {
+    if (hwnd_ != nullptr && IsWindow(hwnd_) != FALSE) DestroyWindow(hwnd_);
+    hwnd_ = nullptr;
+  }
+
+  HWND Hwnd() const { return hwnd_; }
+
+  // WORKER THREAD. Never touches deliver_; it only posts.
+  bool Post(const PasswordProbeResult& result) {
+    if (hwnd_ == nullptr) return false;
+    auto* payload = new PasswordProbeResult(result);
+    if (PostMessageW(hwnd_, kResultMessage, 0, reinterpret_cast<LPARAM>(payload)) == FALSE) {
+      delete payload;
+      return false;
+    }
+    return true;
+  }
+
+  // Diagnostics for the suite: how many results arrived and on WHICH thread.
+  int delivered() const { return delivered_; }
+  DWORD deliveredThread() const { return deliveredThread_; }
+
+ private:
+  static LRESULT CALLBACK ProcThunk(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* self = reinterpret_cast<PasswordResultWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE && lparam != 0) {
+      self = reinterpret_cast<PasswordResultWindow*>(
+          reinterpret_cast<const CREATESTRUCTW*>(lparam)->lpCreateParams);
+      SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+      // Children (there are none) and the first WM_ message need the handle
+      // stored before CreateWindowExW returns.
+      if (self != nullptr) self->hwnd_ = hwnd;
+    }
+    if (self == nullptr) return DefWindowProcW(hwnd, message, wparam, lparam);
+    return self->Handle(hwnd, message, wparam, lparam);
+  }
+
+  LRESULT Handle(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == kResultMessage) {
+      std::unique_ptr<PasswordProbeResult> payload(
+          reinterpret_cast<PasswordProbeResult*>(lparam));
+      ++delivered_;
+      deliveredThread_ = GetCurrentThreadId();
+      if (payload && deliver_) deliver_(*payload);
+      return 0;
+    }
+    if (message == WM_DESTROY) {
+      hwnd_ = nullptr;
+      return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+  }
+
+  HWND hwnd_ = nullptr;
+  Deliver deliver_;
+  int delivered_ = 0;
+  DWORD deliveredThread_ = 0;
+};
+
+// Where the remember-me vault lives: <LOCALAPPDATA>\PrismArchive\passwords.vault.
+inline std::wstring DefaultVaultPath() {
+  const std::wstring root = prism::win::settingsfile::PathsUnder(
+                                prism::win::settingsfile::LocalAppDataDirectory())
+                                .root;
+  return root.empty() ? std::wstring() : root + L"\\passwords.vault";
+}
+
+// "Remember" persists the ONE password the probe PROVED, through DPAPI. The path
+// is a parameter so the suite can use a temp store (a test must never touch the
+// developer's real vault), and a failed write is a false, never a silent success.
+inline bool RememberPassword(const std::wstring& storePath, const std::string& password) {
+  if (storePath.empty() || password.empty()) return false;
+  prism::win::DpapiVault vault(storePath);
+  return vault.Add(password);
+}
+
+// Does this failed Open mean "we were never given a password"? The measured
+// signal (docs/OPENFLOW.md): a header-encrypted archive asks our open callback
+// for a password, and with none supplied the callback answers E_ABORT -- the
+// trace carries that HRESULT. A WRONG password on the same archive is
+// indistinguishable from "not this format", which is why this predicate only ever
+// answers "we have not tried one yet".
+inline bool OpenNeedsPassword(const std::string& openTrace) {
+  char needle[32] = {};
+  std::snprintf(needle, sizeof(needle), "hr=0x%08lX",
+                static_cast<unsigned long>(prism::openflow::kOpenHrAbort));
+  return openTrace.find(needle) != std::string::npos;
+}
 
 }  // namespace prism::app

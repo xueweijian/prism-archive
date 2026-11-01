@@ -105,7 +105,9 @@
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
 #include "../PrismWin/GalleryWindow.hpp"
+#include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
+#include "../PrismWin/SidebarView.hpp"      // C40: SetTranslator (four headings)
 #include "../PrismWin/SolidSweeper.hpp"
 
 #pragma comment(lib, "advapi32.lib")  // RegOpenKeyExW in Resolve7zDll
@@ -384,6 +386,91 @@ int RunCompressHere(const prism::app::LaunchRequest& request) {
   return outcome.ok ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// C40: the password gate -- C5's ring, C35's dialog, and the app's threads.
+//
+// The contract this function exists to keep (CONTRACTS B9):
+//   * Submit arrives on the UI thread (the dialog's WM_COMMAND);
+//   * the probe -- a real 7z.dll Open, seconds on a big header -- runs on ONE
+//     worker, whose only way back is PostMessage into PasswordResultWindow;
+//   * FinishProbe runs on the UI thread, because it touches controls;
+//   * "remember" writes the DPAPI vault only after the UI thread has seen the
+//     hit, and only for a password the probe PROVED.
+//
+// The gate is modal for the open: it pumps messages until the dialog is gone.
+// That pump is also what delivers the worker's posted result -- which is why the
+// loop blocks in GetMessageW only while the dialog is still alive.
+//
+// LIMIT (stated, not hidden): the password is used for Open only. Extraction
+// through ExtractWithPlan has no password parameter yet (C5's follow-up), so a
+// header-encrypted archive opens and lists here but its extraction will still
+// fail -- the next card that touches the extract callback owns that.
+// ---------------------------------------------------------------------------
+std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
+                             prism::win::SevenZipLibrary& library) {
+  prism::pwd::PasswordUiConfig config;
+  config.archiveName = prism::win::WideToUtf8(FileNameWide(archive));
+  const std::wstring vaultPath = prism::app::DefaultVaultPath();
+  if (!vaultPath.empty()) {
+    // Reading the vault is a DPAPI call per entry; it happens once, here, before
+    // the dialog exists.
+    prism::win::DpapiVault vault(vaultPath);
+    config.vaultEntries = vault.List();
+  }
+
+  prism::win::pwd_ui::PasswordDialog dialog;
+  if (!dialog.Create(instance, L"PrismArchive")) return std::wstring();
+  dialog.SetConfig(config);
+
+  prism::app::PasswordProbeRunner runner;
+  prism::app::PasswordResultWindow sink;
+  std::wstring opened;
+
+  // The UI thread's half of the hop: a posted result is applied HERE, and the
+  // dialog is the only thing that sees it.
+  if (!sink.Create(instance, [&dialog](const prism::app::PasswordProbeResult& result) {
+        dialog.FinishProbe(result.found, result.cancelled, result.password,
+                           result.diagnostics);
+      })) {
+    dialog.Destroy();
+    return std::wstring();
+  }
+
+  dialog.SetSubmitHandler([&runner, &sink, &library, archive](const std::string& password) {
+    runner.Start(
+        password,
+        [&library, archive](const std::string& candidate, std::string* why) {
+          // WORKER THREAD. Its own reader: 7z.dll handlers are not thread-safe
+          // and the UI thread may still hold the failed probe.
+          prism::win::ArchiveReader reader(library);
+          const bool ok = reader.Open(archive, prism::win::Utf8ToWide(candidate));
+          if (why != nullptr) *why = reader.openTrace();
+          return ok;
+        },
+        [&sink](const prism::app::PasswordProbeResult& result) {
+          sink.Post(result);  // POST only: no window call on this thread
+        });
+  });
+  dialog.SetOpenedHandler([&opened, vaultPath](const std::string& password, bool remember) {
+    opened = prism::win::Utf8ToWide(password);
+    if (remember) prism::app::RememberPassword(vaultPath, password);
+  });
+  dialog.Start();
+
+  MSG message{};
+  while (dialog.Hwnd() != nullptr) {
+    if (GetMessageW(&message, nullptr, 0, 0) <= 0) break;
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
+  }
+  // Never detach: the worker must be finished before "library" is used again by
+  // the caller's retry, and before this stack frame dies.
+  runner.Join();
+  sink.Destroy();
+  dialog.Destroy();
+  return opened;
+}
+
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
@@ -469,8 +556,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   auto app = std::make_shared<AppContext>();
   app->archivePath = archive;
   if (!app->library.Load(dll)) {
-    MessageBoxW(nullptr, (L"7z.dll \u52A0\u8F7D\u5931\u8D25\uFF1A\n" + dll).c_str(),
-                L"PrismArchive", MB_ICONERROR);
+    // C40: error.engine.load has shipped since C19 with a {path} placeholder;
+    // the English "7z.dll failed to load" literal was the last hardcoded error on
+    // this path. Sub() keeps the Chinese fallback for a checkout without tables.
+    const std::wstring message =
+        tr.Sub("error.engine.load", {{"path", prism::win::WideToUtf8(dll)}},
+               std::wstring(L"\u52A0\u8F7D 7z.dll \u5931\u8D25\uFF1A") + dll);
+    MessageBoxW(nullptr, message.c_str(), L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
@@ -478,16 +570,48 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // The catalog is read ONCE, on the UI thread, from a probe handler that is
   // released before the pool opens its own (one seek+header read, blueprint's
   // zero-payload scan). The pool's handlers are the ones that decode.
+  // C40: the password the gate PROVES, kept for the handler pool below -- the
+  // pool (C34/C35) opens every extraction handler with it, so an archive that
+  // opened with a password can also be extracted.
+  std::wstring archivePassword;
   {
-    prism::win::ArchiveReader probe(app->library);
-    if (!probe.Open(archive)) {
-      const std::wstring trace(probe.openTrace().begin(), probe.openTrace().end());
-      MessageBoxW(nullptr, (L"Failed to open:\n" + archive + L"\n\n" + trace).c_str(),
+    std::string trace;  // the engine trace is narrow; only the message is wide
+    bool opened = false;
+    {
+      prism::win::ArchiveReader probe(app->library);
+      opened = probe.Open(archive);
+      if (opened) {
+        app->catalog = probe.ReadCatalog();
+      } else {
+        trace = probe.openTrace();
+      }
+    }
+    // C40: the password gate. A header-encrypted archive makes our own open
+    // callback answer E_ABORT (C5's measured truth table), which is the one
+    // signal that says "ask the user" rather than "the file is broken".
+    if (!opened && prism::app::OpenNeedsPassword(trace)) {
+      archivePassword = RunPasswordGate(instance, archive, app->library);
+      if (!archivePassword.empty()) {
+        // A fresh reader: the failed one already holds a stream and a partial
+        // archive object, and re-Open()ing it would leak both.
+        prism::win::ArchiveReader retry(app->library);
+        opened = retry.Open(archive, archivePassword);
+        if (opened) {
+          app->catalog = retry.ReadCatalog();
+        } else {
+          trace = retry.openTrace();
+        }
+      }
+    }
+    if (!opened) {
+      MessageBoxW(nullptr,
+                  (prism::app::OpenFailedStatus(tr, FileNameWide(archive)) + L"\n\n" +
+                   prism::win::Utf8ToWide(trace))
+                      .c_str(),
                   L"PrismArchive", MB_ICONERROR);
       if (SUCCEEDED(coInit)) CoUninitialize();
       return 1;
     }
-    app->catalog = probe.ReadCatalog();
   }
   app->items = app->catalog;
 
@@ -496,6 +620,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   prism::app::OperationHandles::Config opsConfig;
   opsConfig.archivePath = archive;
   opsConfig.handlerSlots = 2;
+  // Empty for an unencrypted archive; the gate's proven secret otherwise. This is
+  // the join between C40's open flow and C34/C35's pool: without it the catalogue
+  // would open and every extraction handler would fail on the same header.
+  opsConfig.password = archivePassword;
   std::string opsError;
   app->ops = prism::app::OperationHandles::Create(app->library, opsConfig, &opsError);
   if (!app->ops) {
@@ -521,6 +649,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return code;
   }
+
+  // C40: the sidebar's four section headings come from the same tables as every
+  // other sentence. The renderer's call site belongs to another card, so the
+  // translator is installed here, once, before the first layout is built.
+  prism::win::sidebar::SetTranslator(&language.translator);
 
   prism::win::gallery::GalleryWindow window;
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) {
@@ -673,6 +806,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const std::wstring compressFailPrefix =
       tr.Or("progress.compressFailed", language.tag == L"zh-CN" ? L"\u538B\u7F29\u5931\u8D25"
                                                                 : L"Compression failed");
+  // C40: the worker may not touch the translator, so the "no reason" sentence is
+  // resolved HERE, on the UI thread, and captured by value (the same rule the
+  // extraction headline follows above).
+  const std::wstring compressNoReason = prism::app::EngineNoReasonText(tr);
 
   window.SetMenuCommandHandler([&, instance, compressHeadline, compressBusyText,
                                 compressDonePrefix, compressFailPrefix](UINT command) {
@@ -724,7 +861,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             return false;  // keep the dialog open: nothing was started
           }
           compressWorker = std::thread([&, request, stage, compressHeadline,
-                                        compressDonePrefix, compressFailPrefix]() {
+                                        compressDonePrefix, compressFailPrefix,
+                                        compressNoReason]() {
             CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             window.PostHudStart(prism::win::WideToUtf8(compressHeadline));
             prism::app::CompressionOutcome outcome;
@@ -767,9 +905,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             std::wstring status = (outcome.ok ? compressDonePrefix : compressFailPrefix) +
                                   L" " + outcome.archivePath;
             if (!outcome.ok) {
-              status += L"\\n";
-              status += outcome.error.empty() ? std::wstring(L"(engine reported no reason)")
-                                              : prism::win::Utf8ToWide(outcome.error);
+              // C40: a real newline (this was a literal backslash-n), and the
+              // engine's reason or the translated "no reason" sentence.
+              status += L"\n";
+              status += prism::app::CompressFailureDetail(compressNoReason, outcome.error);
             }
             window.PostStatus(status);
             // The re-pack wrote a NEW file: the UI thread switches the session
@@ -801,18 +940,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // failed switch therefore leaves the session on the archive it was showing.
   window.SetArchiveChangedHandler([&window, app, tr](const std::wstring& newPath) {
     if (app->extractReader.load() != nullptr || app->sweepReader.load() != nullptr) {
-      window.SetStatus(tr.Or("status.refreshDeferred",
-                             L"\u5DF2\u5199\u5165\uFF1B\u5F53\u524D\u64CD\u4F5C\u7ED3\u675F"
-                             L"\u540E\u5237\u65B0"));
+      // C40: the sentence (and its real-Chinese fallback) lives in AppWiring so
+      // the suite can assert its bytes; C38's audit found it double-escaped.
+      window.SetStatus(prism::app::RefreshDeferredStatus(tr));
       return;
     }
     prism::app::ArchiveSession session{&app->library, &app->ops, &app->catalog, &app->items,
                                        &app->archivePath, 2};
     const prism::app::ArchiveSwitch switched = prism::app::SwitchArchive(session, newPath);
     if (!switched.ok) {
-      window.SetStatus(tr.Or("error.open", L"\u6253\u5F00\u5931\u8D25") + L" " +
-                           FileNameWide(newPath) + L"\uFF1A" +
-                           prism::win::Utf8ToWide(switched.error));
+      // C40: error.open is the table's key (it names the file); the engine's own
+      // reason stays verbatim after the colon.
+      window.SetStatus(prism::app::OpenFailedStatus(tr, FileNameWide(newPath)) + L"\uFF1A" +
+                       prism::win::Utf8ToWide(switched.error));
       return;
     }
     // The plan is derived from the catalogue and the archive's own folder, so it
@@ -834,10 +974,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       const std::wstring title = L"PrismArchive -- " + FileNameWide(app->archivePath);
       SetWindowTextW(window.Hwnd(), title.c_str());
     }
-    window.SetStatus(L"\x5171 " + std::to_wstring(app->items.size()) + L" \x9879");
+    window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
   });
 
-  window.SetStatus(L"\x5171 " + std::to_wstring(app->items.size()) + L" \x9879");
+  window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
 
   // ---- C34: the inline-preview companion (C30) is hosted HERE --------------
   //

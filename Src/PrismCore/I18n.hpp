@@ -673,6 +673,9 @@ inline const std::vector<std::string>& RequiredKeys() {
       "status.files.other",
       "status.folders.one",
       "status.folders.other",
+      // C40: the status bar's entry count. It used to be a code default inside
+      // Tr::Or(), so a translator never learned it existed.
+      "status.items.count",
       // Primary actions.
       "action.extract",
       "action.compress",

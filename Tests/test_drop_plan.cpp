@@ -103,12 +103,14 @@ void CheckPlanShape(const DropPlan& plan) {
 
 // D3 predicates: they answer "did the injected defect actually fire?", which is
 // what separates a CAUGHT mutation from a red run for an unrelated reason.
-bool ReadOnlyInjectionFired() {
+// [[maybe_unused]]: each predicate is referenced only from its own mutant build,
+// and the GCC lane runs -Werror=unused-function (MSVC does not warn).
+[[maybe_unused]] bool ReadOnlyInjectionFired() {
   const DropPlan plan = drop::PlanDrop(Input({true, true}, {File("C:/drop/note.txt")}));
   return plan.primary == DropAction::AddToArchive;
 }
 
-bool FlattenInjectionFired() {
+[[maybe_unused]] bool FlattenInjectionFired() {
   const DropPlan plan =
       drop::PlanDrop(Input({true, false},
                            {Folder("C:/drop/pack", {File("C:/drop/pack/a.txt"),

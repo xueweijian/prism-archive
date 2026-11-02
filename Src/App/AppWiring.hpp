@@ -83,6 +83,7 @@
 #include <vector>
 
 #include "../PrismCore/CompressionPlan.hpp"   // C9 decision layer (what to write)
+#include "../PrismCore/DropPlan.hpp"           // C53: C52's drop model (what a drop means)
 #include "../PrismCore/I18n.hpp"             // C19 resource tables + language choice
 #include "../PrismCore/Log.hpp"              // C16 logger (the one warn a key miss gets)
 #include "../PrismCore/ExtractScheduler.hpp"
@@ -2123,5 +2124,133 @@ bool ApplySessionView(WindowLike& window, const prism::session::SessionEntry& en
   }
   return complete;
 }
+
+// ---------------------------------------------------------------------------
+// C53: THE APP'S HALF OF A DROP ONTO THE WINDOW (C52's missing seam)
+//
+// C52 delivered the window's half: Explorer's HDROP becomes a tree, the tree
+// becomes a prism::drop::DropPlan, and the window forwards that plan to whoever
+// registered SetDropHandler. Nothing executed it, so a user saw the hint and
+// then nothing. This section is the EXECUTOR, and it lives in AppWiring so the
+// suite drives the production lambda instead of re-implementing it.
+//
+// WHAT EACH ACTION MAY DO TODAY
+//   * OpenArchive  -- reuse the archive-changed flow: post the path, the app
+//                     re-opens the file and rebuilds the view (the same door the
+//                     compress card's re-pack uses, so there is one switch path).
+//   * Refuse       -- post the model's own reason. A refusal that says nothing
+//                     is indistinguishable from a broken drop target (C5/C52).
+//   * AddToArchive -- REFUSED EXPLICITLY. ArchiveWriter has no incremental
+//                     "add these files to this archive" operation: it writes a
+//                     NEW archive from a source root. Pretending success here
+//                     would be a half-write the user could not see, so the app
+//                     says "append is not supported yet" and writes NOTHING.
+//   * ExtractHere / TestArchive -- need the extract/verify flow callable with an
+//                     EXPLICIT file list instead of the whole catalog; until that
+//                     seam exists they report the plan's own headline on the
+//                     status line (visible feedback, never a half-run write).
+//
+// The negative control (D3/D27) compiles the AddToArchive branch into a claim
+// of success (PRISM_C53_MUTANT_FAKE_ADD): the suite's "the bytes did not move", the suite's "the bytes did not move"
+// conjunction goes red, and the first failure prints the CAUGHT marker.
+// ---------------------------------------------------------------------------
+namespace dropin {
+
+enum class DropEffect : std::uint8_t {
+  OpenArchive = 0,  // post the path to the archive-changed flow
+  Refuse,           // post the model's reason text
+  UnsupportedAdd,   // AddToArchive: explicitly not implemented, nothing written
+  ReportStatus,     // ExtractHere/TestArchive: status only, nothing executed
+};
+
+inline const char* DropEffectName(DropEffect effect) {
+  switch (effect) {
+    case DropEffect::OpenArchive: return "OpenArchive";
+    case DropEffect::Refuse: return "Refuse";
+    case DropEffect::UnsupportedAdd: return "UnsupportedAdd";
+    case DropEffect::ReportStatus: return "ReportStatus";
+  }
+  return "?";
+}
+
+inline std::ostream& operator<<(std::ostream& os, DropEffect effect) {
+  return os << DropEffectName(effect);
+}
+
+struct DropDecision {
+  DropEffect effect = DropEffect::ReportStatus;
+  std::wstring archivePath;  // OpenArchive only
+  std::wstring status;       // everything except OpenArchive
+};
+
+// The one decision the drop handler makes. Pure on purpose: the suite asserts
+// the TEXT the user would read (D2), not a boolean that could be satisfied by
+// any message at all.
+inline DropDecision DecideDrop(const prism::drop::DropPlan& plan) {
+  using prism::drop::DropAction;
+  DropDecision decision;
+  decision.status = prism::win::Utf8ToWide(plan.headline);
+  if (!plan.detail.empty()) {
+    decision.status += L"  ";
+    decision.status += prism::win::Utf8ToWide(plan.detail);
+  }
+  if (plan.primary == DropAction::OpenArchive && !plan.members.empty()) {
+    decision.effect = DropEffect::OpenArchive;
+    decision.archivePath = prism::win::Utf8ToWide(plan.members.front());
+    decision.status.clear();  // the switch reports its own outcome
+    return decision;
+  }
+  switch (plan.primary) {
+    case DropAction::OpenArchive:
+      // The model said "open" but handed over no member: nothing to open. Say
+      // so instead of posting an empty path into the switch (D18).
+      decision.effect = DropEffect::Refuse;
+      decision.status = L"\u6CA1\u6709\u53EF\u6253\u5F00\u7684\u5F52\u6863";
+      return decision;
+    case DropAction::Refuse:
+      decision.effect = DropEffect::Refuse;
+      return decision;  // headline + detail already name the reason
+    case DropAction::AddToArchive:
+#if defined(PRISM_C53_MUTANT_FAKE_ADD)
+      // MUTANT ACTIVE (D28: the banner sits inside the guard, not at the end of
+      // the file): a drop that the model read as "add" claims the files were
+      // written although no writer call exists anywhere on this path.
+      decision.effect = DropEffect::ReportStatus;
+      decision.status = L"\u5DF2\u6DFB\u52A0 " + std::to_wstring(plan.fileCount) + L" \u9879";
+      return decision;
+#else
+      // No half-write, no fake success: the writer has no incremental add, so
+      // the app states that in the user's words and leaves the archive alone.
+      decision.effect = DropEffect::UnsupportedAdd;
+      decision.status = L"\u6682\u4E0D\u652F\u6301\u8FFD\u52A0 (AddToArchive)\uFF1A\u62D6\u5165\u7684 " +
+                        std::to_wstring(plan.fileCount) +
+                        L" \u4E2A\u6587\u4EF6\u6CA1\u6709\u88AB\u5199\u5165"
+                        L"\uFF08ArchiveWriter \u5C1A\u65E0\u589E\u91CF\u6DFB\u52A0\u80FD\u529B\uFF09";
+      return decision;
+#endif
+    case DropAction::ExtractHere:
+    case DropAction::TestArchive:
+      decision.effect = DropEffect::ReportStatus;
+      decision.status += L"\uFF08\u5C1A\u672A\u63A5\u5165\uFF1A\u672C\u6B21\u6CA1\u6709\u6267\u884C\u4EFB\u4F55\u5199\u5165\uFF09";
+      return decision;
+  }
+  return decision;
+}
+
+// The PRODUCTION handler. Main.cpp calls this once; the Windows suite calls the
+// same function, so the tested lambda is the shipped lambda.
+template <class WindowLike>
+void InstallDropHandler(WindowLike& window) {
+  window.SetDropHandler([&window](const prism::drop::DropPlan& plan) {
+    const DropDecision decision = DecideDrop(plan);
+    if (decision.effect == DropEffect::OpenArchive) {
+      window.PostArchiveChanged(decision.archivePath);
+      return;
+    }
+    if (!decision.status.empty()) window.PostStatus(decision.status);
+  });
+}
+
+}  // namespace dropin
 
 }  // namespace prism::app

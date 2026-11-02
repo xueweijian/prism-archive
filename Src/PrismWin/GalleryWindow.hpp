@@ -63,11 +63,14 @@
 #include <dwrite.h>
 #include <wrl/client.h>
 
+#include <cassert>
+#include <cstdint>
 #include <memory>
 #include <chrono>
 #include <functional>
 #include <cstdio>
 #include <mutex>
+#include <ostream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -90,8 +93,10 @@
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
+#include "PaletteOverlay.hpp"               // C53: Ctrl+K paints THIS layer (C31)
 #include "GalleryRenderer.hpp"
 #include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
+#include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
 
 // C34: the glass layer is composition, so the window's TU needs the three
@@ -111,6 +116,41 @@
 namespace prism::win::gallery {
 
 using Microsoft::WRL::ComPtr;
+
+// C53: the four surfaces that can own the user's attention at the same time --
+// the drop hint (C52), the command palette (C31/C8), Quick Look and the settings
+// dialog (C31/V3). Exactly ONE may be active. The enum is the single vocabulary
+// for that rule, so a future overlay cannot invent a fifth answer.
+enum class ActiveOverlay : std::uint8_t {
+  None = 0,
+  DropHint,
+  Palette,
+  QuickLook,
+  Settings
+};
+
+inline const char* ActiveOverlayName(ActiveOverlay overlay) {
+  switch (overlay) {
+    case ActiveOverlay::None: return "None";
+    case ActiveOverlay::DropHint: return "DropHint";
+    case ActiveOverlay::Palette: return "Palette";
+    case ActiveOverlay::QuickLook: return "QuickLook";
+    case ActiveOverlay::Settings: return "Settings";
+  }
+  return "?";
+}
+
+inline std::ostream& operator<<(std::ostream& os, ActiveOverlay overlay) {
+  return os << ActiveOverlayName(overlay);
+}
+
+#if defined(PRISM_C53_MUTANT_MULTI_OVERLAY)
+// MUTANT ACTIVE (D28: the banner sits inside the guard): the exclusivity rule
+// is compiled out, so the palette and the drop hint can be up together.
+inline constexpr bool kOverlayExclusivityEnforced = false;
+#else
+inline constexpr bool kOverlayExclusivityEnforced = true;
+#endif
 
 class GalleryWindow {
  public:
@@ -281,6 +321,40 @@ class GalleryWindow {
   LRESULT DispatchKeyStroke(const prism::keys::Stroke& stroke) { return HandleKey(stroke); }
   bool PaletteOpen() const { return palette_.IsOpen(); }
   const prism::win::palette::PaletteShell& Palette() const { return palette_; }
+
+  // ---------- card C53: ONE modal overlay at a time -------------------------
+  // The window owns three of the four surfaces itself; the settings dialog is
+  // hosted by the app, so it reports itself through SetSettingsLauncher's gate
+  // (settingsModalOpen_ is true only while that gate is running).
+  ActiveOverlay CurrentOverlay() const {
+    if (settingsModalOpen_) return ActiveOverlay::Settings;
+    if (palette_.IsOpen()) return ActiveOverlay::Palette;
+    if (dropHintVisible_) return ActiveOverlay::DropHint;
+    if (QuickLookOpen()) return ActiveOverlay::QuickLook;
+    return ActiveOverlay::None;
+  }
+  int ActiveOverlayCount() const {
+    int count = 0;
+    if (settingsModalOpen_) ++count;
+    if (palette_.IsOpen()) ++count;
+    if (dropHintVisible_) ++count;
+    if (QuickLookOpen()) ++count;
+    return count;
+  }
+  // The invariant the window itself enforces. NDEBUG removes assert(), so the
+  // suite reads the counter back (a Release build must not hide a logic error).
+  bool SingleOverlayInvariant() const { return ActiveOverlayCount() <= 1; }
+  int OverlayInvariantViolations() const { return overlayViolations_; }
+  bool SettingsModalOpen() const { return settingsModalOpen_; }
+  const prism::win::palette::PaletteOverlay& Overlay() const { return overlay_; }
+  bool PaletteOverlayOpen() const { return overlay_.IsOpen(); }
+  const std::wstring& StatusText() const { return status_; }
+  // The app supplies the launcher so it can load the document from ITS paths
+  // (a portable build does not use %LOCALAPPDATA%); tests use the same seam to
+  // drive the menu command without entering an unbounded modal loop.
+  void SetSettingsLauncher(std::function<void()> launcher) {
+    settingsLauncher_ = std::move(launcher);
+  }
   size_t HistoryBackCount() const { return history_.BackCount(); }
   size_t HistoryForwardCount() const { return history_.ForwardCount(); }
 
@@ -1031,9 +1105,15 @@ class GalleryWindow {
         return 0;
       }
       case WM_COMMAND: {
-        // Menu items only (the gallery owns no child controls). The command id is
+        // Menu items only (the gallery owns no child controls). C53: the menu
+        // bar carries Settings... (C31/V3) -- a MODAL surface, so it goes through
+        // the one-overlay gate BEFORE the dialog runs. Every other id is
         // forwarded verbatim: mapping an id to an ACTION is the app's job.
         const UINT command = LOWORD(wparam);
+        if (command == prism::win::settingsui::SettingsDialog::kMenuSettingsId) {
+          RunSettingsCommand();
+          return 0;
+        }
         if (onMenuCommand_) onMenuCommand_(command);
         return 0;
       }
@@ -1072,6 +1152,53 @@ class GalleryWindow {
   // Signed client coordinates: a drag can deliver negative values.
   static int MouseX(LPARAM lparam) { return static_cast<short>(LOWORD(lparam)); }
   static int MouseY(LPARAM lparam) { return static_cast<short>(HIWORD(lparam)); }
+
+  // ---------- card C53: the one-surface gate --------------------------------
+  // Every OPEN of a modal surface funnels through here: "keep" survives, the
+  // other three are dismissed. The assertion is the enforcement point the suite
+  // reads back in Release builds too (NDEBUG removes assert()).
+  void AssertSingleOverlay() {
+    if (SingleOverlayInvariant()) return;
+    ++overlayViolations_;
+    assert(false && "C53: at most one modal overlay may be active");
+  }
+
+  void DismissOtherOverlays(ActiveOverlay keep) {
+    if (kOverlayExclusivityEnforced) {
+      if (keep != ActiveOverlay::DropHint) ClearDropHint();
+      if (keep != ActiveOverlay::Palette) {
+        overlay_.Close();
+        palette_.Close();
+      }
+      if (keep != ActiveOverlay::QuickLook) quickLookClose();
+    }
+    AssertSingleOverlay();
+  }
+
+  // C53: the Settings... menu item. A dialog is a modal surface, so it goes
+  // through the gate before the message loop is entered and reports itself for
+  // the whole time the gate runs. The launcher defaults to the real dialog with
+  // the real (default) settings file -- Main installs one that uses the paths
+  // the app actually loaded.
+  void RunSettingsCommand() {
+    DismissOtherOverlays(ActiveOverlay::Settings);
+    settingsModalOpen_ = true;
+    AssertSingleOverlay();
+    if (settingsLauncher_) {
+      settingsLauncher_();
+    } else {
+      prism::win::settingsui::SettingsDialog dialog;
+      const prism::win::settingsfile::Paths paths =
+          prism::win::settingsfile::DefaultPaths();
+      dialog.SetPaths(paths);
+      std::string error;
+      dialog.LoadFrom(paths, &error);  // before Create(): Create syncs the draft
+      dialog.OpenModal(GetModuleHandleW(nullptr), host_.hwnd);
+    }
+    settingsModalOpen_ = false;
+    AssertSingleOverlay();
+    Invalidate();
+  }
 
   // ---------- the action band's wiring (card V2) ----------
   // What a click or a chord MEANS is the model's decision, not this file's: the
@@ -1202,6 +1329,17 @@ class GalleryWindow {
     // (that is how typing reaches the query field) and only a stroke it declines
     // is re-resolved against the gallery table.
     if (palette_.IsOpen()) {
+      // C53: the OVERLAY gets the stroke before the shell (C31). It owns Tab
+      // (scope) and resolves Up/Down/Enter/Esc against the SAME filtered rows it
+      // paints. A stroke it consumes must NOT fall through to the shell or to the
+      // gallery table -- Ctrl+K inside the palette would otherwise close it and
+      // reopen it on the second half of the same key press.
+      const prism::win::palette::PaletteOverlay::Outcome overlayOutcome = overlay_.OnKey(stroke);
+      if (overlayOutcome.consumed) {
+        if (overlayOutcome.activate) RunPalette();
+        Invalidate();
+        return 0;
+      }
       const prism::win::palette::PaletteShell::KeyOutcome outcome = palette_.OnKey(stroke);
       if (outcome.consumed) {
         if (outcome.command == prism::keys::Command::ActivateSelection) RunPalette();
@@ -1222,7 +1360,11 @@ class GalleryWindow {
         return;
       case prism::keys::Command::QuickLookToggle:
         if (quickLook_ && selection_ >= 0 && selection_ < count) {
+          // C53: Quick Look is a modal surface too; opening it dismisses the
+          // drop hint and closes the palette.
+          DismissOtherOverlays(ActiveOverlay::QuickLook);
           quickLook_->ToggleAt(static_cast<uint32_t>(selection_));
+          AssertSingleOverlay();
           Invalidate();
         }
         return;
@@ -1233,7 +1375,11 @@ class GalleryWindow {
         OpenPalette();
         return;
       case prism::keys::Command::ClosePalette:
+        // C53: one close closes both halves (Esc reaching the shell directly is
+        // still one surface going away, never a dead card left painted).
+        overlay_.Close();
         palette_.Close();
+        AssertSingleOverlay();
         Invalidate();
         return;
       case prism::keys::Command::SmartExtract:
@@ -1326,7 +1472,14 @@ class GalleryWindow {
 
   // ---------- command palette (C8) ----------
   void OpenPalette() {
+    // C53: Ctrl+K opens ONE modal surface. The drop hint and Quick Look are
+    // dismissed first (a palette painted over a drop hint would leave two
+    // overlays competing for Esc and for the user's eye).
+    DismissOtherOverlays(ActiveOverlay::Palette);
+    overlay_.Attach(&palette_);  // the shell owns the rectangles (C31/D7)
     palette_.Open();
+    overlay_.Open();  // one open state, not two (the overlay closes the shell too)
+    AssertSingleOverlay();
     Invalidate();
   }
 
@@ -1334,7 +1487,10 @@ class GalleryWindow {
   // switch the keyboard uses; a FILE is navigated to (its folder + selection),
   // never extracted -- opening a payload is the app's decision, not the list's.
   void RunPalette() {
-    const prism::palette::Entry* entry = palette_.Highlighted();
+    // The overlay filters by scope, so its visible row -- not the unfiltered
+    // shell highlight -- is what Enter must run (C53).
+    const prism::palette::Entry* entry =
+        overlay_.IsOpen() ? overlay_.Highlighted() : palette_.Highlighted();
     if (!entry) {
       palette_.Close();
       Invalidate();
@@ -1431,6 +1587,11 @@ class GalleryWindow {
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kMenuExit, exitMenuLabel_.c_str());
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileMenuLabel_.c_str());
+    // C53: C31/V3's Settings item lives on the SAME bar, not on a second menu
+    // that would REPLACE this one. (SettingsDialog::InstallMenu builds a whole
+    // bar of its own; Main only falls back to it when the window has no menu.)
+    AppendMenuW(bar, MF_STRING, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
+                L"Settings...");
     HMENU previous = GetMenu(host_.hwnd);
     if (!SetMenu(host_.hwnd, bar)) {
       DestroyMenu(bar);
@@ -1698,6 +1859,9 @@ class GalleryWindow {
   }
 
   void Render() {
+    // C53: the frame boundary is the cheapest place to prove that two modal
+    // surfaces never reached the screen together.
+    AssertSingleOverlay();
     if (!EnsureDeviceResources()) return;
     if (!rendererReady_) {
       // Belt and braces for the crash this card fixed: a renderer that was
@@ -1996,6 +2160,16 @@ class GalleryWindow {
 
   // HDROP -> DropEntry tree -> PlanDrop -> hint. Owns the handle (DragFinish).
   void EvaluateDrop(HDROP drop) {
+    // C53: a drop is itself a modal gesture. While the settings dialog owns the
+    // thread a drop can still arrive on the (disabled) owner window; it is
+    // consumed and NAMED instead of being planned behind a modal surface.
+    if (settingsModalOpen_) {
+      if (drop != nullptr) ::DragFinish(drop);
+      SetStatus(L"\u8BBE\u7F6E\u5BF9\u8BDD\u6846\u6253\u5F00\u65F6\u4E0D\u63A5\u53D7\u62D6\u5165");
+      return;
+    }
+    // The hint takes the surface from the palette / Quick Look: one overlay.
+    DismissOtherOverlays(ActiveOverlay::DropHint);
     std::vector<prism::drop::DropEntry> entries;
     POINT point{};
     dropScanBudget_ = kDropScanEntries;
@@ -2031,6 +2205,7 @@ class GalleryWindow {
     dropHintTitle_ = Utf8ToWide(lastDropPlan_.headline);
     dropHintDetail_ = Utf8ToWide(lastDropPlan_.detail);
     dropHintVisible_ = true;
+    AssertSingleOverlay();
     Invalidate();
     // Executing the action is the app's job (it owns the engine, the password
     // prompt and the progress HUD). A window that started extraction from a
@@ -2184,6 +2359,7 @@ class GalleryWindow {
   bool readOnly_ = false;
   // C8: the two authorities the window asks instead of deciding for itself.
   prism::win::palette::PaletteShell palette_;
+  prism::win::palette::PaletteOverlay overlay_;  // C53: what Ctrl+K paints (C31)
   prism::history::Stack history_;
   int zoomPx_ = 256;  // Ctrl+Shift+P stop; the renderer has no tile-size input yet
   // C12: sidebar state + its draw-command list (painting is not wired yet).
@@ -2249,6 +2425,11 @@ class GalleryWindow {
   prism::drop::DropPlan lastDropPlan_;
   bool dropHintVisible_ = false;
   bool dropHintAccepted_ = false;
+  // C53: the one-overlay rule's own state. settingsModalOpen_ is set by the
+  // settings gate in RunSettingsCommand (and read by CurrentOverlay()).
+  bool settingsModalOpen_ = false;
+  std::function<void()> settingsLauncher_;
+  int overlayViolations_ = 0;
   prism::layout::Rect dropHintRect_;
   std::wstring dropHintTitle_;
   std::wstring dropHintDetail_;

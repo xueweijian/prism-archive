@@ -753,6 +753,12 @@ PRISM_TEST("wiring.four_context_menu_verbs_reach_four_plans") {
       {"extract.to.subfolder", app::LaunchMode::kExtractSub},
       {"test.integrity", app::LaunchMode::kTest},
       {"open.in.prism", app::LaunchMode::kGallery},
+      // C58: the three creation verbs the menu has advertised since C4. They
+      // are part of the SAME table/parser agreement (see the contract-change
+      // note below for what used to be pinned).
+      {"smart.extract.each.to.own.folder", app::LaunchMode::kSmartExtractEach},
+      {"compress.to.7z", app::LaunchMode::kCompress7z},
+      {"compress.to.zip", app::LaunchMode::kCompressZip},
   };
   for (const VerbCase& one : cases) {
     const std::wstring rendered = win::shell_launch::ArgsForVerb(one.verb, {fx.archivePath});
@@ -771,10 +777,45 @@ PRISM_TEST("wiring.four_context_menu_verbs_reach_four_plans") {
   }
   // A verb we do not implement is REFUSED, never guessed into a command line.
   PRISM_CHECK(win::shell_launch::ArgsForVerb("frobnicate.everything", {fx.archivePath}).empty());
+  // CONTRACT CHANGE (C58): C4's menu verbs now have an implementation.
+  //
+  // C25 pinned "--compress-7z is refused" because the exe had no creation verb
+  // for it and the menu advertised a command that answered "this version does
+  // not support that command". The defect was the promise, not the refusal, so
+  // C58 implemented the verbs and this pin now asserts the BEHAVIOUR instead:
+  // the flag parses, the mode is the verb's, the paths arrive as inputs, and the
+  // verb's format mapping is 7z or zip (the mutation suite proves the mapping
+  // cannot silently become "zip writes 7z").
   {
-    const app::LaunchRequest refused = app::ParseLaunch({L"--compress-7z", L"x.7z"});
-    PRISM_CHECK(refused.unknownFlag);
-    PRISM_CHECK(refused.mode == app::LaunchMode::kGallery);  // no silent fallback plan
+    const app::LaunchRequest seven =
+        app::ParseLaunch({L"--compress-7z", L"C:\\src\\one.txt", L"C:\\src\\two.txt"});
+    PRISM_CHECK(!seven.unknownFlag);
+    PRISM_CHECK(seven.mode == app::LaunchMode::kCompress7z);
+    PRISM_CHECK(app::Compresses(seven.mode));
+    PRISM_CHECK(!app::Extracts(seven.mode));
+    PRISM_CHECK_EQ(seven.inputs.size(), size_t(2));
+    PRISM_CHECK(seven.archive == L"C:\\src\\one.txt");  // head, unchanged
+    PRISM_CHECK_EQ(static_cast<int>(app::CompressionFormatOf(seven.mode)),
+                   static_cast<int>(prism::ArchiveFormat::SevenZip));
+
+    const app::LaunchRequest zip =
+        app::ParseLaunch({L"--compress-zip", L"C:\\src\\one.txt"});
+    PRISM_CHECK(!zip.unknownFlag);
+    PRISM_CHECK(zip.mode == app::LaunchMode::kCompressZip);
+    PRISM_CHECK(app::Compresses(zip.mode));
+    PRISM_CHECK_EQ(static_cast<int>(app::CompressionFormatOf(zip.mode)),
+                   static_cast<int>(prism::ArchiveFormat::Zip));
+
+    const app::LaunchRequest each = app::ParseLaunch(
+        {L"--smart-extract-each", L"C:\\a\\one.7z", L"C:\\a\\two.zip"});
+    PRISM_CHECK(!each.unknownFlag);
+    PRISM_CHECK(each.mode == app::LaunchMode::kSmartExtractEach);
+    PRISM_CHECK(app::Extracts(each.mode));
+    PRISM_CHECK(!app::Compresses(each.mode));
+    PRISM_CHECK_EQ(each.archives.size(), size_t(2));
+    PRISM_CHECK_EQ(app::LaunchModeName(each.mode), std::string("SmartExtractEach"));
+    // An unknown flag is still refused -- the contract that "never guess" holds.
+    PRISM_CHECK(app::ParseLaunch({L"--extract-wherever", L"x.7z"}).unknownFlag);
   }
 
   // 3b. The three extracting verbs produce three different LAYOUTS on disk.

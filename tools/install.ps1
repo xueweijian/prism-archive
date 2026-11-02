@@ -699,6 +699,18 @@ function Invoke-Install {
     if (-not $SkipAssoc) {
         Install-Associations -ExePath $exe -IconPath $exe -Exts $Exts
         Report-UserChoice -Exts $Exts
+        # Static verbs are the entry point the user actually sees. On a machine
+        # where the archive association is pinned by the Windows user choice
+        # (hash protected, as on this dev box), the shell does not necessarily
+        # load the shellex DLL -- but "shell\verb" entries are always shown.
+        # Without this step "installed" and "visible in the right-click menu"
+        # were two different things, which is exactly what the user reported.
+        $verbsScript = Join-Path $PSScriptRoot 'register-static-verbs.ps1'
+        if (Test-Path -LiteralPath $verbsScript) {
+            & $verbsScript -ExePath $exe -Quiet
+        } else {
+            Write-Warn ('static verbs script not found next to install.ps1: ' + $verbsScript)
+        }
     }
     Install-EngineEnv -Dll $EngineDll
     Install-Marker -InstallDir $TargetDir -ExePath $exe -Exts $Exts -Mode 'install'

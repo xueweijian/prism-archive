@@ -652,14 +652,29 @@ PRISM_TEST("glue.i18n_fallback_chain_resolves_missing_keys") {
   PRISM_CHECK_EQ(runtime.translator.MissingKeys().size(), size_t(1));
 }
 PRISM_TEST("glue.headless_verb_parses_and_plans") {
-  // --compress-here is the automation verb: two paths in, one .7z out, and the
-  // shell's still-refused flags must stay refused (C25's suite pins that).
+  // --compress-here is the automation verb: two paths in, one .7z out.
   const app::LaunchRequest parsed =
       app::ParseLaunch({L"--compress-here", L"C:\\a\\one.txt", L"C:\\a\\two.txt"});
   PRISM_CHECK(parsed.mode == app::LaunchMode::kCompressHere);
   PRISM_CHECK(!parsed.unknownFlag);
   PRISM_CHECK_EQ(parsed.inputs.size(), size_t(2));
   PRISM_CHECK(parsed.archive == L"C:\\a\\one.txt");
-  const app::LaunchRequest refused = app::ParseLaunch({L"--compress-7z", L"x.7z"});
-  PRISM_CHECK(refused.unknownFlag);
+  // CONTRACT CHANGE (C58): C4's menu verbs now have an implementation.
+  // C25 used to pin "--compress-7z is refused"; the refusal was only ever a
+  // placeholder for the missing implementation, and the menu had already
+  // advertised the verb. The pin now follows the product: the flag parses, the
+  // format is the verb's (.7z here, .zip for --compress-zip), and an unknown
+  // flag is still refused rather than guessed.
+  const app::LaunchRequest seven = app::ParseLaunch({L"--compress-7z", L"C:\\a\\one.txt"});
+  PRISM_CHECK(!seven.unknownFlag);
+  PRISM_CHECK(seven.mode == app::LaunchMode::kCompress7z);
+  PRISM_CHECK(app::Compresses(seven.mode));
+  PRISM_CHECK_EQ(static_cast<int>(app::CompressionFormatOf(seven.mode)),
+                 static_cast<int>(prism::ArchiveFormat::SevenZip));
+  const app::LaunchRequest zip = app::ParseLaunch({L"--compress-zip", L"C:\\a\\one.txt"});
+  PRISM_CHECK(!zip.unknownFlag);
+  PRISM_CHECK(zip.mode == app::LaunchMode::kCompressZip);
+  PRISM_CHECK_EQ(static_cast<int>(app::CompressionFormatOf(zip.mode)),
+                 static_cast<int>(prism::ArchiveFormat::Zip));
+  PRISM_CHECK(app::ParseLaunch({L"--compress-rar", L"x"}).unknownFlag);
 }

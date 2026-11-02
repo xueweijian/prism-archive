@@ -38,10 +38,18 @@
 //     that process half: hidden window + wake poll + "first 12 entries" scan +
 //     ack + flyout.
 //
+// WHAT CARD C58 ADDED (the shell menu now tells the truth):
+//   * C4's --compress-7z / --compress-zip / --smart-extract-each verbs are
+//     IMPLEMENTED. The menu had advertised them since C4 while C25 pinned the
+//     refusal (the exe answered "this version does not support that command"),
+//     which is the worst kind of defect: the product promises what it cannot do.
+//     Section 6 now turns each verb into the same plan/write path
+//     --compress-here already used, with the FORMAT coming from the verb (7z or
+//     zip), and RunExtractEach runs --extract-sub once per archive. The two
+//     pinned assertions moved with the contract (Tests/win/test_app_wiring.cpp
+//     and test_glue.cpp say so in their comments).
+//
 // WHAT IS STILL *NOT* WIRED (deliberate, and stated in the PR):
-//   * The shell's --compress-7z / --compress-zip verbs. C25's suite PINS the
-//     refusal of those two flags; flipping them here would turn another card's
-//     green test red, so --compress-here carries the same path instead.
 //   * Re-packing an OPEN archive into a new one is a two-step job (extract to
 //     %TEMP%, then create) and the window keeps showing the archive it opened;
 //     the refresh it performs re-reads that archive. Switching the open archive
@@ -109,25 +117,29 @@
 namespace prism::app {
 
 // ---------------------------------------------------------------------------
-// 1. Command line: the four context-menu verbs (C4 contract).
+// 1. Command line: the context-menu verbs (C4 contract, completed by C58).
 //
 // shell_launch::ArgsForVerb renders "verb -> flag + quoted paths"; the exe side
 // of that contract is this parser. The flag constants are INCLUDED from the
 // registrar header, not re-spelled, so the two halves cannot drift: a test
 // feeds a verb through ArgsForVerb and asserts the exe parses it.
 // ---------------------------------------------------------------------------
-// The automation verb for archive CREATION (this card's contract). It is NOT
-// one of C4's shell flags on purpose -- see section 6 for why the shell's
-// --compress-7z / --compress-zip stay refused for now.
+// The automation verb for archive CREATION (C9/C27). Its flag lives here
+// because C4's registrar does not render it; the three SHELL creation verbs
+// below come from the registrar's constants, so the two halves cannot drift.
 inline constexpr wchar_t kCompressHere[] = L"--compress-here";
 
 enum class LaunchMode : std::uint8_t {
-  kGallery = 0,    // no verb: open the window (double-click path)
-  kSmartExtract,   // --smart-extract
-  kExtractHere,    // --extract-here
-  kExtractSub,     // --extract-sub
-  kTest,           // --test (verify integrity, write nothing)
-  kCompressHere,   // --compress-here <files...> (C9 create, automation verb)
+  kGallery = 0,     // no verb: open the window (double-click path)
+  kSmartExtract,    // --smart-extract
+  kExtractHere,     // --extract-here
+  kExtractSub,      // --extract-sub
+  kTest,            // --test (verify integrity, write nothing)
+  kCompressHere,    // --compress-here <files...> (C9 create, automation verb)
+  // C58: the three C4 menu verbs the product used to refuse.
+  kCompress7z,      // --compress-7z <files...> (create a .7z)
+  kCompressZip,     // --compress-zip <files...> (create a .zip)
+  kSmartExtractEach,  // --smart-extract-each <archives...> (one subfolder each)
 };
 
 inline const char* LaunchModeName(LaunchMode mode) {
@@ -138,6 +150,9 @@ inline const char* LaunchModeName(LaunchMode mode) {
     case LaunchMode::kExtractSub: return "ExtractSub";
     case LaunchMode::kTest: return "Test";
     case LaunchMode::kCompressHere: return "CompressHere";
+    case LaunchMode::kCompress7z: return "Compress7z";
+    case LaunchMode::kCompressZip: return "CompressZip";
+    case LaunchMode::kSmartExtractEach: return "SmartExtractEach";
   }
   return "?";
 }
@@ -149,29 +164,67 @@ inline std::ostream& operator<<(std::ostream& os, LaunchMode mode) {
 // True for the modes that write files by extracting.
 inline bool Extracts(LaunchMode mode) {
   return mode == LaunchMode::kSmartExtract || mode == LaunchMode::kExtractHere ||
-         mode == LaunchMode::kExtractSub || mode == LaunchMode::kGallery;
+         mode == LaunchMode::kExtractSub || mode == LaunchMode::kSmartExtractEach ||
+         mode == LaunchMode::kGallery;
 }
 
-// True for the mode that CREATES an archive (C9).
-inline bool Compresses(LaunchMode mode) { return mode == LaunchMode::kCompressHere; }
+// True for the modes that CREATE an archive (C9 + C58).
+inline bool Compresses(LaunchMode mode) {
+  return mode == LaunchMode::kCompressHere || mode == LaunchMode::kCompress7z ||
+         mode == LaunchMode::kCompressZip;
+}
+
+// CONTRACTS D3: counters that are only ever touched by a mutant build. The
+// suite reads them to prove an injected defect REALLY fired -- a mutation whose
+// guard silently stopped applying must stay red, never masquerade as caught.
+struct CompressVerbMutationCounters {
+  std::atomic<int> zipForcedTo7z{0};
+  std::atomic<int> emptyFileOnFailure{0};
+};
+
+inline CompressVerbMutationCounters& CompressVerbMutations() {
+  static CompressVerbMutationCounters counters;
+  return counters;
+}
+
+// The format a creation verb writes. This is the ONE place the verb's promise
+// becomes an engine format: --compress-here keeps C9's .7z default, the shell's
+// --compress-7z asks for .7z, --compress-zip for a real .zip.
+//
+// NEGATIVE CONTROL (CONTRACTS D3): PRISM_C58_MUTANT_ZIP_AS_7Z makes the mapping
+// constant (SevenZip). The zip case MUST go red: it would produce a .7z file
+// under a .zip name -- exactly the "menu says zip, product writes 7z" defect.
+inline prism::ArchiveFormat CompressionFormatOf(LaunchMode mode) {
+#if defined(PRISM_C58_MUTANT_ZIP_AS_7Z)
+  if (mode == LaunchMode::kCompressZip) {
+    CompressVerbMutations().zipForcedTo7z.fetch_add(1, std::memory_order_relaxed);
+  }
+  return prism::ArchiveFormat::SevenZip;
+#else
+  return mode == LaunchMode::kCompressZip ? prism::ArchiveFormat::Zip
+                                          : prism::ArchiveFormat::SevenZip;
+#endif
+}
 
 struct LaunchRequest {
   LaunchMode mode = LaunchMode::kGallery;
   std::wstring archive;      // first non-flag argument
-  // Every non-flag argument. For --compress-here that is the input list; the
-  // other verbs that take a path use archive, its head.
+  // Every non-flag argument. For every compress mode (--compress-here / 7z /
+  // zip) that is the input list; the other verbs that take a path use archive,
+  // its head.
   std::vector<std::wstring> inputs;
   // C46: EVERY non-flag argument, for every mode. The gallery reads this list as
   // "the archives this launch opened" (a file-manager multi-selection or
   // "PrismArchive.exe a.7z b.7z"): the head is shown, the rest join the session
-  // so the next launch can offer them. --compress-here keeps using inputs (its
-  // arguments are sources to pack, not archives to open).
+  // so the next launch can offer them. The compress modes keep using inputs
+  // (their arguments are sources to pack, not archives to open).
   std::vector<std::wstring> archives;
   std::wstring flag;         // the verb flag we matched ("" when none)
   // Set when the caller passed a flag we do NOT implement. The app must refuse
   // visibly rather than fall back to "open the gallery": a context-menu command
   // that silently does something else is worse than one that says it is not
-  // ready (the C9 surface -- the shell's --compress-7z/zip are still here).
+  // ready. (C58 implemented C4's three menu verbs; anything else is still
+  // refused here, never guessed.)
   bool unknownFlag = false;
   std::wstring unknownText;
 };
@@ -202,17 +255,28 @@ inline LaunchRequest ParseLaunch(const std::vector<std::wstring>& argv) {
     } else if (arg == kCompressHere) {
       request.mode = LaunchMode::kCompressHere;
       request.flag = arg;
+    } else if (arg == prism::win::shell_launch::kCompress7z) {
+      // C58: C4's creation verbs. The format is the VERB's property (see
+      // CompressionFormatOf), never inferred from the input paths' extension.
+      request.mode = LaunchMode::kCompress7z;
+      request.flag = arg;
+    } else if (arg == prism::win::shell_launch::kCompressZip) {
+      request.mode = LaunchMode::kCompressZip;
+      request.flag = arg;
+    } else if (arg == prism::win::shell_launch::kSmartExtractEach) {
+      request.mode = LaunchMode::kSmartExtractEach;
+      request.flag = arg;
     } else {
-      // --compress-7z / --compress-zip / --smart-extract-each are in C4's
-      // table but the shell-verb wiring is still open (C25's suite PINS the
-      // refusal; see section 6). Refuse loudly; never launch a guess.
+      // Anything else is still refused loudly; never launch a guess.
       request.unknownFlag = true;
       request.unknownText = arg;
     }
   }
   for (const std::wstring& arg : argv) {
     if (StartsWithFlag(arg)) continue;
-    if (request.mode == LaunchMode::kCompressHere) request.inputs.push_back(arg);
+    // Compress modes (the shell's 7z/zip verbs included) read the arguments as
+    // SOURCES to pack; every other verb reads them as archives/paths.
+    if (Compresses(request.mode)) request.inputs.push_back(arg);
     request.archives.push_back(arg);  // C46: the gallery's session list
     if (request.archive.empty()) request.archive = arg;
   }
@@ -689,6 +753,76 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   return outcome;
 }
 
+// --smart-extract-each <archives...> (C58): the same "extract to <name>" verb
+// --extract-sub runs, once per archive. Each archive gets its OWN handler and
+// its OWN folder (collision-suffixed by the planner), so a multi-selection from
+// Explorer cannot make two archives fight over one directory.
+//
+// Again the answer is data (exit code + one stderr line per archive), never a
+// dialog: the shell may call this for a whole selection.
+struct ExtractEachOutcome {
+  int exitCode = 1;
+  size_t archives = 0;
+  size_t succeeded = 0;
+  size_t failed = 0;
+  std::vector<std::string> lines;  // stderr lines, in order
+};
+
+inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archives,
+                                         prism::win::SevenZipLibrary& library,
+                                         bool scanExecutables = true) {
+  ExtractEachOutcome out;
+  if (archives.empty()) {
+    out.lines.push_back("smart-extract-each failed: no archives");
+    return out;
+  }
+  for (const std::wstring& archive : archives) {
+    ++out.archives;
+    const std::string name = prism::win::WideToUtf8(archive);
+    prism::win::ArchiveReader reader(library);
+    if (!reader.Open(archive)) {
+      ++out.failed;
+      out.lines.push_back("smart-extract-each archive=" + name + " ok=0 files=0 bytes=0 target= error=open: " +
+                          reader.openTrace());
+      continue;
+    }
+    const std::vector<ArchiveItem> catalog = reader.ReadCatalog();
+    reader.Close();
+    OperationHandles::Config config;
+    config.archivePath = archive;
+    config.handlerSlots = 2;
+    config.backlog = 4;
+    std::string why;
+    std::shared_ptr<OperationHandles> handles =
+        OperationHandles::Create(library, config, &why);
+    if (!handles) {
+      ++out.failed;
+      out.lines.push_back("smart-extract-each archive=" + name + " ok=0 files=0 bytes=0 target= error=" + why);
+      continue;
+    }
+    const ExtractionPlan plan = BuildExtractionPlan(
+        LaunchMode::kExtractSub, name, catalog, [](const std::string& path) {
+          return std::filesystem::exists(prism::win::Utf8ToWide(path));
+        });
+    const ExtractionOutcome result = RunExtraction(*handles, catalog, plan, archive, scanExecutables);
+    handles->Close();
+    const bool ok = result.ok;
+    if (ok) {
+      ++out.succeeded;
+    } else {
+      ++out.failed;
+    }
+    out.lines.push_back(
+        "smart-extract-each archive=" + name + " ok=" + std::to_string(ok ? 1 : 0) +
+        " files=" + std::to_string(result.filesWritten) +
+        " bytes=" + std::to_string(result.bytesWritten) +
+        " target=" + plan.plan.baseTargetDir +
+        " error=" + (ok ? std::string() : result.error));
+  }
+  out.exitCode = (out.failed == 0 && out.succeeded > 0) ? 0 : 1;
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // 5. Integrity verification (--test): decode every entry, write nothing.
 //
@@ -844,15 +978,18 @@ inline VerifyOutcome VerifyIntegrity(OperationHandles& handles,
 // policy: CompressionPlan decides WHAT to write, ArchiveWriter does the writing,
 // and this section only turns a list of paths into a plan and a plan into a job.
 //
-// WHY --compress-here AND NOT --compress-7z
-//   C4's table renders --compress-7z / --compress-zip for the shell verbs, but
-//   card C25's suite PINS the refusal of those two flags (Tests/win/
-//   test_app_wiring.cpp (3): ParseLaunch({--compress-7z}) must report
-//   unknownFlag). Wiring them here would turn another card's green test red, so
-//   the shell verbs stay refused until the card that owns that assertion updates
-//   it. The automation verb --compress-here <files...> (this card's contract)
-//   carries the same code path end to end, and the window's Compress action is
-//   the real user entry. Both land in RunCompression().
+// C58: THE SHELL VERBS RUN THE SAME PATH
+//   C4's table has rendered --compress-7z / --compress-zip since the shell
+//   extension landed, but the exe refused both (C25 pinned that refusal so the
+//   gap could not be papered over). C58 closes the gap where it belongs: the
+//   verb is parsed into a LaunchMode, CompressionFormatOf turns the mode into
+//   the engine format, and RunCompressVerb drives PlanCompression +
+//   RunCompression end to end. --compress-here keeps working unchanged; the one
+//   thing that differs between the three creation verbs is the format.
+//
+//   The verb's answer is DATA (exit code + stderr lines), not a message box:
+//   Explorer may launch these verbs for a whole multi-selection, and a dialog
+//   per file is not an interface.
 // ---------------------------------------------------------------------------
 
 inline std::wstring ParentDirectory(const std::wstring& path) {
@@ -1022,9 +1159,13 @@ struct CompressionOutcome {
   int64_t elapsedMs = 0;
 };
 
-// done/total are INPUT bytes -- the only honest progress axis for a create: the
-// output size is not known until the last block is written (CompressionPlan's
-// cost model says so). Returning false cancels the run.
+// done/total come from the WRITER's progress callback: total is the plan's
+// INPUT byte count (the only total known before the run -- the output size is
+// not known until the last block is written), while done is the engine's own
+// completed counter. For zip the engine counts container bytes (local headers,
+// padding), so done can legitimately pass total: callers that render a
+// PERCENTAGE must clamp it to 100 instead of printing "107%" (measured on
+// C58's --compress-zip end-to-end run). Returning false cancels the run.
 using CompressionProgress = std::function<bool(uint64_t doneBytes, uint64_t totalBytes)>;
 
 inline CompressionOutcome RunCompression(const CompressionRequest& request,
@@ -1061,6 +1202,68 @@ inline CompressionOutcome RunCompression(const CompressionRequest& request,
   outcome.verifiedItems = result.verifiedItems;
   outcome.elapsedMs = result.elapsedMs;
   return outcome;
+}
+
+// One shell creation verb, end to end (C58). The result is DATA, not a dialog:
+// Main.cpp prints every line to stderr (in order) and returns exitCode, and the
+// Windows suite calls the SAME function, so the verdict it asserts is the one a
+// real command line produces. 0 == an archive was written; 1 == nothing usable
+// is on disk, with a sentence saying why.
+struct CompressVerbOutcome {
+  int exitCode = 1;
+  bool ok = false;
+  std::wstring archivePath;
+  std::vector<std::string> lines;  // stderr lines, in order
+};
+
+inline CompressVerbOutcome RunCompressVerb(const LaunchRequest& request,
+                                           const CompressionProgress& progress = {}) {
+  CompressVerbOutcome out;
+  const prism::ArchiveFormat format = CompressionFormatOf(request.mode);
+  const CompressionTarget target = PlanCompression(request.inputs, format);
+  if (!target.ok) {
+#if defined(PRISM_C58_MUTANT_CREATE_ON_FAILURE)
+    // MUTATION (CONTRACTS D3): the failure path leaves an EMPTY output file
+    // behind, the "we tried" debris the contract forbids. The suite's
+    // "nothing was produced" assertion must go red; the counter proves it fired.
+    if (!request.inputs.empty()) {
+      const std::wstring root = ParentDirectory(request.inputs.front());
+      if (!root.empty()) {
+        const std::string name = prism::DefaultArchiveFileName(
+            EntryPathOf(StemName(request.inputs.front())), format);
+        const std::wstring path = root + L"\\" + prism::win::Utf8ToWide(name);
+        HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+          ::CloseHandle(file);
+          CompressVerbMutations().emptyFileOnFailure.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+#endif
+    out.lines.push_back("compress failed: " +
+                        (target.error.empty() ? std::string("unknown reason") : target.error));
+    return out;
+  }
+  CompressionRequest job;
+  job.archivePath = target.archivePath;
+  job.sourceRoot = target.sourceRoot;
+  job.plan = target.plan;
+  const CompressionOutcome outcome = RunCompression(job, progress);
+  out.ok = outcome.ok;
+  out.exitCode = outcome.ok ? 0 : 1;
+  out.archivePath = outcome.archivePath;
+  char line[1024];
+  std::snprintf(line, sizeof(line),
+                "compress ok=%d items=%llu bytes=%llu verified=%llu ms=%lld target=%s error=%s",
+                static_cast<int>(outcome.ok),
+                static_cast<unsigned long long>(outcome.itemsWritten),
+                static_cast<unsigned long long>(outcome.bytesWritten),
+                static_cast<unsigned long long>(outcome.verifiedItems),
+                static_cast<long long>(outcome.elapsedMs),
+                prism::win::WideToUtf8(outcome.archivePath).c_str(), outcome.error.c_str());
+  out.lines.push_back(line);
+  return out;
 }
 
 // What the compress dialog shows as its input: the entries the window currently

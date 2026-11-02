@@ -276,21 +276,22 @@ struct AppContext {
   prism::app::ExtractionPlan plan;
 };
 
-// A context-menu verb we do not implement yet must SAY so. Falling back to
-// "open the gallery" would look like the command worked (and, for --compress-*,
-// would silently do nothing to the user's archive) -- see TODO(C9) in
-// AppWiring.hpp.
-void ReportRefusedVerb(const prism::app::LaunchRequest& request, const Tr& tr) {
-  std::wstring text =
-      tr.Or("error.verb.unsupported",
-            L"\u672C\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u8FD9\u4E2A\u547D\u4EE4\uFF1A") +
-      L"\n\n  ";
-  text += request.unknownText.empty() ? std::wstring(L"(unknown)") : request.unknownText;
-  text += L"\n\n" +
-          tr.Or("error.verb.supported",
-                L"\u5DF2\u652F\u6301\uFF1A--smart-extract / --extract-here / --extract-sub "
-                L"/ --test / --compress-here");
-  MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONWARNING);
+// A context-menu verb we do not implement must SAY so on stderr -- and must not
+// open a modal box. Explorer and scripts can invoke the exe for a whole
+// selection; a MessageBox on an unsupported flag hangs the caller (measured:
+// the process was still alive after 12 s with the box up), which is worse than
+// the refusal. The exit code (2) is the verdict, the line below is the reason.
+// The window path (double-click / no arguments) can never carry an unknown
+// flag, so no interactive fallback is lost here.
+void ReportRefusedVerb(const prism::app::LaunchRequest& request) {
+  const std::string flag =
+      request.unknownText.empty() ? std::string("(unknown)")
+                                  : prism::win::WideToUtf8(request.unknownText);
+  std::fprintf(stderr,
+               "verb refused: unsupported flag %s; supported: --smart-extract "
+               "--extract-here --extract-sub --test --compress-here --compress-7z "
+               "--compress-zip --smart-extract-each\n",
+               flag.c_str());
 }
 
 // One line of machine-readable telemetry. A GUI app has no console, so this is
@@ -346,27 +347,25 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
   return 0;
 }
 
-// --compress-here <files...> (card C27): archive creation without a window.
+// --compress-here / --compress-7z / --compress-zip <files...> (C27 + C58):
+// archive creation without a window. The verb decides the FORMAT
+// (CompressionFormatOf); everything else -- plan, write, verify -- is the one
+// path C9 shipped.
 //
 // Exit code is the verdict and stderr is the machine-readable detail -- the
-// shape the other verbs already use. NO message box here on purpose: this verb
-// exists for automation, and a dialog would hang a CI step that nobody is
-// watching.
-int RunCompressHere(const prism::app::LaunchRequest& request) {
-  const prism::app::CompressionTarget target =
-      prism::app::PlanCompression(request.inputs, prism::ArchiveFormat::SevenZip);
-  if (!target.ok) {
-    std::fprintf(stderr, "compress failed: %s\n", target.error.c_str());
-    return 1;
-  }
-  prism::app::CompressionRequest job;
-  job.archivePath = target.archivePath;
-  job.sourceRoot = target.sourceRoot;
-  job.plan = target.plan;
+// shape the other verbs already use. NO message box here on purpose: Explorer
+// may invoke these verbs for a whole multi-selection, and a dialog per file
+// would hang a batch that nobody is watching.
+int RunCompressLaunch(const prism::app::LaunchRequest& request) {
   uint64_t lastPercent = 1000;
-  const prism::app::CompressionOutcome outcome = prism::app::RunCompression(
-      job, [&lastPercent](uint64_t done, uint64_t total) {
-        const uint64_t percent = total == 0 ? 0 : (done * 100) / total;
+  const prism::app::CompressVerbOutcome outcome = prism::app::RunCompressVerb(
+      request, [&lastPercent](uint64_t done, uint64_t total) {
+        // The engine's completed counter can pass the INPUT total for zip (it
+        // counts container bytes: headers, padding). A command line that prints
+        // "compress 107%" looks broken, so the rendered percentage is clamped;
+        // the raw byte pair stays visible for diagnosis.
+        const uint64_t raw = total == 0 ? 0 : (done * 100) / total;
+        const uint64_t percent = raw > 100 ? 100 : raw;
         if (percent != lastPercent) {
           lastPercent = percent;
           std::fprintf(stderr, "compress %llu%% (%llu/%llu bytes)\n",
@@ -376,15 +375,8 @@ int RunCompressHere(const prism::app::LaunchRequest& request) {
         }
         return true;
       });
-  std::fprintf(stderr,
-               "compress ok=%d items=%llu bytes=%llu verified=%llu ms=%lld target=%s error=%s\n",
-               static_cast<int>(outcome.ok),
-               static_cast<unsigned long long>(outcome.itemsWritten),
-               static_cast<unsigned long long>(outcome.bytesWritten),
-               static_cast<unsigned long long>(outcome.verifiedItems),
-               static_cast<long long>(outcome.elapsedMs),
-               prism::win::WideToUtf8(outcome.archivePath).c_str(), outcome.error.c_str());
-  return outcome.ok ? 0 : 1;
+  for (const std::string& line : outcome.lines) std::fprintf(stderr, "%s\n", line.c_str());
+  return outcome.exitCode;
 }
 
 // ---------------------------------------------------------------------------
@@ -537,14 +529,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   }
 
   if (launch.unknownFlag) {
-    ReportRefusedVerb(launch, tr);
+    // C58: stderr + exit 2, NEVER a modal box (a batch caller must not hang).
+    ReportRefusedVerb(launch);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 2;
   }
-  // C9: archive creation has no archive to open -- dispatch it before the
-  // open/picker logic, and give it the same 7z.dll resolution as everything else.
-  if (launch.mode == prism::app::LaunchMode::kCompressHere) {
-    const int code = RunCompressHere(launch);
+  // C9 + C58: archive creation has no archive to open -- dispatch it before the
+  // open/picker logic. The three creation verbs share this one door; the format
+  // is the verb's (--compress-here/7z -> .7z, --compress-zip -> .zip).
+  if (prism::app::Compresses(launch.mode)) {
+    const int code = RunCompressLaunch(launch);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return code;
   }
@@ -588,6 +582,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     MessageBoxW(nullptr, message.c_str(), L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
+  }
+
+  // C58: --smart-extract-each <archives...>. Each archive is opened, planned and
+  // extracted into its OWN folder (the --extract-sub plan), with one handler per
+  // archive. Dispatched BEFORE the session logic: a batch verb is not a window
+  // session, and it must not rewrite the user's restore list. The verdict is
+  // stderr + exit code, never a dialog.
+  if (launch.mode == prism::app::LaunchMode::kSmartExtractEach) {
+    const prism::app::ExtractEachOutcome outcome =
+        prism::app::RunExtractEach(launch.archives, app->library);
+    for (const std::string& line : outcome.lines) std::fprintf(stderr, "%s\n", line.c_str());
+    if (SUCCEEDED(coInit)) CoUninitialize();
+    return outcome.exitCode;
   }
 
   // ---- C46: arguments win; otherwise the last session decides --------------

@@ -104,6 +104,7 @@
 #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
+#include "../PrismWin/EditConfirmDialog.hpp"  // C54: the edit confirmation (programmatic)
 #include "../PrismWin/GalleryWindow.hpp"
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
@@ -828,6 +829,26 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   window.SetMenuLabels(fileMenuTitle, tr("menu.compress.to.7z"),
                        tr.Or("action.exit", language.tag == L"zh-CN" ? L"\u9000\u51FA"
                                                                     : L"E&xit"));
+  // C54: the Edit menu. The labels are the app's words (the window only paints
+  // them), and the same three actions are bound to Delete / F2 / Ctrl+Shift+N in
+  // PrismCore's key table.
+  window.SetEditMenuLabels(
+      tr.Or("menu.edit", language.tag == L"zh-CN" ? L"\u7F16\u8F91" : L"&Edit"),
+      tr.Or("menu.edit.delete", language.tag == L"zh-CN" ? L"\u5220\u9664" : L"&Delete"),
+      tr.Or("menu.edit.rename", language.tag == L"zh-CN" ? L"\u91CD\u547D\u540D" : L"Rena&me"),
+      tr.Or("menu.edit.newFolder",
+            language.tag == L"zh-CN" ? L"\u65B0\u5EFA\u6587\u4EF6\u5939" : L"New &Folder"));
+  // Requirement 3: the entries are disabled BEFORE the user confirms something
+  // that can only fail, and the reason is C51's own diagnosis (read-only /
+  // multi-volume / held exclusively / wrong container).
+  {
+    const prism::app::ArchiveEditGate gate = prism::app::ProbeEditGate(app->archivePath);
+    window.SetEditAvailability(gate.enabled, gate.reason);
+    if (!gate.enabled) {
+      logger.Emit(prism::log::Level::kInfo, "edit",
+                  "archive editing disabled", {{"reason", prism::win::WideToUtf8(gate.reason)}});
+    }
+  }
 
   // The window's navigator owns the current folder from here on: the catalog
   // goes in once, and every later question ("which rows?", "which crumbs?",
@@ -941,6 +962,35 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::unique_ptr<prism::win::cd::CompressDialog> compressDialog;
   std::thread compressWorker;
   std::atomic<bool> compressBusy{false};
+  // ---- C54: editing an existing archive (C51's engine, this card's UI) ----
+  // One dialog and one worker, like the compressor above. The window's gate
+  // (BeginOperation/EndOperation) is what makes the edit exclusive: while it is
+  // held, a double-click, Quick Look or a second edit is REFUSED with a reason.
+  std::unique_ptr<prism::win::editui::EditConfirmDialog> editDialog;
+  std::thread editWorker;
+  const std::wstring editHeadline =
+      tr.Or("progress.edit", language.tag == L"zh-CN" ? L"\u7F16\u8F91\u5F52\u6863"
+                                                     : L"Editing archive");
+  const std::wstring editDonePrefix =
+      tr.Or("progress.edited", language.tag == L"zh-CN" ? L"\u5DF2\u7F16\u8F91\u5F52\u6863"
+                                                       : L"Archive edited");
+  const std::wstring editFailPrefix =
+      tr.Or("progress.editFailed",
+            language.tag == L"zh-CN" ? L"\u7F16\u8F91\u5931\u8D25" : L"Edit failed");
+  const std::wstring editCancelledText =
+      tr.Or("progress.editCancelled",
+            language.tag == L"zh-CN" ? L"\u5DF2\u53D6\u6D88\u7F16\u8F91\uFF0C\u5F52"
+                                       L"\u6863\u672A\u6539\u52A8"
+                                     : L"Edit cancelled, the archive was not changed");
+  const std::wstring editBlockedText =
+      tr.Or("progress.editBlocked",
+            language.tag == L"zh-CN" ? L"\u6B63\u5728\u89E3\u538B\u6216\u626B\u63CF"
+                                       L"\uFF0C\u7A0D\u540E\u518D\u7F16\u8F91"
+                                     : L"Extract or scan is running; edit later");
+  const std::wstring editNoNameText =
+      tr.Or("error.edit.noName",
+            language.tag == L"zh-CN" ? L"\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A"
+                                     : L"A name is required");
   const std::wstring compressHeadline = tr("menu.compress.to.7z");
   const std::wstring compressBusyText =
       tr.Or("progress.compress.busy",
@@ -1078,6 +1128,142 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
   });
 
+  // ---- C54: the Edit menu / Delete / F2 / Ctrl+Shift+N ---------------------
+  //
+  // The window turns its selection into an INTENT (archive-relative path, kind);
+  // this handler owns everything else: C51's plan for the sentence, the real
+  // confirmation dialog, the exclusive-operation gate, one worker that calls
+  // ArchiveEditor::ApplyEdits, the HUD, and the refresh through C34's switch.
+  //
+  // THREE CONTRACTS ARE KEPT HERE, IN THIS ORDER:
+  //   1. no confirmation -> no write (the dialog's Cancel is the app's answer
+  //      through EditMayProceed; PRISM_C54_MUTANT_CANCEL_STILL_WRITES removes it);
+  //   2. no concurrent operation -> the pool is closed before the rewrite
+  //      (CONTRACTS D30 fact 3: ReplaceFileW fails while any reader holds the
+  //      file), and the gate refuses a second edit/extract/preview while this
+  //      one is in flight;
+  //   3. a failed rewrite leaves the original byte-for-byte untouched -- C51's
+  //      executor guarantees it, and the suite asserts the file's bytes.
+  window.SetEditHandler([&window, app, instance, archivePassword, &editDialog, &editWorker,
+                         editHeadline, editDonePrefix, editFailPrefix, editCancelledText,
+                         editBlockedText, editNoNameText](
+                            const prism::win::editui::EditIntent& intent) {
+    namespace editui = prism::win::editui;
+    // The dialog AND the rewrite are one operation: while it is up, no preview,
+    // no extraction and no second edit may start (requirement 4).
+    if (!window.BeginOperation(GalleryWindow::OperationKind::Edit, L"编辑归档")) return;
+
+    // The plan quoted by the dialog. Rename/new-folder start with the current
+    // name; the user edits it in the dialog, and the accepted text is re-planned
+    // and re-validated before anything touches the file.
+    std::vector<prism::EditOp> ops = editui::DefaultEditOps(intent);
+    if (ops.empty()) {
+      window.EndOperation();
+      window.SetStatus(editNoNameText);
+      return;
+    }
+    const prism::EditPlan preview =
+        prism::app::PreviewArchiveEdit(app->archivePath, app->catalog, ops);
+    if (!preview.ok) {
+      window.EndOperation();
+      window.SetStatus(L"编辑被拒绝：" + prism::win::Utf8ToWide(preview.error));
+      return;
+    }
+    const std::wstring archiveName = FileNameWide(app->archivePath);
+    editui::EditDialogModel model =
+        editui::BuildEditDialogModel(intent.action, intent.path, preview, archiveName);
+    editDialog = std::make_unique<editui::EditConfirmDialog>();
+    if (!editDialog->Create(instance, model.title)) {
+      editDialog.reset();
+      window.EndOperation();
+      window.SetStatus(editFailPrefix + L"：无法创建确认对话框");
+      return;
+    }
+    editDialog->SetModel(model);
+    editDialog->SetResultHandler(
+        [&window, app, intent, archivePassword, &editWorker, editHeadline,
+         editDonePrefix, editFailPrefix, editCancelledText, editBlockedText,
+         editNoNameText](const editui::EditDialogResult& result) {
+          // (1) THE CANCEL RULE. Cancel means the archive is not touched; the
+          // negative control turns this into "write anyway".
+          if (!editui::EditMayProceed(result)) {
+            window.EndOperation();
+            window.SetStatus(editCancelledText);
+            return;
+          }
+          std::vector<prism::EditOp> acceptedOps = editui::BuildEditOps(intent, result.input);
+          if (acceptedOps.empty()) {
+            window.EndOperation();
+            window.SetStatus(editNoNameText);
+            return;
+          }
+          const prism::EditPlan plan = prism::app::PreviewArchiveEdit(
+              app->archivePath, app->catalog, acceptedOps);
+          if (!plan.ok) {
+            window.EndOperation();
+            window.SetStatus(L"编辑被拒绝：" + prism::win::Utf8ToWide(plan.error));
+            return;
+          }
+          // (2) No reader may be live when the file is replaced. The window's
+          // gate already refuses a NEW operation; these are the operations that
+          // started before the user asked to edit.
+          if (app->extracting.load() || app->extractReader.load() != nullptr ||
+              app->sweepReader.load() != nullptr) {
+            window.EndOperation();
+            window.SetStatus(editBlockedText);
+            return;
+          }
+          // CONTRACTS D30 fact 3: a live ReaderPool holds the original with
+          // FILE_SHARE_READ, and ReplaceFileW cannot remove a handle-held file.
+          // Closing the pool is not enough -- the pool OBJECT owns the readers,
+          // so it has to be destroyed before the worker starts.
+          if (app->ops) {
+            app->ops->Close();
+            app->ops.reset();
+          }
+          if (editWorker.joinable()) editWorker.join();
+          const uint64_t total = plan.estimatedWriteBytes;
+          editWorker = std::thread([app, &window, acceptedOps, total, archivePassword,
+                                    editHeadline, editDonePrefix, editFailPrefix]() {
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            window.PostHudStart(prism::win::WideToUtf8(editHeadline));
+            prism::app::ArchiveEditRequest request;
+            request.archivePath = app->archivePath;
+            request.password = archivePassword;
+            request.ops = acceptedOps;
+            request.progress = [&window, total](uint64_t done) {
+              window.PostProgress(done, total);
+              return true;
+            };
+            const prism::app::ArchiveEditOutcome outcome = prism::app::RunArchiveEdit(request);
+            std::wstring status;
+            if (outcome.ok) {
+              status = editDonePrefix + L"：" +
+                       std::to_wstring(outcome.entriesAffected) + L" 个条目受影响，写入 " +
+                       std::to_wstring(outcome.bytesWritten) + L" 字节";
+            } else {
+              status = editFailPrefix + L"\n" + prism::win::Utf8ToWide(outcome.error) +
+                       L"\n原归档未改动（字节不变）";
+            }
+            std::fprintf(stderr,
+                         "edit ok=%d entries=%llu write=%llu copied=%llu items=%llu ms=%lld\n",
+                         static_cast<int>(outcome.ok),
+                         static_cast<unsigned long long>(outcome.entriesAffected),
+                         static_cast<unsigned long long>(outcome.bytesWritten),
+                         static_cast<unsigned long long>(outcome.estimatedWriteBytes),
+                         static_cast<unsigned long long>(outcome.itemsWritten),
+                         static_cast<long long>(outcome.elapsedMs));
+            // The pool was destroyed for the replace; C34's switch rebuilds it
+            // and re-reads the catalogue. Post the refresh FIRST so the edit
+            // result is the status line the user ends up reading.
+            window.PostArchiveChanged(app->archivePath);
+            window.PostOperationFinished(status);
+            CoUninitialize();
+          });
+        });
+    editDialog->Show();
+  });
+
   // A finished re-pack lands in a NEW file, so "refresh" means "switch": replace
   // the catalogue, the rows and the handler pool. C11's pool is what makes that
   // safe at all -- the app only has to guarantee that no lease is live (the sweep
@@ -1117,6 +1303,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     window.SetThumbs(nullptr);
     window.SetItems(&app->items);
     window.SetRootLabel(FileNameWide(app->archivePath));
+    // C54: the file may have changed on disk (an edit wrote a new container),
+    // so the read-only/lock/volume diagnosis is re-run for the SAME path.
+    {
+      const prism::app::ArchiveEditGate gate = prism::app::ProbeEditGate(app->archivePath);
+      window.SetEditAvailability(gate.enabled, gate.reason);
+    }
     if (window.Hwnd() != nullptr) {
       const std::wstring title = L"PrismArchive -- " + FileNameWide(app->archivePath);
       SetWindowTextW(window.Hwnd(), title.c_str());
@@ -1228,7 +1420,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   app->shuttingDown.store(true);
   if (auto* reader = app->sweepReader.load()) reader->RequestBatchAbort();
   if (auto* reader = app->extractReader.load()) reader->RequestBatchAbort();
-  app->ops->Close();  // no new work; queued tasks are cancelled
+  // C54: an edit in flight destroyed the pool before ReplaceFileW; a close on
+  // the null pointer would crash exactly the shutdown the edit was waiting on.
+  if (app->ops) app->ops->Close();  // no new work; queued tasks are cancelled
 
   // Join EVERY worker before "window" leaves scope: it is a stack object and the
   // workers talk to it. Joining is what makes the posting contract sound -- a
@@ -1237,6 +1431,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   worker.join();
   if (extractWorker.joinable()) extractWorker.join();
   if (compressWorker.joinable()) compressWorker.join();
+  if (editWorker.joinable()) editWorker.join();
   // The dialog outlives Run() only when the user closed the main window while it
   // was open; its destructor destroys the HWND, which is safe after the loop.
   compressDialog.reset();

@@ -65,6 +65,7 @@
 
 #include <memory>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <cstdio>
 #include <mutex>
@@ -90,6 +91,7 @@
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
+#include "EditConfirmDialog.hpp"            // C54: edit intents, confirmation model, gate
 #include "GalleryRenderer.hpp"
 #include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
@@ -365,6 +367,12 @@ class GalleryWindow {
   // a member field would look translated in a test and stay English on screen.
   static constexpr UINT kMenuCompress = 0xE001;  // "compress..." (C9 + C18)
   static constexpr UINT kMenuExit = 0xE002;
+  // C54: the Edit menu. The same three actions are also keyboard reachable
+  // (Delete / F2 / Ctrl+Shift+N); the menu exists so a user who does not know
+  // the chords can still find them.
+  static constexpr UINT kMenuEditDelete = 0xE003;
+  static constexpr UINT kMenuEditRename = 0xE004;
+  static constexpr UINT kMenuEditNewFolder = 0xE005;
 
   void SetMenuLabels(std::wstring fileTitle, std::wstring compressText, std::wstring exitText) {
     fileMenuLabel_ = std::move(fileTitle);
@@ -372,6 +380,93 @@ class GalleryWindow {
     exitMenuLabel_ = std::move(exitText);
     RebuildMenu();
   }
+
+  // The Edit menu's words are the app's, like the File menu's (see above).
+  void SetEditMenuLabels(std::wstring editTitle, std::wstring deleteText,
+                         std::wstring renameText, std::wstring newFolderText) {
+    editMenuLabel_ = std::move(editTitle);
+    editDeleteLabel_ = std::move(deleteText);
+    editRenameLabel_ = std::move(renameText);
+    editNewFolderLabel_ = std::move(newFolderText);
+    RebuildMenu();
+  }
+
+  // Requirement 3: a read-only archive, a multi-volume set or a file another
+  // process holds exclusively DISABLES the entries before the user confirms a
+  // rewrite that can only fail, and the reason is readable (the app builds it
+  // from C51's refusal, see prism::app::ProbeEditGate).
+  void SetEditAvailability(bool enabled, std::wstring reason = {}) {
+    editEnabled_ = enabled;
+    editDisabledReason_ = std::move(reason);
+    RebuildMenu();
+    SyncActionContext();
+    Invalidate();
+  }
+  bool EditEnabled() const { return editEnabled_; }
+  const std::wstring& EditDisabledReason() const { return editDisabledReason_; }
+  bool MenuItemEnabled(UINT command) const {
+    HMENU bar = host_.hwnd ? GetMenu(host_.hwnd) : nullptr;
+    if (!bar) return false;
+    const int count = GetMenuItemCount(bar);
+    for (int i = 0; i < count; ++i) {
+      HMENU popup = GetSubMenu(bar, i);
+      if (!popup) continue;
+      const UINT state = GetMenuState(popup, command, MF_BYCOMMAND);
+      if (state != static_cast<UINT>(-1)) return (state & MF_GRAYED) == 0;
+    }
+    return false;
+  }
+
+  // ---------- card C54: editing entry points + the single-operation gate -----
+  // The window owns exactly two things here: the INTENT it derives from its own
+  // selection (which archive-relative path, which folder) and the GATE that
+  // makes one operation exclusive (requirement 4). What an edit costs, whether
+  // it is legal, and whether the user confirmed it stay with the plan/dialog/app.
+  void SetEditHandler(
+      std::function<void(const prism::win::editui::EditIntent&)> handler) {
+    onEdit_ = std::move(handler);
+  }
+  const prism::win::editui::EditIntent& LastEditIntent() const { return lastEdit_; }
+
+  enum class OperationKind : std::uint8_t { None, Edit, Extract, Preview, Compress };
+
+  // Called by the app BEFORE it starts a long operation. False = another one is
+  // already running; the caller must NOT start, and this method has already set
+  // the readable refusal into the status line.
+  bool BeginOperation(OperationKind kind, std::wstring label) {
+    if (kind == OperationKind::None) return true;
+    if (!prism::win::editui::ConcurrencyGateActive()) {
+      // MUTANT: the gate does not refuse. The state is still recorded so the
+      // rest of the window behaves as it did on the clean build.
+      operationBusy_ = true;
+      operationKind_ = kind;
+      operationLabel_ = std::move(label);
+      return true;
+    }
+    if (operationBusy_) {
+      RefuseOperation(OperationName(kind));
+      return false;
+    }
+    operationBusy_ = true;
+    operationKind_ = kind;
+    operationLabel_ = std::move(label);
+    if (kind == OperationKind::Edit) quickLookClose();  // no preview during an edit
+    Invalidate();
+    return true;
+  }
+  void EndOperation() {
+    operationBusy_ = false;
+    operationKind_ = OperationKind::None;
+    operationLabel_.clear();
+    Invalidate();
+  }
+  bool OperationBusy() const { return operationBusy_; }
+  OperationKind BusyKind() const { return operationKind_; }
+  const std::wstring& OperationLabel() const { return operationLabel_; }
+  // Diagnostics the suite asserts: the refusal must be COUNTED and readable.
+  int RefusedOperationCount() const { return refusedOperations_; }
+  const std::wstring& LastOperationRefusal() const { return lastOperationRefusal_; }
+  const std::wstring& StatusText() const { return status_; }
   // WM_COMMAND -> here. The window decides nothing about what "compress" means.
   void SetMenuCommandHandler(std::function<void(UINT)> handler) {
     onMenuCommand_ = std::move(handler);
@@ -458,11 +553,22 @@ class GalleryWindow {
   // FILE, so "refresh" means "switch to it" -- the parameter is what makes that
   // possible without a second member the worker would have to touch.
   static constexpr UINT kArchiveChanged = WM_APP + 5;
+  // C54: a worker finished an exclusive operation. The UI thread releases the
+  // gate and shows the worker's one status line -- a worker must never call
+  // EndOperation itself (it is UI-thread state).
+  static constexpr UINT kOperationFinished = WM_APP + 6;
   void PostArchiveChanged(std::wstring path) {
     if (!host_.hwnd) return;
     auto* heap = new std::wstring(std::move(path));
     if (!PostMessageW(host_.hwnd, kArchiveChanged, 0, reinterpret_cast<LPARAM>(heap))) {
       delete heap;  // the window is gone; nobody will free it for us
+    }
+  }
+  void PostOperationFinished(std::wstring status) {
+    if (!host_.hwnd) return;
+    auto* heap = new std::wstring(std::move(status));
+    if (!PostMessageW(host_.hwnd, kOperationFinished, 0, reinterpret_cast<LPARAM>(heap))) {
+      delete heap;
     }
   }
   void SetArchiveChangedHandler(std::function<void(const std::wstring&)> handler) {
@@ -690,6 +796,15 @@ class GalleryWindow {
   // Enter / double-click on a row: folders drill in, files go to the app.
   bool ActivateRow(int row) {
     if (row < 0 || row >= nav_.Count()) return false;
+    // Requirement 4: a file activation starts an extraction. While an edit is
+    // running, that second operation is REFUSED with a reason instead of being
+    // allowed to race the rewrite (the app's reader pool and the editor would
+    // fight over the same file). Folder navigation stays allowed: it touches
+    // nothing on disk.
+    if (!folderItems_[static_cast<size_t>(row)].isDir &&
+        !OperationAllowed(L"\u89E3\u538B")) {  // 解压
+      return true;  // consumed and refused -- never a silent parallel run
+    }
     nav_.SetSelection(row);
     ApplySelection(nav_.Selection());
     const prism::tree::NavResult result = nav_.Enter(row);
@@ -938,6 +1053,12 @@ class GalleryWindow {
         if (onArchiveChanged_ && path) onArchiveChanged_(*path);
         return 0;
       }
+      case kOperationFinished: {
+        std::unique_ptr<std::wstring> status(reinterpret_cast<std::wstring*>(lparam));
+        EndOperation();
+        if (status) SetStatus(*status);
+        return 0;
+      }
       case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(host_.hwnd, &ps);
@@ -1034,6 +1155,20 @@ class GalleryWindow {
         // Menu items only (the gallery owns no child controls). The command id is
         // forwarded verbatim: mapping an id to an ACTION is the app's job.
         const UINT command = LOWORD(wparam);
+        // C54: the Edit menu is the window's own door (it derives the intent from
+        // its selection), so it never reaches the app's menu switch.
+        if (command == kMenuEditDelete) {
+          RequestEdit(prism::win::editui::EditAction::Delete);
+          return 0;
+        }
+        if (command == kMenuEditRename) {
+          RequestEdit(prism::win::editui::EditAction::Rename);
+          return 0;
+        }
+        if (command == kMenuEditNewFolder) {
+          RequestEdit(prism::win::editui::EditAction::NewFolder);
+          return 0;
+        }
         if (onMenuCommand_) onMenuCommand_(command);
         return 0;
       }
@@ -1222,6 +1357,7 @@ class GalleryWindow {
         return;
       case prism::keys::Command::QuickLookToggle:
         if (quickLook_ && selection_ >= 0 && selection_ < count) {
+          if (!OperationAllowed(L"\u9884\u89C8")) return;  // 预览
           quickLook_->ToggleAt(static_cast<uint32_t>(selection_));
           Invalidate();
         }
@@ -1241,13 +1377,19 @@ class GalleryWindow {
         // extraction means: it hands the CATALOG index to the app, exactly like
         // Enter on a file. Same door, same plan, one code path.
         if (selection_ >= 0 && selection_ < count && onActivate_) {
+          if (!OperationAllowed(L"\u89E3\u538B")) return;  // 解压
           onActivate_(static_cast<int>(folderItems_[static_cast<size_t>(selection_)].index));
         }
         return;
       case prism::keys::Command::NewFolder:
-        // TODO(C9): the CoW virtual folder is card C9. Say it out loud instead
-        // of silently swallowing the chord.
-        SetStatus(L"\u65B0\u5EFA\u6587\u4EF6\u5939\uFF1AC9 \u672A\u63A5\u5165");
+        // C54: Ctrl+Shift+N is a REAL archive edit now (C51's CoW engine).
+        RequestEdit(prism::win::editui::EditAction::NewFolder);
+        return;
+      case prism::keys::Command::DeleteSelected:
+        RequestEdit(prism::win::editui::EditAction::Delete);
+        return;
+      case prism::keys::Command::RenameSelected:
+        RequestEdit(prism::win::editui::EditAction::Rename);
         return;
       case prism::keys::Command::ZoomNext:
         // The ladder's arithmetic is C8's; the renderer has no tile-size input
@@ -1298,6 +1440,89 @@ class GalleryWindow {
         MoveSelection(listMode_ ? +1 : +static_cast<int>(viewport_.Columns()));
         return;
     }
+  }
+
+  // ---------- card C54: edit requests and the exclusive-operation gate ------
+  //
+  // The gate is ONE boolean because every long operation in this product touches
+  // the same archive: a reader pool decode, the solid sweep, a re-pack or a CoW
+  // rewrite. Two of them at once is not "parallelism", it is two writers on one
+  // file (or a reader holding the handle ReplaceFileW needs). The window is the
+  // only object both the UI and the workers already talk to, so it owns the flag
+  // and the readable refusal; the app owns what each operation MEANS.
+  //
+  // CONTRACTS D26/D3: the refusal is compiled out by PRISM_C54_MUTANT_ALLOW_
+  // CONCURRENT so the suite's "second operation is rejected" case can go red.
+  bool OperationAllowed(const wchar_t* action) {
+    if (!prism::win::editui::ConcurrencyGateActive()) return true;
+    if (!operationBusy_) return true;
+    RefuseOperation(action);
+    return false;
+  }
+
+  static const wchar_t* OperationName(OperationKind kind) {
+    switch (kind) {
+      case OperationKind::Edit: return L"\u7F16\u8F91";      // 编辑
+      case OperationKind::Extract: return L"\u89E3\u538B";   // 解压
+      case OperationKind::Preview: return L"\u9884\u89C8";   // 预览
+      case OperationKind::Compress: return L"\u538B\u7F29";  // 压缩
+      case OperationKind::None: break;
+    }
+    return L"\u64CD\u4F5C";  // 操作
+  }
+
+  void RefuseOperation(const wchar_t* action) {
+    ++refusedOperations_;
+    std::wstring reason = L"\u64CD\u4F5C\u88AB\u62D2\u7EDD\uFF1A";  // 操作被拒绝：
+    if (operationBusy_ && !operationLabel_.empty()) {
+      reason += operationLabel_ + L" \u6B63\u5728\u8FDB\u884C";  // 正在进行
+    }
+    reason += L"\uFF0C\u4E0D\u80FD\u540C\u65F6";  // ，不能同时
+    reason += action;
+    lastOperationRefusal_ = reason;
+    SetStatus(reason);
+  }
+
+  // Turn the selection into an archive-relative INTENT. The window never builds
+  // an EditPlan (that is C51's job) and never writes (that is the app's).
+  bool RequestEdit(prism::win::editui::EditAction action) {
+    using prism::win::editui::EditAction;
+    if (!archiveOpen_ || catalog_ == nullptr) {
+      SetStatus(L"\u6CA1\u6709\u6253\u5F00\u7684\u5F52\u6863");  // 没有打开的归档
+      return false;
+    }
+    if (!OperationAllowed(L"\u7F16\u8F91")) return false;  // 编辑 (a second edit)
+    if (!editEnabled_) {
+      SetStatus(editDisabledReason_.empty()
+                    ? std::wstring(L"\u5F53\u524D\u5F52\u6863\u4E0D\u652F\u6301\u7F16"
+                                   L"\u8F91")  // 当前归档不支持编辑
+                    : editDisabledReason_);
+      return false;
+    }
+    prism::win::editui::EditIntent intent;
+    intent.action = action;
+    if (action == EditAction::NewFolder) {
+      intent.directory = nav_.Folder();
+      intent.leaf = "\u65B0\u5EFA\u6587\u4EF6\u5939";
+      intent.path = intent.directory.empty() ? intent.leaf
+                                             : intent.directory + "/" + intent.leaf;
+    } else {
+      if (selection_ < 0 || selection_ >= ItemCount()) {
+        SetStatus(L"\u8BF7\u5148\u9009\u4E2D\u4E00\u4E2A\u6761\u76EE");  // 请先选中一个条目
+        return false;
+      }
+      const prism::ArchiveItem& item = folderItems_[static_cast<size_t>(selection_)];
+      intent.path = item.path;
+      intent.directory = FolderOf(item.path);
+      intent.leaf = std::string(prism::FileNameOf(item.path));
+      intent.isDir = item.isDir;
+      // Deleting a folder means deleting its subtree ON PURPOSE; C51 refuses it
+      // without recurse, and the confirmation dialog names the entry count.
+      intent.recurse = item.isDir;
+    }
+    lastEdit_ = intent;
+    if (onEdit_) onEdit_(intent);
+    return true;
   }
 
   // Grid mode steps in folder space (one row per tile). List mode steps in VIEW
@@ -1422,15 +1647,28 @@ class GalleryWindow {
     if (!host_.hwnd) return;  // Create() installs it once the HWND exists
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
-    if (!bar || !file) {
+    HMENU edit = CreatePopupMenu();
+    if (!bar || !file || !edit) {
       if (bar) DestroyMenu(bar);
       if (file) DestroyMenu(file);
+      if (edit) DestroyMenu(edit);
       return;
     }
     AppendMenuW(file, MF_STRING, kMenuCompress, compressMenuLabel_.c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kMenuExit, exitMenuLabel_.c_str());
+    // C54's Edit menu. A disabled entry is GREY, and RequestEdit still answers
+    // with the readable reason if a chord reaches it anyway.
+    AppendMenuW(edit, MF_STRING, kMenuEditDelete, editDeleteLabel_.c_str());
+    AppendMenuW(edit, MF_STRING, kMenuEditRename, editRenameLabel_.c_str());
+    AppendMenuW(edit, MF_STRING, kMenuEditNewFolder, editNewFolderLabel_.c_str());
+    if (!editEnabled_) {
+      EnableMenuItem(edit, kMenuEditDelete, MF_BYCOMMAND | MF_GRAYED);
+      EnableMenuItem(edit, kMenuEditRename, MF_BYCOMMAND | MF_GRAYED);
+      EnableMenuItem(edit, kMenuEditNewFolder, MF_BYCOMMAND | MF_GRAYED);
+    }
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileMenuLabel_.c_str());
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), editMenuLabel_.c_str());
     HMENU previous = GetMenu(host_.hwnd);
     if (!SetMenu(host_.hwnd, bar)) {
       DestroyMenu(bar);
@@ -2145,6 +2383,23 @@ class GalleryWindow {
   std::wstring fileMenuLabel_ = L"&File";
   std::wstring compressMenuLabel_ = L"&Compress...";
   std::wstring exitMenuLabel_ = L"E&xit";
+  // C54: the Edit menu starts DISABLED and English-defaulted. An app that never
+  // calls SetEditAvailability must not offer a delete that can only fail; the
+  // window created by a test opts in explicitly.
+  std::wstring editMenuLabel_ = L"&Edit";
+  std::wstring editDeleteLabel_ = L"&Delete";
+  std::wstring editRenameLabel_ = L"Rena&me";
+  std::wstring editNewFolderLabel_ = L"New &Folder";
+  bool editEnabled_ = false;
+  std::wstring editDisabledReason_;
+  std::function<void(const prism::win::editui::EditIntent&)> onEdit_;
+  prism::win::editui::EditIntent lastEdit_;
+  // C54: one operation at a time (see OperationAllowed).
+  bool operationBusy_ = false;
+  OperationKind operationKind_ = OperationKind::None;
+  std::wstring operationLabel_;
+  int refusedOperations_ = 0;
+  std::wstring lastOperationRefusal_;
   std::function<void(UINT)> onMenuCommand_;
   // The app's persisted column geometry; the renderer paints it verbatim.
   prism::list::ColumnLayout listColumns_;

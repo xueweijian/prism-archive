@@ -33,6 +33,10 @@ namespace prism::keys {
 // WM_KEYDOWN's wParam through unchanged, and a test asserts the agreement).
 inline constexpr uint32_t kKeyBack = 0x08;
 inline constexpr uint32_t kKeyReturn = 0x0D;
+// C54: editing keys. VK_DELETE = 0x2E, VK_F2 = 0x71; the window passes WM_KEYDOWN's
+// wParam straight through, so these values are the Win32 contract, not a guess.
+inline constexpr uint32_t kKeyDelete = 0x2E;
+inline constexpr uint32_t kKeyF2 = 0x71;
 inline constexpr uint32_t kKeyEscape = 0x1B;
 inline constexpr uint32_t kKeySpace = 0x20;
 inline constexpr uint32_t kKeyEnd = 0x23;
@@ -71,6 +75,11 @@ enum class Command : uint8_t {
   SmartExtract,
   // 9.1 row 5: Ctrl+Shift+N -> virtual folder in the archive (CoW transaction).
   NewFolder,
+  // C54: editing an EXISTING archive. Delete removes the selection, F2 renames
+  // it. The dialogs and the engine live above this table; the table only says
+  // which key means which edit.
+  DeleteSelected,
+  RenameSelected,
   // 9.1 row 6: Alt+Left/Right -> history back/forward.
   HistoryBack,
   HistoryForward,
@@ -97,6 +106,8 @@ inline std::ostream& operator<<(std::ostream& os, Command command) {
     case Command::ClosePalette: return os << "ClosePalette";
     case Command::SmartExtract: return os << "SmartExtract";
     case Command::NewFolder: return os << "NewFolder";
+    case Command::DeleteSelected: return os << "DeleteSelected";
+    case Command::RenameSelected: return os << "RenameSelected";
     case Command::HistoryBack: return os << "HistoryBack";
     case Command::HistoryForward: return os << "HistoryForward";
     case Command::ToggleGrid: return os << "ToggleGrid";
@@ -178,6 +189,8 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
   switch (key) {
     case kKeySpace: return Command::QuickLookToggle;  // 9.1 row 1
     case kKeyReturn: return Command::ActivateSelection;
+    case kKeyDelete: return Command::DeleteSelected;  // C54: delete the selection
+    case kKeyF2: return Command::RenameSelected;      // C54: rename the selection
     case kKeyBack: return Command::GoUp;
     case kKeyHome: return Command::SelectFirst;
     case kKeyEnd: return Command::SelectLast;

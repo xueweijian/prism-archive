@@ -51,6 +51,9 @@
 #include "Log.hpp"
 
 #if defined(PRISM_C57_MUTANT_NO_REDACTION)
+// C57 MUTANT ACTIVE: no_redaction -- Path() and FileName() hand the raw string
+// through, so "no full path in any line" MUST go red. The counter below is the
+// D3 predicate the suite arms its verdict with.
 #define PRISM_C57_REDACTION_MUTANT 1
 #endif
 
@@ -232,6 +235,9 @@ class Redactor {
   // A value that IS a path: "C:\Users\alice\AppData\...\7z.dll" -> "C:\...\7z.dll".
   std::string Path(std::string_view raw) const {
     const std::string cleaned = StripControl(raw);
+    // An empty value has no path to collapse: hand "" back so the writer prints
+    // "unknown" (D1) instead of a lone ellipsis, which would read like a path.
+    if (cleaned.empty()) return std::string();
 #ifdef PRISM_C57_REDACTION_MUTANT
     // MUTANT (CONTRACTS D3): the path survives verbatim.
     static_cast<void>(RedactionMutantCount()++);

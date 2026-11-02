@@ -1,0 +1,37 @@
+// about_version_fixture.rc -- a VERSIONINFO that is deliberately NOT this
+// project's version (card C57).
+//
+// The About dialog must READ its version from a PE resource (Src/App/PrismArchive.rc
+// in the shipped build). A build that hardcodes the string "0.1.0.0" would still
+// look right in a screenshot, so the suite points the dialog at THIS executable:
+// its VERSIONINFO says 9.8.7.6, and the report in the text control must say so
+// too. Nothing else lives in this file -- no icon, no strings, no side effects.
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 9,8,7,6
+ PRODUCTVERSION 9,8,7,6
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "PrismArchive contributors"
+            VALUE "FileDescription", "C57 version fixture (not the product)"
+            VALUE "FileVersion", "9.8.7.6"
+            VALUE "InternalName", "about_version_fixture"
+            VALUE "OriginalFilename", "win_about_version_fixture.exe"
+            VALUE "ProductName", "PrismArchive version fixture"
+            VALUE "ProductVersion", "9.8.7.6"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

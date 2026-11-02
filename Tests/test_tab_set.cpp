@@ -135,6 +135,19 @@ PRISM_TEST("tabs.reopening_an_open_archive_activates_it_instead_of_duplicating")
   PRISM_CHECK_EQ(set.size(), std::size_t{2});        // still two tabs, not three
   PRISM_CHECK_EQ(set.activeIndex(), 0);
   PRISM_CHECK_EQ(set.active()->path, std::string("C:/a.7z"));
+
+  // The de-duplication branch runs BEFORE the existence check: an archive that
+  // is already on the strip is FOCUSED, not re-opened, so a file that vanished
+  // behind an open tab cannot turn "open" into a refusal that leaves the stale
+  // tab unreachable. (Pinned, not accidental -- the order is the decision.)
+  tabs::OpenRequest vanished;
+  vanished.path = "C:/a.7z";
+  vanished.exists = false;
+  const tabs::OpenOutcome focused = set.Open(vanished);
+  PRISM_CHECK_EQ(focused.verdict, tabs::TabVerdict::kOk);
+  PRISM_CHECK(focused.activatedExisting);
+  PRISM_CHECK_EQ(set.size(), std::size_t{2});
+  PRISM_CHECK_EQ(set.activeIndex(), 0);
 }
 
 PRISM_TEST("tabs.identity_is_case_and_separator_insensitive") {
@@ -591,6 +604,23 @@ PRISM_TEST("tabs.restore_clips_an_over_long_session_and_reports_the_clip") {
   PRISM_CHECK_EQ(emptyReport.restored, std::size_t{0});
   PRISM_CHECK_EQ(none.ToSession().active, -1);
   PRISM_CHECK_EQ(none.ToSession().entries.size(), std::size_t{0});
+}
+
+PRISM_TEST("tabs.clear_returns_to_the_empty_state") {
+  tabs::TabSet set = ThreeTabs(1);
+  PRISM_CHECK_EQ(set.size(), std::size_t{3});
+  set.Clear();
+  PRISM_CHECK(set.empty());
+  PRISM_CHECK_EQ(set.size(), std::size_t{0});
+  PRISM_CHECK_EQ(set.activeIndex(), -1);
+  PRISM_CHECK(set.active() == nullptr);
+  PRISM_CHECK(set.MruPaths().empty());
+  PRISM_CHECK_EQ(set.ToSession().active, -1);
+  PRISM_CHECK_EQ(set.IndexOf("C:/a.7z"), -1);
+  // ... and the set is usable again, with a fresh view binding.
+  const tabs::OpenOutcome reopened = set.Open("C:/a.7z");
+  PRISM_CHECK(reopened.created);
+  PRISM_CHECK_EQ(set.activeIndex(), 0);
 }
 
 int main(int argc, char** argv) {

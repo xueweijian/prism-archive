@@ -658,6 +658,11 @@ inline const std::vector<std::string>& RequiredKeys() {
       "menu.smart.extract.each.to.own.folder",
       "menu.compress.to.7z",
       "menu.compress.to.zip",
+      // C54: the archive-edit menu (Delete / Rename / New folder).
+      "menu.edit",
+      "menu.edit.delete",
+      "menu.edit.rename",
+      "menu.edit.newFolder",
       // Sidebar headings and the empty state.
       "sidebar.section.favorites",
       "sidebar.section.recent",
@@ -700,6 +705,8 @@ inline const std::vector<std::string>& RequiredKeys() {
       "error.missingPath",
       "error.verb.unsupported",
       "error.verb.supported",
+      // C54: an edit whose name field was left empty.
+      "error.edit.noName",
       // SKIP / progress prompts.
       "skip.file",
       "skip.summary",
@@ -711,6 +718,12 @@ inline const std::vector<std::string>& RequiredKeys() {
       "progress.compressed",
       "progress.compressFailed",
       "progress.compress.busy",
+      // C54: the edit worker's HUD/status lines.
+      "progress.edit",
+      "progress.edited",
+      "progress.editFailed",
+      "progress.editCancelled",
+      "progress.editBlocked",
       // Status line: a finished re-pack that cannot refresh yet (C27 wiring).
       "status.refreshDeferred",
   };

@@ -11,6 +11,10 @@
     "menu.smart.extract.each.to.own.folder": "智能解压（各自解压到独立文件夹）",
     "menu.compress.to.7z": "压缩为 .7z 归档",
     "menu.compress.to.zip": "压缩为 .zip 归档",
+    "menu.edit": "编辑",
+    "menu.edit.delete": "删除",
+    "menu.edit.rename": "重命名",
+    "menu.edit.newFolder": "新建文件夹",
     "sidebar.section.favorites": "收藏",
     "sidebar.section.recent": "最近",
     "sidebar.section.tree": "归档目录树",
@@ -40,6 +44,7 @@
     "error.disk.full": "磁盘空间不足，无法解压 {name}",
     "error.access.denied": "拒绝访问：{path}",
     "error.engine.noReason": "（引擎未报告原因）",
+    "error.edit.noName": "名称不能为空",
     "error.verify.failed": "校验失败：",
     "error.missingPath": "这条命令缺少归档路径。",
     "error.verb.unsupported": "本版本还不支持这个命令：",
@@ -52,6 +57,11 @@
     "progress.failed": "解压失败",
     "progress.compressed": "已压缩",
     "progress.compressFailed": "压缩失败",
-    "progress.compress.busy": "正在压缩，请稍后"
+    "progress.compress.busy": "正在压缩，请稍后",
+    "progress.edit": "编辑归档",
+    "progress.edited": "已编辑归档",
+    "progress.editFailed": "编辑失败",
+    "progress.editCancelled": "已取消编辑，归档未改动",
+    "progress.editBlocked": "正在解压或扫描，稍后再编辑"
   }
 }

@@ -11,6 +11,10 @@
     "menu.smart.extract.each.to.own.folder": "Smart Extract (each to its own folder)",
     "menu.compress.to.7z": "Compress to a .7z archive",
     "menu.compress.to.zip": "Compress to a .zip archive",
+    "menu.edit": "&Edit",
+    "menu.edit.delete": "&Delete",
+    "menu.edit.rename": "Rena&me",
+    "menu.edit.newFolder": "New &Folder",
     "sidebar.section.favorites": "FAVORITES",
     "sidebar.section.recent": "RECENT",
     "sidebar.section.tree": "ARCHIVE TREE",
@@ -40,6 +44,7 @@
     "error.disk.full": "Not enough free space to extract {name}",
     "error.access.denied": "Access denied: {path}",
     "error.engine.noReason": "(the engine reported no reason)",
+    "error.edit.noName": "A name is required",
     "error.verify.failed": "Integrity check failed:",
     "error.missingPath": "This command needs an archive path.",
     "error.verb.unsupported": "This build does not support this command yet:",
@@ -52,6 +57,11 @@
     "progress.failed": "Extraction failed",
     "progress.compressed": "Compressed",
     "progress.compressFailed": "Compression failed",
-    "progress.compress.busy": "Compression is already running"
+    "progress.compress.busy": "Compression is already running",
+    "progress.edit": "Editing archive",
+    "progress.edited": "Archive edited",
+    "progress.editFailed": "Edit failed",
+    "progress.editCancelled": "Edit cancelled, the archive was not changed",
+    "progress.editBlocked": "Extract or scan is running; edit later"
   }
 }

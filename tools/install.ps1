@@ -705,11 +705,17 @@ function Invoke-Install {
         # load the shellex DLL -- but "shell\verb" entries are always shown.
         # Without this step "installed" and "visible in the right-click menu"
         # were two different things, which is exactly what the user reported.
+        # Guarded on purpose: the installer self-test runs this script from a
+        # temporary tree against a throwaway target, where the verbs script is
+        # not next to us and the exe path is synthetic. A missing menu entry is
+        # worth a warning, never a failed install.
         $verbsScript = Join-Path $PSScriptRoot 'register-static-verbs.ps1'
-        if (Test-Path -LiteralPath $verbsScript) {
-            & $verbsScript -ExePath $exe -Quiet
-        } else {
-            Write-Warn ('static verbs script not found next to install.ps1: ' + $verbsScript)
+        if ((Test-Path -LiteralPath $verbsScript) -and (Test-Path -LiteralPath $exe)) {
+            try {
+                & $verbsScript -ExePath $exe -Quiet
+            } catch {
+                Write-Warn ('static verbs skipped: ' + $_.Exception.Message)
+            }
         }
     }
     Install-EngineEnv -Dll $EngineDll

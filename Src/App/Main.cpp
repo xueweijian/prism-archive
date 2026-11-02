@@ -107,6 +107,7 @@
 #include "../PrismWin/GalleryWindow.hpp"
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
+#include "../PrismWin/SettingsDialog.hpp"   // C53: Settings... menu + dialog (C31/V3)
 #include "../PrismWin/SidebarView.hpp"      // C40: SetTranslator (four headings)
 #include "../PrismWin/SolidSweeper.hpp"
 
@@ -834,6 +835,36 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // "which level did that click hit?") is answered by PrismCore.
   window.SetItems(&app->items);
   window.SetRootLabel(FileNameWide(archive));
+
+  // ---- C31/V3 + C53: the Settings... menu item and its modal gate ----------
+  //
+  // The window already owns the menu bar (C27's File menu), so it appends the
+  // item itself in RebuildMenu; the V3 patch's SettingsDialog::InstallMenu
+  // replaces the WHOLE bar, which would erase File > Compress/Exit. InstallMenu
+  // is used only when no menu exists, so the delivered helper is still wired.
+  if (GetMenu(window.Hwnd()) == nullptr) {
+    prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd());
+  }
+  // The dialog must read and write the document THIS launch loaded (a portable
+  // build puts it beside the exe, not in %LOCALAPPDATA%), and a save must not
+  // leave the app's in-memory copy stale for the exit save to overwrite.
+  window.SetSettingsLauncher([&window, &settings]() {
+    prism::win::settingsui::SettingsDialog dialog;
+    dialog.SetPaths(settings.paths);
+    std::string loadError;
+    if (!dialog.LoadFrom(settings.paths, &loadError)) {
+      window.SetStatus(L"\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A" +
+                       prism::win::Utf8ToWide(loadError));
+    }
+    dialog.OpenModal(GetModuleHandleW(nullptr), window.Hwnd());  // the modal gate
+    if (dialog.saved()) {
+      settings.report = prism::win::settingsfile::LoadStore(settings.store, settings.paths);
+      settings.loaded =
+          settings.report.outcome != prism::win::settingsfile::LoadOutcome::Failed;
+      window.SetStatus(L"\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
+    }
+  });
+
   // C46: the per-archive place. The walk goes through the window's own
   // ActivateRow (the double-click path), so navigation stays owned by the
   // window while GALLERY V2 rewrites it.
@@ -930,6 +961,25 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       CoUninitialize();
     });
   });
+  // ---- C52 + C53: a drop ONTO the window -----------------------------------
+  //
+  // The window turned Explorer's HDROP into a tree and asked PrismCore what it
+  // means (prism::drop::PlanDrop). C52 shipped no executor, so a user saw the
+  // hint and then nothing; the executor now lives in AppWiring (one pure
+  // DecideDrop + this install call), which is also the function the Windows
+  // suite drives. Contract, in one sentence: a drop always answers, and a drop
+  // that cannot be executed says so instead of pretending.
+  //
+  // AddToArchive is REFUSED EXPLICITLY: ArchiveWriter has no incremental
+  // "append these files to this archive" operation (it writes a NEW archive from
+  // a source root), so "Added N files" would be a lie and a half-write would be
+  // invisible. The status line says "暂不支持追加" and nothing is written; the
+  // suite asserts the bytes did not move. ExtractHere/TestArchive still need the
+  // C4 flow callable with an explicit file list -- they report, they do not run.
+  // OpenArchive reuses the archive-changed flow (the same door the re-pack uses),
+  // and Refuse carries the model's own reason.
+  prism::app::dropin::InstallDropHandler(window);
+
   // ---- C27: the compress entry (menu -> C18 dialog -> C9 writer -> HUD) ----
   //
   // The window shows the CONTENT of an open archive, and ArchiveWriter writes

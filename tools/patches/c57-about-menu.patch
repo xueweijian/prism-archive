@@ -1,0 +1,63 @@
+C57 patch A -- Help > About (one menu item, one modal dialog).
+Generated with git diff against main@22ad7ad and verified with "git apply --check".
+Apply:  git apply tools/patches/c57-about-menu.patch
+GalleryWindow.hpp belongs to C27/C53, and Main.cpp is being changed by C58, so this is a
+patch and not an edit: whoever lands first takes it verbatim. AboutDialog owns the report
+and the version read, so no other file has to learn how the diagnostics text is made.
+diff --git a/Src/PrismWin/GalleryWindow.hpp b/Src/PrismWin/GalleryWindow.hpp
+index 300e020..3176f01 100644
+--- a/Src/PrismWin/GalleryWindow.hpp
++++ b/Src/PrismWin/GalleryWindow.hpp
+@@ -96,6 +96,7 @@
+ #include "PaletteOverlay.hpp"               // C53: Ctrl+K paints THIS layer (C31)
+ #include "GalleryRenderer.hpp"
+ #include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
++#include "AboutDialog.hpp"                  // C57: Help > About (one menu item, one modal)
+ #include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
+ #include "SidebarView.hpp"                  // sidebar draw commands (C12)
+ 
+@@ -1114,6 +1115,10 @@ class GalleryWindow {
+           RunSettingsCommand();
+           return 0;
+         }
++        if (command == prism::win::about::AboutDialog::kMenuAboutId) {
++          RunAboutCommand();
++          return 0;
++        }
+         if (onMenuCommand_) onMenuCommand_(command);
+         return 0;
+       }
+@@ -1200,6 +1205,17 @@ class GalleryWindow {
+     Invalidate();
+   }
+ 
++  // C57: Help > About. Deliberately NOT behind the one-overlay gate: the gate
++  // exists because two PAINTED surfaces would compete for Esc and for the user's
++  // eye, and this dialog is modal (it disables the owner and runs its own message
++  // loop), so nothing else can open while it is up. It owns no window state
++  // either -- the report is a snapshot taken when it opens.
++  void RunAboutCommand() {
++    prism::win::about::AboutDialog dialog;
++    dialog.OpenModal(GetModuleHandleW(nullptr), host_.hwnd);
++    Invalidate();
++  }
++
+   // ---------- the action band's wiring (card V2) ----------
+   // What a click or a chord MEANS is the model's decision, not this file's: the
+   // Effect is already "invoke / open menu / move focus". This only translates
+@@ -1592,6 +1608,15 @@ class GalleryWindow {
+     // bar of its own; Main only falls back to it when the window has no menu.)
+     AppendMenuW(bar, MF_STRING, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
+                 L"Settings...");
++    // C57: Help > About. The label is literal here like "Settings..." above: the
++    // item is chrome on this window, and the dialog it opens is where the words
++    // that matter (the report) live.
++    HMENU help = CreatePopupMenu();
++    if (help != nullptr) {
++      AppendMenuW(help, MF_STRING, prism::win::about::AboutDialog::kMenuAboutId,
++                  L"About PrismArchive...");
++      AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"Help");
++    }
+     HMENU previous = GetMenu(host_.hwnd);
+     if (!SetMenu(host_.hwnd, bar)) {
+       DestroyMenu(bar);

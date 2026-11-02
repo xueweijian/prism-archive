@@ -5,7 +5,9 @@
 # REFUSING them, so the menu advertised three commands the product answered with
 # "this version does not support that command". This suite drives the exact
 # functions Main.cpp calls against a real 7z.dll, and then drives the REAL
-# PrismArchive.exe through a real command line (exit code + redirected stderr).
+# PrismArchive.exe through a real command line (exit code + redirected stderr),
+# including a process-per-verb matrix with a 15 s bound: a verb that raises a
+# modal box never exits, and a hung batch caller is worse than an error code.
 #
 # One card = one file; see Tests/suites/README.md.
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)

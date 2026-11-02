@@ -276,21 +276,22 @@ struct AppContext {
   prism::app::ExtractionPlan plan;
 };
 
-// A context-menu verb we do not implement yet must SAY so. Falling back to
-// "open the gallery" would look like the command worked (and, for --compress-*,
-// would silently do nothing to the user's archive) -- see TODO(C9) in
-// AppWiring.hpp.
-void ReportRefusedVerb(const prism::app::LaunchRequest& request, const Tr& tr) {
-  std::wstring text =
-      tr.Or("error.verb.unsupported",
-            L"\u672C\u7248\u672C\u8FD8\u4E0D\u652F\u6301\u8FD9\u4E2A\u547D\u4EE4\uFF1A") +
-      L"\n\n  ";
-  text += request.unknownText.empty() ? std::wstring(L"(unknown)") : request.unknownText;
-  text += L"\n\n" +
-          tr.Or("error.verb.supported",
-                L"\u5DF2\u652F\u6301\uFF1A--smart-extract / --extract-here / --extract-sub "
-                L"/ --test / --compress-here");
-  MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONWARNING);
+// A context-menu verb we do not implement must SAY so on stderr -- and must not
+// open a modal box. Explorer and scripts can invoke the exe for a whole
+// selection; a MessageBox on an unsupported flag hangs the caller (measured:
+// the process was still alive after 12 s with the box up), which is worse than
+// the refusal. The exit code (2) is the verdict, the line below is the reason.
+// The window path (double-click / no arguments) can never carry an unknown
+// flag, so no interactive fallback is lost here.
+void ReportRefusedVerb(const prism::app::LaunchRequest& request) {
+  const std::string flag =
+      request.unknownText.empty() ? std::string("(unknown)")
+                                  : prism::win::WideToUtf8(request.unknownText);
+  std::fprintf(stderr,
+               "verb refused: unsupported flag %s; supported: --smart-extract "
+               "--extract-here --extract-sub --test --compress-here --compress-7z "
+               "--compress-zip --smart-extract-each\n",
+               flag.c_str());
 }
 
 // One line of machine-readable telemetry. A GUI app has no console, so this is
@@ -528,7 +529,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   }
 
   if (launch.unknownFlag) {
-    ReportRefusedVerb(launch, tr);
+    // C58: stderr + exit 2, NEVER a modal box (a batch caller must not hang).
+    ReportRefusedVerb(launch);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 2;
   }

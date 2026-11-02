@@ -21,7 +21,12 @@
 //   (6) the same two verdicts through the REAL command line: this suite spawns
 //       the built PrismArchive.exe (path passed by CMake) and reads its exit
 //       code and redirected stderr -- the wiring is only worth anything if the
-//       shipped binary answers this way.
+//       shipped binary answers this way;
+//   (7) EVERY menu verb as its own process with a 15-second BOUND: no run may
+//       still be alive (a modal box hangs a batch caller), exit codes must be
+//       0/2 as promised, successful verbs must produce their files, and
+//       --extract-here/--test are the known-good controls that prove the bound
+//       can tell a working verb from a hung one.
 //
 // NEGATIVE CONTROLS (CONTRACTS D3 + D26/D27), compiled into this same source:
 //   * PRISM_C58_MUTANT_ZIP_AS_7Z        -- the format mapping is constant 7z, so
@@ -173,16 +178,33 @@ Reopened Reopen(const std::wstring& archive) {
   return out;
 }
 
-// Runs one real command line and captures stdout+stderr into 'logPath'.
-// Returns the process exit code, or -1 when the process could not start.
-int RunExeCapture(const std::wstring& exe, const std::vector<std::wstring>& args,
-                  const std::wstring& workDir, const std::wstring& logPath) {
+std::string ReadText(const std::wstring& path) {
+  std::vector<uint8_t> bytes;
+  if (!win::cw::ReadWholeFile(path, &bytes)) return {};
+  return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+// One real command line, with a BOUNDED wait. The bound is the point: a verb
+// that opens a modal message box never exits, and "the batch caller hangs" is
+// exactly the defect this suite must catch (C58 follow-up: measured by the
+// reviewer as >12 s alive on --compress-7z / --compress-zip /
+// --smart-extract-each when the refusal path still owned a MessageBox).
+struct BoundedRun {
+  int exitCode = -1;      // -1 = could not start, -2 = killed on timeout
+  bool timedOut = false;
+  std::string text;       // stdout+stderr, as redirected
+};
+
+BoundedRun RunExeBounded(const std::wstring& exe, const std::vector<std::wstring>& args,
+                         const std::wstring& workDir, const std::wstring& logPath,
+                         DWORD timeoutMs) {
+  BoundedRun out;
   SECURITY_ATTRIBUTES sa{};
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
   HANDLE log = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (log == INVALID_HANDLE_VALUE) return -1;
+  if (log == INVALID_HANDLE_VALUE) return out;
   HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
@@ -201,19 +223,30 @@ int RunExeCapture(const std::wstring& exe, const std::vector<std::wstring>& args
                                       workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
   CloseHandle(log);
   if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-  if (!started) return -1;
-  WaitForSingleObject(pi.hProcess, 120000);
-  DWORD code = 1;
-  GetExitCodeProcess(pi.hProcess, &code);
+  if (!started) return out;
+  const DWORD wait = WaitForSingleObject(pi.hProcess, timeoutMs);
+  if (wait == WAIT_TIMEOUT) {
+    // A verb that is still alive at the bound is a hang (a modal box is the
+    // usual cause). Kill it so the suite can finish and report the verdict.
+    out.timedOut = true;
+    out.exitCode = -2;
+    TerminateProcess(pi.hProcess, 0xDEAD);
+    WaitForSingleObject(pi.hProcess, 5000);
+  } else {
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    out.exitCode = static_cast<int>(code);
+  }
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
-  return static_cast<int>(code);
+  out.text = ReadText(logPath);
+  return out;
 }
 
-std::string ReadText(const std::wstring& path) {
-  std::vector<uint8_t> bytes;
-  if (!win::cw::ReadWholeFile(path, &bytes)) return {};
-  return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+// Exit-code-only wrapper for the cases that do not inspect the timeout flag.
+int RunExeCapture(const std::wstring& exe, const std::vector<std::wstring>& args,
+                  const std::wstring& workDir, const std::wstring& logPath) {
+  return RunExeBounded(exe, args, workDir, logPath, 20000).exitCode;
 }
 
 // One archive's source: a file name and the exact bytes it must contain after a
@@ -228,13 +261,6 @@ bool WriteSources(const std::wstring& dir, const std::vector<SourceFile>& files)
     if (!WriteBytes(Join(dir, file.name), file.bytes)) return false;
   }
   return true;
-}
-
-std::vector<std::wstring> InputsOf(const std::wstring& dir,
-                                   const std::vector<SourceFile>& files) {
-  std::vector<std::wstring> inputs;
-  for (const SourceFile& file : files) inputs.push_back(Join(dir, file.name));
-  return inputs;
 }
 
 // Compares a reopened archive against the sources: exact count, exact names,
@@ -486,13 +512,15 @@ PRISM_TEST("compress_verbs.real_command_line_compresses_and_refuses") {
   // written" assertion counts files, and its own capture file would be a false
   // positive (found the hard way on the first run).
   const std::wstring okLog = Join(gRoot, L"cli-ok.log");
-  const int okCode = RunExeCapture(
+  const BoundedRun okRun = RunExeBounded(
       gExe, {L"--compress-7z", Join(okDir, L"cli-one.bin"), Join(okDir, L"cli-two.bin")}, okDir,
-      okLog);
-  const std::string okText = ReadText(okLog);
-  Emit("  CLI --compress-7z exit=" + std::to_string(okCode));
+      okLog, 20000);
+  const std::string okText = okRun.text;
+  Emit("  CLI --compress-7z exit=" + std::to_string(okRun.exitCode) +
+       " timedOut=" + std::string(okRun.timedOut ? "1" : "0"));
   Emit("  CLI output: " + okText);
-  PRISM_CHECK_EQ(okCode, 0);
+  PRISM_CHECK(!okRun.timedOut);
+  PRISM_CHECK_EQ(okRun.exitCode, 0);
   PRISM_CHECK(okText.find("compress ok=1") != std::string::npos);
   const Reopened reopened = Reopen(Join(okDir, L"cli-one.7z"));
   PRISM_CHECK(Matches(reopened, files, "cli-7z"));
@@ -503,14 +531,119 @@ PRISM_TEST("compress_verbs.real_command_line_compresses_and_refuses") {
   const std::wstring failDir = FreshDir(L"cli-fail");
   if (!PRISM_CHECK(!failDir.empty())) return;
   const std::wstring failLog = Join(gRoot, L"cli-fail.log");
-  const int failCode = RunExeCapture(gExe, {L"--compress-7z", Join(failDir, L"missing.bin")},
-                                     failDir, failLog);
-  const std::string failText = ReadText(failLog);
-  Emit("  CLI failure exit=" + std::to_string(failCode));
+  const BoundedRun failRun = RunExeBounded(
+      gExe, {L"--compress-7z", Join(failDir, L"missing.bin")}, failDir, failLog, 20000);
+  const std::string failText = failRun.text;
+  Emit("  CLI failure exit=" + std::to_string(failRun.exitCode) +
+       " timedOut=" + std::string(failRun.timedOut ? "1" : "0"));
   Emit("  CLI output: " + failText);
-  PRISM_CHECK_EQ(failCode, 1);
+  PRISM_CHECK(!failRun.timedOut);
+  PRISM_CHECK_EQ(failRun.exitCode, 1);
   PRISM_CHECK(failText.find("compress failed") != std::string::npos);
   PRISM_CHECK_EQ(CountFiles(failDir), size_t(0));
+}
+
+// ---------------------------------------------------------------------------
+// (7) The verb matrix, each verb as its own process, with a BOUNDED wait.
+//
+// A verb that opens a modal message box never exits: from Explorer or a script
+// that is a hung caller, which is worse than an error code. This case runs every
+// menu verb the exe accepts, plus an unknown flag, each as a separate process
+// with a 15-second bound, and asserts:
+//   * no run timed out (the anti-modal assertion);
+//   * the exit code is the contract (0 success, 1 failure, 2 refused);
+//   * the verbs that succeed really produced their files.
+// --extract-here and --test are the KNOWN-GOOD controls: if this harness could
+// not tell a working verb from a hung one, those two cases would expose it.
+// ---------------------------------------------------------------------------
+PRISM_TEST("compress_verbs.every_verb_returns_without_a_modal_box") {
+  if (!PRISM_CHECK(!gExe.empty())) return;
+  const std::wstring root = FreshDir(L"verbs");
+  if (!PRISM_CHECK(!root.empty())) return;
+  const std::wstring files = Join(root, L"files");
+  const std::wstring arch = Join(root, L"arch");
+  const std::wstring here = Join(root, L"here");
+  const std::wstring tested = Join(root, L"tested");
+  std::error_code ec;
+  for (const std::wstring* dir : {&files, &arch, &here, &tested}) {
+    fs::create_directories(*dir, ec);
+  }
+  if (!PRISM_CHECK(!ec)) return;
+
+  // Fixtures are authored through C9's path, never through the verbs under test.
+  const auto author = [](const std::wstring& dir, const wchar_t* payloadName,
+                         const std::vector<uint8_t>& bytes,
+                         const wchar_t* archiveName) -> std::wstring {
+    if (!WriteBytes(Join(dir, payloadName), bytes)) return {};
+    const std::wstring target = Join(dir, archiveName);
+    const app::CompressionTarget plan = app::PlanCompression(
+        {Join(dir, payloadName)}, prism::ArchiveFormat::SevenZip, target);
+    if (!plan.ok) return {};
+    app::CompressionRequest job;
+    job.archivePath = plan.archivePath;
+    job.sourceRoot = plan.sourceRoot;
+    job.plan = plan.plan;
+    return app::RunCompression(job).ok ? target : std::wstring();
+  };
+
+  const std::wstring packA = author(arch, L"payload-a.bin", Pattern(700, 11), L"pack-a.7z");
+  const std::wstring packB = author(arch, L"payload-b.bin", Pattern(900, 12), L"pack-b.7z");
+  const std::wstring packHere =
+      author(here, L"payload-here.bin", Pattern(500, 13), L"pack-here.7z");
+  const std::wstring packTest =
+      author(tested, L"payload-test.bin", Pattern(300, 14), L"pack-test.7z");
+  if (!PRISM_CHECK(!packA.empty() && !packB.empty() && !packHere.empty() && !packTest.empty())) {
+    return;
+  }
+
+  const std::wstring aFile = Join(files, L"report-a.txt");
+  const std::wstring bFile = Join(files, L"report-b.bin");
+  if (!PRISM_CHECK(WriteBytes(aFile, Pattern(100, 15)) &&
+                   WriteBytes(bFile, Pattern(2048, 16)))) {
+    return;
+  }
+
+  const std::wstring log = Join(root, L"verb.log");
+  const auto runVerb = [&](const wchar_t* label, const std::vector<std::wstring>& args,
+                           const std::wstring& workDir, int expected) {
+    const BoundedRun run = RunExeBounded(gExe, args, workDir, log, 15000);
+    Emit("  [" + win::WideToUtf8(label) + "] exit=" + std::to_string(run.exitCode) +
+         " timedOut=" + std::string(run.timedOut ? "1" : "0"));
+    Emit("    " + run.text);
+    PRISM_CHECK(!run.timedOut);  // a modal box would still be alive here
+    PRISM_CHECK_EQ(run.exitCode, expected);
+    return run;
+  };
+
+  runVerb(L"--compress-7z", {L"--compress-7z", aFile, bFile}, files, 0);
+  PRISM_CHECK(fs::exists(Join(files, L"report-a.7z"), ec));
+
+  runVerb(L"--compress-zip", {L"--compress-zip", aFile, bFile}, files, 0);
+  PRISM_CHECK(fs::exists(Join(files, L"report-a.zip"), ec));
+
+  // Each folder is named after its archive and lives BESIDE it (the archive's
+  // own parent), which is the --extract-sub contract.
+  runVerb(L"--smart-extract-each", {L"--smart-extract-each", packA, packB}, root, 0);
+  PRISM_CHECK(fs::exists(Join(Join(arch, L"pack-a"), L"payload-a.bin"), ec));
+  PRISM_CHECK(fs::exists(Join(Join(arch, L"pack-b"), L"payload-b.bin"), ec));
+
+  // Known-good control 1: --extract-here writes the payload and exits 0.
+  runVerb(L"--extract-here", {L"--extract-here", packHere}, here, 0);
+  PRISM_CHECK(fs::exists(Join(here, L"payload-here.bin"), ec));
+
+  // Known-good control 2: --test decodes and writes NOTHING.
+  const size_t beforeTest = CountFiles(tested);
+  const BoundedRun verify = runVerb(L"--test", {L"--test", packTest}, tested, 0);
+  PRISM_CHECK(verify.text.find("verify ok=1") != std::string::npos);
+  PRISM_CHECK_EQ(CountFiles(tested), beforeTest);
+
+  // An unknown flag: exit 2, a reason on stderr, and -- the point of this case
+  // -- the process RETURNS. It used to raise a MessageBox and hang.
+  const size_t beforeUnknown = CountFiles(arch);
+  const BoundedRun refused =
+      runVerb(L"unknown flag", {L"--extract-wherever", packA}, arch, 2);
+  PRISM_CHECK(refused.text.find("unsupported flag") != std::string::npos);
+  PRISM_CHECK_EQ(CountFiles(arch), beforeUnknown);
 }
 
 int main(int argc, char** argv) {

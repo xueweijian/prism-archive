@@ -540,7 +540,6 @@ class GalleryWindow {
   // Diagnostics the suite asserts: the refusal must be COUNTED and readable.
   int RefusedOperationCount() const { return refusedOperations_; }
   const std::wstring& LastOperationRefusal() const { return lastOperationRefusal_; }
-  const std::wstring& StatusText() const { return status_; }
   // WM_COMMAND -> here. The window decides nothing about what "compress" means.
   void SetMenuCommandHandler(std::function<void(UINT)> handler) {
     onMenuCommand_ = std::move(handler);

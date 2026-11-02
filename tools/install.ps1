@@ -378,7 +378,15 @@ function Find-SourceDir {
     param([string]$Explicit)
     $tried = New-Object System.Collections.Generic.List[string]
     if ($Explicit) {
-        $p = $Explicit
+        # A trailing separator before the closing quote escapes that quote at the
+        # cmd/PowerShell boundary ("...\" -SevenZipDll ..."), so the rest of the
+        # command line ends up inside the path and Test-Path throws
+        # "Illegal characters in path". Trim quotes and trailing separators here
+        # rather than trusting every caller to quote correctly.
+        $p = $Explicit.Trim().Trim('"')
+        while ($p.Length -gt 3 -and ($p.EndsWith('\') -or $p.EndsWith('/'))) {
+            $p = $p.Substring(0, $p.Length - 1)
+        }
         if (Test-Path -LiteralPath $p -PathType Leaf) { $p = Split-Path -Parent $p }
         $exe = Join-Path $p 'PrismArchive.exe'
         if (Test-Path -LiteralPath $exe -PathType Leaf) { return (Resolve-Path -LiteralPath $p).Path }

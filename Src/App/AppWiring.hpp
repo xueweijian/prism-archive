@@ -94,6 +94,7 @@
 #include "../PrismCore/SidebarModel.hpp"      // C12 SidebarStore port
 #include "../PrismCore/SmartExtractor.hpp"
 #include "../PrismWin/AmsiGuard.hpp"
+#include "../PrismWin/ArchiveEditor.hpp"      // C51 copy-on-write executor (C54 uses it)
 #include "../PrismWin/ArchiveWriter.hpp"      // C9 execution layer (the real writer)
 #include "../PrismWin/DpapiVault.hpp"         // C40: the remember-me store (DPAPI)
 #include "../PrismWin/MotwGuard.hpp"
@@ -500,6 +501,162 @@ class OperationHandles {
   std::shared_ptr<prism::win::ReaderPool> pool_;
 #endif
 };
+
+// ---------------------------------------------------------------------------
+// 3b. Editing an EXISTING archive (card C54): the execution seam the UI calls.
+//
+// C51 delivered ArchiveEditor::ApplyEdits, but nothing above it could say
+// "these edits, this archive" and get a result back. These three functions are
+// that seam, and they are deliberately thin: the RULES stay in EditPlan and the
+// engine work stays in ApplyEdits. What they add is what the app needs and the
+// Windows suite can drive end to end:
+//
+//   * ProbeEditGate  -- can this file be edited AT ALL, and if not, WHY. Read-
+//                       only, multi-volume, wrong container and "another process
+//                       holds it exclusively" are diagnosed before the user
+//                       confirms anything (requirement 3). The refusal codes are
+//                       C51's; the wording is the user's.
+//   * PreviewArchiveEdit -- the C51 plan the confirmation dialog quotes.
+//   * RunArchiveEdit -- one ApplyEdits call, with C51's own plan/verify/elapsed
+//                       numbers carried back so the UI can report them.
+//
+// ORDERING (CONTRACTS D30 fact 3): ReplaceFileW fails while any handle holds the
+// original. The caller must close its ReaderPool (and every lease) BEFORE calling
+// RunArchiveEdit; Main.cpp does, and the suite asserts the consequence by
+// reopening the file afterwards.
+// ---------------------------------------------------------------------------
+struct ArchiveEditGate {
+  bool enabled = false;
+  prism::EditRefusal refusal = prism::EditRefusal::None;
+  std::wstring reason;  // READY FOR THE UI: what is wrong and what to do about it
+};
+
+inline ArchiveEditGate ProbeEditGate(const std::wstring& archivePath) {
+  ArchiveEditGate gate;
+  if (archivePath.empty()) {
+    gate.refusal = prism::EditRefusal::MissingEntry;
+    gate.reason = L"\u6CA1\u6709\u6253\u5F00\u7684\u5F52\u6863";  // 没有打开的归档
+    return gate;
+  }
+  if (prism::win::edit::HasReadOnlyAttribute(archivePath)) {
+    gate.refusal = prism::EditRefusal::ReadOnlyArchive;
+    gate.reason =
+        L"\u5F52\u6863\u662F\u53EA\u8BFB\u7684\uFF1A\u7F16\u8F91\u4F1A\u66FF\u6362"
+        L"\u6574\u4E2A\u6587\u4EF6\uFF0C\u8BF7\u5148\u6E05\u9664\u53EA\u8BFB\u5C5E"
+        L"\u6027";  // 归档是只读的：编辑会替换整个文件，请先清除只读属性
+    return gate;
+  }
+  if (prism::win::edit::IsMultiVolumeSet(archivePath)) {
+    gate.refusal = prism::EditRefusal::MultiVolumeArchive;
+    gate.reason =
+        L"\u5F52\u6863\u662F\u5206\u5377\u96C6\uFF08.001/.002\uFF09\uFF1A\u91CD"
+        L"\u5199\u53EA\u4F1A\u4EA7\u751F\u4E00\u4E2A\u6587\u4EF6\uFF0C\u65E0\u6CD5"
+        L"\u66FF\u6362\u5206\u5377";  // 归档是分卷集（.001/.002）：重写只会产生一个文件，无法替换分卷
+    return gate;
+  }
+  prism::ArchiveFormat format = prism::ArchiveFormat::SevenZip;
+  if (!prism::win::edit::FormatFromPath(archivePath, &format)) {
+    gate.refusal = prism::EditRefusal::UnsupportedFormat;
+    gate.reason =
+        L"\u8FD9\u4E2A\u5BB9\u5668\u683C\u5F0F\u4E0D\u652F\u6301\u7F16\u8F91"
+        L"\uFF08\u53EA\u652F\u6301 .7z/.zip/.tar\uFF09";  // 这个容器格式不支持编辑（只支持 .7z/.zip/.tar）
+    return gate;
+  }
+  // "Held by another owner": open it the way the editor will need it. Sharing
+  // read/write/delete means this probe never becomes the very lock it reports;
+  // a failure is therefore somebody ELSE's exclusive handle.
+  HANDLE file = CreateFileW(archivePath.c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    const DWORD error = GetLastError();
+    gate.refusal = prism::EditRefusal::ReadOnlyArchive;
+    if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION) {
+      gate.reason =
+          L"\u5F52\u6863\u88AB\u5176\u4ED6\u7A0B\u5E8F\u72EC\u5360\uFF1A\u8BF7"
+          L"\u5173\u95ED\u5360\u7528\u5B83\u7684\u7A0B\u5E8F\u540E\u518D\u7F16\u8F91";
+      // 归档被其他程序独占：请关闭占用它的程序后再编辑
+    } else {
+      gate.reason = L"\u65E0\u6CD5\u8BFB\u53D6\u5F52\u6863\uFF08Windows \u9519\u8BEF " +
+                    std::to_wstring(static_cast<unsigned long>(error)) +
+                    L"\uFF09";  // 无法读取归档（Windows 错误 N）
+    }
+    return gate;
+  }
+  CloseHandle(file);
+  gate.enabled = true;
+  gate.refusal = prism::EditRefusal::None;
+  return gate;
+}
+
+// The plan the confirmation dialog quotes. It observes the same two file facts
+// ProbeEditGate does and derives solidity from the catalog's block grouping --
+// the ONLY honest signal this engine gives (CONTRACTS D30 fact 1). No engine
+// open, so the UI thread can build it in microseconds.
+inline prism::EditPlan PreviewArchiveEdit(const std::wstring& archivePath,
+                                          const std::vector<ArchiveItem>& catalog,
+                                          const std::vector<prism::EditOp>& ops) {
+  prism::EditArchiveFacts facts;
+  facts.readOnly = prism::win::edit::HasReadOnlyAttribute(archivePath);
+  facts.multiVolume = prism::win::edit::IsMultiVolumeSet(archivePath);
+  std::vector<uint32_t> blocks;
+  size_t files = 0;
+  for (const ArchiveItem& item : catalog) {
+    if (item.isDir) continue;
+    ++files;
+    bool seen = false;
+    for (uint32_t block : blocks) {
+      if (block == item.block) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) blocks.push_back(item.block);
+  }
+  facts.solid = files >= 2 && blocks.size() < files;
+  return prism::BuildEditPlan(catalog, ops, facts);
+}
+
+struct ArchiveEditRequest {
+  std::wstring archivePath;
+  std::wstring password;
+  std::vector<prism::EditOp> ops;
+  std::function<bool(uint64_t)> progress;  // false = cancel the rewrite
+};
+
+struct ArchiveEditOutcome {
+  bool ok = false;
+  std::string error;
+  prism::EditPlan plan;
+  uint64_t entriesAffected = 0;
+  uint64_t estimatedWriteBytes = 0;
+  uint64_t itemsWritten = 0;
+  uint64_t bytesWritten = 0;
+  uint64_t verifiedItems = 0;
+  bool verified = false;
+  int64_t elapsedMs = 0;
+};
+
+inline ArchiveEditOutcome RunArchiveEdit(const ArchiveEditRequest& request) {
+  ArchiveEditOutcome outcome;
+  prism::win::edit::EditRequest editRequest;
+  editRequest.archivePath = request.archivePath;
+  editRequest.password = request.password;
+  editRequest.ops = request.ops;
+  editRequest.progress = request.progress;
+  const prism::win::edit::EditResult result = prism::win::edit::ApplyEdits(editRequest);
+  outcome.ok = result.ok;
+  outcome.error = result.error;
+  outcome.plan = result.plan;
+  outcome.entriesAffected = result.plan.entriesAffected;
+  outcome.estimatedWriteBytes = result.plan.estimatedWriteBytes;
+  outcome.itemsWritten = result.itemsWritten;
+  outcome.bytesWritten = result.bytesWritten;
+  outcome.verifiedItems = result.verifiedItems;
+  outcome.verified = result.verified;
+  outcome.elapsedMs = result.elapsedMs;
+  return outcome;
+}
 
 // ---------------------------------------------------------------------------
 // 4. Extraction, then the C5 security pass (MoTW inheritance + AMSI pre-scan).

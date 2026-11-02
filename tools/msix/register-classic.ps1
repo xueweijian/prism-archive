@@ -35,6 +35,16 @@ if ($Scope -eq 'LocalMachine') {
   }
 }
 
+function Get-HandlerKeys([string] $ext) {
+  # Every place Explorer has been observed to look, in the order it consults them.
+  $plain = $ext.TrimStart('.')
+  return @(
+    "$root\Software\Classes\$ext\shellex\ContextMenuHandlers\PrismArchive",
+    "$root\Software\Classes\PrismArchive.$plain\shellex\ContextMenuHandlers\PrismArchive",
+    "$root\Software\Classes\SystemFileAssociations\$ext\shellex\ContextMenuHandlers\PrismArchive"
+  )
+}
+
 $clsidKey = "$root\Software\Classes\CLSID\$Clsid"
 $removed = 0
 $written = 0
@@ -42,8 +52,9 @@ $written = 0
 if ($Unregister) {
   if (Test-Path $clsidKey) { Remove-Item $clsidKey -Recurse -Force; $removed++ }
   foreach ($ext in $Extensions) {
-    $handler = "$root\Software\Classes\SystemFileAssociations\$ext\shellex\ContextMenuHandlers\PrismArchive"
-    if (Test-Path $handler) { Remove-Item $handler -Recurse -Force; $removed++ }
+    foreach ($h in (Get-HandlerKeys $ext)) {
+      if (Test-Path $h) { Remove-Item $h -Recurse -Force; $removed++ }
+    }
   }
   Write-Host "UNREGISTERED scope=$Scope keys=$removed"
   return
@@ -75,11 +86,18 @@ New-ItemProperty -Path $inproc -Name '(default)' -Value $DllPath -PropertyType S
 New-ItemProperty -Path $inproc -Name 'ThreadingModel' -Value 'Apartment' -PropertyType String -Force | Out-Null
 $written++
 
+# Explorer resolves context-menu handlers down the association chain:
+#   extension key  ->  ProgID                (SystemFileAssociations is an
+#   extra hint that only some file types honour). On Windows 11 the classic
+#   menu reads the extension key and the ProgID; registering ONLY under
+#   SystemFileAssociations left the entry invisible in practice, which is
+#   exactly what the user reported ("7-Zip shows, PrismArchive does not").
 foreach ($ext in $Extensions) {
-  $handler = "$root\Software\Classes\SystemFileAssociations\$ext\shellex\ContextMenuHandlers\PrismArchive"
-  New-Item -Path $handler -Force | Out-Null
-  New-ItemProperty -Path $handler -Name '(default)' -Value $Clsid -PropertyType String -Force | Out-Null
-  $written++
+  foreach ($handler in (Get-HandlerKeys $ext)) {
+    New-Item -Path $handler -Force | Out-Null
+    New-ItemProperty -Path $handler -Name '(default)' -Value $Clsid -PropertyType String -Force | Out-Null
+    $written++
+  }
 }
 
 Write-Host "REGISTERED scope=$Scope dll=$DllPath bitness=$bitness keys=$written"

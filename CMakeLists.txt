@@ -25,7 +25,10 @@ target_include_directories(prism_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/Src/
 # prism_core (shell ext, integration test) compile against Windows SDK headers
 # that are not /W4-clean, and escalating *their* warnings would be noise.
 if(MSVC)
-  add_compile_options(/W3 /permissive- /utf-8 /D_CRT_SECURE_NO_WARNINGS)
+  # /bigobj: the ASan MSVC lane compiles Main.cpp into more sections than the
+  # default COFF limit allows (C1128). This is a compiler capability flag, not a
+  # warning-policy relaxation: /W3 /WX stay exactly as they were.
+  add_compile_options(/W3 /permissive- /utf-8 /D_CRT_SECURE_NO_WARNINGS /bigobj)
 else()
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

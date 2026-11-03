@@ -440,6 +440,12 @@ try {
     # -----------------------------------------------------------------------
     $installArgs = @('-Quiet', '-InstallDir', $script:InstallDir, '-ScopeRoot', $script:ScopeRoot)
     $inst = Invoke-PackageCmd -CmdName 'INSTALL.cmd' -Arguments $installArgs -Tag 'install'
+    if ($inst.ExitCode -ne 0 -or $inst.Output -notmatch 'INSTALL\.CMD: OK') {
+        # The captured output is the only record of WHY install.ps1 failed; print
+        # it on the failure path so the CI log carries the reason, not just the
+        # exit code.
+        Say ('INSTALL.cmd output (exit ' + $inst.ExitCode + '):' + $script:LF + $inst.Output) 'error'
+    }
     Assert-Equal 'INSTALL.cmd -Quiet exits 0' 0 $inst.ExitCode
     Assert-True 'INSTALL.cmd prints its success marker (INSTALL.CMD: OK)' ($inst.Output -match 'INSTALL\.CMD: OK')
     $script:Installed = $true

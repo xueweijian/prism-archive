@@ -408,8 +408,16 @@ class Painter {
     return out;
   }
 
+  // A token's PAINTABLE colour. Gradient tokens (border-specular-rim,
+  // accent-liquid-primary) leave TokenValue::color zeroed -- a bare
+  // Lookup(...).color for them is OPAQUE BLACK, which painted the active tab's
+  // rim as a dark seam and the dirty dot as a black blob (measured at x = 233
+  // of a two-tab frame: rgb(8,9,12) on a canvas of rgb(16,18,24)). A gradient
+  // token's paint colour is the from-stop, which is also what the suite's
+  // AccentPixel() expects.
   static prism::theme::Rgba Token(prism::theme::TokenId id, prism::theme::Variant variant) {
-    return prism::theme::Lookup(id, variant).color;
+    const prism::theme::TokenValue value = prism::theme::Lookup(id, variant);
+    return value.kind == prism::theme::Kind::Gradient ? value.gradient.from : value.color;
   }
 
   void SetToken(prism::theme::TokenId id, prism::theme::Variant variant) {

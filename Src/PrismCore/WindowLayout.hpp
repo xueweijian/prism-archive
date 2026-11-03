@@ -245,7 +245,12 @@ inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMo
                  ? Rect{0, tabTop, w, (std::min)(tabTop + kTabBarHeight, h)}
                  : Rect{};
   const int topBand = tabBarVisible ? kTopBandHeight + kTabBarHeight : kTopBandHeight;
-  l.actionIsland = Rect{0, l.tabBar.bottom, w, (std::min)(topBand, h)};
+  // The island starts where the band ABOVE it ends: the strip when it exists,
+  // the title bar when it does not. (Reading l.tabBar.bottom unconditionally
+  // made the hidden strip's empty rect -- top/right/bottom all zero -- drag the
+  // action island up to y = 0 and give it the title band's 32 px as well.)
+  const int islandTop = l.tabBar.Empty() ? l.titleBar.bottom : l.tabBar.bottom;
+  l.actionIsland = Rect{0, islandTop, w, (std::min)(topBand, h)};
   const int contentTop = l.actionIsland.bottom;
   const int statusTop = (std::max)(contentTop, h - kStatusBarHeight);
 

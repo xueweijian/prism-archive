@@ -65,14 +65,19 @@ namespace {
 // ---------------------------------------------------------------- mutants
 #if defined(PRISM_C59_MUTANT_CLOSE_RIGHT_NEIGHBOR)
 // C60 MUTANT ACTIVE: close_first_tab -- C59's injected "closing activates tab 0"
-// rule is compiled in, so case 3 (right neighbour) MUST go red.
+// rule is compiled in, so case 3 (right neighbour) MUST go red. The banner sits
+// HERE, within the matrix's 800-byte window after the guard (CONTRACTS D28),
+// not at the end of main().
 constexpr const char* kMutation = "close_first_tab";
+constexpr const char* kMutationBanner = "C60 MUTANT ACTIVE: close_first_tab";
 #elif defined(PRISM_C60_MUTANT_DIRTY_NO_CONFIRM)
 // C60 MUTANT ACTIVE: dirty_no_confirm -- a dirty tab closes without asking, so
 // case 4 (cancel keeps the tab) MUST go red.
 constexpr const char* kMutation = "dirty_no_confirm";
+constexpr const char* kMutationBanner = "C60 MUTANT ACTIVE: dirty_no_confirm";
 #else
 constexpr const char* kMutation = nullptr;
+constexpr const char* kMutationBanner = nullptr;
 #endif
 
 // D3: the injection must PROVE it fired; a stale macro would let the mutant
@@ -147,26 +152,42 @@ prism::theme::Rgba Token(prism::theme::TokenId id) {
 // pixel" instead of "some dark colour is there".
 constexpr prism::theme::Rgba kBackdropPixel{0.043f, 0.055f, 0.075f, 1.0f};
 
+prism::theme::Rgba CanvasPlate() {
+  return prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceCanvasBase),
+                                     kBackdropPixel);
+}
+prism::theme::Rgba IslandPlate() {
+  return prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceFloatingIsland),
+                                     CanvasPlate());
+}
+// The accent is a GRADIENT token: its paint colour is the from-stop, and a bare
+// TokenValue::color for it is opaque black. Reading it through .gradient.from is
+// what the TabBar painter must do too -- the dot/marker assertions below are the
+// ones that go red when it does not.
+prism::theme::Rgba AccentColor() {
+  return prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary,
+                              prism::theme::Variant::Midnight)
+      .gradient.from;
+}
 UINT32 Backdrop() { return ToPixel(kBackdropPixel); }
-UINT32 CanvasOverBackdrop() {
-  return ToPixel(prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceCanvasBase),
-                                            kBackdropPixel));
+UINT32 CanvasOverBackdrop() { return ToPixel(CanvasPlate()); }
+UINT32 IslandOverCanvas() { return ToPixel(IslandPlate()); }
+UINT32 AccentPixel() { return ToPixel(AccentColor()); }
+UINT32 AccentOverCanvas() {
+  return ToPixel(prism::theme::CompositeOver(AccentColor(), CanvasPlate()));
 }
-UINT32 IslandOverCanvas() {
-  return ToPixel(prism::theme::CompositeOver(
-      Token(prism::theme::TokenId::SurfaceFloatingIsland),
-      prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceCanvasBase),
-                                  kBackdropPixel)));
+UINT32 AccentOverIsland() {
+  return ToPixel(prism::theme::CompositeOver(AccentColor(), IslandPlate()));
 }
-UINT32 AccentPixel() {
-  return ToPixel(prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary,
-                                      prism::theme::Variant::Midnight)
-                     .gradient.from);
+int ChannelSum(UINT32 pixel) {
+  return static_cast<int>((pixel >> 16) & 0xFFu) + static_cast<int>((pixel >> 8) & 0xFFu) +
+         static_cast<int>(pixel & 0xFFu);
 }
 
 // Renders one scene through the REAL renderer into an offscreen WIC target.
 bool RenderTabs(const prism::win::tabbar::View& view, const prism::layout::Layout& layout,
-                Frame* frame, int* tabsPainted) {
+                Frame* frame, int* tabsPainted, int* dirtyDots = nullptr,
+                int* insertMarks = nullptr) {
   if (layout.windowW <= 0 || layout.windowH <= 0) return false;
   const UINT32 width = static_cast<UINT32>(layout.windowW);
   const UINT32 height = static_cast<UINT32>(layout.windowH);
@@ -216,6 +237,8 @@ bool RenderTabs(const prism::win::tabbar::View& view, const prism::layout::Layou
                 data + static_cast<size_t>(y) * stride, static_cast<size_t>(width) * 4);
   }
   if (tabsPainted != nullptr) *tabsPainted = renderer.TabBarTabsPainted();
+  if (dirtyDots != nullptr) *dirtyDots = renderer.TabBarDirtyDotsPainted();
+  if (insertMarks != nullptr) *insertMarks = renderer.TabBarInsertMarksPainted();
   return true;
 }
 
@@ -344,9 +367,20 @@ PRISM_TEST("c60 open two archives: two tabs, second active, strip painted") {
   PRISM_CHECK(ColorDistance(plateProbe(1), IslandOverCanvas()) <= 2);
   PRISM_CHECK(ColorDistance(plateProbe(0), CanvasOverBackdrop()) <= 2);
   PRISM_CHECK(ColorDistance(IslandOverCanvas(), CanvasOverBackdrop()) > 8);
-  // The strip's own background (between the two tabs) is the canvas token.
-  const int gapX = rects[1].rect.left - 1;
-  PRISM_CHECK(ColorDistance(frame.At(gapX, rects[1].rect.top + 5), CanvasOverBackdrop()) <= 2);
+  // The active plate's 1 px specular rim must be BRIGHTER than the plate. The
+  // rim is a GRADIENT token, and reading TokenValue::color for it yields opaque
+  // black -- a dark seam, i.e. a DARKER edge than the plate. This is the
+  // assertion that measures which of the two colours reached the device.
+  const prism::layout::Rect activeRect = rects[1].rect;
+  const UINT32 rimPixel =
+      frame.At(activeRect.left, activeRect.top + activeRect.Height() / 2);
+  PRISM_CHECK(ChannelSum(rimPixel) > ChannelSum(plateProbe(1)) + 8);
+  // The strip's own background is the canvas token. Probe ABOVE the plates (the
+  // 6 px band the 20 px plates are centred in): one pixel to the LEFT of the
+  // active plate is its 1 px specular rim, and a probe on the rim would measure
+  // the rim, not the background.
+  PRISM_CHECK(ColorDistance(frame.At(rects[1].rect.left, layout.tabBar.top + 2),
+                            CanvasOverBackdrop()) <= 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +392,11 @@ PRISM_TEST("c60 click the first tab: active switches and the content follows") {
   g_window->OpenTab("C:/work/beta.7z");
   ApplySwitch("C:/work/beta.7z");
   PRISM_CHECK_EQ(g_window->Tabs().activeIndex(), 1);
-  PRISM_CHECK_EQ(g_window->ItemCount(), static_cast<int>(g_catalogBeta.size()));
+  // The content is the OTHER archive: at the ROOT, "alpha" and "beta" each
+  // contribute exactly one row, so the ROW COUNT cannot tell them apart -- the
+  // first row's path can. (Asserting ItemCount == catalog.size() was wrong: the
+  // grid shows the root FOLDER, not the whole snapshot.)
+  PRISM_CHECK_EQ(g_window->Items().front().path, std::string("beta"));
 
   const POINT firstTab = TabCentre(0);
   PRISM_CHECK_EQ(g_window->TabBarTabAt(firstTab.x, firstTab.y), 0);
@@ -370,7 +408,7 @@ PRISM_TEST("c60 click the first tab: active switches and the content follows") {
   PRISM_CHECK_EQ(g_requests, 1);
   PRISM_CHECK_EQ(g_requested, std::string("C:/work/alpha.7z"));
   // The app answered that call; the rows are the OTHER archive's now.
-  PRISM_CHECK_EQ(g_window->ItemCount(), static_cast<int>(g_catalogAlpha.size()));
+  PRISM_CHECK_EQ(g_window->Items().front().path, std::string("alpha"));
   PRISM_CHECK_EQ(ToUtf8(g_window->BreadcrumbText()).substr(0, 5), std::string("alpha"));
 }
 
@@ -421,6 +459,21 @@ PRISM_TEST("c60 dirty tab: the close asks first, cancel keeps the tab") {
   g_window->OpenTab("C:/d/two.7z");
   PRISM_CHECK(g_window->Tabs().SetDirty(1, true));
   PRISM_CHECK_EQ(g_window->Tabs().DirtyCount(), static_cast<std::size_t>(1));
+  // PIXELS: the dirty marker is a dot in the ACCENT token, not a black blob.
+  // Its centre is fixed arithmetic (close.left - 12, plate centre), which is
+  // what lets this assertion name the pixel without measuring a glyph run.
+  const std::vector<prism::win::tabbar::TabGeometry> dirtyRects = g_window->TabBarRects();
+  PRISM_CHECK_EQ(dirtyRects.size(), static_cast<std::size_t>(2));
+  Frame dirtyFrame;
+  int dirtyPainted = 0;
+  int dirtyDots = 0;
+  PRISM_CHECK(RenderTabs(g_window->TabBarView(), g_window->LayoutForTest(), &dirtyFrame,
+                         &dirtyPainted, &dirtyDots));
+  PRISM_CHECK_EQ(dirtyPainted, 2);
+  PRISM_CHECK_EQ(dirtyDots, 1);
+  const D2D1_POINT_2F dot = prism::win::tabbar::DirtyDotCentre(dirtyRects[1]);
+  PRISM_CHECK(ColorDistance(dirtyFrame.At(static_cast<int>(dot.x), static_cast<int>(dot.y)),
+                            AccentOverIsland()) <= 2);
 
   // The injected confirmer IS the user: "no".
   int asked = 0;
@@ -538,6 +591,19 @@ PRISM_TEST("c60 dragging a tab reorders the strip without losing a path") {
   PRISM_CHECK(g_window->TabDragActive());
   PRISM_CHECK_EQ(g_window->TabDragSlot(), 3);
   PRISM_CHECK_EQ(g_window->TabBarView().dragFrom, 0);
+  // PIXELS: the insertion marker is a 2 px ACCENT bar in the slot the tab would
+  // land in -- also a gradient token, so a wrong colour read would paint it
+  // black and this probe would miss by a wide margin.
+  Frame dragFrame;
+  int dragPainted = 0;
+  int insertMarks = 0;
+  PRISM_CHECK(RenderTabs(g_window->TabBarView(), g_window->LayoutForTest(), &dragFrame,
+                         &dragPainted, nullptr, &insertMarks));
+  PRISM_CHECK_EQ(dragPainted, 3);
+  PRISM_CHECK_EQ(insertMarks, 1);
+  const int markX = prism::win::tabbar::InsertMarkX(rects, 3);
+  PRISM_CHECK(ColorDistance(dragFrame.At(markX, g_window->LayoutForTest().tabBar.top + 10),
+                            AccentOverCanvas()) <= 2);
   g_window->Dispatch(WM_LBUTTONUP, 0, toPacked);
 
   PRISM_CHECK_EQ(g_window->Tabs().size(), static_cast<std::size_t>(3));
@@ -575,6 +641,13 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   ResetTabs();
   PRISM_CHECK(g_window->Tabs().empty());
   PRISM_CHECK(!g_window->TabBarVisible());
+  // The WINDOW's own layout dropped the band too: after the last close the
+  // action island sits directly under the title (the hidden band's empty rect
+  // must not be read as bottom == 0 and drag the island over the title).
+  const prism::layout::Layout live = g_window->LayoutForTest();
+  PRISM_CHECK(live.tabBar.Empty());
+  PRISM_CHECK_EQ(live.actionIsland.top, prism::layout::kTitleBarHeight);
+  PRISM_CHECK_EQ(live.actionIsland.Height(), prism::layout::kActionIslandHeight);
 
   const prism::layout::Layout hidden =
       prism::layout::Compute(900, 600, false, false, /*tabBarVisible=*/false);
@@ -600,10 +673,21 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   PRISM_CHECK(ColorDistance(bandPixel, bare.At(850, 80)) == 0);
   PRISM_CHECK(ColorDistance(bandPixel, CanvasOverBackdrop()) > 2);
   // No accent (the dirty dot / insertion marker) anywhere in the band.
+  // Accent reaches the band in two forms: the raw from-stop (a dot on the
+  // strip's canvas) and the same stop composited over a tab plate. Both are
+  // counted, so the negative control cannot be dodged by choosing the other
+  // background.
+  const UINT32 accentFlat = AccentPixel();
+  const UINT32 accentOnCanvas = AccentOverCanvas();
+  const UINT32 accentOnIsland = AccentOverIsland();
   int accentPixels = 0;
   for (int y = hidden.titleBar.bottom; y < hidden.actionIsland.bottom; ++y) {
     for (int x = 0; x < hidden.windowW; ++x) {
-      if (ColorDistance(bare.At(x, y), AccentPixel()) < 24) ++accentPixels;
+      const UINT32 pixel = bare.At(x, y);
+      if (ColorDistance(pixel, accentFlat) < 24 || ColorDistance(pixel, accentOnCanvas) < 24 ||
+          ColorDistance(pixel, accentOnIsland) < 24) {
+        ++accentPixels;
+      }
     }
   }
   PRISM_CHECK_EQ(accentPixels, 0);
@@ -627,9 +711,29 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   const prism::layout::Rect active = rects[1].rect;
   PRISM_CHECK(ColorDistance(strip.At(active.left + 5, active.top + active.Height() / 2),
                             IslandOverCanvas()) <= 2);
-  // The plate exists at y = 48 in THIS frame and not in the empty one.
+  // The plate exists at y = 48 in THIS frame...
   PRISM_CHECK(ColorDistance(strip.At(active.left + 5, 48), IslandOverCanvas()) <= 2);
-  PRISM_CHECK(ColorDistance(bare.At(active.left + 5, 48), IslandOverCanvas()) > 8);
+  // ...and in the empty frame that point is NOT the strip's canvas plate: it is
+  // the breadcrumb pill, which is a different surface (island tint over the
+  // action band, not over the canvas). Measured, not assumed: the pill and the
+  // plate are close in luminance, so "distance > 8" was the wrong discriminator
+  // and the canvas-token test below is the one that actually measures "no strip".
+  PRISM_CHECK(ColorDistance(bare.At(active.left + 5, 48), CanvasOverBackdrop()) > 8);
+  // The strip fills its WHOLE band with the canvas token before it paints any
+  // plate. If it did not run, the band keeps the action island's own tint --
+  // which is 3.6 away from the canvas composite. Count the canvas pixels where
+  // the strip WOULD be (the 32 px under the title): zero above, many below.
+  const auto countCanvasIn = [](const Frame& f, int top) {
+    int count = 0;
+    for (int y = top; y < top + prism::layout::kTabBarHeight; ++y) {
+      for (int x = 0; x < static_cast<int>(f.width); ++x) {
+        if (ColorDistance(f.At(x, y), CanvasOverBackdrop()) <= 2) ++count;
+      }
+    }
+    return count;
+  };
+  PRISM_CHECK_EQ(countCanvasIn(bare, hidden.titleBar.bottom), 0);
+  PRISM_CHECK(countCanvasIn(strip, shown.titleBar.bottom) > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -656,7 +760,7 @@ int main(int argc, char** argv) {
   });
 
   if (kMutation != nullptr) {
-    std::cout << "C60 MUTANT ACTIVE: " << kMutation << std::endl;
+    std::cout << kMutationBanner << std::endl;
     // CONTRACTS D27: arm BEFORE the first assertion; the first failure prints
     // the marker and leaves with 0, and only while the injected defect fired.
     if (std::strcmp(kMutation, "close_first_tab") == 0) {
@@ -670,15 +774,16 @@ int main(int argc, char** argv) {
 
   const int rc = prism::test::RunAll(argc, argv);
   if (kMutation != nullptr) {
+    // The CAUGHT marker comes from the harness at the FIRST failure (it exits 0
+    // there). Reaching this line means the suite either stayed green (stale
+    // injection) or failed for a reason the predicate did not prove -- both
+    // must stay RED (D3/D26), so neither may print a marker or return 0.
     if (rc == 0) {
       std::cout << "C60 MUTATION NOT CAUGHT: the suite stayed green with the regression compiled "
                    "in -- the injection is stale"
                 << std::endl;
-      return 1;
     }
-    std::cout << "C60 MUTATION CAUGHT: " << kMutation << " (suite red, see FAIL lines)"
-              << std::endl;
-    return 0;
+    return 1;
   }
   if (rc != 0) return rc;
   std::cout << "ALL TAB-BAR CHECKS PASSED (" << prism::test::CheckCount() << " checks)"

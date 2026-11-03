@@ -732,6 +732,11 @@ inline Rect ClampFrameToWorkArea(const Rect& frame, const Rect& work,
   // CONTRACTS D3 negative control: the whole clamp is compiled out, so the
   // "an oversized saved frame lands inside the work area" assertions go red.
 #if defined(PRISM_C66_MUTANT_NO_WORKAREA_CLAMP)
+  // CONTRACTS D31: every parameter is still referenced, or the mutant build
+  // fails on -Werror=unused-parameter before the rule it is meant to break.
+  (void)work;
+  (void)minWidth;
+  (void)minHeight;
   return frame;
 #else
   if (work.Empty()) return frame;  // no work area known: nothing to clamp to

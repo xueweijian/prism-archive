@@ -29,6 +29,9 @@ namespace prism::appearance {
 
 inline constexpr char kAccentKey[] = "appearance.accentColor";
 inline constexpr char kGlassIntensityKey[] = "appearance.glassIntensity";
+// C77: the refraction layer's switch (DESIGN.md 2.1). Default ON.
+inline constexpr char kBackdropKey[] = "appearance.backdropRefraction";
+inline constexpr bool kDefaultBackdropRefraction = true;
 
 // The schema defaults, spelled once: SettingsStore's table and this header must
 // agree, and the pure test asserts that agreement rather than assuming it.
@@ -77,6 +80,7 @@ struct Applied {
   bool accentParsed = false;   // the stored text was a valid #RRGGBB
   bool accentApplied = false;  // ... and it differed from the default sentinel
   double glassIntensity = kDefaultGlassIntensity;
+  bool backdropRefraction = kDefaultBackdropRefraction;
 };
 
 // Pushes the two appearance keys into the theme runtime. A missing/invalid
@@ -91,6 +95,12 @@ inline Applied Apply(const settings::SettingsStore& store) {
   if (intensity > 1.0) intensity = 1.0;
   applied.glassIntensity = intensity;
   theme::live::SetGlassIntensity(intensity);
+
+  // A missing key means "never chosen", which is the default: ON.
+  const bool backdrop =
+      store.GetBool(kBackdropKey, kDefaultBackdropRefraction);
+  applied.backdropRefraction = backdrop;
+  theme::live::SetBackdropRefraction(backdrop);
 
   const std::string hex = store.GetString(kAccentKey, kDefaultAccentHex);
   theme::Rgba color;

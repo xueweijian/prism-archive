@@ -698,6 +698,11 @@ inline const std::vector<SettingSpec>& SettingsSpecs() {
       {"appearance.theme", SettingType::Enum, "system", 1, 0, 0.0, 0.0, kThemes, 0},
       {"appearance.glassIntensity", SettingType::Number, "0.72", 2, 0, 0.0, 1.0, nullptr, 0},
       {"appearance.accentColor", SettingType::String, "#4F8CFF", 2, 0, 0.0, 0.0, nullptr, 9},
+      // C77: the backdrop/refraction layer (DESIGN.md 2.1). Additive at schema
+      // v3 on purpose -- a new key with a default needs no migration, and
+      // bumping the version would have rewritten every existing document's
+      // schemaVersion for no data change. Missing -> "true" (see Appearance).
+      {"appearance.backdropRefraction", SettingType::Bool, "true", 3, 0, 0.0, 0.0, nullptr, 0},
       {"archive.recentCount", SettingType::Int, "12", 2, 0, 0.0, 50.0, nullptr, 0},
       {"extract.overwrite", SettingType::Enum, "ask", 1, 0, 0.0, 0.0, kOverwriteModes, 0},
       {"extract.closeWhenDone", SettingType::Bool, "false", 1, 0, 0.0, 0.0, nullptr, 0},

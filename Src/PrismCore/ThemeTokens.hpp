@@ -69,6 +69,13 @@ enum class TokenId : uint8_t {
   TextPrimary,               // EXT: WCAG foreground role
   TextSecondary,             // EXT: WCAG secondary role
   SurfaceBackdropReference,  // EXT: opaque compositing reference
+  // C77 EXT: the three numbers a glass PANEL is made of. They are tokens, not
+  // literals at the call site, for the same reason the surfaces are: a second
+  // colour source is how the chrome drifts away from the design table.
+  SurfaceBackdropGhost,      // refracted content: colour = the neutral it is
+                             // mixed toward, alpha = the refraction STRENGTH
+  SurfaceBackdropVeil,       // desaturation wash drawn over the ghost
+  ShadowFloatingPanel,       // drop shadow: colour + peak alpha
   Count
 };
 
@@ -85,6 +92,9 @@ inline constexpr std::string_view kTokenNames[] = {
     "--text-primary",
     "--text-secondary",
     "--surface-backdrop-reference",
+    "--surface-backdrop-ghost",
+    "--surface-backdrop-veil",
+    "--shadow-floating-panel",
 };
 static_assert(sizeof(kTokenNames) / sizeof(kTokenNames[0]) == kTokenCount,
               "every TokenId needs exactly one CSS name");
@@ -92,7 +102,8 @@ static_assert(sizeof(kTokenNames) / sizeof(kTokenNames[0]) == kTokenCount,
 inline constexpr Kind kTokenKinds[] = {
     Kind::Color,    Kind::Color, Kind::Gradient, Kind::Gradient,
     Kind::Font,     Kind::Spring, Kind::Spring,  Kind::Color,
-    Kind::Color,    Kind::Color,
+    Kind::Color,    Kind::Color, Kind::Color,    Kind::Color,
+    Kind::Color,
 };
 static_assert(sizeof(kTokenKinds) / sizeof(kTokenKinds[0]) == kTokenCount,
               "every TokenId needs exactly one kind");
@@ -272,6 +283,18 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(110), ChannelFromByte(110), ChannelFromByte(115), 1.0f)},
     {TokenId::SurfaceBackdropReference, Variant::Daylight,
      Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 1.0f)},
+    // C77: the backdrop ghost is the CANVAS colour (the neutral the refracted
+    // content is washed toward) at the refraction STRENGTH the design asks for.
+    // The ghost is laid down whole (alpha 1.0) and the VEIL is what decides how
+    // much of it survives: .65 leaves 35 % of the chroma -- "desaturate to
+    // ~0.35", and it is the veil (not a second alpha) that the pixel suite
+    // measures, because a veil is a colour and an alpha is not.
+    {TokenId::SurfaceBackdropGhost, Variant::Daylight,
+     Rgba(ChannelFromByte(246), ChannelFromByte(248), ChannelFromByte(252), 1.0f)},
+    {TokenId::SurfaceBackdropVeil, Variant::Daylight,
+     Rgba(ChannelFromByte(246), ChannelFromByte(248), ChannelFromByte(252), 0.65f)},
+    {TokenId::ShadowFloatingPanel, Variant::Daylight,
+     Rgba(0.0f, 0.0f, 0.0f, 0.18f)},
     // Midnight (blueprint 3.3 verbatim)
     {TokenId::SurfaceCanvasBase, Variant::Midnight,
      Rgba(ChannelFromByte(18), ChannelFromByte(20), ChannelFromByte(26), 0.68f)},
@@ -283,6 +306,12 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(161), ChannelFromByte(161), ChannelFromByte(166), 1.0f)},
     {TokenId::SurfaceBackdropReference, Variant::Midnight,
      Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 1.0f)},
+    {TokenId::SurfaceBackdropGhost, Variant::Midnight,
+     Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 1.0f)},
+    {TokenId::SurfaceBackdropVeil, Variant::Midnight,
+     Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 0.65f)},
+    {TokenId::ShadowFloatingPanel, Variant::Midnight,
+     Rgba(0.0f, 0.0f, 0.0f, 0.18f)},
     // High contrast (EXT a11y variant: opaque, maximum separation)
     {TokenId::SurfaceCanvasBase, Variant::HighContrast,
      Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 1.0f)},
@@ -294,6 +323,15 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(229), ChannelFromByte(229), ChannelFromByte(234), 1.0f)},
     {TokenId::SurfaceBackdropReference, Variant::HighContrast,
      Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 1.0f)},
+    // High contrast: the refraction is still THERE (turning it off would make
+    // the setting a lie) but the veil is nearly opaque, so the ghost can never
+    // compete with a glyph. The shadow is pure black and full strength.
+    {TokenId::SurfaceBackdropGhost, Variant::HighContrast,
+     Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.55f)},
+    {TokenId::SurfaceBackdropVeil, Variant::HighContrast,
+     Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.82f)},
+    {TokenId::ShadowFloatingPanel, Variant::HighContrast,
+     Rgba(0.0f, 0.0f, 0.0f, 0.30f)},
 };
 
 // --border-specular-rim and --accent-liquid-primary.
@@ -601,6 +639,10 @@ struct Overrides {
   bool hasAccent = false;
   Rgba accent{};
   double glassIntensity = kReferenceGlassIntensity;
+  // C77: appearance.backdropRefraction. ON by default, because the backdrop
+  // layer is the thing that makes a translucent panel read as glass at all --
+  // a switch that shipped off would have shipped the pre-C77 look.
+  bool backdropRefraction = true;
 };
 
 inline Overrides& Current() {
@@ -622,6 +664,8 @@ inline void SetGlassIntensity(double intensity) {
   if (intensity > 1.0) intensity = 1.0;
   Current().glassIntensity = intensity;
 }
+
+inline void SetBackdropRefraction(bool enabled) { Current().backdropRefraction = enabled; }
 
 inline void Reset() { Current() = Overrides{}; }
 
@@ -662,6 +706,10 @@ inline Rgba EffectiveAccent(Variant variant) {
 inline double GlassIntensityScale() {
   return live::Current().glassIntensity / live::kReferenceGlassIntensity;
 }
+
+// C77: the refraction layer. Renderers ask THIS, never a local bool, so the
+// setting and the pixels cannot disagree.
+inline bool BackdropRefractionEnabled() { return live::Current().backdropRefraction; }
 
 // The floating-island surface with the saved glass intensity folded into its
 // alpha. Every consumer that paints "glass" must come through here; a literal

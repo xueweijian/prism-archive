@@ -1242,11 +1242,19 @@ int main(int argc, char** argv) {
                  y >= static_cast<int>(box.top) - 2 && y <= static_cast<int>(box.bottom) + 2;
         };
         int outsideDiff = 0;
+        int reported = 0;
         for (int y = 0; y < static_cast<int>(kH); ++y) {
           for (int x = 0; x < static_cast<int>(kW); ++x) {
             if (inner(pillBox, x, y) || inner(otherPillBox, x, y)) continue;
             const size_t i = static_cast<size_t>(y) * kW + static_cast<size_t>(x);
-            if (frameSidebar[i] != frameOtherFocus[i]) ++outsideDiff;
+            if (frameSidebar[i] != frameOtherFocus[i]) {
+              ++outsideDiff;
+              if (reported < 12) {
+                std::printf("SIDEBAR: outside-pill diff at (%d,%d): %08X vs %08X\n", x, y,
+                            frameSidebar[i], frameOtherFocus[i]);
+                ++reported;
+              }
+            }
           }
         }
         std::printf("SIDEBAR: focusPillDiff=%.2f outsidePillPixels=%d otherPill=%d\n", pillDiff,

@@ -92,6 +92,7 @@
 #include "../PrismCore/SidebarModel.hpp"    // sidebar state (C12)
 #include "../PrismCore/SpringAnimator.hpp"
 #include "../PrismCore/ThumbStore.hpp"
+#include "../PrismCore/TabSet.hpp"      // C59: several archives, one window
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
 #include "EditConfirmDialog.hpp"            // C54: edit intents, confirmation model, gate
@@ -100,6 +101,7 @@
 #include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
 #include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
+#include "TabBar.hpp"                        // C60: the tab strip (pixels + hits)
 
 // C34: the glass layer is composition, so the window's TU needs the three
 // import libraries CreateSwapChainForComposition / D3D11 device creation pull
@@ -1028,6 +1030,166 @@ class GalleryWindow {
   // WM_DROPFILES contract requires.
   void HandleDropFiles(HDROP drop) { EvaluateDrop(drop); }
 
+  // ---------- card C60: the tab strip (DESIGN.md §2.1) ----------------------
+  //
+  // The window owns the TabSet (C59) and the strip that paints it; every RULE
+  // -- which archive is active after a close, the 16-tab ceiling, "one path is
+  // one tab", the dirty refusal -- is C59's answer and is NOT re-derived here.
+  // What this class adds is exactly what a window can add:
+  //   * geometry + hit tests in client pixels (from WindowLayout's band),
+  //   * the pointer/keyboard gestures (click, x, middle-click, Ctrl+Tab,
+  //     Ctrl+W, drag-reorder),
+  //   * the C54 confirmation box a dirty close goes through,
+  //   * and ONE callback: "the active tab is now this path" -- the app performs
+  //     the switch through C34's SwitchArchive, so a tab click and a menu
+  //     "open" are the same path through the product (the card's requirement
+  //     4). An empty path means the EMPTY STATE: the last tab was closed, the
+  //     window stays up and the strip hides itself.
+  prism::tabs::TabSet& Tabs() { return tabs_; }
+  const prism::tabs::TabSet& Tabs() const { return tabs_; }
+  bool TabBarVisible() const { return !tabs_.empty(); }
+  prism::layout::Rect TabBarRect() const { return layout_.tabBar; }
+  // What the current frame paints (hover / drag state included), so a suite
+  // asserts the same view the renderer was handed.
+  prism::win::tabbar::View TabBarView() const { return TabViewNow(); }
+
+  // The three hit tests, exposed for the same reason HitTestForTest exists: a
+  // suite must be able to aim at the rectangle THAT WAS PAINTED instead of
+  // re-deriving the strip's arithmetic in the test.
+  int TabBarTabAt(int x, int y) const {
+    return prism::win::tabbar::TabAt(layout_.tabBar, TabBarRects(), x, y);
+  }
+  int TabBarCloseAt(int x, int y) const {
+    return prism::win::tabbar::CloseAt(layout_.tabBar, TabBarRects(), x, y);
+  }
+  int TabBarInsertSlot(int x) const {
+    return prism::win::tabbar::InsertSlot(layout_.tabBar, TabBarRects(), x);
+  }
+  std::vector<prism::win::tabbar::TabGeometry> TabBarRects() const {
+    return prism::win::tabbar::TabRects(layout_.tabBar, TabViewNow());
+  }
+
+  // The app's door: "show this archive now" (empty == empty state). The window
+  // never opens a file; it only reports which tab became active.
+  void SetTabHandler(std::function<void(const std::string&)> handler) {
+    onTab_ = std::move(handler);
+  }
+  // The confirmation seam. nullptr (the default) means the REAL C54 dialog:
+  // the window builds C54's EditDialogModel and shows C54's EditConfirmDialog,
+  // which completes asynchronously through its result handler. A suite injects
+  // its own answer so the headless case is synchronous and observable.
+  void SetTabCloseConfirmer(std::function<bool(const std::wstring& archiveName)> ask) {
+    onTabCloseConfirm_ = std::move(ask);
+  }
+  int TabClosePrompts() const { return tabClosePrompts_; }
+  int TabCloseRefusals() const { return tabCloseRefusals_; }
+  std::wstring LastTabClosePrompt() const { return lastTabClosePrompt_; }
+  bool TabCloseDialogOpen() const { return tabCloseDialog_ != nullptr; }
+
+  // Where the pointer is over the strip right now (read back by the suite; the
+  // paint uses the same fields).
+  int TabHover() const { return tabHover_; }
+  int TabHoverClose() const { return tabHoverClose_; }
+  bool TabDragActive() const { return tabDragActive_; }
+  int TabDragSlot() const { return tabDropSlot_; }
+
+  // Open (or re-activate) a tab. This is the APP's call after C34's
+  // SwitchArchive succeeded -- it deliberately does NOT fire the tab handler,
+  // or opening an archive would re-enter the switch that just opened it.
+  prism::tabs::OpenOutcome OpenTab(const std::string& utf8Path, bool exists = true) {
+    prism::tabs::OpenRequest request;
+    request.path = utf8Path;
+    request.exists = exists;
+    const std::string activeBefore = ActiveTabPath();
+    prism::tabs::OpenOutcome outcome = tabs_.Open(request);
+    if (outcome.verdict == prism::tabs::TabVerdict::kOk) {
+      // A new tab, or an existing one activated: the strip changed either way.
+      RecomputeLayout();
+      Invalidate();
+    }
+    (void)activeBefore;
+    return outcome;
+  }
+
+  // The raw close (no question asked). The C59 verdict is returned verbatim:
+  // kNeedsConfirm means "nothing changed, ask the user".
+  prism::tabs::CloseOutcome CloseTab(int index, bool confirmed = false) {
+    const std::string activeBefore = ActiveTabPath();
+    prism::tabs::CloseOutcome outcome = tabs_.Close(index, confirmed);
+    if (outcome.closed) AfterTabsChanged(activeBefore);
+    return outcome;
+  }
+
+  // The UI door: close tab 'index', asking first when C59 says the tab is
+  // dirty. Returns the verdict when it completed synchronously; std::nullopt
+  // means C54's dialog is now on screen and the close completes when the user
+  // answers it (the handler re-enters CloseTab(index, true)).
+  std::optional<prism::tabs::CloseOutcome> RequestCloseTab(int index) {
+    const std::string activeBefore = ActiveTabPath();
+    // tabbar::kDirtyNeedsConfirm is the D3 control: when it is compiled out the
+    // dirty tab is closed as if the user had already agreed.
+    prism::tabs::CloseOutcome outcome =
+        tabs_.Close(index, !prism::win::tabbar::kDirtyNeedsConfirm);
+    if (outcome.closed) {
+      AfterTabsChanged(activeBefore);
+      return outcome;
+    }
+    if (!outcome.needsConfirm) return outcome;
+    const std::wstring name = TabDisplayName(index);
+    ++tabClosePrompts_;
+    lastTabClosePrompt_ = name;
+    if (onTabCloseConfirm_) {
+      if (!onTabCloseConfirm_(name)) {
+        ++tabCloseRefusals_;
+        return outcome;  // refused: the tab is still there, nothing changed
+      }
+      const prism::tabs::CloseOutcome closed = tabs_.Close(index, true);
+      if (closed.closed) AfterTabsChanged(activeBefore);
+      return closed;
+    }
+    ShowTabCloseDialog(index, name);
+    return std::nullopt;  // asynchronous: C54's dialog owns the next step
+  }
+
+  bool ActivateTab(int index) {
+    const std::string activeBefore = ActiveTabPath();
+    if (!tabs_.Activate(index)) return false;
+    AfterTabsChanged(activeBefore);
+    return true;
+  }
+  // Ctrl+Tab / Ctrl+Shift+Tab: the wrapping ring over the open tabs.
+  bool CycleTabs(int delta) {
+    const int next = prism::win::tabbar::WrapIndex(tabs_.activeIndex(), delta,
+                                                   static_cast<int>(tabs_.size()));
+    return next >= 0 && ActivateTab(next);
+  }
+  bool MoveTab(int from, int to) {
+    if (!tabs_.Move(from, to)) return false;
+    RecomputeLayout();  // the strip's widths are an equal share: order matters
+    Invalidate();
+    return true;
+  }
+  // A drop at an insertion SLOT (what the marker shows) -> TabSet::Move's
+  // erase-then-insert index.
+  bool DropTab(int from, int slot) {
+    return MoveTab(from, prism::win::tabbar::MoveTarget(from, slot));
+  }
+
+  // C54's model for "close a tab that has unsaved changes". Public because the
+  // suite builds the SAME dialog the product shows and asserts its words.
+  static prism::win::editui::EditDialogModel TabCloseModel(const std::wstring& archiveName) {
+    prism::win::editui::EditDialogModel model;
+    model.dangerous = true;                     // it discards unsaved work
+    model.title = L"\u5173\u95ED\u6807\u7B7E";  // 关闭标签
+    model.body = L"\u2018" + archiveName +
+                 L"\u2019 \u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002"  // 有未保存的修改。
+                 L"\u5173\u95ED\u540E\u8FD9\u4E9B\u4FEE\u6539\u4F1A\u4E22\u5931\u3002";
+    model.acceptLabel = L"\u5173\u95ED\u5E76\u4E22\u5F03";  // 关闭并丢弃
+    model.cancelLabel = L"\u53D6\u6D88";                     // 取消
+    model.needsInput = false;
+    return model;
+  }
+
  private:
   static LRESULT CALLBACK ProcThunk(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* self = reinterpret_cast<GalleryWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1163,6 +1325,7 @@ class GalleryWindow {
         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_MOUSEMOVE: {
+        HandleTabMouseMove(MouseX(lparam), MouseY(lparam));
         const int index = ActionBarHit(MouseX(lparam), MouseY(lparam));
         if (index != actionHover_) {
           actionHover_ = index;
@@ -1183,6 +1346,9 @@ class GalleryWindow {
         return 0;
       }
       case WM_LBUTTONUP: {
+        // C60: a release that ends a tab press/drag owns the event; the tab was
+        // already activated on the press (that is what makes a drag start).
+        if (HandleTabMouseUp(MouseX(lparam), MouseY(lparam))) return 0;
         if (actionPressed_ != -1) {
           actionPressed_ = -1;
           Invalidate();
@@ -1191,14 +1357,31 @@ class GalleryWindow {
         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_LBUTTONDBLCLK: {
+        // A double-click on a tab is still a tab click: the strip gets first
+        // refusal so the second WM_LBUTTONDOWN of the pair cannot select a row.
+        if (TabBarTabAt(MouseX(lparam), MouseY(lparam)) >= 0) return 0;
         DoubleClickAt(MouseX(lparam), MouseY(lparam));
         return 0;
+      }
+      case WM_MBUTTONDOWN: {
+        // C60: middle-click closes the tab under the pointer (C59's rule: a
+        // dirty tab refuses and the C54 box asks).
+        const int index = TabBarTabAt(MouseX(lparam), MouseY(lparam));
+        if (index >= 0) {
+          RequestCloseTab(index);
+          return 0;
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_LBUTTONDOWN: {
         // C52: a click anywhere dismisses a drop hint that is still on screen
         // (the app clears it as soon as it acts; this is the "user changed
         // their mind" path, so an overlay can never become permanent chrome).
         if (dropHintVisible_) ClearDropHint();
+        // C60: the strip is chrome ABOVE every row (and above the band's own
+        // baseline), so a click on a tab -- or on the strip's background -- is
+        // consumed before the action band or the grid can see it.
+        if (HandleTabMouseDown(MouseX(lparam), MouseY(lparam))) return 0;
         // C-V2: the band is chrome ABOVE the rows: a button click must never
         // also select the tile that happens to be behind it.
         if (ActionBarClick(MouseX(lparam), MouseY(lparam))) return 0;
@@ -1281,6 +1464,203 @@ class GalleryWindow {
       default:
         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
     }
+  }
+
+  // ---------- card C60: the tab strip's private half ------------------------
+  std::string ActiveTabPath() const {
+    const prism::tabs::Tab* tab = tabs_.active();
+    return tab != nullptr ? tab->path : std::string();
+  }
+
+  std::wstring TabDisplayName(int index) const {
+    const prism::tabs::Tab* tab = tabs_.At(index);
+    return tab != nullptr ? Utf8ToWide(tab->displayName) : std::wstring();
+  }
+
+  // The view the painter and the hit tests both read. Built on demand (<=16
+  // tabs, no allocation worth caching) so it cannot go stale against the
+  // TabSet -- a cached copy is how a strip starts painting a tab that is gone.
+  prism::win::tabbar::View TabViewNow() const {
+    prism::win::tabbar::View view;
+    view.items.reserve(tabs_.size());
+    for (const prism::tabs::Tab& tab : tabs_.tabs()) {
+      prism::win::tabbar::Item item;
+      item.title = Utf8ToWide(tab.displayName);
+      item.dirty = tab.dirty;
+      view.items.push_back(std::move(item));
+    }
+    view.active = tabs_.activeIndex();
+    view.hover = tabHover_;
+    view.hoverClose = tabHoverClose_;
+    view.pressedClose = tabPressedClose_;
+    view.dragFrom = tabDragActive_ ? tabDragFrom_ : -1;
+    view.dropIndex = tabDragActive_ ? tabDropSlot_ : -1;
+    return view;
+  }
+
+  // Every mutation ends here: the band may have appeared/disappeared (a close
+  // of the last tab frees its 32 px), and the APP is told which archive is now
+  // active -- but only when the answer CHANGED. Closing an inactive tab must
+  // not re-open the archive that is already on screen (that would reset the
+  // user's folder for no reason).
+  void AfterTabsChanged(const std::string& activeBefore) {
+    const std::string activeAfter = ActiveTabPath();
+    RecomputeLayout();
+    Invalidate();
+    if (activeAfter == activeBefore) return;
+    if (activeAfter.empty()) {
+      ClearArchiveView();  // the empty state: the window stays up
+      if (onTab_) onTab_(std::string());
+      return;
+    }
+    if (onTab_) onTab_(activeAfter);
+  }
+
+  // "No archive open" is a STATE, not an exit (C59's CloseOutcome::emptyState).
+  // The view is cleared through the same model objects a real open feeds, so
+  // the grid, the sidebar and the action band all read "no archive" instead of
+  // showing the closed archive's rows.
+  void ClearArchiveView() {
+    catalog_ = nullptr;
+    archiveOpen_ = false;
+    nav_.Attach(nullptr);
+    selection_ = -1;
+    sidebar_.AttachCatalog(nullptr);
+    folderItems_.clear();
+    folderRowOfCatalog_.clear();
+    listItems_.clear();
+    listRowToFolder_.clear();
+    folderToListRow_.clear();
+    history_.Clear();
+    RebuildBreadcrumbText();
+    SyncActionContext();
+    RecomputeLayout();
+    Invalidate();
+  }
+
+  // C54's confirmation box for a dirty tab. Non-modal on purpose: the window
+  // never blocks its own message loop (C54's dialog completes through its
+  // result handler), and the close it authorises runs through the SAME
+  // CloseTab(index, true) an injected confirmer would take.
+  void ShowTabCloseDialog(int index, const std::wstring& name) {
+    if (!host_.hwnd) return;
+    auto dialog = std::make_unique<prism::win::editui::EditConfirmDialog>();
+    const HINSTANCE instance =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(host_.hwnd, GWLP_HINSTANCE));
+    if (!dialog->Create(instance, L"PrismArchive")) {
+      // No dialog possible (headless): refuse rather than discard silently --
+      // losing the user's edits is the one outcome this path must never take.
+      ++tabCloseRefusals_;
+      return;
+    }
+    dialog->SetModel(TabCloseModel(name));
+    dialog->SetResultHandler([this, index](const prism::win::editui::EditDialogResult& result) {
+      const bool accepted = prism::win::editui::EditMayProceed(result);
+      tabCloseDialog_.reset();
+      if (!accepted) {
+        ++tabCloseRefusals_;
+        SetStatus(L"\u5DF2\u53D6\u6D88\u5173\u95ED\u6807\u7B7E");  // 已取消关闭标签
+        Invalidate();
+        return;
+      }
+      CloseTab(index, true);
+    });
+    tabCloseDialog_ = std::move(dialog);
+    tabCloseDialog_->Show();
+  }
+
+  // One pointer press inside the strip. Returns true when the strip consumed
+  // it -- a tab click must never also select the tile painted underneath.
+  bool HandleTabMouseDown(int x, int y) {
+    if (!TabBarVisible() || layout_.tabBar.Empty()) return false;
+    const std::vector<prism::win::tabbar::TabGeometry> tabs = TabBarRects();
+    const int close = prism::win::tabbar::CloseAt(layout_.tabBar, tabs, x, y);
+    if (close >= 0) {
+      tabPressedClose_ = close;
+      Invalidate();
+      (void)RequestCloseTab(close);
+      return true;
+    }
+    const int index = prism::win::tabbar::TabAt(layout_.tabBar, tabs, x, y);
+    if (index < 0) {
+      // The strip's own background/insertion area: still the strip's click.
+      return x >= layout_.tabBar.left && x < layout_.tabBar.right && y >= layout_.tabBar.top &&
+             y < layout_.tabBar.bottom;
+    }
+    ActivateTab(index);
+    // A press on a tab may become a DRAG. The slot is armed at the tab's own
+    // position so a press with no movement drops nowhere (Move(from, from)).
+    tabDragPending_ = index;
+    tabDragFrom_ = index;
+    tabDropSlot_ = index;
+    tabDragActive_ = false;
+    tabDragOrigin_.x = x;
+    tabDragOrigin_.y = y;
+    if (host_.hwnd) SetCapture(host_.hwnd);
+    return true;
+  }
+
+  // Motion: arm the reorder marker once the pointer has moved past the slop,
+  // and keep the hover state the painter uses.
+  void HandleTabMouseMove(int x, int y) {
+    if (!TabBarVisible() || layout_.tabBar.Empty()) return;
+    const std::vector<prism::win::tabbar::TabGeometry> tabs = TabBarRects();
+    const int hover = prism::win::tabbar::TabAt(layout_.tabBar, tabs, x, y);
+    const int hoverClose = prism::win::tabbar::CloseAt(layout_.tabBar, tabs, x, y);
+    if (hover != tabHover_ || hoverClose != tabHoverClose_) {
+      tabHover_ = hover;
+      tabHoverClose_ = hoverClose;
+      Invalidate();
+    }
+    if (tabDragPending_ < 0) return;
+    const int dx = x - tabDragOrigin_.x;
+    const int dy = y - tabDragOrigin_.y;
+    const int slop = prism::win::tabbar::Metrics::kDragSlop;
+    if (!tabDragActive_ && dx * dx + dy * dy < slop * slop) return;
+    tabDragActive_ = true;
+    tabDropSlot_ = prism::win::tabbar::InsertSlot(layout_.tabBar, tabs, x);
+    Invalidate();
+  }
+
+  // Release: a drag that moved applies the reorder; a press that did not is
+  // just the activation the press already performed.
+  bool HandleTabMouseUp(int x, int y) {
+    const bool wasDragging = tabDragActive_;
+    const int from = tabDragFrom_;
+    const int slot = tabDropSlot_;
+    const bool hadPending = tabDragPending_ >= 0;
+    tabDragPending_ = -1;
+    tabDragFrom_ = -1;
+    tabDropSlot_ = -1;
+    tabDragActive_ = false;
+    if (host_.hwnd) ReleaseCapture();
+    if (!hadPending) return false;
+    if (wasDragging && from >= 0 && slot >= 0 &&
+        prism::win::tabbar::MoveTarget(from, slot) != from) {
+      DropTab(from, slot);
+    }
+    (void)x;
+    (void)y;
+    Invalidate();
+    return true;
+  }
+
+  // Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+W get first refusal, exactly like the
+  // action band does: the chords are the strip's, and a stroke the strip
+  // declines still reaches C25's table unchanged.
+  bool HandleTabKey(const prism::keys::Stroke& stroke) {
+    if (tabs_.empty()) return false;
+    constexpr std::uint32_t kTabKey = 0x09;  // VK_TAB
+    constexpr std::uint32_t kKeyW = 'W';
+    if (stroke.ctrl && !stroke.alt && stroke.key == kTabKey) {
+      CycleTabs(stroke.shift ? -1 : +1);
+      return true;
+    }
+    if (stroke.ctrl && !stroke.shift && !stroke.alt && stroke.key == kKeyW) {
+      RequestCloseTab(tabs_.activeIndex());
+      return true;
+    }
+    return false;
   }
 
   // Signed client coordinates: a drag can deliver negative values.
@@ -1481,6 +1861,11 @@ class GalleryWindow {
         return 0;
       }
     }
+    // C60: the strip's chords (Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+W) are claimed
+    // BEFORE the gallery table, the same way the action band claims its own.
+    // A stroke the strip declines reaches C25's table unchanged, so no existing
+    // chord changes meaning.
+    if (HandleTabKey(stroke)) return 0;
     ExecuteCommand(prism::keys::Resolve(stroke, KeyScope()));
     return 0;
   }
@@ -2143,6 +2528,10 @@ class GalleryWindow {
     scene.actions = &actionBar_;
     scene.actionHover = actionHover_;
     scene.actionPressed = actionPressed_;
+    // C60: the strip's view is built from the SAME TabSet the hit tests read,
+    // so a tab can never be painted somewhere it cannot be clicked.
+    const prism::win::tabbar::View tabView = TabViewNow();
+    scene.tabs = TabBarVisible() ? &tabView : nullptr;
     // C29: the rail's command list is a LAYOUT input; EnsureSidebar rebuilds it
     // only when the model is dirty, so this is a cache hit on every other frame.
     EnsureSidebar();
@@ -2311,8 +2700,11 @@ class GalleryWindow {
     const double scroll = viewport_.Scroll();
     const bool rail = prism::layout::RailVisible(sidebarRailVisible_, listMode_) &&
                       GalleryRenderer::SidebarFits(static_cast<float>(clientW_));
+    // C60: the strip reserves 32 px only while a tab exists -- an empty strip
+    // returns the action island (and the content) to the pre-C60 geometry.
     layout_ = prism::layout::Compute(static_cast<int>(clientW_),
-                                     static_cast<int>(clientH_), rail, listMode_);
+                                     static_cast<int>(clientH_), rail, listMode_,
+                                     TabBarVisible());
     // V4: the grid's content height is the FLOW's height (tiles are cellHeight
     // tall, tile-less rows are 32 px bands), so the viewport is fed an average
     // pitch that makes Rows() * pitch == FlowContentHeight(). Scroll clamping
@@ -2692,6 +3084,26 @@ class GalleryWindow {
   std::size_t dropScanBudget_ = 0;  // entries left in the current walk
   int dropHintDraws_ = 0;           // frames that actually painted the overlay
   int paintMessages_ = 0;           // WM_PAINTs handled (paint evidence)
+
+  // ---- card C60: the tab strip (design §2.1) ----
+  // tabs_ is C59's model, unmodified. Everything else here is UI state the
+  // model must not know about: which tab the pointer is over, whether a press
+  // became a drag, and where the insertion marker is.
+  prism::tabs::TabSet tabs_;
+  int tabHover_ = -1;
+  int tabHoverClose_ = -1;
+  int tabPressedClose_ = -1;
+  int tabDragPending_ = -1;   // pressed on a tab, drag not armed yet
+  int tabDragFrom_ = -1;
+  int tabDropSlot_ = -1;
+  bool tabDragActive_ = false;
+  POINT tabDragOrigin_{};
+  std::function<void(const std::string&)> onTab_;            // the app's switch
+  std::function<bool(const std::wstring&)> onTabCloseConfirm_;  // test/app seam
+  std::unique_ptr<prism::win::editui::EditConfirmDialog> tabCloseDialog_;
+  int tabClosePrompts_ = 0;    // dirty closes that asked the user
+  int tabCloseRefusals_ = 0;   // ... and were answered "cancel"
+  std::wstring lastTabClosePrompt_;
 };
 
 }  // namespace prism::win::gallery

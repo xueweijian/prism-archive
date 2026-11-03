@@ -87,6 +87,22 @@ enum class ActionId : uint8_t {
   Count,
 };
 
+// The stable machine name (stderr/tests). Same spelling as operator<<.
+inline const char* ActionName(ActionId id) {
+  switch (id) {
+    case ActionId::Open: return "Open";
+    case ActionId::ExtractTo: return "ExtractTo";
+    case ActionId::Compress: return "Compress";
+    case ActionId::Add: return "Add";
+    case ActionId::Delete: return "Delete";
+    case ActionId::Test: return "Test";
+    case ActionId::QuickLook: return "QuickLook";
+    case ActionId::Search: return "Search";
+    case ActionId::Count: return "Count";
+  }
+  return "?";
+}
+
 inline std::ostream& operator<<(std::ostream& os, ActionId id) {
   switch (id) {
     case ActionId::Open: return os << "Open";

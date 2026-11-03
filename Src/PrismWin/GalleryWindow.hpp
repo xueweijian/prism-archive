@@ -1806,7 +1806,18 @@ class GalleryWindow {
   // The ONE exit of the band: the app owns what "extract" or "test" does, so a
   // test can count commands without starting an extraction.
   void FireAction(prism::actionbar::ActionId action, int item) {
-    if (onAction_) onAction_(action, item);
+    if (onAction_) {
+      onAction_(action, item);
+      return;
+    }
+    // C64: an action with NO app handler is a DEAD BUTTON, not a quiet success.
+    // Before this card Main never called SetActionHandler, so all eight buttons
+    // (and their Alt chords) did nothing at all. Say it on stderr so the process
+    // suite can catch the missing wiring; the UI status line says it too.
+    std::fprintf(stderr, "action unhandled id=%s item=%d\n",
+                 prism::actionbar::ActionName(action), item);
+    SetStatus(std::wstring(L"\u52A8\u4F5C\u672A\u63A5\u7EBF\uFF1A") +
+              prism::win::Utf8ToWide(prism::actionbar::ActionName(action)));
   }
 
   // Tab / Enter / arrows / Esc -- but only for the keys the band actually owns:

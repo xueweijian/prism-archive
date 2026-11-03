@@ -72,4 +72,38 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "win.c64_launch" COMMAND win_c64_launch)
   set_tests_properties(win.c64_launch PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
       PASS_REGULAR_EXPRESSION "ALL C64 LAUNCH CHECKS PASSED")
+
+  # NEGATIVE CONTROL for the dead-button defect: the SAME Main.cpp with the
+  # SetActionHandler call compiled out. The process suite clicks Search on the
+  # real window; the mutant window logs "action unhandled" and never logs
+  # "action id=Search", so the assertion goes red and prints CAUGHT.
+  add_executable(prism_archive_mutant_no_action_handler
+                 "${CMAKE_SOURCE_DIR}/Src/App/Main.cpp"
+                 "${CMAKE_SOURCE_DIR}/Src/App/PrismArchive.rc")
+  target_include_directories(prism_archive_mutant_no_action_handler
+                             PRIVATE "${CMAKE_SOURCE_DIR}/Src")
+  target_link_libraries(prism_archive_mutant_no_action_handler PRIVATE prism_win_bridge
+                        user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
+                        ole32.lib comdlg32.lib shell32.lib shlwapi.lib comctl32.lib)
+  set_target_properties(prism_archive_mutant_no_action_handler
+                        PROPERTIES WIN32_EXECUTABLE TRUE)
+  target_compile_definitions(prism_archive_mutant_no_action_handler
+                             PRIVATE UNICODE _UNICODE
+                                     PRISM_C64_MUTANT_NO_ACTION_HANDLER=1)
+  target_compile_options(prism_archive_mutant_no_action_handler PRIVATE /WX-)
+
+  add_executable(win_c64_launch_mutant_no_action_handler win/test_c64_launch.cpp)
+  target_link_libraries(win_c64_launch_mutant_no_action_handler PRIVATE prism_core
+                        prism_win_bridge user32.lib ole32.lib shell32.lib)
+  target_compile_options(win_c64_launch_mutant_no_action_handler PRIVATE /WX-)
+  target_compile_definitions(win_c64_launch_mutant_no_action_handler
+                             PRIVATE "PRISM_C64_EXE=\"$<TARGET_FILE:prism_archive_mutant_no_action_handler>\""
+                                     "PRISM_C64_LAUNCH_MUTANT_NAME=\"no_action_handler\"")
+  add_dependencies(win_c64_launch_mutant_no_action_handler
+                   prism_archive_mutant_no_action_handler)
+  add_test(NAME "mutation.c64.no_action_handler"
+           COMMAND win_c64_launch_mutant_no_action_handler)
+  set_tests_properties(mutation.c64.no_action_handler PROPERTIES TIMEOUT 120
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "C64 LAUNCH MUTATION CAUGHT: no_action_handler")
 endif()

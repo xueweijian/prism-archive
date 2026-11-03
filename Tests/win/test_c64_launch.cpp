@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -26,6 +27,8 @@
 
 #include "../mini_test.hpp"
 #include "../win/UniqueTempDir.hpp"
+#include "../../Src/PrismCore/ActionBarModel.hpp"
+#include "../../Src/PrismCore/WindowLayout.hpp"
 #include "../../Src/PrismWin/PrismEngineBridge.hpp"
 
 #pragma comment(lib, "user32.lib")
@@ -44,6 +47,12 @@ constexpr DWORD kLineTimeoutMs = 20'000;
 constexpr DWORD kKillTimeoutMs = 5'000;
 
 bool g_noFixture = false;
+
+#if defined(PRISM_C64_LAUNCH_MUTANT_NAME)
+constexpr const char* kMutant = PRISM_C64_LAUNCH_MUTANT_NAME;
+#else
+constexpr const char* kMutant = nullptr;
+#endif
 
 std::wstring ExePath() { return prism::win::Utf8ToWide(PRISM_C64_EXE); }
 
@@ -163,8 +172,8 @@ bool ChildAlive(const Child& child) {
 
 // Wait for one stderr line; both exits are bounded (deadline and child death).
 bool WaitForLine(Child* child, const fs::path& stderrPath, const std::string& needle,
-                 std::string* text) {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kLineTimeoutMs);
+                 std::string* text, DWORD budgetMs = kLineTimeoutMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
   for (;;) {
     *text = ReadText(stderrPath);
     if (Contains(*text, needle)) return true;
@@ -179,6 +188,64 @@ void StopChild(Child* child) {
   TerminateProcess(child->info.hProcess, 0xC64);
   WaitForSingleObject(child->info.hProcess, kKillTimeoutMs);
   child->exited = true;
+}
+
+
+struct WindowSearch {
+  DWORD pid = 0;
+  HWND hwnd = nullptr;
+};
+
+BOOL CALLBACK WindowSearchProc(HWND hwnd, LPARAM param) {
+  auto* find = reinterpret_cast<WindowSearch*>(param);
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != find->pid || IsWindowVisible(hwnd) == FALSE) return TRUE;
+  wchar_t title[256]{};
+  GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+  if (wcsstr(title, L"PrismArchive") == nullptr) return TRUE;
+  find->hwnd = hwnd;
+  return FALSE;
+}
+
+HWND WaitForMainWindow(const Child& child, DWORD budgetMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+  for (;;) {
+    WindowSearch find;
+    find.pid = child.info.dwProcessId;
+    EnumWindows(WindowSearchProc, reinterpret_cast<LPARAM>(&find));
+    if (find.hwnd != nullptr) return find.hwnd;
+    if (!ChildAlive(child)) return nullptr;
+    if (std::chrono::steady_clock::now() >= deadline) return nullptr;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+}
+
+// Click the Search button on the real window. The geometry is the SAME
+// WindowLayout/ActionBarModel pair the window hit-tests with, so the test is
+// aiming at the rectangle the product computes, not at a hardcoded pixel.
+bool ClickSearchButton(HWND hwnd) {
+  RECT client{};
+  if (GetClientRect(hwnd, &client) == FALSE) return false;
+  const int width = client.right - client.left;
+  const int height = client.bottom - client.top;
+  const prism::layout::Layout layout =
+      prism::layout::Compute(width, height, /*sidebarVisible=*/true, /*listMode=*/false,
+                             /*tabBarVisible=*/true);
+  const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+  const int index = prism::actionbar::IndexOf(prism::actionbar::ActionId::Search);
+  if (index < 0 || static_cast<std::size_t>(index) >= band.buttons.size()) return false;
+  const prism::actionbar::Rect& r = band.buttons[static_cast<std::size_t>(index)].rect;
+  const LPARAM at = MAKELONG(static_cast<short>((r.left + r.right) / 2),
+                             static_cast<short>((r.top + r.bottom) / 2));
+  // Both doors: the pointer click and the Alt+S chord the same button advertises.
+  // The chord makes the assertion about the HANDLER (the click's hit test is
+  // already covered by win.action_bar_paint), and it is the door a keyboard user
+  // actually has.
+  PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, at);
+  PostMessageW(hwnd, WM_LBUTTONUP, 0, at);
+  PostMessageW(hwnd, WM_SYSKEYDOWN, static_cast<WPARAM>('S'), 0);
+  return true;
 }
 
 struct Toy {
@@ -283,13 +350,65 @@ PRISM_TEST("c64 process: a missing third argument is skipped, never a dialog") {
   PRISM_CHECK(found);
 }
 
+PRISM_TEST("c64 process: the action island is wired in the shipped exe") {
+  Toy& toy = World();
+  if (!Setup()) {
+    g_noFixture = true;
+    return;
+  }
+  const fs::path stderrPath = toy.dir.path() / L"action.err";
+  Child child;
+  std::string why;
+  if (!PRISM_CHECK(StartChild(ExePath(), {toy.alpha}, toy.dir.path(), stderrPath, &child, &why))) {
+    std::printf("    %s\n", why.c_str());
+    return;
+  }
+  std::string text;
+  const bool ready = WaitForLine(&child, stderrPath, "tabs opened=1 skipped=0", &text);
+  HWND hwnd = ready ? WaitForMainWindow(child, 10'000) : nullptr;
+  bool clicked = false;
+  bool answered = false;
+  if (ready && hwnd != nullptr) {
+    clicked = ClickSearchButton(hwnd);
+    if (clicked) {
+      answered = WaitForLine(&child, stderrPath, "action id=Search", &text, 5'000);
+    }
+  }
+  // Kill the child BEFORE any assertion: ReportFailure terminates THIS process
+  // at the first red (D27), so a child still holding inherited handles would
+  // outlive the suite and keep ctest's pipe open (observed as a long hang).
+  StopChild(&child);
+  if (!answered) {
+    std::printf("    stderr tail:\n%s\n",
+                text.substr(text.size() > 2000 ? text.size() - 2000 : 0).c_str());
+  }
+  PRISM_CHECK(ready);
+  PRISM_CHECK(hwnd != nullptr);
+  PRISM_CHECK(clicked);
+  PRISM_CHECK(answered);
+}
+
 int main(int argc, char** argv) {
+  if (kMutant != nullptr) {
+    std::printf("C64 LAUNCH MUTANT ACTIVE: %s\n", kMutant);
+    prism::test::SetMutationVerdict(
+        (std::string("C64 LAUNCH MUTATION CAUGHT: ") + kMutant).c_str(),
+        [mutation = kMutant] { return mutation != nullptr; });
+  }
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::puts("C64-LAUNCH SKIP: no COM on this window station");
     return kSkipReturnCode;
   }
   const int rc = prism::test::RunAll(argc, argv);
   CoUninitialize();
+  if (kMutant != nullptr) {
+    if (rc == 0) {
+      std::puts("C64 LAUNCH MUTATION NOT CAUGHT: the suite stayed green with the handler compiled "
+                "out");
+      return 1;
+    }
+    return 0;
+  }
   if (rc != 0) return rc;
   if (g_noFixture) {
     std::printf("C64-LAUNCH SKIP: fixture unavailable (%s)\n", World().why.c_str());

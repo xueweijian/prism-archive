@@ -324,6 +324,9 @@ PrismArchive 的客户端区域（动作岛、标签栏、列表、侧栏、状�
 ### 已知边界（如实写出来，不假装支持）
 
 - 侧栏树项的展开/折叠只**报告状态**，不提供 ExpandCollapse 动作（用键盘或点击箭头）。
+- 驱动工具里的 `type`（语义输入）在默认无头模式下要求原生 UIA 的 TextPattern，而 MSAA
+  代理只提供 ValuePattern：用 `set-value` 写字，或给 `type` 加 `--headed`（物理按键，
+  等价于读屏用户真的在打字）。两条路都实测会改查询并过滤列表。
 - 多选（Ctrl/Shift）通过每一行的 `SELECTED` 状态暴露；`accSelection` 只返回一个元素。
 - UIA 看到的是 **MSAA 代理元素**（LegacyIAccessible），不是原生 UIA Provider：
   Windows 讲述人、NVDA、Inspect.exe 都能用，但个别只认原生 UIA 属性的工具会退化。

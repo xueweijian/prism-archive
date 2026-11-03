@@ -288,7 +288,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PrismArchive\un
 - `Ctrl+Shift+P`：只切换并显示图标档位，缩略图仍按固定尺寸绘制。
 - Help → About（含诊断报告）：对话框已经写好，但菜单项还没接上；0.1.0 复制诊断
   请用错误弹窗的 `Ctrl+C`（见 [TROUBLESHOOTING](TROUBLESHOOTING.md#7zdll-找不到)）。
-### 设置对话框里「改了以后真的会变」的项（C69 实测）
+### 设置里「改了以后真的会变」的项（C69 + C71 实测）
 
 C69 用真对话框 + 真窗口 + 像素/菜单字符串断言逐项测过。**会变的**：
 
@@ -299,15 +299,17 @@ C69 用真对话框 + 真窗口 + 像素/菜单字符串断言逐项测过。**�
 | 列表/网格（listMode） | 窗口模型切换，渲染器绘制的行/瓦片布局随之改变 | win.c69_settings checklist 用例 |
 | 排序（sort） | 排序键与方向落到窗口的多键排序规格上，行序随之改变 | 同上 |
 
-**写进文件但运行时还没有消费者**（改了不会立刻看到任何差异；这不算「坏了」，是还没接线）：
+**C71 接线后也「改了真的会变」的四项**（对话框里没有对应控件，改的是
+`%LOCALAPPDATA%\PrismArchive\settings.json`；保存后下一次绘制/解压生效）：
 
-- appearance.glassIntensity（玻璃强度）：schema 有键、有 v2→v3 迁移，但没有任何渲染路径读它。
-- appearance.accentColor（强调色）：同上；强调色目前只来自 ThemeTokens 的令牌行。
-- extract.overwrite（ask/replace/skip/rename）：解压流程不读它，冲突策略仍是运行时对话框。
-- extract.verifyAfterExtract：解压流程不读它；校验由 --test 动词单独触发。
+| 设置 | 可观察的差异 | 断言 |
+|---|---|---|
+| appearance.accentColor | 进度条填充、动作岛焦点环、列表选中行改用保存的颜色（默认值 #4F8CFF 是「跟随主题令牌」的哨兵） | win.c71_livesettings（同一坐标像素 = 解析出的 RGB，且与令牌像素不同） |
+| appearance.glassIntensity | 玻璃不透明度按 0.72 为基准缩放：0.30 与 0.90 在同一玻璃坐标得到不同像素，且等于 CompositeOver(令牌×强度, 背景) | win.c71_livesettings（两档像素 + 合成值比对） |
+| extract.overwrite | 目标已存在时 replace 覆盖、skip 保留原文件、rename 另存为 `note (1).txt`；ask 走确认接缝 | win.c71_livesettings（磁盘字节 + 回调计数；ask 断言提示次数，不弹真框） |
+| extract.verifyAfterExtract | 开：解压后按 C13 Verify 逐条重解，损坏条目让本次操作报告失败；关：同一计划成功 | win.c71_livesettings（同一损坏包、同一计划，off ok / on verifyFailed） |
 
-这四项在 Tests/win/test_c69_settings.cpp 里只断言「保存后能原样读回」，不断言行为差异；
-接线后应把上表补全。动作岛的八个按钮同理：标签来自 PrismCore 的编译期表（中文），
+动作岛的八个按钮同理：标签来自 PrismCore 的编译期表（中文），
 不随语言切换（见下一条）。
 
 - 设置对话框的**摘要行与就地提示**仍是英文：它们由 DialogState 的诊断句子生成，

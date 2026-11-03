@@ -246,7 +246,9 @@ class ActionBarPainter {
     // override it with .72, which is why the island looked like a lit gray
     // ribbon against the canvas instead of glass. A pixel assertion in the C64
     // suite compares this fill with CompositeOver(SurfaceFloatingIsland, canvas).
-    return ToD2d(Token(prism::theme::TokenId::SurfaceFloatingIsland, variant));
+    // C71: and the token's alpha now carries appearance.glassIntensity, through
+    // the same EffectiveGlassSurface() helper the shader and the content painter use.
+    return ToD2d(prism::theme::EffectiveGlassSurface(variant));
   }
   static D2D1_COLOR_F BorderColor(prism::theme::Variant variant) {
     prism::theme::Rgba c =
@@ -255,8 +257,9 @@ class ActionBarPainter {
     return ToD2d(c);
   }
   static D2D1_COLOR_F Accent(prism::theme::Variant variant, float alpha) {
-    prism::theme::Rgba c =
-        prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary, variant).gradient.from;
+    // C71: the focus ring follows appearance.accentColor when the user saved
+    // one; otherwise this is the theme's --accent-liquid-primary token.
+    prism::theme::Rgba c = prism::theme::EffectiveAccent(variant);
     c.a = alpha;
     return ToD2d(c);
   }

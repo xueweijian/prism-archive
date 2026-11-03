@@ -279,6 +279,12 @@ class GalleryRenderer {
 
   void Draw(ID2D1RenderTarget* target, const Scene& scene) {
     const D2D1_SIZE_F size = target->GetSize();
+    // C71: one resolution per frame; every method below that resets a brush
+    // restores THESE values, not the pre-C71 constants.
+    accentColor_ = AccentOf(scene.actionTheme);
+    islandColor_ = IslandOf(scene.actionTheme);
+    accent_->SetColor(accentColor_);
+    island_->SetColor(islandColor_);
     // V1: ONE layout for the whole frame -- bands, grid metrics, list body and
     // chrome. A component that wants a rectangle asks this object.
     // V4: the rail is CHROME (DESIGN.md §2 lists it as a band beside the
@@ -371,7 +377,7 @@ class GalleryRenderer {
                                       static_cast<float>(layout.statusBar.right),
                                       static_cast<float>(layout.statusBar.top) + 1.0f),
                           islandBorder_.Get());
-    island_->SetColor(kIslandFill);
+    island_->SetColor(islandColor_);
   }
 
   // V4: the status band (DESIGN.md §2 "状态条 28", §3 four states).
@@ -395,7 +401,7 @@ class GalleryRenderer {
         // while unknown. Colour is never the ONLY signal (the text says it too).
         const D2D1_COLOR_F dot =
             scene.status.crypto == prism::layout::CryptoState::Encrypted
-                ? kAccent
+                ? accentColor_
                 : (scene.status.crypto == prism::layout::CryptoState::Unencrypted
                        ? kTextSecondary
                        : kIslandBorder);
@@ -403,7 +409,7 @@ class GalleryRenderer {
         island_->SetColor(dot);
         target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 3.0f, cy), 3.0f, 3.0f),
                             island_.Get());
-        island_->SetColor(kIslandFill);
+        island_->SetColor(islandColor_);
         textLeft = rect.left + 12.0f;
       }
       std::wstring text = Utf8(segment.text);
@@ -445,6 +451,35 @@ class GalleryRenderer {
     out.b = c.b;
     out.a = c.a;
     return out;
+  }
+
+  // C71: the two LIVE colours. appearance.accentColor / glassIntensity are
+  // resolved once per frame (the theme runtime is process-global) instead of
+  // the old hardcoded kAccent / kIslandFill literals.
+  static D2D1_COLOR_F AccentOf(prism::theme::Variant variant) {
+    // The pre-C71 kAccent brush was OPAQUE; the token's own alpha is a material
+    // role used by DialogChrome, not by these solid fills/rings. Keep the alpha
+    // contract identical so this change cannot repaint anything by accident.
+    prism::theme::Rgba accent = prism::theme::EffectiveAccent(variant);
+    accent.a = 1.0f;
+    return ToD2d(accent);
+  }
+  static D2D1_COLOR_F IslandOf(prism::theme::Variant variant) {
+    // These content surfaces (breadcrumb pill, progress capsule) used the
+    // pre-C71 kIslandFill .72 literal. C71 scales exactly that alpha by the
+    // same intensity/reference ratio the token path uses: the default stays
+    // pixel-identical (C60/C64 pin it) and the setting still reaches them.
+    (void)variant;
+    D2D1_COLOR_F fill = kIslandFill;
+#if defined(PRISM_C71_MUTANT_IGNORE_GLASS)
+    ++prism::theme::live::MutantGlassHits();
+#else
+    double alpha = 0.72 * prism::theme::GlassIntensityScale();
+    if (alpha < 0.0) alpha = 0.0;
+    if (alpha > 1.0) alpha = 1.0;
+    fill.a = static_cast<float>(alpha);
+#endif
+    return fill;
   }
 
   // ColorToken -> concrete RGBA from the token table (C15). The rail's panel is
@@ -934,7 +969,7 @@ class GalleryRenderer {
     const float iconBottom = band.bottom - 8.0f;
     islandBorder_->SetColor(prism::QuickLookPlanner::KindByName(item.path) ==
                                     prism::PreviewKind::Image
-                                ? kAccent
+                                ? accentColor_
                                 : kTextSecondary);
     target->FillRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(band.left + 8.0f, iconTop, band.left + 24.0f,
@@ -1034,7 +1069,7 @@ class GalleryRenderer {
     target->FillRectangle(
         D2D1::RectF(rect.left + 12.0f, cy - 4.0f, rect.right - 12.0f, cy + 4.0f),
         island_.Get());
-    island_->SetColor(kIslandFill);
+    island_->SetColor(islandColor_);
   }
 
   void DrawNamePlate(ID2D1RenderTarget* target, const prism::layout::Rect& cell,
@@ -1055,7 +1090,7 @@ class GalleryRenderer {
     if (scene.selectedItem < 0) return;
     if (static_cast<int>(itemIndex) != scene.selectedItem) return;
     const D2D1_RECT_F rect = CellRectF(cell);
-    islandBorder_->SetColor(kAccent);
+    islandBorder_->SetColor(accentColor_);
     target->DrawRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(rect.left - 1.0f, rect.top - 1.0f, rect.right + 1.0f,
                                       rect.bottom + 1.0f),
@@ -1192,11 +1227,11 @@ class GalleryRenderer {
         D2D1_ROUNDED_RECT sel = D2D1::RoundedRect(
             D2D1::RectF(rowRect.left + 8.0f, top + 2.0f, rowRect.right - 8.0f, bottom - 2.0f),
             10.0f, 10.0f);
-        D2D1_COLOR_F selColor = kAccent;
+        D2D1_COLOR_F selColor = accentColor_;
         selColor.a = 0.26f;
         accent_->SetColor(selColor);
         target->FillRoundedRectangle(sel, accent_.Get());
-        accent_->SetColor(kAccent);
+        accent_->SetColor(accentColor_);
       }
 
       const std::wstring name = Utf8(row.name);
@@ -1417,6 +1452,9 @@ class GalleryRenderer {
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> writeFactory_;
+  // C71: the live colours this frame resolved (see Draw).
+  D2D1_COLOR_F accentColor_{0.243f, 0.545f, 1.0f, 1.0f};
+  D2D1_COLOR_F islandColor_{0.10f, 0.12f, 0.16f, 0.72f};
   ComPtr<ID2D1SolidColorBrush> accent_, tile_, tileBorder_, island_, card_, islandBorder_;
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
   // C29 sidebar: one recolourable brush + the two single-line text formats.

@@ -91,7 +91,9 @@
 #include <utility>
 #include <vector>
 
+#include "../PrismCore/Appearance.hpp"      // C71: live theme overrides
 #include "../PrismCore/CompressionPlan.hpp"   // C9 decision layer (what to write)
+#include "../PrismCore/OverwritePolicy.hpp"   // C71: extract.overwrite decision
 #include "../PrismCore/DropPlan.hpp"           // C53: C52's drop model (what a drop means)
 #include "../PrismCore/I18n.hpp"             // C19 resource tables + language choice
 #include "../PrismCore/Log.hpp"              // C16 logger (the one warn a key miss gets)
@@ -962,6 +964,37 @@ inline SecuritySummary ApplySecurityPass(const std::wstring& archivePathWide,
   return summary;
 }
 
+// C71: the two extraction settings that used to be inert.
+//   * overwrite      -- ask/replace/skip/rename, applied per entry;
+//   * verifyAfterExtract -- run C13's VerifyIntegrity over the catalog after a
+//     successful write, so "verified" is the engine's per-item CRC verdict.
+struct ExtractionOptions {
+  prism::overwrite::Mode overwrite = prism::overwrite::Mode::Ask;
+  bool verifyAfterExtract = false;
+  // Test/UI seams. An empty prompt makes "ask" behave like "skip" -- never like
+  // a silent overwrite (see OverwritePolicy.hpp).
+  prism::overwrite::PromptFn prompt;
+  prism::overwrite::ExistsFn exists;
+};
+
+#if defined(PRISM_C71_MUTANT_IGNORE_VERIFY)
+// NEGATIVE CONTROL (CONTRACTS D3): the post-extraction verification pass is
+// compiled out. The counter proves the injected branch ran (D27).
+inline int& MutantVerifyHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+
+inline ExtractionOptions ExtractionOptionsFromSettings(
+    const prism::settings::SettingsStore& store) {
+  ExtractionOptions options;
+  options.overwrite = prism::overwrite::ModeFromKey(
+      store.GetString("extract.overwrite", "ask"));
+  options.verifyAfterExtract = store.GetBool("extract.verifyAfterExtract", true);
+  return options;
+}
+
 struct ExtractionOutcome {
   bool ok = false;
   uint64_t filesWritten = 0;
@@ -969,6 +1002,10 @@ struct ExtractionOutcome {
   std::string error;          // guard/fuse/backpressure reason (UTF-8, diagnostic)
   SecuritySummary security;
   std::wstring status;        // ready for PostStatus/SetStatus
+  // C71: what the post-extraction verification pass did (false/false when the
+  // setting was off or extraction itself failed first).
+  bool verified = false;
+  bool verifyFailed = false;
 };
 
 namespace detail {
@@ -999,6 +1036,19 @@ inline std::wstring BuildStatusText(const ExtractionOutcome& outcome, bool ok,
 
 }  // namespace detail
 
+struct VerifyOutcome {
+  bool ok = false;
+  uint64_t items = 0;
+  uint64_t bytes = 0;
+  int32_t failedIndex = -1;
+  std::string error;
+};
+
+// Defined below; RunExtraction calls it to implement verifyAfterExtract.
+inline VerifyOutcome VerifyIntegrity(OperationHandles& handles,
+                                     const std::vector<ArchiveItem>& catalog,
+                                     const std::wstring& archivePathWide);
+
 // One extraction, on whichever handler the caller's task owns. Returns the
 // outcome; the caller posts it (a worker must not touch window state).
 inline ExtractionOutcome RunExtraction(OperationHandles& handles,
@@ -1007,7 +1057,8 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
                                        const std::wstring& archivePathWide,
                                        bool scanExecutables,
                                        prism::win::amsi::InitMode amsiMode =
-                                           prism::win::amsi::InitMode::LoadAmsi) {
+                                           prism::win::amsi::InitMode::LoadAmsi,
+                                       const ExtractionOptions& options = {}) {
   ExtractionOutcome outcome;
   std::string why;
   std::optional<OperationHandles::Task> task =
@@ -1022,8 +1073,9 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   }
 
   prism::win::SmartExtractCallback::Result result;
-  const bool ok = task->reader->ExtractWithPlan(catalog, plan.plan, plan.plan.baseTargetDir,
-                                                nullptr, &result);
+  bool ok = task->reader->ExtractWithPlan(catalog, plan.plan, plan.plan.baseTargetDir,
+                                          nullptr, &result, options.overwrite,
+                                          options.prompt, options.exists);
   handles.Finish(*task, ok);
 
   outcome.ok = ok;
@@ -1037,8 +1089,34 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   if (ok) {
     outcome.security =
         ApplySecurityPass(archivePathWide, result.writtenPaths, scanExecutables, amsiMode);
+
+    // C71: extract.verifyAfterExtract. This is LITERALLY C13's VerifyIntegrity:
+    // decode every entry through the engine's kTest path and let a CRC failure
+    // decide. Verification cannot "fix" a bad file; it only refuses to call the
+    // operation a success.
+    if (options.verifyAfterExtract) {
+#if defined(PRISM_C71_MUTANT_IGNORE_VERIFY)
+      ++MutantVerifyHits();
+#else
+      const VerifyOutcome verified = VerifyIntegrity(handles, catalog, archivePathWide);
+      outcome.verified = true;
+      outcome.verifyFailed = !verified.ok;
+      if (!verified.ok) {
+        ok = false;
+        outcome.ok = false;
+        outcome.error = "verification after extraction failed: " +
+                        (verified.error.empty()
+                             ? std::string("an entry did not decode")
+                             : verified.error);
+      }
+#endif
+    }
   }
+  outcome.ok = ok;
   outcome.status = detail::BuildStatusText(outcome, ok, plan.plan.baseTargetDir);
+  if (outcome.verifyFailed) {
+    outcome.status += L" | \u6821\u9A8C\u5931\u8D25";  // 校验失败
+  }
   return outcome;
 }
 
@@ -1053,14 +1131,16 @@ inline ExtractionOutcome RunSelectionExtraction(OperationHandles& handles,
                                                 const std::vector<uint32_t>& selection,
                                                 const std::string& targetDir,
                                                 const std::wstring& archivePathWide,
-                                                bool scanExecutables) {
+                                                bool scanExecutables,
+                                                const ExtractionOptions& options = {}) {
   ExtractionPlan plan;
   plan.mode = LaunchMode::kExtractHere;
   plan.plan = BuildSelectionPlan(catalog, selection, targetDir);
   plan.label = L"\u89E3\u538B\u9009\u4E2D\u9879";  // 解压选中项
   // The WHOLE catalog goes to the engine; the plan says which entries to skip
   // (see BuildSelectionPlan for why a filtered vector is an out-of-bounds read).
-  return RunExtraction(handles, catalog, plan, archivePathWide, scanExecutables);
+  return RunExtraction(handles, catalog, plan, archivePathWide, scanExecutables,
+                        prism::win::amsi::InitMode::LoadAmsi, options);
 }
 
 // --smart-extract-each <archives...> (C58): the same "extract to <name>" verb
@@ -1080,7 +1160,8 @@ struct ExtractEachOutcome {
 
 inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archives,
                                          prism::win::SevenZipLibrary& library,
-                                         bool scanExecutables = true) {
+                                         bool scanExecutables = true,
+                                         const ExtractionOptions& options = {}) {
   ExtractEachOutcome out;
   if (archives.empty()) {
     out.lines.push_back("smart-extract-each failed: no archives");
@@ -1114,7 +1195,9 @@ inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archiv
         LaunchMode::kExtractSub, name, catalog, [](const std::string& path) {
           return std::filesystem::exists(prism::win::Utf8ToWide(path));
         });
-    const ExtractionOutcome result = RunExtraction(*handles, catalog, plan, archive, scanExecutables);
+    const ExtractionOutcome result =
+        RunExtraction(*handles, catalog, plan, archive, scanExecutables,
+                      prism::win::amsi::InitMode::LoadAmsi, options);
     handles->Close();
     const bool ok = result.ok;
     if (ok) {
@@ -1140,14 +1223,6 @@ inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archiv
 // SetOperationResult, so "verified" means the bytes actually decoded -- not
 // "the header parsed".
 // ---------------------------------------------------------------------------
-struct VerifyOutcome {
-  bool ok = false;
-  uint64_t items = 0;
-  uint64_t bytes = 0;
-  int32_t failedIndex = -1;
-  std::string error;
-};
-
 namespace detail {
 
 // Discards every byte but still lets the engine produce them (a CRC error is

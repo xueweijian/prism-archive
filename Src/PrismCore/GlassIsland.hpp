@@ -16,6 +16,7 @@
 #include <cstdint>
 
 #include "SpringAnimator.hpp"
+#include "ThemeTokens.hpp"
 
 namespace prism::glass {
 
@@ -99,17 +100,27 @@ class GlassIslandScene {
     out[9] = 8.0f;                            // refraction band px
     out[10] = 14.0f;                          // ior strength px
     out[11] = 1.48f;                          // vibrancy saturation
-    const bool day = theme_ == Theme::Daylight;
-    // tint rgba: Day 255,255,255,0.58 | Midnight 38,42,54,0.52
-    out[12] = day ? 1.0f : 38.0f / 255.0f;
-    out[13] = day ? 1.0f : 42.0f / 255.0f;
-    out[14] = day ? 1.0f : 54.0f / 255.0f;
-    out[15] = day ? 0.58f : 0.52f;
-    // specular rgba (rim highlight, --border-specular-rim)
-    out[16] = 1.0f;
-    out[17] = 1.0f;
-    out[18] = 1.0f;
-    out[19] = day ? 0.85f : 0.28f;
+    // C71: reg3/reg4 come from the SAME token resolution every other painter
+    // uses, so appearance.glassIntensity reaches the shader too. The literals
+    // that used to live here (.58/.52, .85/.28) are exactly what these tokens
+    // resolve to at the default intensity -- Tests/test_theme_tokens.cpp pins
+    // the equality for both themes.
+    const prism::theme::Variant tokenVariant =
+        theme_ == Theme::Daylight ? prism::theme::Variant::Daylight
+                                  : prism::theme::Variant::Midnight;
+    const prism::theme::Rgba tint =
+        prism::theme::EffectiveGlassSurface(tokenVariant);
+    out[12] = tint.r;
+    out[13] = tint.g;
+    out[14] = tint.b;
+    out[15] = tint.a;
+    const prism::theme::Rgba specular =
+        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, tokenVariant)
+            .gradient.from;
+    out[16] = specular.r;
+    out[17] = specular.g;
+    out[18] = specular.b;
+    out[19] = specular.a;
   }
 
  private:

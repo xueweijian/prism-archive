@@ -669,11 +669,17 @@ bool SetupNeighbourFixture() {
   fx.dir = fx.scratch->path().wstring();
   fx.archivePath = (fx.scratch->path() / "neighbour.7z").wstring();
 
+  // Item 0 is SMALLER than item 1 on purpose: with incompressible payloads the
+  // packed stream of a solid block lays the items out back to back, so item 1's
+  // data starts at 32 + item0's packed size. A 1 MiB item 0 (packed ~1 MiB +
+  // ~200 bytes of LZMA framing) leaves a 64 KiB margin, which is why the flip
+  // below cannot land in item 0 on any 7-Zip this project supports.
   fx.names = {"n0.bin", "n1.bin", "n2.bin", "n3.bin"};
+  const std::vector<size_t> payloadBytes = {kItemBytes / 2, kItemBytes, kItemBytes, kItemBytes};
   std::vector<std::wstring> wideNames;
   for (size_t i = 0; i < fx.names.size(); ++i) {
     const std::vector<uint8_t> payload = MakePayload(kSeedBase + 0x40u + static_cast<uint32_t>(i),
-                                                     kItemBytes);
+                                                     payloadBytes[i]);
     std::ofstream file(fx.scratch->path() / fx.names[i], std::ios::binary);
     file.write(reinterpret_cast<const char*>(payload.data()),
                static_cast<std::streamsize>(payload.size()));
@@ -690,13 +696,13 @@ bool SetupNeighbourFixture() {
     std::cout << "    FAIL: " << fx.why << std::endl;
     return false;
   }
-  // Flip one byte 1 KiB into item 1's packed data. A .7z is [32-byte signature
-  // header][packed streams][header], and these payloads are incompressible
-  // (LCG noise), so item 0's packed data is its own size: the byte lands inside
-  // item 1 for every 7-Zip version the fixtures support.
+  // Flip one byte 64 KiB into item 1's packed data (see the layout note above).
+  // A .7z is [32-byte signature header][packed streams][header], and the
+  // payloads are incompressible (LCG noise), so the offset is exact enough.
   {
     std::fstream archive(fx.archivePath, std::ios::in | std::ios::out | std::ios::binary);
-    const std::streamoff offset = 32 + static_cast<std::streamoff>(kItemBytes) + 1024;
+    const std::streamoff offset =
+        32 + static_cast<std::streamoff>(kItemBytes / 2) + (64 * 1024);
     archive.seekg(offset);
     char byte = 0;
     archive.read(&byte, 1);
@@ -1026,7 +1032,7 @@ PRISM_TEST("reader_pool.skipped_neighbour_error_is_not_our_failure") {
 
   const SingleOutcome one = ExtractIndex(*lease->get(), fx.catalog.size(), probeIndex, nullptr);
   // D2: the bytes are the evidence, and they are intact -- the corruption is in
-  // the neighbour, not in what we asked for.
+  // the neighbour, not in what we asked for (n2.bin is a full-size payload).
   PRISM_CHECK_EQ(one.bytes, kItemBytes);
   PRISM_CHECK_EQ(one.sha, fx.expected[fx.probePayload]);
   // D18: the neighbour's code has to be REAL for this test to mean anything.

@@ -61,6 +61,12 @@ namespace {
 // is unreachable again. The banner sits inside the guard (CONTRACTS D28).
 constexpr const char* kMutation = "no_getobject";
 constexpr const char* kMutationBanner = "C80 MUTANT ACTIVE: no_getobject";
+#elif defined(PRISM_C80_MUTANT_READONLY_SEARCH)
+// C80 MUTANT ACTIVE: readonly_search -- the field is visible and focusable but
+// put_accValue answers E_NOTIMPL, which is exactly the state a UIA driver
+// reports as "POLICY_DENIED: supported_action".
+constexpr const char* kMutation = "readonly_search";
+constexpr const char* kMutationBanner = "C80 MUTANT ACTIVE: readonly_search";
 #else
 constexpr const char* kMutation = nullptr;
 constexpr const char* kMutationBanner = nullptr;
@@ -237,6 +243,25 @@ Located Locate(IAccessible* root, const std::wstring& name, long role = -1) {
   return out;
 }
 
+// D3 proof for the read-only arm: the field is there, and the write is refused.
+// Only a build that really answers E_NOTIMPL may print the CAUGHT marker.
+[[maybe_unused]] bool SearchValueWriteRefused() {
+  if (g_window == nullptr || !g_window->SearchOpen()) return false;
+  IAccessible* acc = ClientAccessible(g_window->Hwnd());
+  if (acc == nullptr) return false;
+  bool refused = false;
+  for (long i = 1; i <= ChildCount(acc); ++i) {
+    if (RoleOf(acc, i) != ROLE_SYSTEM_TEXT) continue;
+    VARIANT child = ChildId(i);
+    BSTR probe = ::SysAllocString(L"probe");
+    refused = acc->put_accValue(child, probe) == E_NOTIMPL;
+    ::SysFreeString(probe);
+    break;
+  }
+  acc->Release();
+  return refused;
+}
+
 // The focused element's name, through accFocus (VT_DISPATCH) or "-self" for
 // CHILDID_SELF, or "" when nothing has focus.
 std::wstring FocusedName(IAccessible* acc) {
@@ -397,6 +422,58 @@ PRISM_TEST("c80.default_action_presses_search_and_the_field_appears") {
   acc->Release();
 }
 
+PRISM_TEST("c80.search_field_accepts_a_written_value_like_a_typed_one") {
+  IAccessible* acc = ClientAccessible(g_window->Hwnd());
+  PRISM_CHECK(acc != nullptr);
+  if (acc == nullptr) return;
+  PRISM_CHECK(g_window->SearchOpen());  // the previous case opened it through the UI
+  const Located field = Locate(acc, L"\u641C\u7D22\u6846", ROLE_SYSTEM_TEXT);
+  PRISM_CHECK(field.ok());
+  if (!field.ok()) {
+    acc->Release();
+    return;
+  }
+  // What a UIA client reads before it types: focusable, and NOT read-only (the
+  // proxy derives IsReadOnly from STATE_SYSTEM_READONLY, and the field accepts a
+  // value -- a read-only bit here is "visible but unusable").
+  const long state = StateOf(field.parent, field.id);
+  PRISM_CHECK((state & STATE_SYSTEM_FOCUSABLE) != 0);
+  PRISM_CHECK((state & STATE_SYSTEM_READONLY) == 0);
+  PRISM_CHECK_EQ(g_window->ListRowCount(), 13);
+
+  VARIANT child = ChildId(field.id);
+  BSTR one = ::SysAllocString(L"item01");
+  // In the read-only mutant build this is the FIRST red (E_NOTIMPL).
+  PRISM_CHECK_EQ(field.parent->put_accValue(child, one), S_OK);
+  ::SysFreeString(one);
+
+  // (1) the QUERY changed -- through the same model the keyboard edits.
+  PRISM_CHECK_EQ(g_window->SearchModel().Query(), std::string("item01"));
+  // (2) the list is filtered by the same ApplySearchFilter a typed character
+  //     runs, while the CATALOG is untouched (filtering is a view).
+  PRISM_CHECK_EQ(g_window->ListRowCount(), 1);
+  PRISM_CHECK_EQ(g_window->Items().size(), static_cast<std::size_t>(13));
+  // ...and a client reads the new text back.
+  {
+    BSTR read = nullptr;
+    PRISM_CHECK(SUCCEEDED(field.parent->get_accValue(child, &read)));
+    PRISM_CHECK(read != nullptr && std::wstring(read) == L"item01");
+    ::SysFreeString(read);
+  }
+
+  // (3) an empty write restores every row.
+  BSTR empty = ::SysAllocString(L"");
+  PRISM_CHECK_EQ(field.parent->put_accValue(child, empty), S_OK);
+  ::SysFreeString(empty);
+  PRISM_CHECK_EQ(g_window->SearchModel().Query(), std::string(""));
+  PRISM_CHECK_EQ(g_window->ListRowCount(), 13);
+
+  // The default action on the field puts the keyboard in it (UIA Focus).
+  PRISM_CHECK(SUCCEEDED(field.parent->accDoDefaultAction(child)));
+  PRISM_CHECK_EQ(ToUtf8(FocusedName(acc)), std::string("\u641C\u7D22\u6846"));
+  acc->Release();
+}
+
 PRISM_TEST("c80.focus_and_hit_test_agree_with_the_window") {
   IAccessible* acc = ClientAccessible(g_window->Hwnd());
   PRISM_CHECK(acc != nullptr);
@@ -519,10 +596,18 @@ int main(int argc, char** argv) {
     // The predicate asks the WINDOW, not the macro only: WM_GETOBJECT must really
     // answer 0. (AccessibleObjectFromWindow still hands back the OS's default
     // window object in that state, so the message itself is the proof.)
-    prism::test::SetMutationVerdict("C80 MUTATION CAUGHT: no_getobject", [] {
-      return prism::win::a11y::ActiveMutation() == "no_getobject" && g_window != nullptr &&
-             ::SendMessageW(g_window->Hwnd(), WM_GETOBJECT, 0, OBJID_CLIENT) == 0;
-    });
+    if (std::strcmp(kMutation, "readonly_search") == 0) {
+      // The write must really be refused before a red may claim CAUGHT (D3).
+      prism::test::SetMutationVerdict("C80 MUTATION CAUGHT: readonly_search", [] {
+        return prism::win::a11y::ActiveMutation() == "readonly_search" &&
+               SearchValueWriteRefused();
+      });
+    } else {
+      prism::test::SetMutationVerdict("C80 MUTATION CAUGHT: no_getobject", [] {
+        return prism::win::a11y::ActiveMutation() == "no_getobject" && g_window != nullptr &&
+               ::SendMessageW(g_window->Hwnd(), WM_GETOBJECT, 0, OBJID_CLIENT) == 0;
+      });
+    }
   }
 
   const int rc = prism::test::RunAll(argc, argv);

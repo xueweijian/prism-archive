@@ -75,7 +75,14 @@ snapshot → 找到「搜索框」 → agent-desktop type <ref> "zzz"
 
 **后果**：读屏或自动化能点开搜索框，但**无法把查询串写进去**。
 **修法**：搜索框元素暴露可写的 `accValue`（MSAA → UIA 的 ValuePattern），写入后走与 `WM_CHAR` 同一条 model 更新路径；加"写入后列表被过滤 / 写空串恢复"的断言。
-**状态**：已派回 C80 补。
+**状态**：已修复（C80 后续提交）。`put_accValue` 写入整串查询，走与 `WM_CHAR` 同一条
+model 路径（`SetQuery`/`InsertText` + 同一个 `ApplySearchFilter`）；字段带
+`STATE_SYSTEM_FOCUSABLE`、不带 `STATE_SYSTEM_READONLY`，默认动作把键盘焦点放进字段。
+断言：`c80.a11y`（写入 → 查询/行数/回读/清空恢复）、`c80.a11y_uia`（ValuePattern.SetValue
+12 行 → 1 行 → 清空 → 12 行）、负向控制 `c80.mutation.readonly_search` 与
+`c80.mutation.readonly_search_uia`（`PRISM_C80_MUTANT_READONLY_SEARCH` 下两条都必须红）。
+顺带修正：无障碍列表现在镜像**画出来的**行（过滤+排序后的 `listRowToFolder_`），
+此前查询把列表缩到 1 行时，读屏仍被告知有 12 行。
 
 ---
 

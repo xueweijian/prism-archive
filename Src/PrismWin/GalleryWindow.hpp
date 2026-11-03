@@ -1820,9 +1820,7 @@ class GalleryWindow {
           wide.insert(wide.begin(), pendingHighSurrogate_);
           pendingHighSurrogate_ = 0;
         }
-        const prism::search::Effect effect = search_.InsertText(WideToUtf8(wide));
-        if (effect.queryChanged) ApplySearchFilter();
-        Invalidate();
+        ApplySearchText(WideToUtf8(wide), /*replace=*/false);
         return 0;
       }
       case WM_IME_STARTCOMPOSITION: {
@@ -2545,6 +2543,10 @@ class GalleryWindow {
       field.role = Role::Text;
       field.name = "\u641C\u7D22\u6846";  // 搜索框
       field.value = search_.DisplayText();
+      // "Press" on a field means "put the cursor in it"; the VALUE is writable
+      // through put_accValue, which is the same model path a typed character
+      // takes (see ApplySearchText).
+      field.action = "输入";  // 输入
       field.focused = searchFocused;
       field.bounds = prism::layout::Rect{static_cast<int>(box.left), static_cast<int>(box.top),
                                         static_cast<int>(box.right),
@@ -2561,7 +2563,14 @@ class GalleryWindow {
     list.name = breadcrumbText_.empty() ? WideToUtf8(rootLabel_)
                                         : WideToUtf8(breadcrumbText_);
     list.bounds = layout_.content;
-    for (int row = 0; row < ItemCount(); ++row) {
+    // The PAINTED rows, in the order they are painted: listRowToFolder_ is the
+    // filtered, sorted view that list mode draws and that the hit test resolves.
+    // Walking folderItems_ instead told a screen reader about rows the user
+    // could not see -- the writable search field made that visible, because a
+    // query narrowed the paint to one row while the tree still listed twelve.
+    for (std::size_t viewRow = 0; viewRow < listRowToFolder_.size(); ++viewRow) {
+      const int row = listRowToFolder_[viewRow];
+      if (row < 0 || row >= ItemCount()) continue;
       const prism::ArchiveItem& item = folderItems_[static_cast<std::size_t>(row)];
       Node entry;
       entry.role = Role::ListItem;
@@ -2572,7 +2581,7 @@ class GalleryWindow {
       entry.description = item.isDir ? "\u6587\u4EF6\u5939" : "\u6587\u4EF6";
       entry.selected = sel_.Contains(row);
       entry.focused = !bandFocused && !searchFocused && selection_ == row;
-      entry.bounds = A11yRowRect(row);
+      entry.bounds = A11yRowRect(static_cast<int>(viewRow), row);
       list.children.push_back(std::move(entry));
     }
     root.children.push_back(std::move(list));
@@ -2626,11 +2635,10 @@ class GalleryWindow {
 
   // The rectangle the renderer gave this row, in the CURRENT view mode. Both
   // branches read the one layout authority, so the element a client is told
-  // about is the rectangle the user can see.
-  prism::layout::Rect A11yRowRect(int folderRow) {
+  // about is the rectangle the user can see. 'viewRow' is the position in the
+  // filtered/sorted view (the list view draws it), 'folderRow' the entry.
+  prism::layout::Rect A11yRowRect(int viewRow, int folderRow) {
     if (listMode_) {
-      const int viewRow = ListRowForFolderRow(folderRow);
-      if (viewRow < 0) return prism::layout::Rect{};
       return prism::layout::ListRowRect(layout_, viewRow,
                                         static_cast<int>(viewport_.Scroll()));
     }
@@ -3791,6 +3799,43 @@ class GalleryWindow {
     return prism::win::searchbox::Box{left, top, right, top + 32.0f};
   }
 
+  // ---------- card C80: ONE write path for the query ----------------------
+  //
+  // A typed character (WM_CHAR) and an assistive-technology VALUE write
+  // (IAccessible::put_accValue, i.e. UIA's ValuePattern.SetValue) must not be
+  // two implementations: both end HERE, on the search model's own editing
+  // functions -- InsertText for one code unit, SetQuery for a whole replacement
+  // -- and on the SAME ApplySearchFilter. "The list narrowed" therefore means
+  // exactly the same thing however the text arrived.
+  void ApplySearchText(const std::string& utf8, bool replace) {
+    if (replace) {
+      search_.SetQuery(utf8);  // the model's whole-string update (caret included)
+      ApplySearchFilter();
+      Invalidate();
+      return;
+    }
+    const prism::search::Effect effect = search_.InsertText(utf8);
+    if (!effect.queryChanged) {
+      Invalidate();
+      return;
+    }
+    ApplySearchFilter();
+    Invalidate();
+  }
+
+  // The accessible verbs for the field. Writing its value is the product's own
+  // state change (SetQuery + the one filter), and "default action" puts the
+  // keyboard into it -- never a second copy of the query.
+  void SetSearchValueFromAccessible(const std::string& utf8) {
+    if (!search_.IsOpen()) return;
+    ApplySearchText(utf8, /*replace=*/true);
+  }
+  void FocusSearchField() {
+    if (!search_.IsOpen()) return;
+    search_.SetFocused(true);
+    Invalidate();
+  }
+
   // The query owns C13's SUBSTRING field only: a glob/type/size filter the
   // caller already set survives, so search narrows the view instead of
   // resetting it. Clearing the query restores every row (empty == no filter).
@@ -4280,6 +4325,14 @@ class GalleryWindow {
     void ActivateFolder(const std::string& path) override {
       GalleryWindow* owner = window.load(std::memory_order_acquire);
       if (owner != nullptr) owner->A11yActivateFolder(path);
+    }
+    void SetSearchValue(const std::string& utf8) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->SetSearchValueFromAccessible(utf8);
+    }
+    void FocusSearchField() override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->FocusSearchField();
     }
 
     void Detach() { window.store(nullptr, std::memory_order_release); }

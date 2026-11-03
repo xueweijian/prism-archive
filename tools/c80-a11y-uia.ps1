@@ -13,12 +13,25 @@
 # requires at least 20, names three of the eight buttons, the archive's tab and
 # a list row, then clicks 搜索 and requires the search FIELD to appear.
 #
-# Verdict shape (CONTRACTS D1): the stdout marker "C80 UIA CHECKS PASSED" is a
-# conjunction with exit 0. A machine without the driver SKIPS (exit 77, mapped
-# to SKIP_RETURN_CODE), never a fake green. Failures are printed one per line as
-# "FAIL ..." at the moment they are found.
+# THE FIELD MUST BE TYPEABLE, NOT JUST VISIBLE. After the field appears, this
+# script WRITES a value through UIA's ValuePattern (MSAA put_accValue), requires
+# the query to filter the list down to one row, writes an empty value and
+# requires all twelve rows back. "Found but read-only" was the exact defect the
+# UIA driver reported as "POLICY_DENIED: supported_action".
+#
+# -Expect readonly runs the SAME script against the mutant build
+# (PrismArchive_c80_readonly, PRISM_C80_MUTANT_READONLY_SEARCH): there the write
+# MUST be refused, and the script prints the D27 marker
+# "C80 MUTATION CAUGHT: readonly_search" instead of the pass marker.
+#
+# Verdict shape (CONTRACTS D1): the stdout marker is a conjunction with exit 0. A
+# machine without the driver SKIPS (exit 77, mapped to SKIP_RETURN_CODE), never a
+# fake green. Failures are printed one per line as "FAIL ..." the moment they
+# are found.
 param(
-    [string]$Exe = $env:PRISM_C80_EXE
+    [string]$Exe = $env:PRISM_C80_EXE,
+    [ValidateSet('writable', 'readonly')]
+    [string]$Expect = 'writable'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,7 +101,9 @@ try {
             Add-Failure ("the app exited before showing a window (exit " + $process.ExitCode + ")")
             break
         }
-        $listed = (agent-desktop list-windows --app PrismArchive.exe 2>&1 | Out-String) | ConvertFrom-Json
+        # Match by PID, not by application name: the negative-control binary is
+        # PrismArchive_c80_readonly.exe and must find its own window.
+        $listed = (agent-desktop list-windows 2>&1 | Out-String) | ConvertFrom-Json
         $mine = $listed.data | Where-Object { $_.pid -eq $process.Id } | Select-Object -First 1
         if ($mine) { $windowId = $mine.id; break }
         Start-Sleep -Milliseconds 250
@@ -137,6 +152,53 @@ try {
             $afterElements = Get-TreeElements $after.data.tree
             $field = $afterElements | Where-Object { $_.role -eq 'textfield' -and $_.name -eq '搜索框' } | Select-Object -First 1
             if (-not $field) { Add-Failure "the search field did not appear after pressing 搜索 through UIA" }
+
+            if ($field -and $Expect -eq 'readonly') {
+                # NEGATIVE CONTROL: the mutant app must REFUSE the write. A
+                # writable field here means the injection is stale -- red.
+                $probe = (agent-desktop set-value $field.ref_id "item01" --timeout-ms 4000 2>&1 | Out-String)
+                $probeJson = $probe | ConvertFrom-Json
+                if ($probeJson.ok) {
+                    Add-Failure "the read-only build ACCEPTED a written value (the injection is stale)"
+                }
+            } elseif ($field) {
+                # WRITE -> the query filters the list to the one matching row.
+                $write = (agent-desktop set-value $field.ref_id "item01" --timeout-ms 4000 2>&1 | Out-String)
+                $writeJson = $write | ConvertFrom-Json
+                if (-not $writeJson.ok) { Add-Failure ("ValuePattern.SetValue on 搜索框 failed: " + $write) }
+                Start-Sleep -Milliseconds 400
+                $filtered = ((agent-desktop snapshot --window-id $windowId -i --compact 2>&1 | Out-String)) | ConvertFrom-Json
+                $filteredElements = Get-TreeElements $filtered.data.tree
+                $filteredRows = @($filteredElements | Where-Object { $_.role -eq 'option' })
+                if ($filteredRows.Count -ne 1) {
+                    Add-Failure ("after writing 'item01' the list has " + $filteredRows.Count + " rows (expected 1)")
+                }
+                $match = $filteredRows | Where-Object { $_.name -eq 'item01.txt' } | Select-Object -First 1
+                if (-not $match) { Add-Failure "after writing 'item01' the matching row is not in the list" }
+                $fieldAfter = $filteredElements | Where-Object { $_.role -eq 'textfield' -and $_.name -eq '搜索框' } | Select-Object -First 1
+                if ($fieldAfter -and $fieldAfter.value -ne 'item01') {
+                    Add-Failure ("the field reads back '" + $fieldAfter.value + "' instead of 'item01'")
+                }
+
+                # EMPTY -> every row comes back. `clear` is the driver's "set the
+                # value to the empty string" verb (Windows PowerShell 5.1 drops an
+                # empty native-command argument, so passing "" here is not portable).
+                # The C++ suite asserts the literal empty BSTR through put_accValue,
+                # so this half only has to prove the ROWS come back.
+                if ($fieldAfter) {
+                    $clear = (agent-desktop clear $fieldAfter.ref_id --timeout-ms 4000 2>&1 | Out-String)
+                    $clearJson = $clear | ConvertFrom-Json
+                    if (-not $clearJson.ok) {
+                        Add-Failure ("clearing the field failed: " + $clear)
+                    }
+                    Start-Sleep -Milliseconds 400
+                    $restored = ((agent-desktop snapshot --window-id $windowId -i --compact 2>&1 | Out-String)) | ConvertFrom-Json
+                    $restoredRows = @((Get-TreeElements $restored.data.tree) | Where-Object { $_.role -eq 'option' })
+                    if ($restoredRows.Count -ne 12) {
+                        Add-Failure ("after clearing the field the list has " + $restoredRows.Count + " rows (expected 12)")
+                    }
+                }
+            }
         }
     }
 } finally {
@@ -149,6 +211,12 @@ try {
 if ($script:failures.Count -gt 0) {
     Write-Output ("C80 UIA CHECKS FAILED (" + $script:failures.Count + " failures)")
     exit 1
+}
+if ($Expect -eq 'readonly') {
+    # The marker is printed only after the refusal was OBSERVED, so a stale
+    # injection (a writable field that silently passes) stays RED (D3/D26/D27).
+    Write-Output "C80 MUTATION CAUGHT: readonly_search"
+    exit 0
 }
 Write-Output "C80 UIA CHECKS PASSED"
 exit 0

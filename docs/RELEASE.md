@@ -398,6 +398,7 @@ pwsh -File tools\verify-package.ps1 -ZipDir dist -Mutate SkipVerbs      # 期望
 
 `win.c68_verify` 与两个变异通过 ctest `DEPENDS` 排在 `win.c68_package` 之后；打包测试与 C24 共享
 `RESOURCE_LOCK "prism-release-install"`，因为两者都会对同一个构建树跑 `cmake --install`。
+`win.c68_verify` 与两个变异另外共享 `RESOURCE_LOCK "prism-c68-real-verbs"`：它们都会临时改写真实右键菜单（结束前恢复快照），`ctest -j` 下不能互相踩。
 
 ### 11.5 已知边界
 

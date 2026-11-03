@@ -40,7 +40,10 @@
 #     7z.dll on the machine, exit 77), verify-package itself exits 77 with the
 #     reason instead of becoming a hard "Not Run" -- a skip stays a skip.
 # RESOURCE_LOCK: package runs "cmake --install" into the shared build tree
-#     (install_manifest.txt), so it takes C24's lock; verify/mutants do not.
+#     (install_manifest.txt), so it takes C24's lock.  verify/mutants take
+#     "prism-c68-real-verbs": each one temporarily rewrites the REAL
+#     HKCU\Software\Classes\*\shell keys (and restores the snapshot), so they
+#     must not run against each other under "ctest -j".
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   find_program(PRISM_PWSH NAMES pwsh)
   if(NOT PRISM_PWSH)
@@ -73,6 +76,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
         SKIP_RETURN_CODE 77
         PASS_REGULAR_EXPRESSION "PACKAGE VERIFY: PASS"
         DEPENDS "win.c68_package"
+        RESOURCE_LOCK "prism-c68-real-verbs"
         LABELS "release;installer;distribution")
 
     foreach(mutant IN ITEMS DropShellDll SkipVerbs)
@@ -87,6 +91,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
           SKIP_RETURN_CODE 77
           PASS_REGULAR_EXPRESSION "PACKAGE VERIFY\\(MUTATION ${mutant}\\): CAUGHT"
           DEPENDS "win.c68_package"
+          RESOURCE_LOCK "prism-c68-real-verbs"
           LABELS "release;mutation")
     endforeach()
   endif()

@@ -457,17 +457,23 @@ try {
         Assert-Equal ('installed ' + $name + ' sha256') (Get-FileSha256 $pkgFile) (Get-FileSha256 $instFile)
     }
 
-    $pkgAssets = @(Get-ChildItem -LiteralPath (Join-Path $script:PackageRoot 'Assets') -Recurse -File)
-    $instAssets = @(Get-ChildItem -LiteralPath (Join-Path $script:InstallDir 'Assets') -Recurse -File)
-    Assert-Equal 'installed Assets file count matches the package' $pkgAssets.Count $instAssets.Count
+    # Enumerate with System.IO, not Get-ChildItem: under a short (8.3) TEMP path
+    # Get-ChildItem returns long-form FullNames, so Substring(base.Length) slices
+    # the relative path in the wrong place (the C63 defect).  Directory
+    # enumeration builds paths from the base string, keeping the two forms equal.
+    $pkgAssetsRoot = Join-Path $script:PackageRoot 'Assets'
+    $instAssetsRoot = Join-Path $script:InstallDir 'Assets'
+    $pkgAssetFiles = @([System.IO.Directory]::EnumerateFiles($pkgAssetsRoot, '*', [System.IO.SearchOption]::AllDirectories))
+    $instAssetFiles = @([System.IO.Directory]::EnumerateFiles($instAssetsRoot, '*', [System.IO.SearchOption]::AllDirectories))
+    Assert-Equal 'installed Assets file count matches the package' $pkgAssetFiles.Count $instAssetFiles.Count
     $assetDiff = @()
-    foreach ($pkgAsset in $pkgAssets) {
-        $rel = $pkgAsset.FullName.Substring((Join-Path $script:PackageRoot 'Assets').Length).TrimStart('\', '/')
-        $instAsset = Join-Path (Join-Path $script:InstallDir 'Assets') $rel
+    foreach ($full in $pkgAssetFiles) {
+        $rel = $full.Substring($pkgAssetsRoot.Length).TrimStart('\', '/')
+        $instAsset = Join-Path $instAssetsRoot $rel
         if (-not (Test-Path -LiteralPath $instAsset -PathType Leaf)) { $assetDiff += ($rel + ': missing'); continue }
-        if ((Get-FileSha256 $pkgAsset.FullName) -ne (Get-FileSha256 $instAsset)) { $assetDiff += ($rel + ': bytes differ') }
+        if ((Get-FileSha256 $full) -ne (Get-FileSha256 $instAsset)) { $assetDiff += ($rel + ': bytes differ') }
     }
-    Assert-True ('installed Assets bytes match the package (' + $pkgAssets.Count + ' files)') ($assetDiff.Count -eq 0) ($assetDiff -join '; ')
+    Assert-True ('installed Assets bytes match the package (' + $pkgAssetFiles.Count + ' files)') ($assetDiff.Count -eq 0) ($assetDiff -join '; ')
     Assert-True 'install marker records the install folder in the scratch scope' ((Test-RegKey ($script:ScopeRoot + '\PrismArchive')) -and ([string](Get-RegValue ($script:ScopeRoot + '\PrismArchive') 'InstallDir') -eq $script:InstallDir))
 
     # -----------------------------------------------------------------------

@@ -744,6 +744,43 @@ inline const std::vector<std::string>& RequiredKeys() {
       "progress.editBlocked",
       // Status line: a finished re-pack that cannot refresh yet (C27 wiring).
       "status.refreshDeferred",
+      // C74: the action band's eight words. The table used to carry compiled-in
+      // Chinese in ActionBarModel, so a language switch left the band behind.
+      // They are keys now (actionbar.*), and these eight are the census that
+      // makes a table that drops one fail HERE instead of on screen.
+      "actionbar.open",
+      "actionbar.extractTo",
+      "actionbar.compress",
+      "actionbar.add",
+      "actionbar.delete",
+      "actionbar.test",
+      "actionbar.quickLook",
+      "actionbar.search",
+      // C74: the Settings dialog's summary line and its in-place hints. They
+      // were English sentences built by DialogState, so a Chinese build showed
+      // English diagnostics under every row. {detail}/{path}/{tag}/{max}/... are
+      // the C19 placeholders; the English text is also the code fallback.
+      "settings.summary.loadFailed",
+      "settings.summary.willSave",
+      "settings.summary.motwOn",
+      "settings.summary.motwOff",
+      "settings.summary.notSaved",
+      "settings.issue.languageEmpty",
+      "settings.issue.languageTooLong",
+      "settings.issue.pathTooLong",
+      "settings.issue.pathNotAbsolute",
+      "settings.issue.pathBadChar",
+      "settings.issue.pathParent",
+      "settings.issue.cacheEmpty",
+      "settings.issue.cacheNotNumber",
+      "settings.issue.cacheNoDigits",
+      "settings.issue.cacheOutOfRange",
+      "settings.issue.cacheWhole",
+      "settings.issue.cacheMin",
+      "settings.issue.cacheMax",
+      "settings.issue.readOnly",
+      "settings.issue.storeRefused",
+      "settings.issue.storeRepair",
   };
   return keys;
 }

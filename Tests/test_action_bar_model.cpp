@@ -67,7 +67,7 @@ PRISM_TEST("the table is eight actions in Bandizip's order") {
   for (int i = 0; i < kActionCount; ++i) {
     PRISM_CHECK_EQ(kActions[static_cast<std::size_t>(i)].id, expected[i]);
     PRISM_CHECK_EQ(IndexOf(expected[i]), i);
-    PRISM_CHECK(!kActions[static_cast<std::size_t>(i)].label.empty());
+    PRISM_CHECK(!kActions[static_cast<std::size_t>(i)].key.empty());
     PRISM_CHECK(!kActions[static_cast<std::size_t>(i)].icon.empty());
   }
   // Open is FIRST: it is the only action legal with no archive, so it is the

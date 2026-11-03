@@ -312,8 +312,9 @@ C69 用真对话框 + 真窗口 + 像素/菜单字符串断言逐项测过。**�
 | extract.overwrite | 目标已存在时 replace 覆盖、skip 保留原文件、rename 另存为 `note (1).txt`；ask 在窗口里弹确认，命令行动词（无窗口）按 skip 处理并在 `skipped=` 里报数 | win.c71_livesettings（磁盘字节 + 回调计数；ask 断言提示次数，不弹真框） |
 | extract.verifyAfterExtract | 开：解压后按 C13 Verify 逐条重解，损坏条目让本次操作报告失败；关：同一计划成功 | win.c71_livesettings（同一损坏包、同一计划，off ok / on verifyFailed） |
 
-动作岛的八个按钮同理：标签来自 PrismCore 的编译期表（中文），
-不随语言切换（见下一条）。
-
-- 设置对话框的**摘要行与就地提示**仍是英文：它们由 DialogState 的诊断句子生成，
-  走的是错误文案而不是资源表（schema 的 repair 消息也来自 SettingsStore）。
+C74 之后，动作岛的八个按钮、侧栏标题、信息卡（未加密 / 未知 | 字典 --
+/ 压缩比）以及设置对话框的摘要行与就地提示都从资源表读取：
+`ActionBarModel` 只保留键（`actionbar.*`），语言值由窗口注入；
+侧栏的信息卡用 `status.*`，设置诊断用 `settings.issue.*` 与
+`settings.summary.*`。断言见 `core.actionbar_labels` 与 `win.i18n_switch`
+（真窗口切语言后标签文本与像素都变）。

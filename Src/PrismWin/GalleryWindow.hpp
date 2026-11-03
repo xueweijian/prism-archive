@@ -164,6 +164,18 @@ inline constexpr bool kOverlayExclusivityEnforced = false;
 inline constexpr bool kOverlayExclusivityEnforced = true;
 #endif
 
+// C74 negative control (CONTRACTS D3). In this build ApplyLanguage() refreshes
+// the sidebar but never rebuilds the band's labels, i.e. the exact defect the
+// card closes: the words stay whatever they were when the window opened. The
+// switch suite MUST go red; Tests/suites/c74-i18nlast.cmake builds that binary.
+#if defined(PRISM_C74_MUTANT_NO_LABEL_REBUILD)
+// MUTANT ACTIVE (C74 arm no_label_rebuild): a language switch leaves the eight
+// band labels at their previous language.
+inline constexpr bool kActionBarLabelsRebuilt = false;
+#else
+inline constexpr bool kActionBarLabelsRebuilt = true;
+#endif
+
 class GalleryWindow {
  public:
   // Monotonic millisecond clock -- public because Main.cpp drives HUD phases
@@ -1117,6 +1129,26 @@ class GalleryWindow {
   // three inputs, so a stale context cannot hide behind a green matrix).
   prism::actionbar::Context ActionContext() const { return actionBar_.GetContext(); }
   int ActionBarFocus() const { return actionBar_.FocusIndex(); }
+
+  // C74: the word one button paints right now. A read-back seam, so a suite
+  // proves a language switch reached the band without OCR-ing the frame.
+  std::string ActionBarLabelAt(int index) const { return actionBar_.Label(index); }
+
+  // C74: the ONE door for a language switch. The app calls it at startup and
+  // from the Settings dialog's language handler. The sidebar and the band read
+  // the SAME translator, so they cannot disagree about the language; the band's
+  // eight words are rebuilt here (that rebuild is the negative control).
+  void ApplyLanguage(const prism::i18n::Translator* translator) {
+    // Copy the resolved WORDS, never the translator pointer: the Settings dialog
+    // hands us a translator that lives only for its modal call, and a member
+    // pointer would dangle the moment the dialog closed.
+    sidebarLabels_ = prism::win::sidebar::LabelsFrom(translator);
+    if (kActionBarLabelsRebuilt) {
+      actionBar_.SetLabels(prism::win::actionbar::LabelsFromTranslator(translator));
+    }
+    sidebarDirty_ = true;
+    Invalidate();
+  }
 
   // The painted bar band (client pixels). Exposed so the Windows integration
   // test can aim a click at the bar it can SEE instead of guessing constants.
@@ -2641,7 +2673,9 @@ class GalleryWindow {
     metrics.viewportTop = static_cast<float>(layout_.content.top);
     metrics.viewportBottom = static_cast<float>(layout_.content.bottom);
     metrics.scrollY = sidebarScroll_;
-    sidebarLayout_ = prism::win::sidebar::Build(sidebar_, metrics);
+    // C74: the words are the values ApplyLanguage() copied in, not a lookup in
+    // a global translator slot (that slot could outlive its owner).
+    sidebarLayout_ = prism::win::sidebar::Build(sidebar_, metrics, sidebarLabels_);
     sidebarDirty_ = false;
   }
 
@@ -3618,6 +3652,8 @@ class GalleryWindow {
   int zoomPx_ = 256;  // Ctrl+Shift+P stop; the renderer has no tile-size input yet
   // C12: sidebar state + its draw-command list (painting is not wired yet).
   prism::sidebar::Model sidebar_;
+  // C74: the section headings + telemetry words, resolved once per language.
+  prism::win::sidebar::Labels sidebarLabels_;
   mutable prism::win::sidebar::Layout sidebarLayout_;
   mutable bool sidebarDirty_ = true;
   float sidebarScroll_ = 0.0f;

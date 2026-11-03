@@ -272,8 +272,12 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // C69: +11 for the Settings dialog's own surfaces (title, six rows, the MoTW
   // switch, Browse, Save, Cancel). They were English literals with control id 0
   // until this card, so no language switch could retitle them -- the same class
-  // of defect C64 fixed for the menu item. The census is 73.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{73});
+  // of defect C64 fixed for the menu item. The census was 73.
+  // C74: +29. Eight actionbar.* keys (the band's labels were compiled-in
+  // Chinese in ActionBarModel), five settings.summary.* (the dialog's summary
+  // line) and sixteen settings.issue.* (the in-place hints, which were English
+  // diagnostics). The census is 102 and a table that drops one fails here.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{102});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

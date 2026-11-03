@@ -46,6 +46,7 @@
 #include <cstdint>
 #include <ostream>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -139,24 +140,49 @@ inline std::ostream& operator<<(std::ostream& os, Group group) {
 struct Spec {
   ActionId id = ActionId::Count;
   Group group = Group::Count;
-  std::string_view icon;   // vector-glyph id consumed by ActionBar.hpp
-  std::string_view label;  // UTF-8, painted by DirectWrite
-  char mnemonic = 0;       // Alt+<letter>
+  std::string_view icon;  // vector-glyph id consumed by ActionBar.hpp
+  // C74: the RESOURCE KEY, not the word. The table used to carry compiled-in
+  // Chinese, so the band stayed Chinese after a language switch. The caller now
+  // injects the active language's eight labels (SetLabels below); PrismCore may
+  // not include the translator (ARCH rule) or Windows.
+  std::string_view key;
+  char mnemonic = 0;  // Alt+<letter>
   bool hasDropdown = false;
 };
 
-// Eight actions, Bandizip's order. The labels are OURS (the blueprint's
+// Eight actions, Bandizip's order. The keys are OURS (the blueprint's
 // language), never copied from Bandizip's resource file.
 inline constexpr std::array<Spec, 8> kActions{{
-    {ActionId::Open, Group::Archive, "open", "打开", 'O', false},
-    {ActionId::ExtractTo, Group::Archive, "extract", "解压到…", 'E', true},
-    {ActionId::Compress, Group::Archive, "compress", "压缩", 'C', true},
-    {ActionId::Add, Group::Modify, "add", "添加", 'A', false},
-    {ActionId::Delete, Group::Modify, "delete", "删除", 'D', false},
-    {ActionId::Test, Group::Inspect, "test", "测试", kTestMnemonic, false},
-    {ActionId::QuickLook, Group::Inspect, "view", "查看", 'V', false},
-    {ActionId::Search, Group::Find, "search", "搜索", 'S', false},
+    {ActionId::Open, Group::Archive, "open", "actionbar.open", 'O', false},
+    {ActionId::ExtractTo, Group::Archive, "extract", "actionbar.extractTo", 'E', true},
+    {ActionId::Compress, Group::Archive, "compress", "actionbar.compress", 'C', true},
+    {ActionId::Add, Group::Modify, "add", "actionbar.add", 'A', false},
+    {ActionId::Delete, Group::Modify, "delete", "actionbar.delete", 'D', false},
+    {ActionId::Test, Group::Inspect, "test", "actionbar.test", kTestMnemonic, false},
+    {ActionId::QuickLook, Group::Inspect, "view", "actionbar.quickLook", 'V', false},
+    {ActionId::Search, Group::Find, "search", "actionbar.search", 'S', false},
 }};
+
+// The words the band shipped with before the keys existed. This is the LAST
+// fallback, used only when the caller injects nothing (unit suites, the shell
+// DLLs, a table-less build): an empty button is worse than a built-in word.
+inline const std::array<std::string, 8>& DefaultLabels() {
+  static const std::array<std::string, 8> labels = {"打开", "解压到…", "压缩",
+                                                    "添加", "删除",   "测试",
+                                                    "查看", "搜索"};
+  return labels;
+}
+
+// C74 negative control (CONTRACTS D3). In this build SetLabels() is ignored and
+// every lookup returns the built-in word, i.e. the pre-C74 band. The label suite
+// MUST go red; Tests/suites/c74-i18nlast.cmake builds exactly that binary.
+#if defined(PRISM_C74_MUTANT_FIXED_LABELS)
+// MUTANT ACTIVE (C74 arm fixed_labels): the injected table never reaches a
+// button, so switching the language leaves the band in Chinese.
+inline constexpr bool kLabelInjectionEnabled = false;
+#else
+inline constexpr bool kLabelInjectionEnabled = true;
+#endif
 
 inline constexpr int kActionCount = static_cast<int>(kActions.size());
 
@@ -421,6 +447,34 @@ class Model {
     return Effect{Effect::Kind::CloseDropdown, owner, -1, true};
   }
 
+  // ------------------------------------------------------------- labels (C74)
+  // The table carries KEYS; the caller injects the eight words of the active
+  // language. A wrong-sized table is REJECTED (ignored) instead of half-applied:
+  // a band with seven translated buttons and one stale word is worse than the
+  // built-in default. No translator is included here by design.
+  void SetLabels(std::span<const std::string> labels) {
+    if (labels.size() != static_cast<std::size_t>(kActionCount)) {
+      labels_.clear();
+      return;
+    }
+    labels_.assign(labels.begin(), labels.end());
+  }
+  void ClearLabels() { labels_.clear(); }
+  bool HasInjectedLabels() const { return !labels_.empty(); }
+
+  // Never empty, never throws: index out of range falls back to the first
+  // built-in word rather than reading past the table.
+  const std::string& Label(int index) const {
+    const std::size_t clamped =
+        (index >= 0 && index < kActionCount) ? static_cast<std::size_t>(index) : 0;
+    if (kLabelInjectionEnabled &&
+        labels_.size() == static_cast<std::size_t>(kActionCount)) {
+      return labels_[clamped];
+    }
+    return DefaultLabels()[clamped];
+  }
+  const std::string& LabelOf(ActionId id) const { return Label(IndexOf(id)); }
+
  private:
   void CloseDropdownInternal() {
     dropdownOwner_ = ActionId::Count;
@@ -431,6 +485,8 @@ class Model {
   int focus_ = -1;
   ActionId dropdownOwner_ = ActionId::Count;
   int dropdownIndex_ = 0;
+  // Empty == "no table injected": Label() serves the built-in words.
+  std::vector<std::string> labels_;
 };
 
 // ----------------------------------------------------------------- geometry

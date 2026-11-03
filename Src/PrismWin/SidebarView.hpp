@@ -181,10 +181,20 @@ struct Layout {
 // sidebar.empty.noArchive had been in both tables since C19. They are now a
 // value the caller can hand in (or that the installed translator fills).
 struct Labels {
+  // C40: the four section headings.
   std::string favorites = "FAVORITES";
   std::string recent = "RECENT";
   std::string tree = "ARCHIVE TREE";
   std::string noArchive = "NO ARCHIVE OPEN";
+  // C74: the telemetry capsule's words. They were literals in Build(), so the
+  // "info card" (NOT ENCRYPTED / UNKNOWN | DICT -- / RATIO 53.6%) stayed English
+  // in a Chinese build even though every key below has been in both tables
+  // since C19. The placeholders are the C19 ones ({percent} / {size}).
+  std::string encrypted = "ENCRYPTED";
+  std::string notEncrypted = "NOT ENCRYPTED";
+  std::string unknownMethod = "UNKNOWN";
+  std::string ratio = "RATIO {percent}";
+  std::string dictionary = "DICT {size}";
 };
 
 // The translator the app installs ONCE at startup (Main.cpp, before the window
@@ -212,6 +222,11 @@ inline Labels LabelsFrom(const prism::i18n::Translator* translator) {
   labels.recent = pick("sidebar.section.recent", labels.recent);
   labels.tree = pick("sidebar.section.tree", labels.tree);
   labels.noArchive = pick("sidebar.empty.noArchive", labels.noArchive);
+  labels.encrypted = pick("status.encrypted", labels.encrypted);
+  labels.notEncrypted = pick("status.notEncrypted", labels.notEncrypted);
+  labels.unknownMethod = pick("status.unknownMethod", labels.unknownMethod);
+  labels.ratio = pick("status.ratio", labels.ratio);
+  labels.dictionary = pick("status.dictionary", labels.dictionary);
   return labels;
 }
 
@@ -239,13 +254,16 @@ inline std::string FormatRatio(std::uint32_t permille) {
   return out;
 }
 
-inline std::string EncryptionLabel(prism::sidebar::Encryption encryption) {
+// C74: the cipher prefix is a token ("AES-256"), the word after it is the
+// table's. A table-less build keeps the exact pre-C74 sentence.
+inline std::string EncryptionLabel(prism::sidebar::Encryption encryption,
+                                   const Labels& labels) {
   switch (encryption) {
-    case prism::sidebar::Encryption::Aes256: return "AES-256 ENCRYPTED";
-    case prism::sidebar::Encryption::Unknown: return "ENCRYPTED";
-    case prism::sidebar::Encryption::None: return "NOT ENCRYPTED";
+    case prism::sidebar::Encryption::Aes256: return "AES-256 " + labels.encrypted;
+    case prism::sidebar::Encryption::Unknown: return labels.encrypted;
+    case prism::sidebar::Encryption::None: return labels.notEncrypted;
   }
-  return "NOT ENCRYPTED";
+  return labels.notEncrypted;
 }
 
 inline std::string RowLabel(std::string_view label, std::string_view path) {
@@ -422,18 +440,24 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
     push(Command{PrimKind::StatusText,
                  Box{textLeft, lineTop.top, layout.pill.right - metrics.statusPadding,
                      lineTop.bottom},
-                 "NO ARCHIVE", {}, ColorToken::Muted, 0.7f, -1, Section::None});
+                 labels.noArchive, {}, ColorToken::Muted, 0.7f, -1, Section::None});
     return layout;
   }
 
   const float lineTop = pillTop + metrics.statusPadding;
-  const std::string method = status.method.empty() ? std::string("UNKNOWN") : status.method;
+  const std::string method =
+      status.method.empty() ? labels.unknownMethod : status.method;
   const std::string dictionary =
       status.dictionaryBytes == 0 ? std::string("--") : FormatBytes(status.dictionaryBytes);
+  // C74: the three capsule lines are table entries, not literals. " | " is a
+  // separator, not a word, so it is not a key; the cipher prefix ("AES-256") is
+  // a token the same way "DICT" was.
   const std::string lines[3] = {
-      EncryptionLabel(status.encryption),
-      method + " | DICT " + dictionary,
-      "RATIO " + FormatRatio(status.ratioPermille),
+      EncryptionLabel(status.encryption, labels),
+      method + " | " +
+          prism::i18n::FormatPattern(labels.dictionary, {{"size", dictionary}}),
+      prism::i18n::FormatPattern(labels.ratio,
+                                 {{"percent", FormatRatio(status.ratioPermille)}}),
   };
   const char* icons[3] = {"lock", "bolt", "chart"};
   for (int i = 0; i < 3; ++i) {

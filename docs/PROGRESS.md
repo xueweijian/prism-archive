@@ -290,3 +290,23 @@ PACKAGE VERIFY: PASS (50 checks)  解压→装→右键动词→解压往返→�
 | 启动→首帧 | 60 ms | 164.5 ms | 设备创建 + 玻璃层 + 首帧绘制，WARP 目标 |
 | 最小化常驻内存 | ≤40 MB | 71.5 MB | 渲染设备资源/字体/catalog 不在瞬态路径（C34 既有） |
 | Win11 新式右键菜单 | 可用 | 未验 | 需一次管理员（开发者模式）——用户侧 |
+### 9.6 收尾：把"有字段没实现"的东西全部接上
+
+到这一节为止，仓库里**没有已知的"假功能"**了。这一轮补的是三处：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| `accentColor` / `glassIntensity` / `extract.overwrite` / `verifyAfterExtract` | 只存在于 `settings.json`，无任何消费者 | 分别接上令牌合成、玻璃三处表面、覆盖策略、解压后 `VerifyIntegrity`；四个变异各一条 |
+| 动作岛 8 个标签 | PrismCore 编译期中文表，切语言不变 | 改成键 + 调用方注入（PrismCore 不依赖翻译器），两表 102 键且键集相同 |
+| README | 说"请先装 7-Zip""右键在显示更多选项里""截图尚未拍" | 三条都与现实不符：包里带引擎（ADR-007）、新式菜单已可用、四张真截图 + `docs.c73_assets` 门禁 |
+
+**两次干净 Windows runner 的全量验证**（`.github/workflows/bench.yml`，非开发机）：
+
+```
+Windows bench: success
+  ├ 全量 ctest（排除 bench/fuzz）
+  ├ 真实执行 install.ps1
+  └ 五个右键动词逐个执行：--compress-7z / --compress-zip / --smart-extract-each / --extract-here / --test 全部 exit=0
+```
+
+发布物：`PrismArchive-0.1.0-win-x64.zip`（20 文件，幂等打包，解压→装→动词→解压往返→卸载 50 条断言）。

@@ -82,15 +82,6 @@ std::vector<uint32_t> Indices(std::initializer_list<uint32_t> values) {
   return std::vector<uint32_t>(values);
 }
 
-std::string Join(const std::vector<uint32_t>& values) {
-  std::string out;
-  for (uint32_t value : values) {
-    if (!out.empty()) out += ',';
-    out += std::to_string(value);
-  }
-  return out;
-}
-
 bool SameIndices(const std::vector<uint32_t>& actual, std::initializer_list<uint32_t> expected) {
   return actual == Indices(expected);
 }

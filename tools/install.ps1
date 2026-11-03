@@ -337,6 +337,15 @@ function Get-AssocDescription {
 # payload discovery
 # ---------------------------------------------------------------------------
 
+function Add-EngineCandidate {
+    <# Join-Path throws "Cannot find drive" for a base on a drive that does not
+       exist (a stale registry path, a dev box's E:\DevTools).  A missing drive
+       must only skip that candidate -- never abort the install. #>
+    param($List, [string]$Base)
+    if (-not $Base) { return }
+    try { $List.Add((Join-Path $Base '7z.dll')) } catch { }
+}
+
 function Find-Engine {
     <# 7z.dll is never shipped: find the user's 7-Zip, in the order the engine
        itself would (PRISM_7Z_DLL first, then real installs, then PATH). #>
@@ -358,7 +367,7 @@ function Find-Engine {
                 if ($null -eq $k) { continue }
                 foreach ($name in @('Path64', 'Path')) {
                     $v = $k.GetValue($name)
-                    if ($v) { $candidates.Add((Join-Path ([string]$v) '7z.dll')) }
+                    if ($v) { Add-EngineCandidate $candidates ([string]$v) }
                 }
                 $k.Close()
             }
@@ -368,11 +377,18 @@ function Find-Engine {
     $pf = $env:ProgramFiles
     $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     $pw64 = [Environment]::GetEnvironmentVariable('ProgramW6432')
-    foreach ($dir in @($pf, $pf86, $pw64, (Join-Path $env:LOCALAPPDATA 'Programs\7-Zip'), 'E:\DevTools\7-Zip')) {
-        if ($dir) { $candidates.Add((Join-Path $dir '7z.dll')) }
+    $localPrograms = ''
+    if ($env:LOCALAPPDATA) { $localPrograms = Join-Path $env:LOCALAPPDATA 'Programs\7-Zip' }
+    # No dev-box drive letters here.  A hard-coded E:\DevTools\7-Zip made
+    # Find-Engine throw "Cannot find drive E" on every machine without an E:
+    # drive, which aborted the entire install -- exactly the clean-machine case
+    # the C68 package exists for.  PRISM_7Z_DLL / -SevenZipDll cover the dev
+    # image instead.
+    foreach ($dir in @($pf, $pf86, $pw64, $localPrograms)) {
+        Add-EngineCandidate $candidates $dir
     }
     $cmd = Get-Command '7z.exe' -ErrorAction SilentlyContinue
-    if ($cmd) { $candidates.Add((Join-Path (Split-Path -Parent $cmd.Source) '7z.dll')) }
+    if ($cmd) { Add-EngineCandidate $candidates (Split-Path -Parent $cmd.Source) }
     foreach ($c in $candidates) {
         if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { return (Resolve-Path -LiteralPath $c).Path }
     }

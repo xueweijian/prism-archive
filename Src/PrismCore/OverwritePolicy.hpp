@@ -108,10 +108,15 @@ inline Decision Decide(const std::string& finalPath, bool isDirectory, Mode mode
   }
   if (choice == Choice::Skip) return Decision{Choice::Skip, std::string()};
   if (choice == Choice::Replace) return Decision{Choice::Replace, finalPath};
-  for (int suffix = 1;; ++suffix) {
+  // Bounded on purpose (CONTRACTS D29): PathSafety's resolver caps its chain at
+  // 32; an unbounded probe here would spin forever on a broken ExistsFn. When
+  // the ceiling is hit the honest answer is Skip, never a silent overwrite.
+  constexpr int kMaxSuffix = 32;
+  for (int suffix = 1; suffix <= kMaxSuffix; ++suffix) {
     const std::string candidate = RenameCandidate(finalPath, suffix);
     if (!taken(candidate)) return Decision{Choice::Rename, candidate};
   }
+  return Decision{Choice::Skip, std::string()};
 }
 
 }  // namespace prism::overwrite

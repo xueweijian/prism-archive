@@ -277,3 +277,27 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PrismArchive\un
 - `Ctrl+Shift+P`：只切换并显示图标档位，缩略图仍按固定尺寸绘制。
 - Help → About（含诊断报告）：对话框已经写好，但菜单项还没接上；0.1.0 复制诊断
   请用错误弹窗的 `Ctrl+C`（见 [TROUBLESHOOTING](TROUBLESHOOTING.md#7zdll-找不到)）。
+### 设置对话框里「改了以后真的会变」的项（C69 实测）
+
+C69 用真对话框 + 真窗口 + 像素/菜单字符串断言逐项测过。**会变的**：
+
+| 设置 | 可观察的差异 | 断言 |
+|---|---|---|
+| 主题（Day / Night / High contrast） | 整个设置窗口按新令牌重画：同一坐标的 RGB 从 (30,138,255) → (13,114,216) → (102,179,255) | win.c69_settings（采样点 = 主按钮填充，即主题强调色令牌） |
+| 语言（auto / zh-CN / en-US） | 菜单栏文字与对话框六行标签立刻换语言：Compress to a .7z archive → 压缩为 .7z 归档，Language → 语言 | win.c69_settings（GetMenuStringW + 控件文本） |
+| 列表/网格（listMode） | 窗口模型切换，渲染器绘制的行/瓦片布局随之改变 | win.c69_settings checklist 用例 |
+| 排序（sort） | 排序键与方向落到窗口的多键排序规格上，行序随之改变 | 同上 |
+
+**写进文件但运行时还没有消费者**（改了不会立刻看到任何差异；这不算「坏了」，是还没接线）：
+
+- appearance.glassIntensity（玻璃强度）：schema 有键、有 v2→v3 迁移，但没有任何渲染路径读它。
+- appearance.accentColor（强调色）：同上；强调色目前只来自 ThemeTokens 的令牌行。
+- extract.overwrite（ask/replace/skip/rename）：解压流程不读它，冲突策略仍是运行时对话框。
+- extract.verifyAfterExtract：解压流程不读它；校验由 --test 动词单独触发。
+
+这四项在 Tests/win/test_c69_settings.cpp 里只断言「保存后能原样读回」，不断言行为差异；
+接线后应把上表补全。动作岛的八个按钮同理：标签来自 PrismCore 的编译期表（中文），
+不随语言切换（见下一条）。
+
+- 设置对话框的**摘要行与就地提示**仍是英文：它们由 DialogState 的诊断句子生成，
+  走的是错误文案而不是资源表（schema 的 repair 消息也来自 SettingsStore）。

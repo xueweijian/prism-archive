@@ -62,7 +62,9 @@
 #include <utility>
 #include <vector>
 
+#include "../PrismCore/I18n.hpp"
 #include "../PrismCore/SettingsStore.hpp"
+#include "../PrismCore/ThemeTokens.hpp"
 
 namespace prism::win::settingsui {
 
@@ -109,6 +111,28 @@ inline const char* ThemeName(Theme theme) {
 }
 
 inline std::ostream& operator<<(std::ostream& os, Theme theme) { return os << ThemeName(theme); }
+
+// The theme the dialog PAINTS is the theme its draft names. One mapping, pure,
+// so every lane pins it and the Windows paint path cannot invent a second one
+// (it used to: BuildModel() hardcoded Variant::Midnight, so the Day/Night/High
+// contrast combo repainted nothing -- card C69's measured defect).
+inline prism::theme::Variant ThemeVariantOf(Theme theme) {
+  switch (theme) {
+    case Theme::Midnight: return prism::theme::Variant::Midnight;
+    case Theme::HighContrast: return prism::theme::Variant::HighContrast;
+    case Theme::Daylight: break;
+  }
+  return prism::theme::Variant::Daylight;
+}
+
+// Negative control (CONTRACTS D3): the theme change no longer invalidates the
+// window, so the new tokens never reach the screen. Tests/suites/c69-settings.cmake
+// builds this header with the macro and requires the pixel test to go red.
+#if defined(PRISM_C69_MUTANT_NO_THEME_INVALIDATE)
+inline constexpr bool kThemeRepaintOnChange = false;
+#else
+inline constexpr bool kThemeRepaintOnChange = true;
+#endif
 
 enum class SizeUnit : std::uint8_t { MB = 0, GB };
 
@@ -689,6 +713,15 @@ inline constexpr int kExtractDirHint = 4023;
 inline constexpr int kThumbnailHint = 4024;
 inline constexpr int kLogLevelHint = 4025;
 inline constexpr int kMotwHint = 4026;
+// C69: the six row labels get ids of their own. Before this they were created
+// with id 0 -- unreachable by GetDlgItem, so a language switch could not retitle
+// them and "the label still says Language" was not even testable.
+inline constexpr int kLabelLanguage = 4031;
+inline constexpr int kLabelTheme = 4032;
+inline constexpr int kLabelExtractDir = 4033;
+inline constexpr int kLabelThumbnail = 4034;
+inline constexpr int kLabelLogLevel = 4035;
+inline constexpr int kLabelMotw = 4036;
 }  // namespace ids
 
 class SettingsDialog {
@@ -707,6 +740,11 @@ class SettingsDialog {
   using SaveHandler =
       std::function<bool(const prism::settings::SettingsStore&, std::string* error)>;
   using BrowseHandler = std::function<std::wstring()>;
+  // C69: the app hears about a language change the moment the user picks one, so
+  // it can rebuild the menu bar / status line with the same translator. The
+  // dialog then re-reads the translator it was handed (SetTranslator) for its
+  // own rows -- the dialog owns no string table of its own.
+  using LanguageHandler = std::function<void(const std::string& tag)>;
 
   SettingsDialog() = default;
   ~SettingsDialog() { Destroy(); }
@@ -821,6 +859,23 @@ class SettingsDialog {
 
   void SetSaveHandler(SaveHandler handler) { onSave_ = std::move(handler); }
   void SetBrowseHandler(BrowseHandler handler) { onBrowse_ = std::move(handler); }
+  void SetLanguageHandler(LanguageHandler handler) { onLanguage_ = std::move(handler); }
+
+  // The translator the app already loaded (C19). A null translator is legal: the
+  // English defaults below are then shown, and no key ever reaches the screen.
+  void SetTranslator(const prism::i18n::Translator* translator) {
+    translator_ = translator;
+    Relabel();
+  }
+
+  // One key, one fallback. The fallback is NOT a second translation table: it is
+  // the string this dialog showed before C69, so a build with no Assets/Lang
+  // still reads like the product did.
+  std::wstring Text(const char* key, const wchar_t* fallback) const {
+    if (translator_ == nullptr || key == nullptr) return fallback != nullptr ? fallback : L"";
+    if (!translator_->Has(key)) return fallback != nullptr ? fallback : L"";
+    return WideFromUtf8(translator_->Translate(key));
+  }
 
   // state -> controls. Also the validation pump: every handler ends here, and
   // this is where the hint lines and the Save enablement are recomputed.
@@ -920,13 +975,16 @@ class SettingsDialog {
   chrome::ChromeModel BuildModel() const {
     using chrome::WidgetKind;
     chrome::ChromeModel model;
-    model.variant = prism::theme::Variant::Midnight;
+    // C69: the PIXELS follow the draft. Before this line was a hardcoded
+    // Midnight, so choosing Day or High contrast changed the combo and nothing
+    // else (measured: identical RGB at the same coordinate before/after).
+    model.variant = ThemeVariantOf(state_.theme());
     model.dpi = dpi_;
     model.width = static_cast<float>(kClientWidth);
     model.height = static_cast<float>(kClientHeight);
-    model.title = L"Settings";
+    model.title = Text("settings.title", L"Settings");
 
-    auto label = [&model](const wchar_t* text, float x, float y, float w, float h) {
+    auto label = [&model](const std::wstring& text, float x, float y, float w, float h) {
       chrome::Widget widget;
       widget.kind = WidgetKind::Label;
       widget.rect = D2D1::RectF(x, y, x + w, y + h);
@@ -955,12 +1013,14 @@ class SettingsDialog {
     constexpr float kTop = 48.0f;
     const auto rowY = [](int row) { return kTop + kRow * row; };
 
-    label(L"Language", kLabelX, rowY(0) + 8.0f, 160.0f, 22.0f);
-    label(L"Theme", kLabelX, rowY(1) + 8.0f, 160.0f, 22.0f);
-    label(L"Default extraction folder", kLabelX, rowY(2) + 8.0f, 160.0f, 22.0f);
-    label(L"Thumbnail cache cap", kLabelX, rowY(3) + 8.0f, 160.0f, 22.0f);
-    label(L"Log level", kLabelX, rowY(4) + 8.0f, 160.0f, 22.0f);
-    label(L"Mark-of-the-Web", kLabelX, rowY(5) + 8.0f, 160.0f, 22.0f);
+    label(Text("settings.language", L"Language"), kLabelX, rowY(0) + 8.0f, 160.0f, 22.0f);
+    label(Text("settings.theme", L"Theme"), kLabelX, rowY(1) + 8.0f, 160.0f, 22.0f);
+    label(Text("settings.extractDir", L"Default extraction folder"), kLabelX, rowY(2) + 8.0f, 160.0f,
+          22.0f);
+    label(Text("settings.thumbnailCap", L"Thumbnail cache cap"), kLabelX, rowY(3) + 8.0f, 160.0f,
+          22.0f);
+    label(Text("settings.logLevel", L"Log level"), kLabelX, rowY(4) + 8.0f, 160.0f, 22.0f);
+    label(Text("settings.motw", L"Mark-of-the-Web"), kLabelX, rowY(5) + 8.0f, 160.0f, 22.0f);
 
     chrome::Widget language;
     language.id = ids::kLanguage;
@@ -994,7 +1054,7 @@ class SettingsDialog {
     browse.id = ids::kBrowse;
     browse.kind = WidgetKind::Button;
     browse.rect = D2D1::RectF(kControlX + 340.0f, rowY(2), kControlX + 430.0f, rowY(2) + 32.0f);
-    browse.label = L"Browse...";
+    browse.label = Text("settings.browse", L"Browse...");
     browse.enabled = true;
     browse.state = visual(ids::kBrowse, true);
     add(browse);
@@ -1031,7 +1091,7 @@ class SettingsDialog {
     motw.id = ids::kMotw;
     motw.kind = WidgetKind::CheckBox;
     motw.rect = D2D1::RectF(kControlX, rowY(5), kControlX + 420.0f, rowY(5) + 32.0f);
-    motw.label = L"Inherit Mark-of-the-Web from the archive";
+    motw.label = Text("settings.inheritMotw", L"Inherit Mark-of-the-Web from the archive");
     motw.checked = state_.inheritMotw();
     motw.enabled = true;
     motw.state = visual(ids::kMotw, true);
@@ -1058,7 +1118,7 @@ class SettingsDialog {
                            static_cast<float>(kClientHeight) - 44.0f,
                            static_cast<float>(kClientWidth) - 116.0f,
                            static_cast<float>(kClientHeight) - 12.0f);
-    save.label = L"Save";
+    save.label = Text("settings.save", L"Save");
     save.primary = true;
     save.enabled = state_.SaveEnabled();
     save.state = visual(ids::kSave, save.enabled);
@@ -1071,7 +1131,7 @@ class SettingsDialog {
                              static_cast<float>(kClientHeight) - 44.0f,
                              static_cast<float>(kClientWidth) - 20.0f,
                              static_cast<float>(kClientHeight) - 12.0f);
-    cancel.label = L"Cancel";
+    cancel.label = Text("settings.cancel", L"Cancel");
     cancel.enabled = true;
     cancel.state = visual(ids::kCancel, true);
     add(cancel);
@@ -1110,6 +1170,7 @@ class SettingsDialog {
   void OnCommand(int id, int code, HWND control);
   void OnSaveClicked();
   void OnBrowse();
+  void Relabel();  // C69: re-read every visible word from the translator
   void FocusFirstIssue();
   static void SetTextIfDifferent(HWND control, const std::wstring& text);
 
@@ -1430,6 +1491,7 @@ class SettingsDialog {
   HWND summaryText_ = nullptr;
   HWND saveButton_ = nullptr;
   HWND cancelButton_ = nullptr;
+  HWND label_[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};  // C69 row labels
   DWORD lastError_ = 0;
   int missingControlId_ = 0;
   bool syncing_ = false;
@@ -1448,6 +1510,8 @@ class SettingsDialog {
   DialogState state_;
   SaveHandler onSave_;
   BrowseHandler onBrowse_;
+  LanguageHandler onLanguage_;                      // C69: app re-translates the bar
+  const prism::i18n::Translator* translator_ = nullptr;  // C69: borrowed, never owned
 };
 
 }  // namespace prism::win::settingsui
@@ -1574,10 +1638,14 @@ inline bool SettingsDialog::CreateChildren() {
     MakeControl(L"STATIC", L"", SS_LEFT, hintIds[row], kControlX, HintY(row), kHintWidth, 18);
   }
 
-  const wchar_t* labels[] = {L"Language", L"Theme", L"Default extraction folder",
-                             L"Thumbnail cache cap", L"Log level", L"Mark-of-the-Web"};
+  // C69: ids so Relabel() can retitle them; before this they were id 0.
+  const int labelIds[] = {ids::kLabelLanguage, ids::kLabelTheme, ids::kLabelExtractDir,
+                          ids::kLabelThumbnail, ids::kLabelLogLevel, ids::kLabelMotw};
+  const wchar_t* labelTexts[] = {L"Language", L"Theme", L"Default extraction folder",
+                                 L"Thumbnail cache cap", L"Log level", L"Mark-of-the-Web"};
   for (int row = 0; row < 6; ++row) {
-    MakeControl(L"STATIC", labels[row], SS_LEFT, 0, kLabelX, RowY(row) + 4, 150, 18);
+    label_[row] = MakeControl(L"STATIC", labelTexts[row], SS_LEFT, labelIds[row], kLabelX,
+                              RowY(row) + 4, 150, 18);
   }
 
   if (languageBox_ == nullptr || themeBox_ == nullptr || extractEdit_ == nullptr ||
@@ -1605,6 +1673,39 @@ inline bool SettingsDialog::CreateChildren() {
   }
   SyncControls();
   return true;
+}
+
+// C69: every visible word this dialog owns, re-read from the translator. The
+// stock controls are invisible adapters, so the CHROME model is what the user
+// reads -- BuildModel() re-reads the same keys, and RefreshChrome() repaints it.
+inline void SettingsDialog::Relabel() {
+  if (hwnd_ == nullptr) return;
+  SetWindowTextW(hwnd_, Text("settings.title", L"Settings").c_str());
+  const int labelIds[] = {ids::kLabelLanguage, ids::kLabelTheme, ids::kLabelExtractDir,
+                          ids::kLabelThumbnail, ids::kLabelLogLevel, ids::kLabelMotw};
+  const wchar_t* labelTexts[] = {L"Language", L"Theme", L"Default extraction folder",
+                                 L"Thumbnail cache cap", L"Log level", L"Mark-of-the-Web"};
+  const char* labelKeys[] = {"settings.language", "settings.theme", "settings.extractDir",
+                             "settings.thumbnailCap", "settings.logLevel", "settings.motw"};
+  for (int row = 0; row < 6; ++row) {
+    const HWND label = Control(labelIds[row]);
+    if (label != nullptr) {
+      SetWindowTextW(label, Text(labelKeys[row], labelTexts[row]).c_str());
+    }
+  }
+  if (browseButton_ != nullptr) {
+    SetWindowTextW(browseButton_, Text("settings.browse", L"Browse...").c_str());
+  }
+  if (saveButton_ != nullptr) SetWindowTextW(saveButton_, Text("settings.save", L"Save").c_str());
+  if (cancelButton_ != nullptr) {
+    SetWindowTextW(cancelButton_, Text("settings.cancel", L"Cancel").c_str());
+  }
+  if (motwCheck_ != nullptr) {
+    SetWindowTextW(
+        motwCheck_,
+        Text("settings.inheritMotw", L"Inherit Mark-of-the-Web from the archive").c_str());
+  }
+  RefreshChrome();
 }
 
 inline void SettingsDialog::OnBrowse() {
@@ -1647,11 +1748,20 @@ inline void SettingsDialog::OnCommand(int id, int code, HWND control) {
       if (code != CBN_SELCHANGE) return;
       state_.SetLanguageIndex(
           static_cast<int>(SendMessageW(languageBox_, CB_GETCURSEL, 0, 0)));
+      // C69: the app rebuilds its menu bar / status line FIRST (it owns those
+      // words and the translator), then the dialog re-reads the translator it
+      // was handed. A handler that does nothing leaves every string as it was --
+      // which is exactly what the no_rebuild mutant proves the test can see.
+      if (onLanguage_) onLanguage_(state_.languageTag());
+      Relabel();
       break;
     case ids::kTheme:
       if (code != CBN_SELCHANGE) return;
       state_.SetTheme(
           DialogState::ThemeAt(static_cast<int>(SendMessageW(themeBox_, CB_GETCURSEL, 0, 0))));
+      // C69: new tokens, new brushes, new pixels. Without this Invalidate the
+      // window keeps the previous theme's frame until something else repaints it.
+      if (kThemeRepaintOnChange) RefreshChrome();
       break;
     case ids::kExtractDir:
       if (code != EN_CHANGE) return;

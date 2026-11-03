@@ -269,7 +269,11 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // RequiredKeys() moves, which is the point of the census.
   // C64: +1 for menu.settings (the Settings item was an English literal), so
   // the census is 62 and the table must define exactly that many keys.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{62});
+  // C69: +11 for the Settings dialog's own surfaces (title, six rows, the MoTW
+  // switch, Browse, Save, Cancel). They were English literals with control id 0
+  // until this card, so no language switch could retitle them -- the same class
+  // of defect C64 fixed for the menu item. The census is 73.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{73});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

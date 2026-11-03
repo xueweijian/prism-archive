@@ -490,9 +490,10 @@ function New-PackageStage {
         $rel = $full.Substring($installRoot.Length).TrimStart('\', '/')
         $reason = Get-ExclusionReason $rel
         if ($reason) {
-            $top = ($rel -replace '/', '\').Split('\')[0]
-            if ($excludedSeen.Add($top)) {
-                $excluded.Add([ordered]@{ pattern = ($top + '/**'); reason = $reason })
+            $norm = $rel -replace '/', '\'
+            $pattern = if ($norm -like 'Assets\Package\*') { 'Assets/Package/**' } else { $norm.Split('\')[0] + '/**' }
+            if ($excludedSeen.Add($pattern)) {
+                $excluded.Add([ordered]@{ pattern = $pattern; reason = $reason })
             }
             continue
         }

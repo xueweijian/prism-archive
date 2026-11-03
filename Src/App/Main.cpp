@@ -803,9 +803,22 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // ---- C27: restored view state, sidebar port, menu bar -------------------
   // The geometry/mode/sort the user closed with is applied BEFORE the first
   // paint, so the window never flashes a layout it is about to replace.
+  // C66: the saved number is the VISIBLE frame; restoring it goes through the
+  // clamp so a value larger than the work area (the 1552x832 a maximized window
+  // used to write on a 1536x816 screen) can never put the tail of the action
+  // island off screen again. The stderr line is the observable the process-level
+  // suite reads: it names the saved, the work area and the applied rectangles.
   if (windowState.width > 0 && windowState.height > 0) {
-    SetWindowPos(window.Hwnd(), nullptr, 0, 0, windowState.width, windowState.height,
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    const prism::win::frame::Restore restored = window.RestoreFrame(windowState.width,
+                                                                   windowState.height);
+    std::fprintf(stderr,
+                 "window restore saved=%dx%d work=%dx%d requested=%dx%d"
+                 " window=%dx%d visible=%dx%d ok=%d\n",
+                 restored.saved.Width(), restored.saved.Height(), restored.work.Width(),
+                 restored.work.Height(), restored.requested.Width(),
+                 restored.requested.Height(), restored.applied.Width(),
+                 restored.applied.Height(), restored.visible.Width(),
+                 restored.visible.Height(), static_cast<int>(restored.ok));
   }
   // C12 + C14: the sidebar model gets the settings-backed store, so favourites,
   // recent archives and collapsed folders are restored here and written back at

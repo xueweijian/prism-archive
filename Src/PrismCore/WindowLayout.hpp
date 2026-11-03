@@ -666,4 +666,128 @@ inline Rect ProgressCapsuleRect(const Layout& layout) {
   return Rect{left, bottom - height, left + width, bottom};
 }
 
+// =========================================================== C66: the frame
+// THE DEFECT (measured, not assumed): a user with a 1536x816 work area had
+// "window": {"width": 1552, "height": 832} written to settings.json -- exactly
+// the work area PLUS the DWM invisible resize border (8 px per side on both
+// axes). Two separate rules produced that number, and both have to go:
+//
+//   1. GetWindowRect() is NOT the frame the user sees. On a resizable window the
+//      DWM extends the window rectangle by SM_CXSIZEFRAME + SM_CXPADDEDBORDER
+//      past the visible edge on the left/right/top, and by the same amount at
+//      the bottom. Persisting that rectangle and handing it back to
+//      SetWindowPos() makes the NEXT window 16 px wider than the one the user
+//      closed (the saved rect already contains a border the new window will add
+//      again). Five cycles is enough to walk a 1200 px window off a 1536 px
+//      screen -- and the tail of the action island (添加/删除/测试) is the first
+//      thing that leaves the screen.
+//   2. A MAXIMIZED window's GetWindowRect() is the monitor work area inflated by
+//      that same border -- so a user who simply maximised and closed saved a
+//      rectangle that can never fit any screen again.
+//
+// The policy below is pure integer math (no windows.h; the Linux lane asserts
+// it): persist the VISIBLE frame, and CLAMP every restored frame into the
+// monitor work area before it reaches SetWindowPos. The Win32 half (DWM
+// extended bounds, MonitorFromRect, SetWindowPos) lives in
+// Src/PrismWin/WindowFrame.hpp.
+//
+// CONTRACTS B1: every min/max is parenthesised.
+
+// The floor a restored window may never go below. These are the SAME numbers
+// SettingsStore publishes as window.width/window.height's documented minimum
+// (640 x 480); they live here because they are geometry, and a second copy in
+// the store would be a second answer to "how small may a window be".
+inline constexpr int kMinWindowWidth = 640;
+inline constexpr int kMinWindowHeight = 480;
+
+// The four thicknesses of the DWM invisible border, in pixels, measured on the
+// live window (GetWindowRect minus DWMWA_EXTENDED_FRAME_BOUNDS per side).
+// Positive means "the window rect reaches this far past the visible frame".
+struct FrameBorders {
+  int left = 0;
+  int top = 0;
+  int right = 0;
+  int bottom = 0;
+
+  constexpr bool operator==(const FrameBorders&) const = default;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const FrameBorders& b) {
+  return os << "{" << b.left << "," << b.top << "," << b.right << "," << b.bottom << "}";
+}
+
+// Clamp a frame into the work area. Rules, in this order:
+//   1. never wider/taller than the work area;
+//   2. never smaller than the documented minimum -- UNLESS the work area itself
+//      is smaller than the minimum (a 320 px wide screen must not produce a
+//      640 px window that hangs off it);
+//   3. the LEFT and TOP edges stay inside the work area, so a saved rect from a
+//      monitor that is no longer attached (or a negative-coordinate layout)
+//      lands on screen instead of at x = -1920.
+// A frame that already fits is returned unchanged (byte-for-byte), which is
+// what makes the save/restore cycle a fixed point rather than a slow drift.
+inline Rect ClampFrameToWorkArea(const Rect& frame, const Rect& work,
+                                 int minWidth = kMinWindowWidth,
+                                 int minHeight = kMinWindowHeight) {
+  // CONTRACTS D3 negative control: the whole clamp is compiled out, so the
+  // "an oversized saved frame lands inside the work area" assertions go red.
+#if defined(PRISM_C66_MUTANT_NO_WORKAREA_CLAMP)
+  // CONTRACTS D31: every parameter is still referenced, or the mutant build
+  // fails on -Werror=unused-parameter before the rule it is meant to break.
+  (void)work;
+  (void)minWidth;
+  (void)minHeight;
+  return frame;
+#else
+  if (work.Empty()) return frame;  // no work area known: nothing to clamp to
+  Rect out = frame;
+  out.left = frame.left;
+  out.top = frame.top;
+
+  const int workWidth = work.Width();
+  const int workHeight = work.Height();
+  int width = (std::min)(frame.Width(), workWidth);
+  int height = (std::min)(frame.Height(), workHeight);
+  if (width < 0) width = 0;
+  if (height < 0) height = 0;
+  // (2) the minimum, but never above what the work area can hold.
+  width = (std::max)(width, (std::min)(minWidth, workWidth));
+  height = (std::max)(height, (std::min)(minHeight, workHeight));
+
+  // (3) both edges inside. A frame wider than the work area keeps its LEFT edge
+  // at the work area's left, because a window whose right edge is off screen
+  // loses the toolbar; one whose left edge is off screen loses the sidebar.
+  out.left = (std::max)(work.left, (std::min)(frame.left, work.right - width));
+  out.top = (std::max)(work.top, (std::min)(frame.top, work.bottom - height));
+  out.right = out.left + width;
+  out.bottom = out.top + height;
+  return out;
+#endif
+}
+
+// The window rectangle SetWindowPos must be given to produce the visible frame
+// 'visible'. The invisible border is OUTSIDE the visible frame on every side.
+inline Rect WindowRectForVisibleFrame(const Rect& visible, const FrameBorders& borders) {
+  return Rect{visible.left - borders.left, visible.top - borders.top,
+              visible.right + borders.right, visible.bottom + borders.bottom};
+}
+
+// The inverse: the frame the user actually sees, from GetWindowRect.
+inline Rect VisibleFrameForWindowRect(const Rect& windowRect, const FrameBorders& borders) {
+  return Rect{windowRect.left + borders.left, windowRect.top + borders.top,
+              windowRect.right - borders.right, windowRect.bottom - borders.bottom};
+}
+
+// Does the whole frame sit inside the work area (tolerance 0)?
+inline bool FrameFitsWorkArea(const Rect& frame, const Rect& work) {
+  return work.Contains(frame);
+}
+
+// The rectangle the app should PERSIST for this window: the visible frame the
+// user sees, not the shadow-inflated window rect. Kept here (pure) so the rule
+// is assertable without a window station; the Win32 measurement feeds it.
+inline Rect FrameToPersist(const Rect& windowRect, const FrameBorders& borders) {
+  return VisibleFrameForWindowRect(windowRect, borders);
+}
+
 }  // namespace prism::layout

@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "../PrismCore/OverwritePolicy.hpp"
 #include "../PrismCore/PrismCore.hpp"
 #include "FormatSniffer.hpp"
 #include "SevenZipAbi.hpp"
@@ -972,6 +973,16 @@ inline std::atomic<uint64_t>& MutantOperationGuardBypasses() {
 }
 #endif
 
+#if defined(PRISM_C71_MUTANT_IGNORE_OVERWRITE)
+// NEGATIVE CONTROL (CONTRACTS D3): extract.overwrite is discarded. The counter
+// is the proof the injected branch ran; the suite (D27) only prints its CAUGHT
+// marker when it did.
+inline int& MutantOverwriteHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Extract callback: smart path rewriting + Zip Slip guard + bomb fuse
 // ---------------------------------------------------------------------------
@@ -993,6 +1004,14 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     std::vector<uint32_t> failedIndices;
     std::vector<std::string> failedPaths;
     std::string failureReason;  // empty when nothing failed
+    // C71: extract.overwrite. "replace" is the pre-C71 behaviour, so the
+    // counters below are the ONLY way a suite can tell the policies apart on
+    // disk (a skip writes nothing, a rename lands at firstRenamedTo).
+    uint64_t overwrittenFiles = 0;
+    uint64_t skippedFiles = 0;
+    uint64_t renamedFiles = 0;
+    uint64_t overwritePrompts = 0;
+    std::string firstRenamedTo;
     // C41: a second operation was attempted on this handler while one was
     // already running. Refused, not allowed to corrupt the first one.
     bool operationConflict = false;
@@ -1011,13 +1030,19 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   SmartExtractCallback(const std::vector<ArchiveItem>& catalog, const SmartPlan& plan,
                        const std::string& targetRoot, BombFuse* fuse = nullptr,
                        MethodNameLookup methodLookup = {},
-                       std::vector<uint32_t> requestedIndices = {})
+                       std::vector<uint32_t> requestedIndices = {},
+                       prism::overwrite::Mode overwriteMode = prism::overwrite::Mode::Ask,
+                       prism::overwrite::PromptFn overwritePrompt = {},
+                       prism::overwrite::ExistsFn exists = {})
       : catalog_(catalog),
         plan_(plan),
         guard_(targetRoot),
         fuse_(fuse),
         methodLookup_(std::move(methodLookup)),
-        requestedIndices_(std::move(requestedIndices)) {}
+        requestedIndices_(std::move(requestedIndices)),
+        overwriteMode_(overwriteMode),
+        overwritePrompt_(std::move(overwritePrompt)),
+        exists_(std::move(exists)) {}
 
   const Result& result() const { return result_; }
   void SetFreeDiskBytes(uint64_t freeBytes) { freeDiskBytes_ = freeBytes; }
@@ -1085,16 +1110,51 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     }
 
     packedSoFar_ += item.packSize ? item.packSize : 1;
-    const std::wstring wide = Utf8ToWide(finalPath);
+
+    // C71: extract.overwrite. Before this decision every policy behaved like
+    // "replace" because DiskOutStream opens with CREATE_ALWAYS. A skip must not
+    // even create a parent directory; a rename lands beside the existing file.
+    std::string targetPath = finalPath;
+    {
+      prism::overwrite::Mode mode = overwriteMode_;
+#if defined(PRISM_C71_MUTANT_IGNORE_OVERWRITE)
+      // NEGATIVE CONTROL (CONTRACTS D3): the saved policy is discarded and
+      // everything behaves like the pre-C71 CREATE_ALWAYS. The counter proves
+      // the injected branch ran; the suite's verdict is armed on it (D27).
+      ++MutantOverwriteHits();
+      mode = prism::overwrite::Mode::Replace;
+#endif
+      const auto prompt = [this](const std::string& existing) {
+        ++result_.overwritePrompts;
+        return overwritePrompt_ ? overwritePrompt_(existing)
+                                : prism::overwrite::Choice::Skip;
+      };
+      const prism::overwrite::Decision decided = prism::overwrite::Decide(
+          finalPath, false, mode, exists_, prompt);
+      if (decided.choice == prism::overwrite::Choice::Skip) {
+        ++result_.skippedFiles;
+        currentPath_.clear();
+        return S_OK;  // no stream: the engine counts no write for this item
+      }
+      if (decided.choice == prism::overwrite::Choice::Rename) {
+        ++result_.renamedFiles;
+        if (result_.firstRenamedTo.empty()) result_.firstRenamedTo = decided.path;
+      } else if (exists_ && exists_(finalPath)) {
+        ++result_.overwrittenFiles;
+      }
+      targetPath = decided.path;
+    }
+
+    const std::wstring wide = Utf8ToWide(targetPath);
     CreateParentDirectories(wide);
     auto* sink = new DiskOutStream(wide);
     if (!sink->Open()) {
       delete sink;
       result_.guardTripped = true;
-      result_.guardReason = "cannot create " + finalPath;
+      result_.guardReason = "cannot create " + targetPath;
       return E_ABORT;
     }
-    currentPath_ = finalPath;
+    currentPath_ = targetPath;
     currentIndex_ = item.index;
     // Self-healing cursor: whatever PrepareOperation guessed, a real GetStream
     // tells us the exact index, so the next unattributed failure starts after
@@ -1262,6 +1322,11 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   uint64_t fedProduced_ = 0;
   uint64_t freeDiskBytes_ = 0;
   abi::UInt64 total_ = 0;
+  // C71: extract.overwrite inputs. The exists probe is injected so this class
+  // stays testable without touching the filesystem in its unit cases.
+  prism::overwrite::Mode overwriteMode_ = prism::overwrite::Mode::Ask;
+  prism::overwrite::PromptFn overwritePrompt_;
+  prism::overwrite::ExistsFn exists_;
   LONG refs_ = 1;
 };
 
@@ -1763,7 +1828,10 @@ class ArchiveReader {
   // detour, no post-extraction MoveFile (blueprint ch. 4.2).
   bool ExtractWithPlan(const std::vector<ArchiveItem>& catalog, const SmartPlan& plan,
                        const std::string& targetRoot, BombFuse* fuse,
-                       SmartExtractCallback::Result* resultOut) const {
+                       SmartExtractCallback::Result* resultOut,
+                       prism::overwrite::Mode overwriteMode = prism::overwrite::Mode::Ask,
+                       prism::overwrite::PromptFn overwritePrompt = {},
+                       prism::overwrite::ExistsFn exists = {}) const {
     if (!archive_) return false;
     OperationScope operation(*this);
     if (!operation.Enter()) {
@@ -1788,10 +1856,16 @@ class ArchiveReader {
     if (indices.empty()) return true;
     // kpidMethod is what turns an opaque opResult=1 into "the archive uses
     // zstd". The lambda runs only for a FAILED item (see RecordFailure).
+    if (!exists) {
+      exists = [](const std::string& path) {
+        return GetFileAttributesW(Utf8ToWide(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+      };
+    }
     auto* callback = new SmartExtractCallback(
         catalog, plan, targetRoot, fuse,
         [this](uint32_t index) { return GetString(index, abi::kpidMethod); },
-        std::vector<uint32_t>(indices.begin(), indices.end()));
+        std::vector<uint32_t>(indices.begin(), indices.end()), overwriteMode,
+        std::move(overwritePrompt), std::move(exists));
     const HRESULT hr =
         archive_->Extract(indices.data(), static_cast<abi::UInt32>(indices.size()), 0, callback);
     // C26: SUCCEEDED(hr) is NOT the verdict. The engine reports "this item did
@@ -1806,7 +1880,7 @@ class ArchiveReader {
     // NO file at all did not extract anything -- and "ok with 0 bytes" is
     // exactly the silent-loss report this card exists for. Never let the
     // HRESULT alone call that a success.
-    if (ok && result.filesWritten == 0) {
+    if (ok && result.filesWritten == 0 && result.skippedFiles == 0) {
       ok = false;
       result.emptyResult = true;
       result.failureReason = "the engine reported success but wrote no files for " +

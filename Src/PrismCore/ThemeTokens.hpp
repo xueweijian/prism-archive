@@ -44,6 +44,7 @@
 //   PRISM_C15_MUTANT_CIRCLE_EXPONENT  squircle n=2.0 instead of 4.2
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -574,6 +575,108 @@ struct LiquidGlassTokenRegisters {
 inline LiquidGlassTokenRegisters GlassRegisters(Variant variant) {
   return {Lookup(TokenId::SurfaceFloatingIsland, variant).color,
           Lookup(TokenId::BorderSpecularRim, variant).gradient.from};
+}
+
+// ---------------------------------------------------------------------------
+// C71: LIVE appearance overrides.
+//
+// appearance.accentColor and appearance.glassIntensity used to be schema-only
+// keys: the store kept them, no renderer ever read them. They are applied here
+// (the ONE place a pixel colour is resolved) and consumed by ActionBar,
+// GalleryRenderer and GlassIslandScene::WriteCbuffer. The app calls
+// prism::appearance::Apply(store) once at startup and after a settings save.
+//
+// WHY THE GLASS INTENSITY IS RELATIVE TO 0.72
+// The schema's documented default is 0.72, and before this card the renderer
+// used the token alpha verbatim. Treating 0.72 as 1.0 (a REFERENCE, not a
+// multiplier) is what keeps an upgraded install pixel-identical at its default;
+// a raw multiplier would have silently redrawn every window on first launch.
+// So the effective alpha is token.a * (intensity / 0.72), clamped to 1.
+// ---------------------------------------------------------------------------
+namespace live {
+
+inline constexpr double kReferenceGlassIntensity = 0.72;
+
+struct Overrides {
+  bool hasAccent = false;
+  Rgba accent{};
+  double glassIntensity = kReferenceGlassIntensity;
+};
+
+inline Overrides& Current() {
+  static Overrides overrides;
+  return overrides;
+}
+
+inline void SetAccent(Rgba color) {
+  Current().hasAccent = true;
+  Current().accent = color;
+}
+
+inline void ClearAccent() { Current().hasAccent = false; }
+
+inline void SetGlassIntensity(double intensity) {
+  // The schema already clamps to [0,1]; this is the belt for a TooNew document
+  // this build must read but not validate.
+  if (!(intensity >= 0.0)) intensity = 0.0;
+  if (intensity > 1.0) intensity = 1.0;
+  Current().glassIntensity = intensity;
+}
+
+inline void Reset() { Current() = Overrides{}; }
+
+#if defined(PRISM_C71_MUTANT_IGNORE_ACCENT)
+// NEGATIVE CONTROL (CONTRACTS D3): the override is compiled out, so a saved
+// accent never reaches a pixel. The counter proves the injected branch ran; the
+// suite's verdict is armed on it (D27).
+inline int& MutantAccentHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+#if defined(PRISM_C71_MUTANT_IGNORE_GLASS)
+// NEGATIVE CONTROL (CONTRACTS D3): glass intensity is ignored.
+inline int& MutantGlassHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+
+}  // namespace live
+
+// The accent a renderer must use: the user's saved colour when one was applied,
+// otherwise the theme token (exactly the pre-C71 behaviour).
+inline Rgba EffectiveAccent(Variant variant) {
+#if defined(PRISM_C71_MUTANT_IGNORE_ACCENT)
+  ++live::MutantAccentHits();
+  return Lookup(TokenId::AccentLiquidPrimary, variant).gradient.from;
+#else
+  const live::Overrides& overrides = live::Current();
+  if (overrides.hasAccent) return overrides.accent;
+  return Lookup(TokenId::AccentLiquidPrimary, variant).gradient.from;
+#endif
+}
+
+// The multiplier appearance.glassIntensity represents, relative to the schema's
+// 0.72 reference (1.0 == "do not change anything").
+inline double GlassIntensityScale() {
+  return live::Current().glassIntensity / live::kReferenceGlassIntensity;
+}
+
+// The floating-island surface with the saved glass intensity folded into its
+// alpha. Every consumer that paints "glass" must come through here; a literal
+// .52/.58 at a call site is the defect this function exists to prevent.
+inline Rgba EffectiveGlassSurface(Variant variant) {
+  Rgba surface = Lookup(TokenId::SurfaceFloatingIsland, variant).color;
+#if defined(PRISM_C71_MUTANT_IGNORE_GLASS)
+  ++live::MutantGlassHits();
+#else
+  double alpha = static_cast<double>(surface.a) * GlassIntensityScale();
+  if (alpha < 0.0) alpha = 0.0;
+  if (alpha > 1.0) alpha = 1.0;
+  surface.a = static_cast<float>(alpha);
+#endif
+  return surface;
 }
 
 }  // namespace prism::theme

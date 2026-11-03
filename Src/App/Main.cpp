@@ -276,6 +276,9 @@ struct AppContext {
   std::atomic<uint64_t> archiveGeneration{0};
   std::wstring archivePath;
   prism::app::ExtractionPlan plan;
+  // C71: extract.overwrite + extract.verifyAfterExtract, resolved from the
+  // settings document this launch loaded (and refreshed after a save).
+  prism::app::ExtractionOptions extractOptions;
 };
 
 // A context-menu verb we do not implement must SAY so on stderr -- and must not
@@ -296,13 +299,38 @@ void ReportRefusedVerb(const prism::app::LaunchRequest& request) {
                flag.c_str());
 }
 
+// C71: the GUI's overwrite prompt. The policy decides WHEN to ask (only "ask"
+// mode + an existing file); this function is the UI seam. Yes = replace,
+// No = skip, Cancel = save beside as "name (1).ext". No owner window: the
+// extraction runs on a worker thread and must not touch GalleryWindow state
+// (CONTRACTS B9), and a MessageBox is safe from any thread.
+prism::app::ExtractionOptions LiveExtractionOptions(
+    const prism::settings::SettingsStore& store) {
+  prism::app::ExtractionOptions options =
+      prism::app::ExtractionOptionsFromSettings(store);
+  options.prompt = [](const std::string& path) {
+    const std::wstring text =
+        L"\u76EE\u6807\u5DF2\u5B58\u5728\uFF1A\n" + prism::win::Utf8ToWide(path) +
+        L"\n\n\u662F = \u8986\u76D6\uFF0C\u5426 = \u8DF3\u8FC7\uFF0C"
+        L"\u53D6\u6D88 = \u53E6\u5B58\u4E3A (1)";
+    const int answer = MessageBoxW(nullptr, text.c_str(), L"PrismArchive",
+                                  MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (answer == IDYES) return prism::overwrite::Choice::Replace;
+    if (answer == IDCANCEL) return prism::overwrite::Choice::Rename;
+    return prism::overwrite::Choice::Skip;  // No / dismissed
+  };
+  return options;
+}
+
 // One line of machine-readable telemetry. A GUI app has no console, so this is
 // diagnostic only; the exit code carries the verdict.
 void Telemetry(const char* what, const prism::app::ExtractionOutcome& outcome) {
-  std::fprintf(stderr, "%s ok=%d files=%llu bytes=%llu stamped=%llu amsiBlocked=%llu\n", what,
-               static_cast<int>(outcome.ok),
+  std::fprintf(stderr,
+               "%s ok=%d files=%llu bytes=%llu skipped=%llu stamped=%llu amsiBlocked=%llu\n",
+               what, static_cast<int>(outcome.ok),
                static_cast<unsigned long long>(outcome.filesWritten),
                static_cast<unsigned long long>(outcome.bytesWritten),
+               static_cast<unsigned long long>(outcome.skippedFiles),
                static_cast<unsigned long long>(outcome.security.filesStamped),
                static_cast<unsigned long long>(outcome.security.amsiBlocked));
 }
@@ -329,8 +357,15 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
     return 0;
   }
 
+  // A shell verb runs with no window on purpose: it must NEVER block on a modal
+  // box (the c58 suite measures this). The GUI prompt in app.extractOptions is
+  // therefore dropped here; an "ask" conflict becomes Skip, which is the only
+  // safe non-interactive answer.
+  prism::app::ExtractionOptions options = app.extractOptions;
+  options.prompt = {};
   const prism::app::ExtractionOutcome outcome = prism::app::RunExtraction(
-      *app.ops, app.catalog, app.plan, app.archivePath, /*scanExecutables=*/true);
+      *app.ops, app.catalog, app.plan, app.archivePath, /*scanExecutables=*/true,
+      prism::win::amsi::InitMode::LoadAmsi, options);
   Telemetry("extract", outcome);
   if (!outcome.ok) {
     std::wstring text = tr.Or("progress.failed", L"\u89E3\u538B\u5931\u8D25") + L"\n\n";
@@ -508,6 +543,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   LanguageRuntime language = LoadLanguage(settings.store, &logger);
   const Tr tr{&language.translator};
 
+  // C71: appearance.accentColor / appearance.glassIntensity become the live
+  // theme overrides BEFORE the first frame. Anything painted later (action
+  // island, focus ring, progress capsule, the glass cbuffer) reads them.
+  prism::appearance::Apply(settings.store);
+
   // ---- C46: the previous session, read BEFORE anything opens --------------
   // The session is a SEPARATE document from settings on purpose: settings are
   // the user's preferences (merge on write, newer documents are read-only),
@@ -574,6 +614,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const std::wstring& dll = lookup.path;
 
   auto app = std::make_shared<AppContext>();
+  app->extractOptions = LiveExtractionOptions(settings.store);
   if (!app->library.Load(dll)) {
     // C40: error.engine.load has shipped since C19 with a {path} placeholder;
     // the English "7z.dll failed to load" literal was the last hardcoded error on
@@ -592,8 +633,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // session, and it must not rewrite the user's restore list. The verdict is
   // stderr + exit code, never a dialog.
   if (launch.mode == prism::app::LaunchMode::kSmartExtractEach) {
-    const prism::app::ExtractEachOutcome outcome =
-        prism::app::RunExtractEach(launch.archives, app->library);
+    const prism::app::ExtractEachOutcome outcome = prism::app::RunExtractEach(
+        launch.archives, app->library, /*scanExecutables=*/true,
+        prism::app::ExtractionOptionsFromSettings(settings.store));
     for (const std::string& line : outcome.lines) std::fprintf(stderr, "%s\n", line.c_str());
     if (SUCCEEDED(coInit)) CoUninitialize();
     return outcome.exitCode;
@@ -966,6 +1008,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       settings.report = prism::win::settingsfile::LoadStore(settings.store, settings.paths);
       settings.loaded =
           settings.report.outcome != prism::win::settingsfile::LoadOutcome::Failed;
+      // C71: a saved accent/intensity takes effect on the NEXT PAINT, and a
+      // saved overwrite/verify policy on the next extraction. Both are re-read
+      // from the document the dialog just wrote (never from the draft).
+      prism::appearance::Apply(settings.store);
+      app->extractOptions = LiveExtractionOptions(settings.store);
+      InvalidateRect(window.Hwnd(), nullptr, FALSE);
       window.SetStatus(L"\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
     }
   });
@@ -1031,19 +1079,37 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         app->extractReader.store(task->reader);
         // Published BEFORE the flag check: see the shutdown contract above.
         if (app->shuttingDown.load()) task->reader->RequestBatchAbort();
-        const bool ok = task->reader->ExtractWithPlan(
-            app->catalog, app->plan.plan, app->plan.plan.baseTargetDir, nullptr, &result);
+        bool ok = task->reader->ExtractWithPlan(
+            app->catalog, app->plan.plan, app->plan.plan.baseTargetDir, nullptr, &result,
+            app->extractOptions.overwrite, app->extractOptions.prompt,
+            app->extractOptions.exists);
         app->extractReader.store(nullptr);
         app->ops->Finish(*task, ok);
         outcome.ok = ok;
         outcome.filesWritten = result.filesWritten;
         outcome.bytesWritten = result.bytesWritten;
+        outcome.skippedFiles = result.skippedFiles;
         if (ok) {
           outcome.security = prism::app::ApplySecurityPass(
               app->archivePath, result.writtenPaths, /*scanExecutables=*/true);
+          // C71: the SAME C13 verification the headless path runs.
+          if (app->extractOptions.verifyAfterExtract) {
+            const prism::app::VerifyOutcome verified = prism::app::VerifyIntegrity(
+                *app->ops, app->catalog, app->archivePath);
+            outcome.verified = true;
+            outcome.verifyFailed = !verified.ok;
+            if (!verified.ok) {
+              ok = false;
+              outcome.ok = false;
+              outcome.error = "verification after extraction failed: " + verified.error;
+            }
+          }
         }
         outcome.status =
             prism::app::detail::BuildStatusText(outcome, ok, app->plan.plan.baseTargetDir);
+        if (outcome.verifyFailed) {
+          outcome.status += L" | \u6821\u9A8C\u5931\u8D25";
+        }
       } else {
         outcome.status = L"\x89E3\x538B\x88AB\x62D2\x7EDD";
         if (!why.empty()) outcome.status += L" (" + prism::win::Utf8ToWide(why) + L")";
@@ -1104,7 +1170,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       window.PostHudStart(extractHeadline);
       const prism::app::ExtractionOutcome outcome = prism::app::RunSelectionExtraction(
           *app->ops, app->catalog, selection, app->plan.plan.baseTargetDir, app->archivePath,
-          /*scanExecutables=*/true);
+          /*scanExecutables=*/true, app->extractOptions);
       window.PostProgress(outcome.filesWritten, outcome.filesWritten);
       window.PostStatus(outcome.status);
       Telemetry("extract-selection", outcome);

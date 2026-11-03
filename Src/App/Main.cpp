@@ -104,6 +104,7 @@
 #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
+#include "../PrismWin/DragOutToShell.hpp"   // C67: CF_HDROP drag out (lazy extract)
 #include "../PrismWin/EditConfirmDialog.hpp"  // C54: the edit confirmation (programmatic)
 #include "../PrismWin/GalleryWindow.hpp"
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
@@ -1059,6 +1060,102 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     });
   };
   window.SetActivateHandler(activateHandler);
+
+  // ---- C67: Alt+double-click = "extract into <archive name>\" --------------
+  //
+  // The gesture's DECISION is PrismCore's (prism::keys::ResolvePointer: Alt + a
+  // double click is SmartExtract, a bare one is the ordinary open). The app owns
+  // the meaning, and it is deliberately the SAME plan the --extract-sub verb
+  // builds (C25's BuildExtractionPlan), so the two can never drift.
+  window.SetSmartExtractHandler([app, &activateHandler](int /*catalogIndex*/) {
+    app->plan = prism::app::BuildExtractionPlan(
+        prism::app::LaunchMode::kExtractSub, prism::win::WideToUtf8(app->archivePath),
+        app->catalog,
+        [](const std::string& path) {
+          return std::filesystem::exists(prism::win::Utf8ToWide(path));
+        });
+    std::fprintf(stderr, "gesture alt-dblclick mode=%s target=%s\n",
+                 prism::app::LaunchModeName(app->plan.mode),
+                 app->plan.plan.baseTargetDir.c_str());
+    activateHandler(-1);  // the same worker, the same HUD, the same status line
+  });
+
+  // ---- C67: "extract to..." over a SELECTION -------------------------------
+  //
+  // C67's third behaviour: with more than one row selected the band's
+  // ExtractTo must extract EXACTLY those entries (the count is asserted by
+  // win.c67_gestures). One row / no row keeps the whole-archive plan the
+  // double-click and the shell verbs use.
+  std::thread selectedWorker;
+  auto runSelectedExtraction = [&window, app, &selectedWorker, extractHeadline](
+                                   std::vector<uint32_t> selection) {
+    if (app->extracting.exchange(true)) return;
+    if (selectedWorker.joinable()) selectedWorker.join();
+    selectedWorker = std::thread([app, &window, extractHeadline, selection]() {
+      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      window.PostHudStart(extractHeadline);
+      const prism::app::ExtractionOutcome outcome = prism::app::RunSelectionExtraction(
+          *app->ops, app->catalog, selection, app->plan.plan.baseTargetDir, app->archivePath,
+          /*scanExecutables=*/true);
+      window.PostProgress(outcome.filesWritten, outcome.filesWritten);
+      window.PostStatus(outcome.status);
+      Telemetry("extract-selection", outcome);
+      std::fprintf(stderr, "extract-selection requested=%zu files=%llu ok=%d\n", selection.size(),
+                   static_cast<unsigned long long>(outcome.filesWritten),
+                   static_cast<int>(outcome.ok));
+      app->extracting = false;
+      CoUninitialize();
+    });
+  };
+
+  // ---- C67: drag OUT of the window ----------------------------------------
+  //
+  // The window reports "the user dragged these catalog entries" only after the
+  // press travelled past Explorer's own threshold, and the payload is produced
+  // on the FIRST GetData(CF_HDROP) -- a hovering target costs nothing. The temp
+  // tree is removed when DoDragDrop returns, i.e. on drop AND on cancel.
+  window.SetDragOutHandler([app, archivePassword, &window](
+                               HWND owner, const std::vector<uint32_t>& selection) {
+    namespace dragout = prism::win::dragoutfiles;
+    std::error_code ec;
+    const std::filesystem::path tempRoot = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+      window.SetStatus(L"\u62D6\u51FA\u5931\u8D25\uFF1A\u6CA1\u6709\u4E34\u65F6\u76EE\u5F55");
+      return false;
+    }
+    std::string why;
+    auto drag = dragout::FileDragOut::Create(tempRoot.wstring(), dragout::FileDragOut::Extractor{},
+                                             &why);
+    if (!drag) {
+      window.SetStatus(L"\u62D6\u51FA\u5931\u8D25\uFF1A" + prism::win::Utf8ToWide(why));
+      return false;
+    }
+    const std::wstring dir = drag->temp_dir();
+    drag->SetExtractor([app, archivePassword, selection, dir](dragout::MaterializeResult* out) {
+      const prism::app::DragOutMaterialization produced =
+          prism::app::MaterializeSelectionForDragOut(app->library, app->archivePath,
+                                                     archivePassword, app->catalog, selection, dir);
+      out->ok = produced.ok;
+      out->error = produced.error;
+      out->paths = produced.paths;
+      return produced.ok;
+    });
+    DWORD effect = DROPEFFECT_NONE;
+    const HRESULT hr = drag->Run(owner, DROPEFFECT_COPY, &effect);
+    std::fprintf(stderr,
+                 "dragout hr=0x%08lX effect=%lu requested=%zu files=%zu extracted=%zu temp=%d\n",
+                 static_cast<unsigned long>(hr), static_cast<unsigned long>(effect),
+                 selection.size(), drag->files(), drag->extractions(),
+                 static_cast<int>(drag->temp_dir_exists()));
+    if (drag->files() > 0) {
+      window.SetStatus(L"\u5DF2\u62D6\u51FA " + std::to_wstring(drag->files()) +
+                       L" \u4E2A\u6587\u4EF6");  // 已拖出 N 个文件
+    } else if (hr == DRAGDROP_S_CANCEL) {
+      window.SetStatus(L"\u5DF2\u53D6\u6D88\u62D6\u51FA");  // 已取消拖出
+    }
+    return drag->files() > 0;
+  });
+
   // ---- C52 + C53: a drop ONTO the window -----------------------------------
   //
   // The window turned Explorer's HDROP into a tree and asked PrismCore what it
@@ -1475,8 +1572,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // This is the app's half, mapped onto the paths the rest of Main already
   // owns (no second implementation of extraction/compression/edit).
 #if !defined(PRISM_C64_MUTANT_NO_ACTION_HANDLER)
-  window.SetActionHandler([&window, app, tr, &activateHandler](prism::actionbar::ActionId action,
-                                                              int item) {
+  window.SetActionHandler([&window, app, tr, &activateHandler,
+                           &runSelectedExtraction](prism::actionbar::ActionId action, int item) {
     std::fprintf(stderr, "action id=%s item=%d\n", prism::actionbar::ActionName(action), item);
     switch (action) {
       case prism::actionbar::ActionId::Open: {
@@ -1486,11 +1583,21 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!picked.empty()) window.PostArchiveChanged(picked);
         break;
       }
-      case prism::actionbar::ActionId::ExtractTo:
+      case prism::actionbar::ActionId::ExtractTo: {
+        // C67: a real multi-selection means "extract exactly these" (Bandizip's
+        // habit); one row or none keeps the whole-archive plan. The window owns
+        // the row -> catalog-index mapping, so the app never re-derives it.
+        const std::vector<uint32_t> selected = window.SelectedCatalogIndices();
+        if (selected.size() > 1) {
+          std::fprintf(stderr, "action extract-to selection=%zu\n", selected.size());
+          runSelectedExtraction(selected);
+          break;
+        }
         // The same worker double-click uses (whole-archive v1 plan). The
         // dropdown item index is passed through untouched.
         activateHandler(item);
         break;
+      }
       case prism::actionbar::ActionId::Compress:
         // The File > Compress... menu item is the one C18/C27 entry.
         window.Dispatch(WM_COMMAND, GalleryWindow::kMenuCompress, 0);
@@ -1642,6 +1749,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // Never detach: a detached worker here would outlive "window" and "app".
   worker.join();
   if (extractWorker.joinable()) extractWorker.join();
+  if (selectedWorker.joinable()) selectedWorker.join();
   if (compressWorker.joinable()) compressWorker.join();
   if (editWorker.joinable()) editWorker.join();
   // The dialog outlives Run() only when the user closed the main window while it

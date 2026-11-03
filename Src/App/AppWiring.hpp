@@ -84,6 +84,7 @@
 #include <mutex>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -364,6 +365,137 @@ inline ExtractionPlan BuildExtractionPlan(LaunchMode mode, const std::string& ar
       out.label = L"\u667A\u80FD\u89E3\u538B";  // 智能解压
       return out;
   }
+}
+
+// ---------------------------------------------------------------------------
+// C67: the selection -> extraction join.
+//
+// Three behaviours share ONE rule here, so the window, the action band and the
+// drag-out materialiser can never disagree about what "selected" means:
+//   * SelectedIndexClosure: the archive indices the user selected, with a
+//     selected folder expanded to its subtree (the engine extracts files; a
+//     folder row alone would extract nothing).
+//   * BuildSelectionPlan: a FlatDirectly plan whose ignoredIndices are EVERY
+//     unselected entry. This is not a style choice -- SmartExtractCallback
+//     indexes its catalog by ARCHIVE index ("catalog_[index]"), so a filtered
+//     catalog vector is not a subset, it is an out-of-bounds read: measured in
+//     this card, a two-entry subset made the second item answer E_INVALIDARG
+//     and the extraction wrote 1 of 2 files. The engine must see the WHOLE
+//     catalog and be told what to skip.
+//   * RunSelectionExtraction / MaterializeSelectionForDragOut: the two users of
+//     that plan (the band's "extract to..." and the CF_HDROP payload).
+//
+// NEGATIVE CONTROL (D3): PRISM_C67_MUTANT_EXTRACT_ALL drops the filter, so
+// "extract to..." silently hands the WHOLE archive to the engine and the
+// suite's "files written == selected count" assertion must go red.
+// ---------------------------------------------------------------------------
+#if defined(PRISM_C67_MUTANT_EXTRACT_ALL)
+inline constexpr bool kSelectionFilterArmed = false;
+#else
+inline constexpr bool kSelectionFilterArmed = true;
+#endif
+
+inline std::set<uint32_t> SelectedIndexClosure(const std::vector<ArchiveItem>& catalog,
+                                               const std::vector<uint32_t>& selection) {
+  std::set<uint32_t> keep;
+  if (!kSelectionFilterArmed) {
+    // MUTANT ACTIVE (see above): everything counts as selected.
+    for (const ArchiveItem& item : catalog) keep.insert(item.index);
+    return keep;
+  }
+  std::vector<std::string> directoryPrefixes;
+  for (uint32_t index : selection) {
+    for (const ArchiveItem& item : catalog) {
+      if (item.index != index) continue;
+      keep.insert(index);
+      if (item.isDir) {
+        std::string prefix = item.path;
+        if (prefix.empty() || prefix.back() != '/') prefix += '/';
+        directoryPrefixes.push_back(prefix);
+      }
+      break;
+    }
+  }
+  for (const ArchiveItem& item : catalog) {
+    for (const std::string& prefix : directoryPrefixes) {
+      if (item.path.compare(0, prefix.size(), prefix) == 0) {
+        keep.insert(item.index);
+        break;
+      }
+    }
+  }
+  return keep;
+}
+
+inline prism::SmartPlan BuildSelectionPlan(const std::vector<ArchiveItem>& catalog,
+                                           const std::vector<uint32_t>& selection,
+                                           const std::string& targetDir) {
+  prism::SmartPlan plan;
+  plan.strategy = prism::SmartStrategy::FlatDirectly;
+  plan.baseTargetDir = targetDir;
+  plan.reason = "extract the selection only";
+  const std::set<uint32_t> keep = SelectedIndexClosure(catalog, selection);
+  for (const ArchiveItem& item : catalog) {
+    if (keep.count(item.index) == 0) {
+      plan.ignoredIndices.insert(item.index);
+    } else if (!item.isDir) {
+      ++plan.fileCount;
+      plan.totalBytes += item.size;
+    }
+  }
+  return plan;
+}
+
+// The drag-out payload: the selection written to tempDir, then the REAL paths.
+// The directory itself is created HERE (lazily), which is what keeps a drag
+// that never lands from leaving even an empty folder behind.
+struct DragOutMaterialization {
+  bool ok = false;
+  std::string error;
+  std::vector<std::wstring> paths;
+};
+
+inline DragOutMaterialization MaterializeSelectionForDragOut(
+    prism::win::SevenZipLibrary& library, const std::wstring& archivePathWide,
+    const std::wstring& password, const std::vector<ArchiveItem>& catalog,
+    const std::vector<uint32_t>& selection, const std::wstring& tempDir) {
+  DragOutMaterialization out;
+  if (tempDir.empty()) {
+    out.error = "dragout: empty temp directory";
+    return out;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(std::filesystem::path(tempDir), ec);
+  if (ec) {
+    out.error = "dragout: temp directory could not be created: " + ec.message();
+    return out;
+  }
+  const prism::SmartPlan plan =
+      BuildSelectionPlan(catalog, selection, prism::win::WideToUtf8(tempDir));
+  if (plan.fileCount == 0) {
+    out.error = "dragout: the selection holds no files";
+    return out;
+  }
+  prism::win::ArchiveReader reader(library);
+  if (!reader.Open(archivePathWide, password)) {
+    out.error = "dragout: open failed: " + reader.openTrace();
+    return out;
+  }
+  prism::win::SmartExtractCallback::Result result;
+  const bool ok = reader.ExtractWithPlan(catalog, plan, plan.baseTargetDir, nullptr, &result);
+  reader.Close();
+  if (!ok) {
+    out.error = result.failureReason.empty() ? std::string("dragout: extraction failed")
+                                             : ("dragout: " + result.failureReason);
+    return out;
+  }
+  out.paths.reserve(result.writtenPaths.size());
+  for (const std::string& path : result.writtenPaths) {
+    out.paths.push_back(prism::win::Utf8ToWide(path));
+  }
+  out.ok = !out.paths.empty();
+  if (!out.ok) out.error = "dragout: the engine wrote no files";
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +1040,27 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   }
   outcome.status = detail::BuildStatusText(outcome, ok, plan.plan.baseTargetDir);
   return outcome;
+}
+
+// "Extract to <targetDir>" for the CURRENT selection. Same
+// OperationHandles/RunExtraction path as the whole-archive verbs; the count is
+// the CONTRACT (files written == selected files). The plan is FlatDirectly:
+// the archive's own relative tree is preserved under the target, which is what
+// "extract these here" means for a batch (no smart re-shaping of a subset --
+// the whole-archive smart plan is a different verb).
+inline ExtractionOutcome RunSelectionExtraction(OperationHandles& handles,
+                                                const std::vector<ArchiveItem>& catalog,
+                                                const std::vector<uint32_t>& selection,
+                                                const std::string& targetDir,
+                                                const std::wstring& archivePathWide,
+                                                bool scanExecutables) {
+  ExtractionPlan plan;
+  plan.mode = LaunchMode::kExtractHere;
+  plan.plan = BuildSelectionPlan(catalog, selection, targetDir);
+  plan.label = L"\u89E3\u538B\u9009\u4E2D\u9879";  // 解压选中项
+  // The WHOLE catalog goes to the engine; the plan says which entries to skip
+  // (see BuildSelectionPlan for why a filtered vector is an out-of-bounds read).
+  return RunExtraction(handles, catalog, plan, archivePathWide, scanExecutables);
 }
 
 // --smart-extract-each <archives...> (C58): the same "extract to <name>" verb

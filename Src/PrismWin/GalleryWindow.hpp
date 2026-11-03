@@ -90,6 +90,7 @@
 #include "../PrismCore/ListSortModel.hpp"   // list view order (C13)
 #include "../PrismCore/Preview.hpp"
 #include "../PrismCore/SearchBoxModel.hpp"  // C62: the search field's state machine
+#include "../PrismCore/SelectionModel.hpp"  // C67: the ordered multi-selection
 #include "../PrismCore/Shortcuts.hpp"       // the ONE key table (C8)
 #include "../PrismCore/SidebarModel.hpp"    // sidebar state (C12)
 #include "../PrismCore/SpringAnimator.hpp"
@@ -318,6 +319,52 @@ class GalleryWindow {
   // row in the current folder.
   void SetActivateHandler(std::function<void(int)> handler) {
     onActivate_ = std::move(handler);
+  }
+  // ---- card C67: Alt+double-click, multi-select, drag out ------------------
+  //
+  // "Alt+double-click extracts, plain double-click opens" is PrismCore's
+  // decision (prism::keys::ResolvePointer) and has been since C8; what was
+  // missing was this call site. The index handed over is the CATALOG index, the
+  // same door Ctrl+E and Enter use, so the app owns what "extract" means.
+  void SetSmartExtractHandler(std::function<void(int)> handler) {
+    onSmartExtract_ = std::move(handler);
+  }
+  // A headless window station has no keyboard: the suite injects the modifier
+  // state here. Production reads the thread's REAL key state.
+  void SetAltDownProbe(std::function<bool()> probe) { altDownProbe_ = std::move(probe); }
+  bool AltDown() const {
+    return altDownProbe_ ? altDownProbe_() : ((::GetKeyState(VK_MENU) & 0x8000) != 0);
+  }
+  // D3: the one place the Alt chord can be switched off, so the mutant build
+  // proves the injection compiled in (the verdict's predicate asks THIS).
+  static constexpr bool AltChordEnabled() {
+#if defined(PRISM_C67_MUTANT_IGNORE_ALT)
+    return false;
+#else
+    return true;
+#endif
+  }
+  // The selection the user can SEE: ascending, duplicate-free rows of the
+  // CURRENT folder, plus the catalog indices the app batches over.
+  bool HasSelection() const { return !sel_.Empty(); }
+  int SelectionCount() const { return static_cast<int>(sel_.Size()); }
+  const std::vector<int>& SelectedRows() const { return sel_.Selected(); }
+  std::vector<uint32_t> SelectedCatalogIndices() const {
+    std::vector<uint32_t> out;
+    out.reserve(sel_.Size());
+    for (int row : sel_.Selected()) {
+      if (row >= 0 && row < ItemCount()) {
+        out.push_back(folderItems_[static_cast<std::size_t>(row)].index);
+      }
+    }
+    return out;
+  }
+  // Dragging OUT: the app owns the extraction (it has the engine and the
+  // archive path); the window owns WHEN -- a press that moved far enough to be
+  // a drag, over a selection. Returns true when the drag ran (the call blocks
+  // until the user lets go or cancels).
+  void SetDragOutHandler(std::function<bool(HWND, const std::vector<uint32_t>&)> handler) {
+    onDragOut_ = std::move(handler);
   }
   void SetSelection(int index) {
     nav_.SetSelection(index);
@@ -926,7 +973,10 @@ class GalleryWindow {
   // window class without a mouse (L2: the object under test is not a mock).
 
   // Returns true when the click was consumed (sidebar, breadcrumb or item).
-  bool ClickAt(int x, int y) {
+  bool ClickAt(int x, int y) { return ClickAt(x, y, false, false); }
+  // C67: the modifiers are the DECISION's input (replace / toggle / extend);
+  // PrismCore's SelectionModel owns the rule, this only forwards.
+  bool ClickAt(int x, int y, bool ctrl, bool shift) {
     // The sidebar rail is painted OVER the left edge of the content (C27), so a
     // click inside it belongs to the sidebar -- never to a tile hidden under it.
     // RowHit commands are the same boxes the renderer fills, which is what keeps
@@ -940,13 +990,48 @@ class GalleryWindow {
     // wiped the user's selection every time they missed a crumb by a few
     // pixels. The bar is chrome, not a deselect surface.
     if (y >= barTop_ && y < barBottom_) return true;
-    SetSelection(ItemAtPoint(x, y));  // -1 clears: click on empty space
+    const int row = ItemAtPoint(x, y);  // -1 == empty space
+    // C67: only a press that actually lands ON a row may grow into a drag out;
+    // arming it on chrome (sidebar, crumbs, empty space) would start a drag of
+    // the previous selection when the user merely dragged the scrollbar area.
+    dragArmed_ = row >= 0;
+    dragPressX_ = x;
+    dragPressY_ = y;
+    sel_.Click(row, prism::sel::ClickModifiers{ctrl, shift});
+    // The FOCUS row follows the set; an empty set has no focus, so a chord that
+    // acts on "the selected row" (Ctrl+E, Quick Look) cannot fire at a row the
+    // user just deselected.
+    selection_ = sel_.Empty() ? -1 : sel_.Focus();
+    nav_.SetSelection(selection_);  // the navigator keeps what Backspace restores
+    SyncActionContext();
+    Invalidate();
     return true;
   }
 
-  bool DoubleClickAt(int x, int y) {
+  bool DoubleClickAt(int x, int y) { return DoubleClickAt(x, y, false, false); }
+  bool DoubleClickAt(int x, int y, bool ctrl, bool shift) {
     if (CrumbClick(x, y)) return true;
-    return ActivateRow(ItemAtPoint(x, y));
+    const int row = ItemAtPoint(x, y);
+    // MUTANT ACTIVE (card C67, arm alt_opens) lives in AltChordEnabled(): with
+    // the guard switched off this reads false and Alt+double-click falls
+    // through to the ordinary open. The banner and the verdict are in
+    // Tests/win/test_c67_gestures.cpp next to the same macro.
+    const bool alt = AltChordEnabled() && AltDown();
+    const prism::keys::PointerAction gesture = prism::keys::ResolvePointer(
+        prism::keys::PointerStroke{2, alt, ctrl, shift, false});
+    if (gesture == prism::keys::PointerAction::SmartExtract) {
+      if (row < 0 || row >= ItemCount()) return true;
+      // A FOLDER still drills in: "extract this directory" has no meaning the
+      // user asked for, and Bandizip does the same.
+      if (folderItems_[static_cast<std::size_t>(row)].isDir) return ActivateRow(row);
+      if (!OperationAllowed(L"\u89E3\u538B")) return true;  // 解压
+      SetSelection(row);
+      if (onSmartExtract_) {
+        onSmartExtract_(static_cast<int>(folderItems_[static_cast<std::size_t>(row)].index));
+      }
+      return true;
+    }
+    return ActivateRow(row);
   }
 
   // Enter / double-click on a row: folders drill in, files go to the app.
@@ -993,6 +1078,27 @@ class GalleryWindow {
   const prism::actionbar::Model& ActionBarState() const { return actionBar_; }
   prism::actionbar::Layout ActionBarLayout() const {
     return prism::actionbar::Compute(WindowLayoutForClient());
+  }
+  // Which button a click at this pixel lands on (-1 == none). Public for the
+  // same reason ActionBarLayout is: a test asserts that the rectangle the
+  // renderer PAINTS is the rectangle the hit test RESOLVES.
+  int ActionBarButtonAt(int x, int y) const { return BandLayout().Hit(x, y); }
+  // What the last paint ACTUALLY drew (the renderer's own counters). Comparing
+  // these with ActionBarLayout().buttons is the difference between "the model
+  // says eight" and "eight were painted" -- the pair the C66/C67 band rule is
+  // about (a 7-of-8 band is exactly the state neither side may produce).
+  struct ActionPaintCounters {
+    int buttons = 0;
+    int icons = 0;
+    int labels = 0;
+    int islands = 0;
+    int clippedLabels = 0;
+    int disabled = 0;
+  };
+  ActionPaintCounters PaintedActionCounters() const {
+    return ActionPaintCounters{renderer_.dbgActionButtons, renderer_.dbgActionIcons,
+                               renderer_.dbgActionLabels,  renderer_.dbgActionIslands,
+                               renderer_.dbgActionClippedLabels, renderer_.dbgActionDisabled};
   }
   void SetActionHandler(std::function<void(prism::actionbar::ActionId, int)> handler) {
     onAction_ = std::move(handler);
@@ -1538,6 +1644,22 @@ class GalleryWindow {
         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_MOUSEMOVE: {
+        // C67: a press that travels far enough becomes a DRAG OUT of the
+        // selection (Explorer's own threshold, SM_CXDRAG). The handler blocks
+        // inside DoDragDrop until the user lets go; the app extracts lazily, so
+        // merely moving the mouse costs nothing.
+        if (dragArmed_ && (wparam & MK_LBUTTON) != 0 && onDragOut_) {
+          const int dx = MouseX(lparam) - dragPressX_;
+          const int dy = MouseY(lparam) - dragPressY_;
+          const int threshold = ::GetSystemMetrics(SM_CXDRAG);
+          if (dx * dx + dy * dy >= threshold * threshold) {
+            dragArmed_ = false;
+            quickLookClose();
+            const std::vector<uint32_t> selection = SelectedCatalogIndices();
+            if (!selection.empty() && onDragOut_) (void)onDragOut_(host_.hwnd, selection);
+            return 0;
+          }
+        }
         HandleTabMouseMove(MouseX(lparam), MouseY(lparam));
         const int index = ActionBarHit(MouseX(lparam), MouseY(lparam));
         if (index != actionHover_) {
@@ -1559,6 +1681,7 @@ class GalleryWindow {
         return 0;
       }
       case WM_LBUTTONUP: {
+        dragArmed_ = false;  // C67: the press ended without becoming a drag
         // C60: a release that ends a tab press/drag owns the event; the tab was
         // already activated on the press (that is what makes a drag start).
         if (HandleTabMouseUp(MouseX(lparam), MouseY(lparam))) return 0;
@@ -1573,7 +1696,10 @@ class GalleryWindow {
         // A double-click on a tab is still a tab click: the strip gets first
         // refusal so the second WM_LBUTTONDOWN of the pair cannot select a row.
         if (TabBarTabAt(MouseX(lparam), MouseY(lparam)) >= 0) return 0;
-        DoubleClickAt(MouseX(lparam), MouseY(lparam));
+        // C67: Ctrl/Shift arrive in wparam; Alt is read from the real key state
+        // (and is the one modifier PrismCore turns into "extract", not "open").
+        DoubleClickAt(MouseX(lparam), MouseY(lparam), (wparam & MK_CONTROL) != 0,
+                      (wparam & MK_SHIFT) != 0);
         return 0;
       }
       case WM_MBUTTONDOWN: {
@@ -1601,7 +1727,8 @@ class GalleryWindow {
         // C-V2: the band is chrome ABOVE the rows: a button click must never
         // also select the tile that happens to be behind it.
         if (ActionBarClick(MouseX(lparam), MouseY(lparam))) return 0;
-        ClickAt(MouseX(lparam), MouseY(lparam));
+        ClickAt(MouseX(lparam), MouseY(lparam), (wparam & MK_CONTROL) != 0,
+                (wparam & MK_SHIFT) != 0);
         return 0;
       }
       case kProgressMessage: {
@@ -1749,6 +1876,7 @@ class GalleryWindow {
     archiveOpen_ = false;
     nav_.Attach(nullptr);
     selection_ = -1;
+    sel_.SetCount(0);
     sidebar_.AttachCatalog(nullptr);
     folderItems_.clear();
     folderRowOfCatalog_.clear();
@@ -2057,6 +2185,10 @@ class GalleryWindow {
   // ---------- navigation plumbing ----------
   void ApplySelection(int selection) {
     selection_ = selection;
+    // C67: a programmatic selection (arrow key, palette jump, restore) is ONE
+    // row -- the keyboard is not cherry-picking. Click handlers go through
+    // sel_.Click directly so Ctrl/Shift are never flattened here.
+    sel_.SetSingle(selection);
     // C-V2: the selection IS the enable rule's input (Add/Delete/QuickLook).
     // One call site, so a row selected by a click, an arrow or the palette all
     // reach the band the same way.
@@ -2070,7 +2202,10 @@ class GalleryWindow {
   void SyncActionContext() {
     prism::actionbar::Context context;
     context.archiveOpen = catalog_ != nullptr;
-    context.hasSelection = selection_ >= 0 && selection_ < ItemCount();
+    // C67: the band's rule is "something is selected", and the ordered set is
+    // the ONLY authority for that -- a stale selection_ can no longer keep a
+    // button enabled after the last selected row went away.
+    context.hasSelection = !sel_.Empty() && selection_ >= 0 && selection_ < ItemCount();
     context.readOnly = readOnly_;
     actionBar_.SetContext(context);
   }
@@ -2196,6 +2331,16 @@ class GalleryWindow {
         return;
       case prism::keys::Command::ToggleList:
         SetListMode(true);
+        return;
+      case prism::keys::Command::SelectAll:
+        // C67: every row of THIS folder, anchor at the top like Explorer, focus
+        // on the last row so a following Shift+click measures from it.
+        quickLookClose();
+        sel_.SelectAll();
+        selection_ = sel_.Focus();
+        nav_.SetSelection(selection_);
+        SyncActionContext();
+        Invalidate();
         return;
       case prism::keys::Command::ActivateSelection:
         if (selection_ >= 0) ActivateRow(selection_);
@@ -2548,6 +2693,10 @@ class GalleryWindow {
     RebuildListItems();
     RebuildLayout();
     selection_ = nav_.Selection();
+    // C67: a new folder is a new row space -- the old rows would address
+    // different entries, so the set is rebuilt, never remapped.
+    sel_.SetCount(ItemCount());
+    sel_.SetSingle(selection_);
     SyncActionContext();  // the folder changed: the selection may have been cleared
     scrollTarget_ = 0.0;
     viewport_.SetScroll(0.0);
@@ -2831,6 +2980,15 @@ class GalleryWindow {
                        : prism::win::searchbox::Scene{};
     renderer_.Draw(target_.Get(), scene);
     DrawSearchBox();
+    // C67: one line per client width. "The band showed only seven buttons" is a
+    // question a log can answer (buttons vs dropped at the size that was really
+    // on screen) instead of a screenshot the next reader has to re-measure.
+    if (bandTraceWidth_ != static_cast<int>(clientW_)) {
+      bandTraceWidth_ = static_cast<int>(clientW_);
+      const prism::actionbar::Layout band = prism::actionbar::Compute(layout_);
+      std::fprintf(stderr, "band width=%d buttons=%zu dropped=%d\n", bandTraceWidth_,
+                   band.buttons.size(), band.dropped);
+    }
     // C52: the drop hint is a TRANSIENT overlay, not part of the scene snapshot
     // (the renderer must not grow a fourth "mode" for something that lives for
     // one drag). It is painted over the same target, in the same frame, from
@@ -3473,7 +3631,17 @@ class GalleryWindow {
   const std::vector<prism::ArchiveItem>* catalog_ = nullptr;  // full snapshot (borrowed)
   std::unordered_map<uint32_t, int> folderRowOfCatalog_;      // catalog index -> folder row
   std::vector<prism::ArchiveItem> folderItems_;
-  int selection_ = -1;
+  int selection_ = -1;  // the FOCUS row (kept for the existing call sites)
+  // C67: the ordered selection. selection_ is the focus; this set is what the
+  // app batches over, what the band reports, and what a drag carries.
+  prism::sel::SelectionModel sel_;
+  std::function<void(int)> onSmartExtract_;  // Alt+double-click (catalog index)
+  std::function<bool(HWND, const std::vector<uint32_t>&)> onDragOut_;
+  std::function<bool()> altDownProbe_;  // test seam; production reads the key state
+  int dragPressX_ = 0;
+  int dragPressY_ = 0;
+  bool dragArmed_ = false;
+  int bandTraceWidth_ = -1;  // C67: last client width the band was logged at
   std::wstring rootLabel_ = L"Archive";
   std::wstring status_;
   std::wstring breadcrumbText_;

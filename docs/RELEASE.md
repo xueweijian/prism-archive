@@ -310,3 +310,100 @@ CI 的 `win.release_package» 就是那个外部真值。
     tools/release/prism_version.h.in           版本头模板（补丁的一部分）
     tools/release/patches/0001-version-from-json.patch
     Tests/suites/c24-release.cmake             ctest 注册
+
+## 十一、C68：给用户"下 zip 就能装"的那条路径
+
+> C24 的包回答"发布工程师能证明字节吗"；这一节回答"用户解压、双击安装、右键、卸载"。
+> C24 的 `New-PortablePackage.ps1` 不含 `7z.dll`（LGPL 引擎运行时发现）；
+> C68 的 `package.ps1` **含** `7z.dll` 和 `INSTALL.cmd`/`UNINSTALL.cmd`，让一台没装 7-Zip 的机器也能解压。
+> 两者文件名格式相同、默认都写 `dist/`：手工同时跑时后一个覆盖前一个；CI 里各自写自己的构建目录
+> （`build/release`、`build/c68-package`），互不影响。用包内清单区分：C68 的包有
+> `INSTALL.cmd`/`7z.dll`，C24 的包有 `prism-package.json`。
+
+### 11.1 一条命令打包
+
+```powershell
+. E:\wg\env.ps1 -Card c68
+pwsh -File tools\package.ps1 -BuildDir E:\build\wt-c68 -AssertIdempotent
+```
+
+产物：
+
+```text
+dist/PrismArchive-0.1.0-win-x64.zip
+dist/PrismArchive-0.1.0-win-x64.zip.sha256
+```
+
+脚本固定做的事（任何一条不满足就非 0 退出，不留半个包）：
+
+1. 版本只从 `Src/App/PrismArchive.rc` 的 VERSIONINFO（`PRISM_VERSION_*`）读，再用构建出的 exe 的
+   `FileVersion` 对拍——**旧 exe 配新版本号直接红**；存在 `tools/release/version.json` 时还要求两者一致。
+2. 用 `cmake --install` 落盘布局作为内容真值（CONTRACTS D3），按策略排除 `share/prism-archive/**`
+   （重复的 shader 副本）和 `Assets/Package/**`（MSIX 稀疏包载荷），排除项连同原因写进 `package-manifest.json`。
+3. 加 `7z.dll`（`-SevenZipDll` / `PRISM_7Z_DLL` / 注册表 / PATH 依次查找；找不到退出 77 并打印 SKIP，
+   不产出不能解压的包）、`INSTALL.cmd`、`UNINSTALL.cmd`、`LICENSE`、`README.md`、
+   `THIRD-PARTY-NOTICES.txt`（7-Zip 的 LGPL 许可正文随引擎复制）。
+4. 生成 `package-manifest.json`：每个文件的 `path/size/sha256` 加一个 `contentHash`。
+5. 打 zip 后**重新打开 zip** 逐条重新哈希；通过后才写 `.sha256` sidecar。
+6. `-AssertIdempotent`：同一输入再打一次，要求 `contentHash` 相同（README 里只有版本 + commit、
+   没有时间戳，所以这是严格相等而不是"差不多"）。
+
+### 11.2 一条命令验证
+
+```powershell
+pwsh -File tools\verify-package.ps1 -ZipDir dist
+```
+
+它做七件事，每件都有断言和退出码：
+
+| 步骤 | 断言（红了就是没做到） |
+|---|---|
+| 1 解压 | 唯一临时目录；zip 只有一个根目录；manifest 的 20 个文件逐个字节数 + SHA-256 对得上 |
+| 2 安装 | `INSTALL.cmd -Quiet` 退出 0 **且**打印 `INSTALL.CMD: OK`；装进唯一目录 + 临时 HKCU scope |
+| 3 文件 | exe / 两个 shell DLL / `7z.dll` 与包内字节完全相同；Assets 8 个文件哈希相同 |
+| 4 settings | `%LOCALAPPDATA%\PrismArchive` 可写（4096 字节探针写回读）；已有 `settings.json` 能以读写方式打开 |
+| 5 右键 | `HKCU\Software\Classes\*\shell\PrismArchiveExtract` / `PrismArchiveOpen` 存在，command 精确等于 `"<安装目录>\PrismArchive.exe" --extract-here "%1"` |
+| 6 解压 | 装好的 exe `--compress-7z` 生成测试包，删掉源文件后 `--extract-here` 还原出 4096 字节且 SHA-256 相同 |
+| 7 卸载 | `UNINSTALL.cmd -Quiet` 退出 0；两个动词键、安装目录、marker、uninstall 项全部消失 |
+
+验证前会**快照并恢复**真实的右键菜单（脚本装了临时目录的动词，卸载后又把原来的写回去）；
+文件关联写在 `HKCU\Software\PrismArchiveC68\<guid>` 临时 scope 里，不碰真实安装。
+
+无管理员：写 HKCU 本来就是每用户操作；如果账号被策略限制写不了 `HKCU\Software\Classes`，
+脚本打印 `PACKAGE VERIFY: SKIP (...)` 并 `exit 77`，ctest 报 **Skipped** 而不是绿灯（CONTRACTS D1）。
+
+负向控制（CONTRACTS D3，ctest 里各有一条）：
+
+```powershell
+pwsh -File tools\verify-package.ps1 -ZipDir dist -Mutate DropShellDll   # 期望 ...: CAUGHT
+pwsh -File tools\verify-package.ps1 -ZipDir dist -Mutate SkipVerbs      # 期望 ...: CAUGHT
+```
+
+### 11.3 发布前 5 条检查清单
+
+- [ ] **CI 绿**：PR 上所有 lane 通过；`win.c68_package`、`win.c68_verify` 是 Passed 或带原因的 Skipped。
+- [ ] **bench 绿**：`win.bench_solid` 与 `docs/PERF.md` 的读数没有回退（C65 的基线）。
+- [ ] **版本号**：`Src/App/PrismArchive.rc` 的 VERSIONINFO == 构建出的 exe `FileVersion` == `tools/release/version.json` == tag。`package.ps1` 已对拍前三项，缺的是人确认 tag。
+- [ ] **右键动词**：`verify-package.ps1` 第 5 步绿；再在资源管理器里对任意文件右键一次，确认两个菜单项真的出现并能解压。
+- [ ] **卸载干净**：`verify-package.ps1` 第 7 步绿；手动确认 `HKCU\Software\Classes\*\shell` 下没有 `PrismArchive*` 残留、`%LOCALAPPDATA%\PrismArchive` 已删除。
+
+### 11.4 ctest 注册（`Tests/suites/c68-release.cmake`）
+
+| 测试 | 证明什么 | 超时 |
+|---|---|---|
+| `win.c68_package` | 一条命令打包 + 重新打开 zip 校验 + 两次打包清单哈希相同 | 600s |
+| `win.c68_verify` | 解压 → 装 → 右键动词 → 解压测试 → 卸载，全链路断言 | 300s |
+| `mutation.c68.drop_shelldll` | 包里少一个 DLL 必须红 | 300s |
+| `mutation.c68.skip_verbs` | 装完动词键消失必须红 | 300s |
+
+`win.c68_verify` 与两个变异通过 ctest `DEPENDS` 排在 `win.c68_package` 之后；打包测试与 C24 共享
+`RESOURCE_LOCK "prism-release-install"`，因为两者都会对同一个构建树跑 `cmake --install`。
+`win.c68_verify` 与两个变异另外共享 `RESOURCE_LOCK "prism-c68-real-verbs"`：它们都会临时改写真实右键菜单（结束前恢复快照），`ctest -j` 下不能互相踩。
+
+### 11.5 已知边界
+
+- `7z.dll` 是 7-Zip 的 LGPL 组件：随包分发必须保留 `THIRD-PARTY-NOTICES.txt` 里的许可与来源，发布页也要给出对应的 7-Zip 源码获取方式。
+- 验证里"用自带引擎解压"是在清空 `PRISM_7Z_DLL` 后跑的，但机器上注册过的 7-Zip 仍可能被运行时候选列表兜底；因此第 3 步单独断言了安装目录里的 `7z.dll` 与包内字节相同。
+- 不做 MSIX/AppX 分发（C61 的稀疏包是另一条线），本包只走 `INSTALL.cmd` → `install.ps1`。
+- 打包进 zip 的 `.ps1` 必须保持 ASCII（或带 UTF-8 BOM）。`INSTALL.cmd` 用 Windows PowerShell 5.1，它在没有 BOM 时按 ANSI 代码页读脚本；英文 runner（cp1252）会把 UTF-8 中文里的字节 0x94 解成 U+201D（PowerShell 当作引号），整个脚本解析失败。`register-static-verbs.ps1` 的中文标签因此用 `[char]0x...` 构造（C68 的 CI 实测：解析失败 → 安装仍在跑但不写动词键）。
+

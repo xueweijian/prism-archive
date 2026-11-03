@@ -292,17 +292,26 @@ try {
 
     # 1b. static right-click verbs. register-static-verbs.ps1 writes them to the
     #     REAL HKCU\Software\Classes\* (that is the path Explorer reads; it
-    #     cannot be redirected to the scratch scope). A scratch uninstall must
-    #     leave them alone; a real one must remove them, otherwise the menu keeps
-    #     two entries pointing at an exe this script just deleted.
-    if ($script:ScopeRoot -eq 'HKCU:\Software') {
+    #     cannot be redirected to the scratch scope). Remove them when -- and
+    #     only when -- their command line points at the exe this uninstall is
+    #     removing. A scratch install (C68 package verification) registers real
+    #     verbs for its own temporary exe and must clean them up; a real install's
+    #     menu entries must survive an unrelated scratch uninstall. Matching the
+    #     command path -- not the scope -- is what makes both true at once.
+    $verbRoot = 'HKCU:\Software\Classes\*\shell'
+    if ($targetDir) {
+        $verbExe = [System.IO.Path]::GetFullPath((Join-Path $targetDir 'PrismArchive.exe'))
         foreach ($verb in @('PrismArchiveExtract', 'PrismArchiveOpen')) {
-            $verbKey = $script:ClassesRoot + '\*\shell\' + $verb
-            if (Test-RegKey $verbKey) {
+            $verbKey = $verbRoot + '\' + $verb
+            if (-not (Test-RegKey $verbKey)) { continue }
+            $command = [string](Get-RegValue ($verbKey + '\command') '')
+            if ($command -and $command.IndexOf($verbExe, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 Remove-RegTree $verbKey
+            } else {
+                Say ('left ' + $verb + ' alone: its command points at ' + $command) 'same'
             }
         }
-        Remove-EmptyKeys ($script:ClassesRoot + '\*\shell') $script:ScopeRoot
+        Remove-EmptyKeys $verbRoot 'HKCU:\Software'
     }
 
     # 2. application registration, marker, uninstall entry

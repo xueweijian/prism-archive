@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -62,6 +63,21 @@ constexpr bool kSharedHandlerMutant = true;
 #else
 constexpr bool kSharedHandlerMutant = false;
 #endif
+
+// C70: how many 4-way rounds this process runs. The shipped default stays 3 so
+// ctest's budget does not move; PRISM_C70_STRESS_ROUNDS lets the SAME binary
+// hammer the intermittent path locally (the red needs hundreds of rounds to
+// show up, and a stress knob is not a weaker assertion -- the checks are the
+// same on every round).
+constexpr size_t kDefaultFourWayRounds = 3;
+
+size_t FourWayRounds() {
+  const char* raw = std::getenv("PRISM_C70_STRESS_ROUNDS");
+  if (raw == nullptr || *raw == '\0') return kDefaultFourWayRounds;
+  const long parsed = std::strtol(raw, nullptr, 10);
+  if (parsed <= 0) return kDefaultFourWayRounds;
+  return static_cast<size_t>(parsed);
+}
 
 std::string Sha256Hex(const std::vector<uint8_t>& data) {
   BCRYPT_ALG_HANDLE alg = nullptr;
@@ -137,6 +153,75 @@ class BeginGate {
   int expected_;
 };
 
+// C70: ONE row of the engine's callback sequence. The failure this card chases
+// ("payload correct, ok[i] false") can only come from SetOperationResult, so
+// the row records the code the engine sent, which index the collector had
+// pending at that moment, and how many bytes that index already held. A code
+// that arrives with written==0 is a neighbour's verdict; a code that arrives
+// with the full payload is the engine failing an item it fully decoded.
+struct OpEvent {
+  win::abi::Int32 code = 0;
+  size_t index = static_cast<size_t>(-1);  // collector's pending index
+  size_t written = 0;                      // bytes that index held right then
+  bool hadSink = false;                    // false: the code belongs to nobody
+  // The askExtractMode of the PrepareOperation that opened the item being
+  // closed (0 = kExtract, 1 = kTest, 2 = kSkip). 7-Zip calls GetStream then
+  // PrepareOperation per item, so this names HOW the engine opened it: a
+  // kTest after a kDataError is 7-Zip's FlushCorrupted, not a normal item.
+  win::abi::Int32 mode = -1;
+};
+
+inline const char* DescribeOpResult(win::abi::Int32 code) {
+  switch (code) {
+    case 0: return "kOK";
+    case 1: return "kUnsupportedMethod";
+    case 2: return "kDataError";
+    case 3: return "kCRCError";
+    case 4: return "kUnavailable";
+    case 5: return "kUnexpectedEnd";
+    case 6: return "kDataAfterEnd";
+    case 7: return "kIsNotArc";
+    case 8: return "kHeadersError";
+    case 9: return "kWrongPassword";
+    default: return "unknown";
+  }
+}
+
+// C70: what the engine told ONE worker, in order. Printed only on a failure,
+// and it answers the questions the old log could not: which SetOperationResult
+// carried a non-zero code, which index was pending when it arrived, and whether
+// that index already held the full payload.
+struct CallbackTrace {
+  std::vector<OpEvent> events;
+  std::vector<uint32_t> skippedIndices;
+  size_t extractStreams = 0;
+  size_t skippedStreams = 0;
+  size_t unattributedFailures = 0;
+
+  void Print(size_t requested) const {
+    std::cout << "      callback: extractStreams=" << extractStreams
+              << " skippedStreams=" << skippedStreams << " resultCalls=" << events.size()
+              << " unattributedFailures=" << unattributedFailures << " skippedIndices=[";
+    for (size_t i = 0; i < skippedIndices.size(); ++i) {
+      if (i != 0) std::cout << ",";
+      std::cout << skippedIndices[i];
+    }
+    std::cout << "]" << std::endl;
+    for (size_t i = 0; i < events.size(); ++i) {
+      const OpEvent& e = events[i];
+      std::cout << "      #" << i << " SetOperationResult(code=" << e.code << " "
+                << DescribeOpResult(e.code) << ") askMode=" << e.mode << " pending=";
+      if (e.hadSink) {
+        std::cout << e.index << (e.index == requested ? " (THIS worker)" : " (other)")
+                  << " written=" << e.written;
+      } else {
+        std::cout << "none written=0";
+      }
+      std::cout << std::endl;
+    }
+  }
+};
+
 // Per-item byte collector for the sweep: ONE Extract call over the whole
 // archive, every item demuxed into its own sink by index (the zero-copy
 // contract the real SolidSweeper uses).
@@ -151,7 +236,6 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
       : sinks_(itemCount, nullptr),
         sha_(itemCount),
         bytes_(itemCount),
-        failedByIndex_(itemCount, false),
         gate_(gate) {}
   ~SweepCollector() {
     for (auto* sink : sinks_) {
@@ -178,13 +262,21 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
 
   STDMETHODIMP SetTotal(win::abi::UInt64) override { return S_OK; }
   STDMETHODIMP SetCompleted(const win::abi::UInt64*) override { return S_OK; }
-  STDMETHODIMP PrepareOperation(win::abi::Int32) override { return S_OK; }
+  STDMETHODIMP PrepareOperation(win::abi::Int32 askExtractMode) override {
+    lastMode_ = askExtractMode;
+    return S_OK;
+  }
 
   STDMETHODIMP GetStream(win::abi::UInt32 index, win::abi::ISequentialOutStream** outStream,
                          win::abi::Int32 askExtractMode) override {
     if (!outStream) return E_POINTER;
     *outStream = nullptr;
-    if (askExtractMode != win::abi::kExtract) return S_OK;
+    if (askExtractMode != win::abi::kExtract) {
+      ++skippedStreams_;
+      if (skippedIndices_.size() < 8) skippedIndices_.push_back(index);
+      return S_OK;  // skip: no sink, and pending_ stays whatever it was
+    }
+    ++extractStreams_;
     if (index >= sinks_.size()) return E_INVALIDARG;
     if (gate_ != nullptr && !gateHit_) {
       gateHit_ = true;
@@ -201,16 +293,27 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   }
 
   STDMETHODIMP SetOperationResult(win::abi::Int32 operationResult) override {
+    const size_t attributed = pending_;
+    const bool hadSink = pending_ < sinks_.size() && sinks_[pending_] != nullptr;
+    if (events_.size() < 32) {
+      OpEvent event;
+      event.code = operationResult;
+      event.index = hadSink ? attributed : static_cast<size_t>(-1);
+      event.written = hadSink ? sinks_[attributed]->bytes().size() : 0;
+      event.hadSink = hadSink;
+      event.mode = lastMode_;
+      events_.push_back(event);
+    }
     if (operationResult != 0) {
       failed_ = true;
-      if (pending_ < failedByIndex_.size()) failedByIndex_[pending_] = true;
+      if (!hadSink) ++unattributedFailures_;
     }
-    if (pending_ < sinks_.size() && sinks_[pending_] != nullptr) {
-      auto* sink = sinks_[pending_];
-      bytes_[pending_] = sink->bytes().size();
-      sha_[pending_] = Sha256Hex(sink->bytes());
+    if (hadSink) {
+      auto* sink = sinks_[attributed];
+      bytes_[attributed] = sink->bytes().size();
+      sha_[attributed] = Sha256Hex(sink->bytes());
       sink->Release();
-      sinks_[pending_] = nullptr;
+      sinks_[attributed] = nullptr;
       ++itemsSeen_;
     }
     pending_ = static_cast<size_t>(-1);
@@ -218,11 +321,19 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   }
 
   bool failed() const { return failed_; }
-  // C50: the opResult verdict for ONE item. A skipped neighbour in the same
-  // solid folder must not be able to fail the item this worker asked for.
-  bool itemFailed(size_t index) const {
-    return index < failedByIndex_.size() && failedByIndex_[index];
+  // C70: the engine side of a worker, copied out before Release() so a failing
+  // worker can print exactly what 7z told it.
+  void Snapshot(CallbackTrace* out) const {
+    out->events = events_;
+    out->skippedIndices = skippedIndices_;
+    out->extractStreams = extractStreams_;
+    out->skippedStreams = skippedStreams_;
+    out->unattributedFailures = unattributedFailures_;
   }
+  // NOTE (C70): this collector no longer decides WHICH item a code belongs to.
+  // It witnesses bytes (D2) and records the raw callback sequence; the verdict
+  // is ArchiveReader::BatchVerdict::itemFailed(), attributed by the engine's own
+  // GetStream/SetOperationResult pairing.
   int itemsSeen() const { return itemsSeen_; }
   const std::string& sha(size_t index) const { return sha_[index]; }
   size_t bytes(size_t index) const { return bytes_[index]; }
@@ -231,13 +342,19 @@ class SweepCollector final : public win::abi::IArchiveExtractCallback {
   std::vector<win::MemoryOutStream*> sinks_;
   std::vector<std::string> sha_;
   std::vector<size_t> bytes_;
-  std::vector<bool> failedByIndex_;
   BeginGate* gate_ = nullptr;
   bool gateHit_ = false;
   size_t pending_ = static_cast<size_t>(-1);
+  win::abi::Int32 lastMode_ = -1;
   int itemsSeen_ = 0;
   bool failed_ = false;
   LONG refs_ = 1;
+  // C70 diagnostics (never consulted by the assertions themselves).
+  std::vector<OpEvent> events_;
+  std::vector<uint32_t> skippedIndices_;
+  size_t extractStreams_ = 0;
+  size_t skippedStreams_ = 0;
+  size_t unattributedFailures_ = 0;
 };
 
 struct SweepOutcome {
@@ -431,14 +548,29 @@ struct SingleOutcome {
   bool refused = false;
   long hr = 0;
   uint64_t conflicts = 0;
+  // C70: the two conjuncts of ok, so a red log says WHICH one was false.
+  bool verdictOk = false;
+  bool itemFailed = false;
+  bool aborted = false;
+  bool invalidArgument = false;
+  size_t requested = 0;
+  size_t catalogIndex = static_cast<size_t>(-1);
+  // C70: the engine's per-item verdicts, attributed by the product probe. The
+  // failure log prints them so "ok=false" can never again hide WHICH item the
+  // engine failed and with what code.
+  std::vector<win::ArchiveReader::ItemVerdict> items;
+  size_t resultsWithoutItem = 0;
+  CallbackTrace trace;
 };
 
-SingleOutcome ExtractOne(win::ArchiveReader& reader, const Fixture& fx, size_t payloadIndex,
-                         BeginGate* gate) {
-  auto* collector = new SweepCollector(fx.catalog.size(), gate);
-  const std::vector<uint32_t> indices{static_cast<uint32_t>(fx.catalogIndex[payloadIndex])};
+// One catalog index through its own collector: the byte witness (D2) plus the
+// product's per-item verdict. Catalog indices, not payload slots, so the
+// corrupt-neighbour fixture can reuse it.
+SingleOutcome ExtractIndex(win::ArchiveReader& reader, size_t itemCount, size_t index,
+                           BeginGate* gate) {
+  auto* collector = new SweepCollector(itemCount, gate);
+  const std::vector<uint32_t> indices{static_cast<uint32_t>(index)};
   const win::ArchiveReader::BatchVerdict verdict = reader.ExtractBatchVerdict(indices, collector);
-  const size_t index = fx.catalogIndex[payloadIndex];
   SingleOutcome out;
   out.sha = collector->sha(index);
   out.bytes = collector->bytes(index);
@@ -446,12 +578,30 @@ SingleOutcome ExtractOne(win::ArchiveReader& reader, const Fixture& fx, size_t p
   // SetOperationResult for the items it skipped on the way to ours, and a
   // blanket "an item failed" flag would blame this worker's payload for a
   // neighbour's status. The bytes + SHA-256 above remain the D2 evidence.
-  out.ok = verdict.ok && !collector->itemFailed(index);
+  // C70: the DECIDABLE criterion -- did the engine mark THIS index as failed?
+  // The product attributes every SetOperationResult to the item 7-Zip opened
+  // for it, so a skipped neighbour's kCRCError is a different entry and cannot
+  // make this true. The collector below stays the byte witness (D2) only.
+  out.itemFailed = verdict.itemFailed(static_cast<uint32_t>(index));
+  out.ok = verdict.ok && !out.itemFailed;
   out.refused = verdict.refused;
   out.hr = static_cast<long>(verdict.hr);
   out.conflicts = verdict.conflicts;
+  out.verdictOk = verdict.ok;
+  out.aborted = verdict.aborted;
+  out.invalidArgument = verdict.invalidArgument;
+  out.requested = verdict.requested;
+  out.catalogIndex = index;
+  out.items = verdict.items.results;
+  out.resultsWithoutItem = verdict.items.resultsWithoutItem;
+  collector->Snapshot(&out.trace);
   collector->Release();
   return out;
+}
+
+SingleOutcome ExtractOne(win::ArchiveReader& reader, const Fixture& fx, size_t payloadIndex,
+                         BeginGate* gate) {
+  return ExtractIndex(reader, fx.catalog.size(), fx.catalogIndex[payloadIndex], gate);
 }
 
 // Verifies the sweep's per-item bytes against the payload hashes. A shared
@@ -470,6 +620,135 @@ bool CheckSweepHashes(const SweepOutcome& sweep, const Fixture& fx, const char* 
   return ok;
 }
 
+// C70: the deterministic engine scenario behind this card, built once.
+//
+// A solid 7z over four 2 MiB payloads, with ONE byte of item 1's packed data
+// flipped. Item 1 then fails its CRC while item 2 -- which the engine must
+// decode item 1 to reach -- is byte-identical to its payload. 7-Zip reports
+// code=3 (kCRCError) for index 1 and code=0 for index 2 (measured on 7z.dll
+// 25.01, 2026-11-03, Tests/win/probe). That is the shape a verdict must not
+// confuse: ONE item's code must never be charged to another item.
+struct NeighbourFixture {
+  std::unique_ptr<prism::testtmp::UniqueDir> scratch;
+  std::wstring dir;
+  std::wstring archivePath;
+  win::SevenZipLibrary library;
+  std::vector<ArchiveItem> catalog;
+  std::vector<std::string> names;
+  std::vector<std::string> expected;      // SHA-256 per payload
+  std::vector<size_t> catalogIndex;       // payload order -> catalog index
+  size_t corruptPayload = 1;              // the item whose CRC fails
+  size_t probePayload = 2;                // the item we extract through it
+  bool ready = false;
+  std::string why;
+};
+
+NeighbourFixture& Neighbour() {
+  static NeighbourFixture fixture;
+  return fixture;
+}
+
+bool SetupNeighbourFixture() {
+  NeighbourFixture& fx = Neighbour();
+  if (fx.ready) return true;
+  if (!fx.why.empty()) {
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  if (!SetupFixture()) {  // shares the DLL/CLI discovery and its failure text
+    fx.why = "the base fixture is unavailable";
+    return false;
+  }
+  const Fixture& base = World();
+  fx.scratch = std::make_unique<prism::testtmp::UniqueDir>(L"c70", L"neighbour");
+  if (!fx.scratch->ok()) {
+    fx.why = "cannot create the fixture directory: " + fx.scratch->error();
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  fx.dir = fx.scratch->path().wstring();
+  fx.archivePath = (fx.scratch->path() / "neighbour.7z").wstring();
+
+  fx.names = {"n0.bin", "n1.bin", "n2.bin", "n3.bin"};
+  std::vector<std::wstring> wideNames;
+  for (size_t i = 0; i < fx.names.size(); ++i) {
+    const std::vector<uint8_t> payload = MakePayload(kSeedBase + 0x40u + static_cast<uint32_t>(i),
+                                                     kItemBytes);
+    std::ofstream file(fx.scratch->path() / fx.names[i], std::ios::binary);
+    file.write(reinterpret_cast<const char*>(payload.data()),
+               static_cast<std::streamsize>(payload.size()));
+    if (!file.good()) {
+      fx.why = "cannot write fixture payload " + fx.names[i];
+      std::cout << "    FAIL: " << fx.why << std::endl;
+      return false;
+    }
+    fx.expected.push_back(Sha256Hex(payload));
+    wideNames.push_back(std::wstring(fx.names[i].begin(), fx.names[i].end()));
+  }
+  if (!prism::fixture::PackSolid(base.exePath, fx.dir, L"neighbour.7z", wideNames)) {
+    fx.why = "7z.exe could not author the neighbour fixture";
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  // Flip one byte 1 KiB into item 1's packed data. A .7z is [32-byte signature
+  // header][packed streams][header], and these payloads are incompressible
+  // (LCG noise), so item 0's packed data is its own size: the byte lands inside
+  // item 1 for every 7-Zip version the fixtures support.
+  {
+    std::fstream archive(fx.archivePath, std::ios::in | std::ios::out | std::ios::binary);
+    const std::streamoff offset = 32 + static_cast<std::streamoff>(kItemBytes) + 1024;
+    archive.seekg(offset);
+    char byte = 0;
+    archive.read(&byte, 1);
+    if (!archive.good()) {
+      fx.why = "cannot read the packed data of the neighbour fixture";
+      std::cout << "    FAIL: " << fx.why << std::endl;
+      return false;
+    }
+    byte = static_cast<char>(byte ^ 0xFF);
+    archive.seekp(offset);
+    archive.write(&byte, 1);
+    archive.flush();
+    if (!archive.good()) {
+      fx.why = "cannot corrupt the neighbour fixture";
+      std::cout << "    FAIL: " << fx.why << std::endl;
+      return false;
+    }
+  }
+  if (!fx.library.Load(base.dllPath)) {
+    fx.why = "LoadLibrary(7z.dll) failed";
+    return false;
+  }
+  win::ArchiveReader probe(fx.library);
+  if (!probe.Open(fx.archivePath)) {
+    fx.why = "probe reader could not open the neighbour fixture: " + probe.openTrace();
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  fx.catalog = probe.ReadCatalog();
+  if (fx.catalog.size() != fx.names.size()) {
+    fx.why = "neighbour fixture catalog size mismatch";
+    std::cout << "    FAIL: " << fx.why << std::endl;
+    return false;
+  }
+  fx.catalogIndex.assign(fx.names.size(), static_cast<size_t>(-1));
+  for (size_t i = 0; i < fx.names.size(); ++i) {
+    for (const ArchiveItem& item : fx.catalog) {
+      if (item.path == fx.names[i]) {
+        fx.catalogIndex[i] = item.index;
+        break;
+      }
+    }
+    if (fx.catalogIndex[i] == static_cast<size_t>(-1)) {
+      fx.why = "catalog entry missing for " + fx.names[i];
+      std::cout << "    FAIL: " << fx.why << std::endl;
+      return false;
+    }
+  }
+  fx.ready = true;
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -481,6 +760,17 @@ int main(int argc, char** argv) {
     std::cout << "C11 MUTANT ACTIVE: ReaderPool shared-handler path (old pre-pool behaviour)"
               << std::endl;
   }
+#if defined(PRISM_C70_MUTANT_BLAME_REQUESTED)
+  // D28: the banner sits against the guard so the mutation matrix can prove the
+  // injection was compiled in; D27: the verdict is armed with the runtime
+  // predicate "the injection actually fired", so an unrelated red cannot print
+  // CAUGHT (D3) and a dead injection cannot fake it.
+  std::cout << "C70 MUTANT ACTIVE: every item verdict is charged to the requested index"
+            << std::endl;
+  prism::test::SetMutationVerdict("C70 MUTATION CAUGHT: blame_requested", [] {
+    return win::ArchiveReader::MutantBlameHits() != 0;
+  });
+#endif
   const int rc = prism::test::RunAll(argc, argv);
   CoUninitialize();
   if (rc != 0) return rc;
@@ -593,13 +883,21 @@ PRISM_TEST("reader_pool.concurrent_sweep_and_extract_do_not_cross_talk") {
 PRISM_TEST("reader_pool.four_concurrent_extractions_each_get_their_own_bytes") {
   if (!PRISM_CHECK(SetupFixture())) return;
   const Fixture& fx = World();
-  const size_t kRoundCount = 3;
+  const size_t kRoundCount = FourWayRounds();
   auto pool = MakePool(fx.names.size());
   if (!PRISM_CHECK(pool != nullptr)) return;
   PRISM_CHECK_EQ(pool->stats().handlers, fx.names.size());
   PRISM_CHECK_EQ(pool->capacity(), fx.names.size());
 
+  if (kRoundCount > kDefaultFourWayRounds) {
+    std::cout << "    stress: " << kRoundCount << " four-way rounds (PRISM_C70_STRESS_ROUNDS)"
+              << std::endl;
+  }
   for (size_t round = 0; round < kRoundCount; ++round) {
+    if (kRoundCount > kDefaultFourWayRounds && round != 0 && round % 50 == 0) {
+      std::cout << "    stress: round " << round << "/" << kRoundCount << " clean so far"
+                << std::endl;
+    }
     std::vector<std::optional<win::ReaderPool::Lease>> leases;
     for (size_t i = 0; i < fx.names.size(); ++i) leases.push_back(pool->Acquire());
     for (const auto& lease : leases) {
@@ -620,45 +918,68 @@ PRISM_TEST("reader_pool.four_concurrent_extractions_each_get_their_own_bytes") {
 
     LiveOps live;
     BeginGate gate(static_cast<int>(fx.names.size()));
-    std::vector<bool> ok(fx.names.size(), false);
-    std::vector<std::string> sha(fx.names.size());
-    std::vector<size_t> size(fx.names.size(), 0);
-    std::vector<bool> refused(fx.names.size(), false);
-    std::vector<long> hr(fx.names.size(), 0);
+    std::vector<SingleOutcome> outcomes(fx.names.size());
     std::vector<std::thread> workers;
     for (size_t i = 0; i < fx.names.size(); ++i) {
       workers.emplace_back([&, i] {
         // No pre-call gate: the gate is joined from inside GetStream, so the
         // peak below proves four engine operations really overlapped.
         live.Enter();
-        const SingleOutcome one = ExtractOne(*leases[i]->get(), fx, i, &gate);
+        outcomes[i] = ExtractOne(*leases[i]->get(), fx, i, &gate);
         live.Leave();
-        ok[i] = one.ok;
-        size[i] = one.bytes;
-        sha[i] = one.sha;
-        refused[i] = one.refused;
-        hr[i] = one.hr;
       });
     }
     for (std::thread& worker : workers) worker.join();
     PRISM_CHECK(!gate.timedOut.load());
     PRISM_CHECK_EQ(live.peak.load(), static_cast<int>(fx.names.size()));
+    // C70: PRISM_C70_TRACE=1 dumps the engine's callback sequence for round 0
+    // even when it is green -- the baseline shape has to be known before a
+    // one-off red can be read.
+    static const bool kTraceFirstRound = std::getenv("PRISM_C70_TRACE") != nullptr;
+    if (kTraceFirstRound && round == 0) {
+      for (size_t i = 0; i < outcomes.size(); ++i) {
+        std::cout << "    trace worker " << i << " catalogIndex=" << outcomes[i].catalogIndex
+                  << " ok=" << (outcomes[i].ok ? 1 : 0) << " bytes=" << outcomes[i].bytes
+                  << std::endl;
+        outcomes[i].trace.Print(outcomes[i].catalogIndex);
+      }
+    }
     for (size_t i = 0; i < fx.names.size(); ++i) {
-      if (!ok[i]) {
-        // C50: the log has to say WHICH verdict failed and why. A C41 refusal
-        // means the pool shared a handler (conflicts > 0); an engine failure
-        // after a complete payload means the lease was fine and 7-Zip answered
-        // late (conflicts == 0). Never print just "ok[i] was false" again.
+      const SingleOutcome& one = outcomes[i];
+      if (!one.ok) {
+        // C70: the log has to say WHICH conjunct of ok was false and what the
+        // engine actually reported. verdictOk=false is the engine's HRESULT;
+        // itemFailed=true is a per-item code, and the callback trace below says
+        // whether that code arrived on the requested index with the full
+        // payload already written (our item) or with zero bytes (a neighbour).
         std::cout << "    worker " << i << " item=" << fx.names[i]
-                  << " bytes=" << size[i] << " sha=" << sha[i]
-                  << " expected=" << fx.expected[i]
-                  << " refused=" << (refused[i] ? 1 : 0) << " hr=0x" << std::hex << hr[i]
-                  << std::dec << std::endl;
+                  << " catalogIndex=" << one.catalogIndex << " bytes=" << one.bytes
+                  << " sha=" << one.sha << " expected=" << fx.expected[i]
+                  << " ok=" << (one.ok ? 1 : 0) << " verdictOk=" << (one.verdictOk ? 1 : 0)
+                  << " itemFailed=" << (one.itemFailed ? 1 : 0)
+                  << " refused=" << (one.refused ? 1 : 0)
+                  << " aborted=" << (one.aborted ? 1 : 0)
+                  << " invalidArgument=" << (one.invalidArgument ? 1 : 0)
+                  << " requested=" << one.requested << " conflicts=" << one.conflicts
+                  << " hr=0x" << std::hex << one.hr << std::dec << std::endl;
+        one.trace.Print(one.catalogIndex);
+        // C70: the product's attribution, one line per SetOperationResult the
+        // engine sent. "code=0 (THIS worker)" with a matching SHA-256 is the
+        // green shape; a non-zero code on the requested index is the engine
+        // failing an item it fully decoded (a different bug, reported loudly).
+        for (const auto& item : one.items) {
+          std::cout << "      itemVerdict index=" << item.index << " code=" << item.code << " "
+                    << DescribeOpResult(item.code) << " askMode=" << item.askMode
+                    << " hadStream=" << (item.hadStream ? 1 : 0) << std::endl;
+        }
+        if (one.resultsWithoutItem != 0) {
+          std::cout << "      resultsWithoutItem=" << one.resultsWithoutItem << std::endl;
+        }
         PrintPoolDiagnostics(*pool, "four-way worker failure");
       }
-      PRISM_CHECK(ok[i]);
-      PRISM_CHECK_EQ(size[i], kItemBytes);
-      if (!kSharedHandlerMutant) PRISM_CHECK_EQ(sha[i], fx.expected[i]);
+      PRISM_CHECK(one.ok);
+      PRISM_CHECK_EQ(one.bytes, kItemBytes);
+      if (!kSharedHandlerMutant) PRISM_CHECK_EQ(one.sha, fx.expected[i]);
     }
     PRISM_CHECK_EQ(pool->stats().maxConcurrent, fx.names.size());
     for (auto& lease : leases) lease->Release();
@@ -669,6 +990,74 @@ PRISM_TEST("reader_pool.four_concurrent_extractions_each_get_their_own_bytes") {
     PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
   }
   PRISM_CHECK_EQ(pool->stats().distinctSlotsUsed, fx.names.size());
+}
+
+// C70: THE ENGINE'S CODE FOR A SKIPPED NEIGHBOUR MUST NOT CONVICT OUR ITEM.
+//
+// Extracting item 2 of a solid block forces 7-Zip to decode item 1 first. When
+// item 1 is corrupt the engine reports SetOperationResult(kCRCError) for item 1
+// and kOK for item 2 (measured, 7z.dll 25.01). The verdict must therefore name
+// item 1, and item 2 must still be accepted with its full payload -- which is
+// the decidable criterion this card ships: "the code belongs to the item the
+// engine opened for it", not "the last item somebody asked for".
+//
+// Deterministic by construction: the fixture is one flipped byte at a fixed
+// offset, no timing and no concurrency. The negative control is the mutant
+// build PRISM_C70_MUTANT_BLAME_REQUESTED, which charges every code to the
+// requested index; it must go RED here (mutation.reader_pool.blame_requested).
+PRISM_TEST("reader_pool.skipped_neighbour_error_is_not_our_failure") {
+  if (!PRISM_CHECK(SetupNeighbourFixture())) return;
+  NeighbourFixture& fx = Neighbour();
+  const size_t corruptIndex = fx.catalogIndex[fx.corruptPayload];
+  const size_t probeIndex = fx.catalogIndex[fx.probePayload];
+  PRISM_CHECK(corruptIndex != probeIndex);
+
+  win::ReaderPool::Config config;
+  config.archivePath = fx.archivePath;
+  config.capacity = 1;
+  std::string error;
+  auto pool = win::ReaderPool::Create(fx.library, config, &error);
+  if (!PRISM_CHECK(pool != nullptr)) {
+    std::cout << "    ReaderPool::Create failed: " << error << std::endl;
+    return;
+  }
+  auto lease = pool->Acquire();
+  if (!PRISM_CHECK(lease.has_value())) return;
+
+  const SingleOutcome one = ExtractIndex(*lease->get(), fx.catalog.size(), probeIndex, nullptr);
+  // D2: the bytes are the evidence, and they are intact -- the corruption is in
+  // the neighbour, not in what we asked for.
+  PRISM_CHECK_EQ(one.bytes, kItemBytes);
+  PRISM_CHECK_EQ(one.sha, fx.expected[fx.probePayload]);
+  // D18: the neighbour's code has to be REAL for this test to mean anything.
+  int32_t neighbourCode = -1;
+  for (const auto& item : one.items) {
+    if (item.index == static_cast<uint32_t>(corruptIndex)) neighbourCode = item.code;
+  }
+  if (!PRISM_CHECK(neighbourCode != -1)) {
+    std::cout << "    the engine never reported the skipped neighbour; items=" << one.items.size()
+              << std::endl;
+    one.trace.Print(probeIndex);
+  } else {
+    PRISM_CHECK(neighbourCode != 0);
+  }
+  // THE CONTRACT: the neighbour's failure is not ours.
+  if (one.itemFailed) {
+    std::cout << "    worker item=" << fx.names[fx.probePayload] << " bytes=" << one.bytes
+              << " sha=" << one.sha << " expected=" << fx.expected[fx.probePayload]
+              << " verdictOk=" << (one.verdictOk ? 1 : 0)
+              << " itemFailed=" << (one.itemFailed ? 1 : 0) << " catalogIndex=" << probeIndex
+              << std::endl;
+    for (const auto& item : one.items) {
+      std::cout << "      itemVerdict index=" << item.index << " code=" << item.code << " "
+                << DescribeOpResult(item.code) << " askMode=" << item.askMode
+                << " hadStream=" << (item.hadStream ? 1 : 0) << std::endl;
+    }
+    one.trace.Print(probeIndex);
+  }
+  PRISM_CHECK(!one.itemFailed);
+  PRISM_CHECK(one.ok);
+  lease->Release();
 }
 
 // The scheduler and the pool are two halves of one rule: Dispatch().slot IS

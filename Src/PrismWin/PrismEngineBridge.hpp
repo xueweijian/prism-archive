@@ -1842,6 +1842,66 @@ class ArchiveReader {
   // whether a lease had been shared or the engine had hiccuped. This struct
   // reports the three cases apart; the guard's semantics are untouched
   // (refusal stays a refusal, and still counts).
+  // C70: WHOSE failure is it?
+  //
+  // 7-Zip's SetOperationResult carries a code but no index, so every caller was
+  // left guessing which item it belonged to. The handler's own contract is
+  // exact (CPP/7zip/Archive/7z/7zExtract.cpp): CFolderOutStream::OpenFile calls
+  // GetStream(index, askMode) immediately before an item starts decoding, and
+  // CloseFile_and_SetResult calls SetOperationResult for THAT item -- for the
+  // item the caller asked for (kExtract) and for every neighbour a solid block
+  // had to decode through (kSkip, or kTest when the engine flushes a corrupted
+  // folder). The engine therefore answers "which item" one call earlier; the
+  // owner of a code is the item it most recently OPENED, never "the last index
+  // this caller requested".
+  //
+  // Measured on 7z.dll 25.01 (2026-11-03): extracting index 2 of a solid 7z
+  // whose item 1 is corrupt reports code=3 (kCRCError) for item 1 and code=0
+  // for item 2, and the payload of item 2 is byte-identical to the fixture.
+  // Charge that code to the requested index and a perfectly decoded payload is
+  // reported as a failure -- the "correct SHA-256, ok=false" shape of
+  // win.reader_pool.
+  struct ItemVerdict {
+    uint32_t index = 0;
+    abi::Int32 code = 0;      // 7-Zip's NOperationResult for that item
+    abi::Int32 askMode = -1;  // kExtract / kTest / kSkip, as the engine asked
+    bool hadStream = false;   // the caller was handed a real out stream
+  };
+
+  struct ItemVerdictLog {
+    std::vector<ItemVerdict> results;
+    // A code with no open item: the engine closed something it never opened
+    // through this callback. Counted, never silently folded into another index.
+    size_t resultsWithoutItem = 0;
+
+    const ItemVerdict* find(uint32_t index) const {
+      for (const ItemVerdict& result : results) {
+        if (result.index == index) return &result;
+      }
+      return nullptr;
+    }
+    // The decidable criterion a caller can act on: did the ENGINE mark THIS
+    // index as failed? A neighbour's code is a different entry and cannot make
+    // this true.
+    bool failed(uint32_t index) const {
+      for (const ItemVerdict& result : results) {
+        if (result.index == index) return result.code != 0;
+      }
+      return false;
+    }
+    abi::Int32 codeFor(uint32_t index) const {
+      const ItemVerdict* result = find(index);
+      return result != nullptr ? result->code : 0;
+    }
+    size_t failedCount() const {
+      size_t failed = 0;
+      for (const ItemVerdict& result : results) {
+        if (result.code != 0) ++failed;
+      }
+      return failed;
+    }
+  };
+
   struct BatchVerdict {
     bool ok = false;
     bool refused = false;    // C41 guard: another operation was in flight
@@ -1850,6 +1910,8 @@ class ArchiveReader {
     uint64_t conflicts = 0;  // this handler's C41 counter AFTER the call
     size_t requested = 0;
     bool invalidArgument = false;  // null handler/callback, or no indices
+    ItemVerdictLog items;          // C70: per-item codes, attributed by GetStream
+    bool itemFailed(uint32_t index) const { return items.failed(index); }
   };
 
   BatchVerdict ExtractBatchVerdict(const std::vector<uint32_t>& indices,
@@ -1873,7 +1935,12 @@ class ArchiveReader {
       verdict.conflicts = operationConflicts();
       return verdict;
     }
-    BatchAbortProbe probe(callback, &batchAbort_);
+    // C70: item verdicts are attributed INSIDE the extraction, while the engine
+    // still tells us which item it opened (GetStream) before it closes it
+    // (SetOperationResult). The abort probe stays outermost so an aborted run
+    // stops before any further callback is recorded.
+    ItemVerdictProbe items(callback, &verdict.items, &indices);
+    BatchAbortProbe probe(&items, &batchAbort_);
     std::vector<abi::UInt32> idx(indices.begin(), indices.end());
     verdict.hr = archive_->Extract(idx.data(), static_cast<abi::UInt32>(idx.size()), 0, &probe);
     verdict.ok = SUCCEEDED(verdict.hr);
@@ -1884,6 +1951,13 @@ class ArchiveReader {
   bool ExtractBatch(const std::vector<uint32_t>& indices,
                     abi::IArchiveExtractCallback* callback) const {
     return ExtractBatchVerdict(indices, callback).ok;
+  }
+
+  // C70 (D3): how many times the blame-the-requester injection fired. Zero in
+  // every normal build; the mutation arm prints its CAUGHT marker only while
+  // this is non-zero, so a dead injection can never produce a false verdict.
+  static uint64_t MutantBlameHits() {
+    return ItemVerdictProbe::C70BlameHits().load(std::memory_order_relaxed);
   }
 
   // Property ids are discovered by name (authoritative, read out of the DLL
@@ -1917,6 +1991,97 @@ class ArchiveReader {
   // balanced around the call (the same contract SweepExtractCallback in
   // SolidSweeper.hpp depends on), so a zero count is a programming error here,
   // never a delete.
+  // C70: ONE extra callback layer that records WHO each SetOperationResult
+  // belongs to. It forwards every call unchanged (D10: an unknown IID goes to
+  // the inner callback instead of being hidden) and only observes the pair the
+  // 7-Zip handler already guarantees: GetStream(index) immediately before that
+  // item's SetOperationResult.
+  class ItemVerdictProbe final : public abi::IArchiveExtractCallback {
+   public:
+    ItemVerdictProbe(abi::IArchiveExtractCallback* inner, ItemVerdictLog* log,
+                     const std::vector<uint32_t>* requested)
+        : inner_(inner), log_(log), requested_(requested) {}
+
+    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+      if (!out) return E_POINTER;
+      if (iid == IID_IUnknown || iid == abi::IID_IArchiveExtractCallback) {
+        *out = static_cast<abi::IArchiveExtractCallback*>(this);
+        AddRef();
+        return S_OK;
+      }
+      return inner_->QueryInterface(iid, out);
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }
+    STDMETHODIMP_(ULONG) Release() override { return InterlockedDecrement(&refs_); }
+
+    STDMETHODIMP SetTotal(abi::UInt64 total) override { return inner_->SetTotal(total); }
+    STDMETHODIMP SetCompleted(const abi::UInt64* complete) override {
+      return inner_->SetCompleted(complete);
+    }
+    STDMETHODIMP GetStream(abi::UInt32 index, abi::ISequentialOutStream** outStream,
+                          abi::Int32 askExtractMode) override {
+      const HRESULT hr = inner_->GetStream(index, outStream, askExtractMode);
+      if (SUCCEEDED(hr)) {
+        open_ = true;
+        openIndex_ = index;
+        openMode_ = askExtractMode;
+        openHadStream_ = outStream != nullptr && *outStream != nullptr;
+      }
+      return hr;
+    }
+    STDMETHODIMP PrepareOperation(abi::Int32 askExtractMode) override {
+      return inner_->PrepareOperation(askExtractMode);
+    }
+    STDMETHODIMP SetOperationResult(abi::Int32 operationResult) override {
+      if (open_) {
+        ItemVerdict verdict;
+        verdict.index = openIndex_;
+        verdict.code = operationResult;
+        verdict.askMode = openMode_;
+        verdict.hadStream = openHadStream_;
+        log_->results.push_back(verdict);
+      } else {
+        ++log_->resultsWithoutItem;
+      }
+#if defined(PRISM_C70_MUTANT_BLAME_REQUESTED)
+      // Negative control (D3): the ATTRIBUTION is gone. Every non-zero code is
+      // ALSO charged to the first requested index -- the pre-C70 shape that
+      // convicted a perfectly decoded payload for a neighbour's verdict. The
+      // true owner stays in the log (so the suite still sees the neighbour's
+      // code, D18), which means the mutant can only go red on the semantic
+      // assertion, never on a missing bookkeeping row. The hit counter proves
+      // the injection really fired (D26/D27); a dead injection leaves the
+      // marker unprinted and the arm red for the wrong reason.
+      if (operationResult != 0 && requested_ != nullptr && !requested_->empty()) {
+        ItemVerdict blamed;
+        blamed.index = (*requested_)[0];
+        blamed.code = operationResult;
+        blamed.askMode = openMode_;
+        blamed.hadStream = true;
+        log_->results.push_back(blamed);
+        C70BlameHits().fetch_add(1, std::memory_order_relaxed);
+      }
+#endif
+      open_ = false;
+      return inner_->SetOperationResult(operationResult);
+    }
+
+    static std::atomic<uint64_t>& C70BlameHits() {
+      static std::atomic<uint64_t> hits{0};
+      return hits;
+    }
+
+   private:
+    abi::IArchiveExtractCallback* inner_;
+    ItemVerdictLog* log_;
+    const std::vector<uint32_t>* requested_;
+    bool open_ = false;
+    uint32_t openIndex_ = 0;
+    abi::Int32 openMode_ = -1;
+    bool openHadStream_ = false;
+    LONG refs_ = 1;
+  };
+
   class BatchAbortProbe final : public abi::IArchiveExtractCallback {
    public:
     BatchAbortProbe(abi::IArchiveExtractCallback* inner, const std::atomic<bool>* flag)

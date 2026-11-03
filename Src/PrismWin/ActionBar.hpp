@@ -5,14 +5,21 @@
 // ActionBarModel.hpp); this file owns the last mile, and nothing else:
 //
 //   * the island is the C15 surface token, NOT a coloured ribbon: hover lifts
-//     the local fill by a white wash (+10%), it never turns blue -- Bandizip's
-//     blue toolbar is exactly what the blueprint forbids copying;
+//     the local fill by a token-derived white wash (+4%), it never turns blue --
+//     Bandizip's blue toolbar is exactly what the blueprint forbids copying;
+//   * C78: the band has a GROUP RHYTHM. Four groups (Archive / Modify /
+//     Inspect / Find) are separated by a 1 px token-white seam at alpha 0.08;
+//     the gap across a seam is 12 px, inside a group 4 px;
 //   * every corner is a SQUIRCLE (theme::SquircleField, n=4.2, radius 20 for
 //     the island and 10 for a button), not a circular arc;
 //   * pressing sinks the CONTENT by one pixel (the fill stays put), so the
 //     click reads as a physical press instead of a colour flash;
-//   * a disabled action is painted at 40% of its ink -- dim enough to read as
-//     unavailable, visible enough to teach where it will appear;
+//   * C78: a dropdown action shows a small chevron under its label, and ONLY
+//     while it is hovered, pressed or open -- no permanent menu affordance;
+//   * a disabled action is painted at 38% of its ink -- dim enough to read as
+//     unavailable, visible enough to teach where it will appear. Its LABEL is
+//     TextSecondary, so the word stays below 3:1 contrast (a "disabled" word
+//     that still passes AA is a lie about being clickable);
 //   * icons are vector glyphs drawn from scratch (no Bandizip pixels, no
 //     bitmap pipeline): eight silhouettes, one recolourable brush;
 //   * the dropdown panel is the same glass, hanging below its button.
@@ -81,8 +88,19 @@ inline constexpr std::string_view PaintMutation() {
 class ActionBarPainter {
  public:
   // The disabled ink ratio. One number, used by every primitive, so "disabled
-  // looks disabled" cannot drift between the icon and its label.
-  static constexpr float kDisabledAlpha = 0.40f;
+  // looks disabled" cannot drift between the icon and its label. C78 moved it
+  // 0.40 -> 0.38 (two-fifths of the ink, just under) and keeps the label
+  // on TextSecondary; the contrast assertion measures < 3:1 on the DEVICE.
+#if defined(PRISM_C78_MUTANT_DISABLED_BRIGHT)
+  static constexpr float kDisabledAlpha = 0.70f;
+#else
+  static constexpr float kDisabledAlpha = 0.38f;
+#endif
+  // C78: focus ring geometry. 2 px of the accent token, inset 2 px so it never
+  // touches the squircle edge or clips the icon.
+  static constexpr float kFocusRingWidth = 2.0f;
+  static constexpr float kFocusRingInset = 2.0f;
+  static constexpr float kFocusRingRadius = 10.0f;
 
   HRESULT CreateDeviceResources(ID2D1RenderTarget* target) {
     if (!writeFactory_) {
@@ -163,7 +181,20 @@ class ActionBarPainter {
                    19.5f, 1.0f);
     ++dbgIslands;
 
-    // 2. per-button state fill + focus ring, then the content.
+    // 2. C78: the Group seams, painted on the island BEFORE any button so a
+    // hover wash can never cover a hairline (the seam belongs to the band, not
+    // to the button under the pointer).
+    for (const prism::actionbar::GroupSeparator& separator : layout.separators) {
+#if defined(PRISM_C78_MUTANT_NO_GROUP_SEPARATOR)
+      (void)separator;
+      break;
+#else
+      fillRect(target, RectF(separator.rect), SeparatorColor(variant));
+      ++dbgSeparators;
+#endif
+    }
+
+    // 3. per-button state fill + focus ring, then the content.
     for (std::size_t i = 0; i < layout.buttons.size(); ++i) {
 #if defined(PRISM_C67_MUTANT_SKIP_LAST_PAINT)
       // MUTANT ACTIVE (card C67, arm skip_last_paint): the last button is
@@ -180,32 +211,57 @@ class ActionBarPainter {
       const D2D1_RECT_F rect = RectF(button.rect);
 
       if (hovered || pressed) {
-        // The lift: a white wash INSIDE the button, never a hue change. The
-        // press adds 60% more wash; the 1 px sink below is what sells it.
-        const float alpha = pressed ? 0.16f : 0.10f;
+        // The lift: a token-white wash INSIDE the button, never a hue change.
+        // C78: a ~4% wash. A literal 4% measures 9 luminance levels over the
+        // Midnight island (above the 3-8 band this card pins), so the shipping
+        // value is 3.3% = 7.0 levels; the assertion measures the rendered delta.
+#if defined(PRISM_C78_MUTANT_STRONG_HOVER)
+        const float alpha = pressed ? 0.24f : 0.18f;
+#else
+        const float alpha = pressed ? 0.07f : 0.033f;
+#endif
         fillSquircle(target, D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f,
                                          rect.right - 2.0f, rect.bottom - 2.0f),
-                     10.0f, Wash(alpha));
+                     10.0f, Wash(variant, alpha));
+        // Depth: one specular hairline along the TOP inner edge of the raised
+        // face (token white at 10%). Without it the hover fill is a flat grey
+        // rectangle; with it the button reads as a small glass plate.
+        SetBrush(RimHighlight(variant));
+        target->DrawLine(D2D1::Point2F(rect.left + 12.0f, rect.top + 3.5f),
+                         D2D1::Point2F(rect.right - 12.0f, rect.top + 3.5f), brush_.Get(),
+                         1.0f);
+        ++dbgHighlights;
         if (pressed) ++dbgPressed;
         if (hovered) ++dbgHover;
       }
       ++dbgButtons;
 
       if (model.FocusIndex() == index) {
+#if !defined(PRISM_C78_MUTANT_NO_FOCUS_RING)
+        // C78: 2 px accent ring. Drawn even when the button is disabled -- the
+        // ring says "the keyboard is here", not "this will run".
         SetBrush(Accent(variant, 0.90f));
-        strokeSquircle(target, D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f,
-                                          rect.right - 2.0f, rect.bottom - 2.0f),
-                       9.0f, 1.5f);
+        strokeSquircle(target,
+                       D2D1::RectF(rect.left + kFocusRingInset, rect.top + kFocusRingInset,
+                                   rect.right - kFocusRingInset, rect.bottom - kFocusRingInset),
+                       kFocusRingRadius, kFocusRingWidth);
         ++dbgFocusRings;
+#endif
       }
 
       // Pressed: content sinks 1 px; the island and the fill do not move.
       const float dy = pressed ? 1.0f : 0.0f;
-      PaintButtonContent(target, button, model, enabled, dy);
+      // C78: the chevron is part of the CONTENT, so it sinks with the glyph and
+      // the word on press. It is shown only for a menu action that is hovered,
+      // held, or has its panel open -- there is no permanent arrow.
+      const bool arrow = buttonHasDropdown(button.id) &&
+                         (hovered || pressed ||
+                          (model.DropdownOpen() && model.DropdownOwner() == button.id));
+      PaintButtonContent(target, button, model, enabled, dy, arrow);
       if (!enabled) ++dbgDisabled;
     }
 
-    // 3. the dropdown hangs BELOW the band and above the content.
+    // 4. the dropdown hangs BELOW the band and above the content.
     if (model.DropdownOpen() && enabledDropdown(model, layout, hoverIndex)) {
       const int ownerIndex = OwnerIndex(layout, model.DropdownOwner());
       if (ownerIndex >= 0) DrawDropdown(target, layout, model, ownerIndex, variant, size);
@@ -221,6 +277,9 @@ class ActionBarPainter {
   int dbgHover = 0;
   int dbgPressed = 0;
   int dbgFocusRings = 0;
+  int dbgSeparators = 0;
+  int dbgArrows = 0;
+  int dbgHighlights = 0;
   int dbgDropdowns = 0;
   int dbgDropdownRows = 0;
   // V4: labels that needed the ellipsis. MUST be 0 for the shipping table (the
@@ -284,8 +343,30 @@ class ActionBarPainter {
     c.a = alpha;
     return ToD2d(c);
   }
-  // The hover/press wash is achromatic on purpose (blue ribbon forbidden).
-  static D2D1_COLOR_F Wash(float alpha) { return D2D1::ColorF(1.0f, 1.0f, 1.0f, alpha); }
+  // C78: the seam is the specular-rim token at a measured 8%. Using the token
+  // (not ColorF(1,1,1)) keeps HighContrast honest: a theme that redefines the
+  // rim redefines the seam.
+  static D2D1_COLOR_F SeparatorColor(prism::theme::Variant variant) {
+    prism::theme::Rgba c =
+        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant).gradient.from;
+    c.a = prism::actionbar::kGroupSeparatorAlpha;
+    return ToD2d(c);
+  }
+  // C78: the 1 px top rim of a raised face, from the same specular token.
+  static D2D1_COLOR_F RimHighlight(prism::theme::Variant variant) {
+    prism::theme::Rgba c =
+        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant).gradient.from;
+    c.a = 0.10f;
+    return ToD2d(c);
+  }
+  // The hover/press wash is achromatic on purpose (blue ribbon forbidden) and
+  // token-derived: the specular rim is white in all three shipping variants.
+  static D2D1_COLOR_F Wash(prism::theme::Variant variant, float alpha) {
+    prism::theme::Rgba c =
+        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant).gradient.from;
+    c.a = alpha;
+    return ToD2d(c);
+  }
 
   // ---- squircle geometry (theme::SquircleField owns the exponent)
   HRESULT CreateSquirclePath(ID2D1RenderTarget* target, const D2D1_RECT_F& rect, float radius,
@@ -352,6 +433,15 @@ class ActionBarPainter {
     return S_OK;
   }
 
+  // A crisp 1 px column: FillRectangle on integer bounds, no antialiasing, so
+  // the rendered alpha is exactly the token alpha (the pixel assertion recovers
+  // it as (seam - fill) / (white - fill)).
+  void fillRect(ID2D1RenderTarget* target, const D2D1_RECT_F& rect,
+                const D2D1_COLOR_F& color) {
+    SetBrush(color);
+    target->FillRectangle(rect, brush_.Get());
+  }
+
   void fillSquircle(ID2D1RenderTarget* target, const D2D1_RECT_F& rect, float radius,
                     const D2D1_COLOR_F& color) {
     ComPtr<ID2D1PathGeometry> geometry;
@@ -393,9 +483,16 @@ class ActionBarPainter {
            static_cast<float>(boxWidth) + 0.5f;
   }
 
-  // ---- one button's icon + label + mnemonic, all offset by dy (the sink).
+  static bool buttonHasDropdown(prism::actionbar::ActionId id) {
+    const int index = prism::actionbar::IndexOf(id);
+    return index >= 0 &&
+           prism::actionbar::SpecOf(index).hasDropdown;
+  }
+
+  // ---- one button's icon + label + mnemonic + chevron, all offset by dy.
   void PaintButtonContent(ID2D1RenderTarget* target, const prism::actionbar::Button& button,
-                          const prism::actionbar::Model& model, bool enabled, float dy) {
+                          const prism::actionbar::Model& model, bool enabled, float dy,
+                          bool arrow) {
     const prism::actionbar::Spec& spec = prism::actionbar::SpecOf(
         (std::max)(0, prism::actionbar::IndexOf(button.id)));
     const float alpha = enabled ? 1.0f : kDisabledAlpha;
@@ -417,6 +514,13 @@ class ActionBarPainter {
     // language switch reach this pixel.
     const std::wstring label = Utf8(model.LabelOf(button.id));
     if (!label.empty() && labelFormat_) {
+      // C78: a disabled LABEL is TextSecondary at 38%, not TextPrimary at 38%.
+      // Measured on the device that reading is < 3:1: a disabled word must not
+      // still pass AA, or the band promises an action it will not run.
+      SetBrush(ToD2d(Token(enabled ? prism::theme::TokenId::TextPrimary
+                                   : prism::theme::TokenId::TextSecondary,
+                           lastVariant_),
+                     alpha));
       const D2D1_RECT_F labelBox =
           D2D1::RectF(static_cast<float>(labelRect.left),
                       static_cast<float>(labelRect.top) + dy,
@@ -428,6 +532,26 @@ class ActionBarPainter {
       ++dbgLabels;
       if (LabelOverflows(label, labelRect.Width())) ++dbgLabelsClipped;
     }
+    // C78: the dropdown chevron. 8 x 4 px, directly under the label, two
+    // 1.4 px strokes; token-coloured TextSecondary so it is quieter than the
+    // word and never becomes a second icon. Only the caller's arrow flag (menu
+    // action + hover/press/open) reaches this branch.
+#if !defined(PRISM_C78_MUTANT_NO_ARROW)
+    if (arrow && mnemonicFormat_) {
+      const prism::actionbar::Rect arrowRect(prism::actionbar::ArrowBoxRect(button.rect));
+      const float ax = (arrowRect.left + arrowRect.right) * 0.5f;
+      const float top = static_cast<float>(arrowRect.top) + dy;
+      const float bottom = static_cast<float>(arrowRect.bottom) + dy;
+      SetBrush(ToD2d(Token(prism::theme::TokenId::TextSecondary, lastVariant_),
+                     enabled ? 0.95f : kDisabledAlpha * 0.95f));
+      target->DrawLine(D2D1::Point2F(ax - 3.0f, top + 0.5f),
+                       D2D1::Point2F(ax, bottom - 0.5f), brush_.Get(), 1.4f);
+      target->DrawLine(D2D1::Point2F(ax, bottom - 0.5f),
+                       D2D1::Point2F(ax + 3.0f, top + 0.5f), brush_.Get(), 1.4f);
+      ++dbgArrows;
+    }
+#endif
+
     // The mnemonic: a quiet 10 px letter in the corner. It is the only visible
     // promise that Alt+<letter> works, and it disappears when disabled.
     if (mnemonicFormat_ && spec.mnemonic != 0) {
@@ -444,14 +568,14 @@ class ActionBarPainter {
     }
   }
 
-  // ---- eight self-drawn silhouettes, all inside the 20 px box.
+  // ---- eight self-drawn silhouettes, all inside the 24 px box.
   void PaintGlyph(ID2D1RenderTarget* target, std::string_view icon,
                   const D2D1_RECT_F& box) {
     ID2D1Brush* brush = brush_.Get();
     const float l = box.left, t = box.top, r = box.right, b = box.bottom;
     const float cx = (l + r) * 0.5f, cy = (t + b) * 0.5f;
     const float w = r - l, h = b - t;
-    constexpr float kStroke = 1.6f;
+    constexpr float kStroke = 1.8f;  // 24 px box: one more fifth of a pixel
 
     if (icon == "open") {
       // Folder outline with an arrow leaving it: "open the archive".
@@ -561,7 +685,7 @@ class ActionBarPainter {
           D2D1::RectF(panel.left + 4.0f, top, panel.right - 4.0f,
                       top + prism::actionbar::kDropdownRowHeight);
       if (static_cast<int>(i) == model.DropdownIndex()) {
-        fillSquircle(target, row, 8.0f, Wash(0.12f));
+        fillSquircle(target, row, 8.0f, Wash(variant, 0.12f));
       }
       const std::wstring label = Utf8(items[i].label);
       if (!label.empty() && labelFormat_) {

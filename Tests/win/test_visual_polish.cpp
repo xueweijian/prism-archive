@@ -380,7 +380,8 @@ PRISM_TEST("v4.actionbar: icon box centre is the label centre minus one offset")
     const int iconCentreY = icon.top + icon.Height() / 2;
     const int labelCentreY = label.top + label.Height() / 2;
     PRISM_CHECK_EQ(iconCentreY, labelCentreY - prism::actionbar::kIconLabelOffset);
-    PRISM_CHECK_EQ(prism::actionbar::kIconLabelOffset, 22);
+    // C78: 24 px glyph + 6 px gap moved the fixed offset 22 -> 25.
+    PRISM_CHECK_EQ(prism::actionbar::kIconLabelOffset, 25);
     // The label box is wide enough for the shortest usable label.
     PRISM_CHECK(label.Width() >= prism::actionbar::kMinLabelWidth);
     PRISM_CHECK_EQ(prism::actionbar::kMinLabelWidth, 64);

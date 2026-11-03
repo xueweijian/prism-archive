@@ -9,7 +9,7 @@
 //     paints between y=32 and y=88 and nowhere else;
 //   * the four visual states are real, measured colour differences -- hover
 //     LIFTS a local fill (achromatic: no Bandizip-blue ribbon), disabled ink is
-//     40% of enabled ink (measured, not asserted by comment), pressing sinks
+//     38% of enabled ink (measured, not asserted by comment), pressing sinks
 //     the CONTENT by exactly one pixel;
 //   * icons render inside their 20 px box and never bleed into the button;
 //   * a dropdown hangs below its button and paints its rows;
@@ -184,10 +184,13 @@ bool RenderScene(IWICImagingFactory* wic, const prism::win::gallery::GalleryRend
   return true;
 }
 
-// The icon box of a button, exactly as ActionBar.hpp lays it out.
+// The icon box of a button, exactly as ActionBar.hpp lays it out. C78 grew it
+// 20 -> 24 px and moved its top 8 -> 6; the box now comes from the model instead
+// of a hand-copied constant, so the next geometry change cannot silently leave
+// this test measuring the old box.
 Box IconBox(const Rect& button) {
-  const int centre = (button.left + button.right) / 2;
-  return Box{centre - 10, button.top + 9, centre + 10, button.top + 29};
+  const Rect icon = prism::actionbar::IconBoxRect(button);
+  return Box{icon.left, icon.top, icon.right, icon.bottom};
 }
 
 // A flat patch of the button that carries no glyph: where the island fill shows.
@@ -297,7 +300,7 @@ PRISM_TEST("hover lifts a local fill without turning blue") {
   PRISM_CHECK(std::abs(delta[1] - delta[0]) < 3.0);
 }
 
-PRISM_TEST("a disabled action is 40% ink and ignores the pointer") {
+PRISM_TEST("a disabled action is 38% ink and ignores the pointer") {
   Model model;
   model.SetContext(Context{false, false, false});  // no archive: extract is illegal
   const Layout layout = prism::actionbar::Compute(WindowLayout());
@@ -331,7 +334,7 @@ PRISM_TEST("a disabled action is 40% ink and ignores the pointer") {
   PRISM_CHECK(disabledInk > 5.0);   // the disabled one is dim, not invisible
   const double ratio = disabledInk / (enabledInk > 0.0 ? enabledInk : 1.0);
   PRISM_CHECK(ratio > 0.30);
-  PRISM_CHECK(ratio < 0.52);  // 0.40 with room for antialiasing
+  PRISM_CHECK(ratio < 0.50);  // 0.38 with room for antialiasing
 
   // Hovering a disabled button must change NOTHING (no false affordance).
   if (!PRISM_CHECK(RenderScene(gWic, BaseScene(&model, extractIndex, -1), kWidth, kHeight,
@@ -340,6 +343,24 @@ PRISM_TEST("a disabled action is 40% ink and ignores the pointer") {
   }
   PRISM_CHECK(MeanDiff(frame, hoveredDisabled,
                        Box{button.left, button.top, button.right, button.bottom}) < 0.5);
+}
+
+// Vertical centre of mass of the ink inside a box. A one-pixel translate must
+// move the WHOLE glyph; the topmost row alone can stay put when a stroke's top
+// edge is antialiased (C78 measured that on the 24 px extract glyph).
+double InkCentroidY(const Frame& frame, const Box& box, UINT32 fill) {
+  double weighted = 0.0;
+  double weight = 0.0;
+  for (int y = box.top; y < box.bottom; ++y) {
+    for (int x = box.left; x < box.right; ++x) {
+      if (!frame.In(x, y)) continue;
+      const double d = ColorDistance(frame.At(x, y), fill);
+      if (d <= 40.0) continue;
+      weighted += (static_cast<double>(y) + 0.5) * d;
+      weight += d;
+    }
+  }
+  return weight > 0.0 ? weighted / weight : -1.0;
 }
 
 PRISM_TEST("pressing sinks the content by exactly one pixel") {
@@ -376,12 +397,22 @@ PRISM_TEST("pressing sinks the content by exactly one pixel") {
     return -1;
   };
   const int hoverTop = firstInkRow(hover, icon);
-  const int pressedTop = firstInkRow(pressed, icon);
   PRISM_CHECK(hoverTop > 0);
-  PRISM_CHECK_EQ(pressedTop, hoverTop + 1);
+  // C78: the centroid is the "whole button moved" measurement for the GLYPH (a
+  // 24 px stroke's top edge can round to the same row while every ink pixel
+  // still moved). The LABEL keeps the strict one-row assertion: text has a
+  // crisp top edge, so "top row + 1" is measurable there.
+  const UINT32 fill = FillSample(hover, button);
+  const double hoverCentre = InkCentroidY(hover, icon, fill);
+  const double pressedCentre = InkCentroidY(pressed, icon, fill);
+  PRISM_CHECK(hoverCentre > 0.0);
+  PRISM_CHECK(std::abs((pressedCentre - hoverCentre) - 1.0) < 0.25);
+  const Rect labelRect = prism::actionbar::LabelBoxRect(button);
+  const Box labelBox{labelRect.left, labelRect.top, labelRect.right, labelRect.bottom};
+  PRISM_CHECK_EQ(firstInkRow(pressed, labelBox), firstInkRow(hover, labelBox) + 1);
 }
 
-PRISM_TEST("icons stay inside their 20 px box") {
+PRISM_TEST("icons stay inside their 24 px box") {
   Model model;
   model.SetContext(Context{true, true, false});
   const Layout layout = prism::actionbar::Compute(WindowLayout());

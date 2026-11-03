@@ -32,6 +32,14 @@ $verbs = @(
 # CreateSubKey, not OpenSubKey: on a brand-new user profile (and on a clean CI
 # runner) HKCU\Software\Classes does not exist yet, and OpenSubKey returns null
 # there -- which used to abort the whole install with a null-reference throw.
+# Legacy keys from before 0.1.0-C68. The early ad-hoc registration wrote
+# PrismArchiveExtractAll / PrismArchiveOpenAll; leaving them behind shows the
+# user TWO identical "解压到此处" lines in the shell menu forever, because an
+# upgrade only rewrites the current names. Delete them on every run.
+foreach ($legacy in @("PrismArchiveExtractAll", "PrismArchiveOpenAll", "PrismArchiveOpenAll2")) {
+  try { $classes.DeleteSubKeyTree("*\shell\" + $legacy, $false) } catch { }
+}
+
 $classes = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Software\Classes")
 if (-not $classes) { throw "cannot create HKCU\Software\Classes" }
 $written = 0; $removed = 0

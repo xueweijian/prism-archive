@@ -1845,7 +1845,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // (the first frame never contains a thumbnail that happened to arrive).
   std::thread worker;
   auto startSweep = [&]() {
-  worker = std::thread([app, &window, sweepIndices, sweepSizes]() {
+  // The HWND is read HERE, on the UI thread (this handler runs from WM_PAINT),
+  // and travels by VALUE into the worker: a worker that asked the window for its
+  // handle would be touching UI state off the UI thread (CONTRACTS B9).
+  const HWND sweepTarget = window.Hwnd();
+  worker = std::thread([app, &window, sweepIndices, sweepSizes, sweepTarget]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     // The indices below belong to the archive that was open when this thread
     // started; a switch while we decode makes them meaningless (C34).
@@ -1869,8 +1873,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // A generation bump means the session switched archives while we were
         // decoding: these pixels are indexed against a file nobody is showing.
         if (app->archiveGeneration.load() == generation) {
-          window.SetThumbs(store);
-          PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+          // B9: post, never call. The UI thread takes the store in WndProc.
+          window.PostThumbs(store, sweepTarget);
         } else {
           std::fprintf(stderr, "sweep discarded: the session switched archives\n");
         }

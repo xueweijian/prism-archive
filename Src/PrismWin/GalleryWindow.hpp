@@ -200,6 +200,10 @@ class GalleryWindow {
   // deletes. A failed PostMessage deletes it at the source.
   static constexpr UINT kHudStart = WM_APP + 3;
   static constexpr UINT kStatusText = WM_APP + 4;
+  // C76: the sweep worker's hand-off. Ownership of the store travels in the
+  // message (a heap shared_ptr WndProc takes), so the worker never calls a
+  // setter on a window it does not own (B9).
+  static constexpr UINT kThumbsReady = WM_APP + 7;  // 5/6 are archive/operation
 
   // The window owns an HWND and a device-dependent renderer; both are released
   // in the destructor, in that order. Main.cpp's `window` is a stack object, so
@@ -1169,6 +1173,15 @@ class GalleryWindow {
     PostMessageW(host_.hwnd, kProgressMessage, static_cast<WPARAM>(done),
                  static_cast<LPARAM>(total));
   }
+  // C76 + B9: the sweep worker hands the decoded store over HERE. It touches no
+  // member (the target HWND was captured on the UI thread), the UI thread takes
+  // ownership in WndProc and calls SetThumbs there -- the same shape as
+  // PostStatus/PostHudStart, which is what the contract asks for.
+  void PostThumbs(std::shared_ptr<prism::gallery::ThumbStore> store, HWND target) {
+    if (!target) return;
+    auto* heap = new std::shared_ptr<prism::gallery::ThumbStore>(std::move(store));
+    if (!PostMessageW(target, kThumbsReady, 0, reinterpret_cast<LPARAM>(heap))) delete heap;
+  }
 
   // Progress HUD: the worker drives phases; the UI renders.
   // NOT thread-safe on purpose -- see the hand-off block above. Called from
@@ -1872,6 +1885,16 @@ class GalleryWindow {
       case kThumbsChanged:
         Invalidate();
         return 0;
+      case kThumbsReady: {
+        // C76: the worker's fresh store, taken by value on the UI thread.
+        std::unique_ptr<std::shared_ptr<prism::gallery::ThumbStore>> payload(
+            reinterpret_cast<std::shared_ptr<prism::gallery::ThumbStore>*>(lparam));
+        if (payload && *payload) {
+          SetThumbs(*payload);
+          Invalidate();
+        }
+        return 0;
+      }
       case kArchiveChanged: {
         // UI thread: the app opens the archive the payload names and rebuilds
         // the view. Ownership of the string came with the message.

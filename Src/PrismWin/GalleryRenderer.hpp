@@ -1262,14 +1262,32 @@ class GalleryRenderer {
                      const prism::layout::Layout& layout) {
     if (!scene.actions) return;
     const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+    // C67: the painter's counters are CUMULATIVE for its own lifetime, so
+    // "+= actionBar_.dbgButtons" counted every earlier frame again: a band that
+    // drew 8 buttons once and nothing afterwards reported 16 after two paints.
+    // Measured here -- the "8 painted while the geometry said 0" false alarm
+    // that this card's band test hit first. Only the DELTA of this frame may be
+    // accumulated.
+    const int beforeButtons = actionBar_.dbgButtons;
+    const int beforeIcons = actionBar_.dbgIcons;
+    const int beforeLabels = actionBar_.dbgLabels;
+    const int beforeIslands = actionBar_.dbgIslands;
+    const int beforeClipped = actionBar_.dbgLabelsClipped;
+    const int beforeDisabled = actionBar_.dbgDisabled;
+    const int beforeHover = actionBar_.dbgHover;
+    const int beforePressed = actionBar_.dbgPressed;
+    const int beforeDropdowns = actionBar_.dbgDropdowns;
     actionBar_.Draw(target, band, *scene.actions, scene.actionHover, scene.actionPressed,
                     scene.actionTheme);
-    dbgActionButtons += actionBar_.dbgButtons;
-    dbgActionIcons += actionBar_.dbgIcons;
-    dbgActionDisabled += actionBar_.dbgDisabled;
-    dbgActionHover += actionBar_.dbgHover;
-    dbgActionPressed += actionBar_.dbgPressed;
-    dbgActionDropdowns += actionBar_.dbgDropdowns;
+    dbgActionButtons += actionBar_.dbgButtons - beforeButtons;
+    dbgActionIcons += actionBar_.dbgIcons - beforeIcons;
+    dbgActionLabels += actionBar_.dbgLabels - beforeLabels;
+    dbgActionIslands += actionBar_.dbgIslands - beforeIslands;
+    dbgActionClippedLabels += actionBar_.dbgLabelsClipped - beforeClipped;
+    dbgActionDisabled += actionBar_.dbgDisabled - beforeDisabled;
+    dbgActionHover += actionBar_.dbgHover - beforeHover;
+    dbgActionPressed += actionBar_.dbgPressed - beforePressed;
+    dbgActionDropdowns += actionBar_.dbgDropdowns - beforeDropdowns;
   }
 
   // The breadcrumb pill: geometry from the action band (DESIGN.md §2), so it
@@ -1450,6 +1468,9 @@ class GalleryRenderer {
   // these being non-zero -- a zero would make the pixel diff meaningless).
   int dbgActionButtons = 0;
   int dbgActionIcons = 0;
+  int dbgActionLabels = 0;
+  int dbgActionIslands = 0;
+  int dbgActionClippedLabels = 0;
   int dbgActionDisabled = 0;
   int dbgActionHover = 0;
   int dbgActionPressed = 0;

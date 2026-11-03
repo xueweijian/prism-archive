@@ -86,6 +86,8 @@ enum class Command : uint8_t {
   // 9.1 row 6: Alt+Left/Right -> history back/forward.
   HistoryBack,
   HistoryForward,
+  // C67: Ctrl+A -> select every row in the current folder.
+  SelectAll,
   // Batch-A keys, restated here so the table is complete.
   ToggleGrid,
   ToggleList,
@@ -114,6 +116,7 @@ inline std::ostream& operator<<(std::ostream& os, Command command) {
     case Command::RenameSelected: return os << "RenameSelected";
     case Command::HistoryBack: return os << "HistoryBack";
     case Command::HistoryForward: return os << "HistoryForward";
+    case Command::SelectAll: return os << "SelectAll";
     case Command::ToggleGrid: return os << "ToggleGrid";
     case Command::ToggleList: return os << "ToggleList";
     case Command::ActivateSelection: return os << "ActivateSelection";
@@ -168,6 +171,7 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
       case 'K': return Command::OpenPalette;   // 9.1 row 3
       case 'F': return Command::OpenSearch;    // C62: find in the list
       case 'E': return Command::SmartExtract;  // 9.1 row 4
+      case 'A': return Command::SelectAll;     // C67: select every row
       case '1': return Command::ToggleGrid;    // batch A, kept in the table
       case '2': return Command::ToggleList;
       default: return Command::None;

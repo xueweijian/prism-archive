@@ -107,6 +107,16 @@ class ActionBarPainter {
     return S_OK;
   }
 
+  // D3: whether the painter drops the last button (true only in the mutant
+  // build, so the verdict's predicate can prove the injection compiled in).
+  static constexpr bool PaintSkipsLastButton() {
+#if defined(PRISM_C67_MUTANT_SKIP_LAST_PAINT)
+    return true;
+#else
+    return false;
+#endif
+  }
+
   // hoverIndex / pressedIndex are button indices (-1 == nothing under/held).
   // They are PAINT inputs only: which button is legal is the model's decision.
   void Draw(ID2D1RenderTarget* target, const prism::actionbar::Layout& layout,
@@ -134,6 +144,13 @@ class ActionBarPainter {
 
     // 2. per-button state fill + focus ring, then the content.
     for (std::size_t i = 0; i < layout.buttons.size(); ++i) {
+#if defined(PRISM_C67_MUTANT_SKIP_LAST_PAINT)
+      // MUTANT ACTIVE (card C67, arm skip_last_paint): the last button is
+      // never painted, i.e. the "geometry says eight, the screen shows seven"
+      // half-band the C66 rule forbids. Banner + verdict live in
+      // Tests/win/test_c67_gestures.cpp next to the same macro.
+      if (i + 1 == layout.buttons.size()) break;
+#endif
       const prism::actionbar::Button& button = layout.buttons[i];
       const int index = static_cast<int>(i);
       const bool enabled = model.Enabled(button.id);

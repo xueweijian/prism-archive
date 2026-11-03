@@ -1006,6 +1006,9 @@ struct ExtractionOutcome {
   // setting was off or extraction itself failed first).
   bool verified = false;
   bool verifyFailed = false;
+  // C71: files a skip/ask policy left alone. Reported so a verb that extracted
+  // "0 files" can say WHY instead of looking like an empty archive (D12).
+  uint64_t skippedFiles = 0;
 };
 
 namespace detail {
@@ -1081,6 +1084,7 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   outcome.ok = ok;
   outcome.filesWritten = result.filesWritten;
   outcome.bytesWritten = result.bytesWritten;
+  outcome.skippedFiles = result.skippedFiles;
   if (!ok) {
     if (result.guardTripped) outcome.error = result.guardReason;
     else if (result.fuseTripped) outcome.error = result.fuseReason;

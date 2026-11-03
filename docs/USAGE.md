@@ -306,7 +306,7 @@ C69 用真对话框 + 真窗口 + 像素/菜单字符串断言逐项测过。**�
 |---|---|---|
 | appearance.accentColor | 进度条填充、动作岛焦点环、列表选中行改用保存的颜色（默认值 #4F8CFF 是「跟随主题令牌」的哨兵） | win.c71_livesettings（同一坐标像素 = 解析出的 RGB，且与令牌像素不同） |
 | appearance.glassIntensity | 玻璃不透明度按 0.72 为基准缩放：0.30 与 0.90 在同一玻璃坐标得到不同像素，且等于 CompositeOver(令牌×强度, 背景) | win.c71_livesettings（两档像素 + 合成值比对） |
-| extract.overwrite | 目标已存在时 replace 覆盖、skip 保留原文件、rename 另存为 `note (1).txt`；ask 走确认接缝 | win.c71_livesettings（磁盘字节 + 回调计数；ask 断言提示次数，不弹真框） |
+| extract.overwrite | 目标已存在时 replace 覆盖、skip 保留原文件、rename 另存为 `note (1).txt`；ask 在窗口里弹确认，命令行动词（无窗口）按 skip 处理并在 `skipped=` 里报数 | win.c71_livesettings（磁盘字节 + 回调计数；ask 断言提示次数，不弹真框） |
 | extract.verifyAfterExtract | 开：解压后按 C13 Verify 逐条重解，损坏条目让本次操作报告失败；关：同一计划成功 | win.c71_livesettings（同一损坏包、同一计划，off ok / on verifyFailed） |
 
 动作岛的八个按钮同理：标签来自 PrismCore 的编译期表（中文），

@@ -325,10 +325,12 @@ prism::app::ExtractionOptions LiveExtractionOptions(
 // One line of machine-readable telemetry. A GUI app has no console, so this is
 // diagnostic only; the exit code carries the verdict.
 void Telemetry(const char* what, const prism::app::ExtractionOutcome& outcome) {
-  std::fprintf(stderr, "%s ok=%d files=%llu bytes=%llu stamped=%llu amsiBlocked=%llu\n", what,
-               static_cast<int>(outcome.ok),
+  std::fprintf(stderr,
+               "%s ok=%d files=%llu bytes=%llu skipped=%llu stamped=%llu amsiBlocked=%llu\n",
+               what, static_cast<int>(outcome.ok),
                static_cast<unsigned long long>(outcome.filesWritten),
                static_cast<unsigned long long>(outcome.bytesWritten),
+               static_cast<unsigned long long>(outcome.skippedFiles),
                static_cast<unsigned long long>(outcome.security.filesStamped),
                static_cast<unsigned long long>(outcome.security.amsiBlocked));
 }
@@ -355,9 +357,15 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
     return 0;
   }
 
+  // A shell verb runs with no window on purpose: it must NEVER block on a modal
+  // box (the c58 suite measures this). The GUI prompt in app.extractOptions is
+  // therefore dropped here; an "ask" conflict becomes Skip, which is the only
+  // safe non-interactive answer.
+  prism::app::ExtractionOptions options = app.extractOptions;
+  options.prompt = {};
   const prism::app::ExtractionOutcome outcome = prism::app::RunExtraction(
       *app.ops, app.catalog, app.plan, app.archivePath, /*scanExecutables=*/true,
-      prism::win::amsi::InitMode::LoadAmsi, app.extractOptions);
+      prism::win::amsi::InitMode::LoadAmsi, options);
   Telemetry("extract", outcome);
   if (!outcome.ok) {
     std::wstring text = tr.Or("progress.failed", L"\u89E3\u538B\u5931\u8D25") + L"\n\n";
@@ -1080,6 +1088,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         outcome.ok = ok;
         outcome.filesWritten = result.filesWritten;
         outcome.bytesWritten = result.bytesWritten;
+        outcome.skippedFiles = result.skippedFiles;
         if (ok) {
           outcome.security = prism::app::ApplySecurityPass(
               app->archivePath, result.writtenPaths, /*scanExecutables=*/true);

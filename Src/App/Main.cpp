@@ -1707,11 +1707,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         window.Dispatch(WM_KEYDOWN, VK_SPACE, 0);
         break;
       case prism::actionbar::ActionId::Search:
-        // C62's search box is not wired into the window yet. Say "not wired"
-        // (and log it) instead of letting the button look broken.
-        std::fprintf(stderr, "action not-wired id=Search\n");
-        window.SetStatus(L"\u641C\u7D22\u5C1A\u672A\u63A5\u7EBF\uFF1A"
-                         L"C62 \u7684\u641C\u7D22\u6846\u8FD8\u6CA1\u6709\u63A5\u5165\u7A97\u53E3");
+        // C62's field IS wired now (C66 applied the patch); the button and
+        // Ctrl+F must open the same thing, otherwise the toolbar advertises a
+        // feature that only exists on the keyboard.
+        window.OpenSearch();
         break;
       case prism::actionbar::ActionId::Count:
         break;

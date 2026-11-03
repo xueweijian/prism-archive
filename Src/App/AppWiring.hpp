@@ -1920,6 +1920,39 @@ inline ArchiveSwitch SwitchArchive(const ArchiveSession& session, const std::wst
 }
 
 // ---------------------------------------------------------------------------
+// C64: the LAST MILE of a tab switch -- C34's switch, then the view.
+//
+// SwitchArchive owns the file/pool/catalog ordering, but it only mutates the
+// session. The window still paints whatever it was handed. A tab click that
+// runs the switch and stops there leaves the strip on beta and the rows on
+// alpha -- the defect C64 exists to close. This template is the one place that
+// publishes the new catalogue to a gallery-shaped window, so Main.cpp and the
+// tab suite drive the SAME code.
+//
+// The negative control is compile-time: PRISM_C64_MUTANT_STALE_TAB_CONTENT
+// performs the switch but never republishes the rows, and the suite's "the
+// list follows the tab" assertion MUST go red.
+// ---------------------------------------------------------------------------
+template <class WindowLike>
+ArchiveSwitch ApplyArchiveSwitch(WindowLike& window, const ArchiveSession& session,
+                                 const std::wstring& newPath) {
+  ArchiveSwitch out = SwitchArchive(session, newPath);
+  if (!out.ok) return out;
+#if defined(PRISM_C64_MUTANT_STALE_TAB_CONTENT)
+  // NEGATIVE CONTROL: the archive really switched, the view did not.
+  (void)window;
+  return out;
+#else
+  window.SetItems(session.items);
+  window.SetRootLabel(LeafName(*session.archivePath));
+  // The successful switch records its tab (de-duplicated by path). This is the
+  // APP's call, deliberately not a tab-handler re-entry.
+  window.OpenTab(prism::win::WideToUtf8(*session.archivePath), true);
+  return out;
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // 10. The inline-preview companion's HOST half (card C34, C30's missing piece).
 //
 // C30 shipped the shared section, the wake/ack events and the focus-free flyout

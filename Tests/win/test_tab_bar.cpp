@@ -719,21 +719,23 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   // plate are close in luminance, so "distance > 8" was the wrong discriminator
   // and the canvas-token test below is the one that actually measures "no strip".
   PRISM_CHECK(ColorDistance(bare.At(active.left + 5, 48), CanvasOverBackdrop()) > 8);
-  // The strip fills its WHOLE band with the canvas token before it paints any
-  // plate. If it did not run, the band keeps the action island's own tint --
-  // which is 3.6 away from the canvas composite. Count the canvas pixels where
-  // the strip WOULD be (the 32 px under the title): zero above, many below.
-  const auto countCanvasIn = [](const Frame& f, int top) {
+  // The strip paints a PLATE for every tab into that 32 px band; no plate may
+  // reach it when there is no tab. C64 made the action band itself the canvas
+  // (ActionBarPainter now uses the floating-island TOKEN instead of a lit
+  // ribbon), so "canvas-coloured pixels" is no longer a usable absence marker:
+  // the band is SUPPOSED to be canvas now. The plate colour is the surface the
+  // strip adds, and it stays unique to the strip.
+  const auto countPlateIn = [](const Frame& f, int top) {
     int count = 0;
     for (int y = top; y < top + prism::layout::kTabBarHeight; ++y) {
       for (int x = 0; x < static_cast<int>(f.width); ++x) {
-        if (ColorDistance(f.At(x, y), CanvasOverBackdrop()) <= 2) ++count;
+        if (ColorDistance(f.At(x, y), IslandOverCanvas()) <= 2) ++count;
       }
     }
     return count;
   };
-  PRISM_CHECK_EQ(countCanvasIn(bare, hidden.titleBar.bottom), 0);
-  PRISM_CHECK(countCanvasIn(strip, shown.titleBar.bottom) > 0);
+  PRISM_CHECK_EQ(countPlateIn(bare, hidden.titleBar.bottom), 0);
+  PRISM_CHECK(countPlateIn(strip, shown.titleBar.bottom) > 0);
 }
 
 // ---------------------------------------------------------------------------

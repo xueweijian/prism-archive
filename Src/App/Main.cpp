@@ -884,6 +884,36 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // The archive this launch opened is tab 0. OpenTab only tells the MODEL, so
   // it cannot re-enter the switch above.
   window.OpenTab(prism::win::WideToUtf8(archive), true);
+  // ---- C64: every archive on the command line becomes a tab ---------------
+  //
+  // "PrismArchive.exe a.7z b.7z" opened only a.7z: C46 recorded b.7z in the
+  // session document, so the user saw ONE tab and the next launch restored the
+  // second archive as if it had been open. The FIRST argument stays active; the
+  // rest are OPENED (a header read each) and added as tabs. A missing/damaged
+  // extra argument is SKIPPED and counted -- never a message box per file (the
+  // same contract the session restore already follows).
+  int extraTabsSkipped = 0;
+  for (std::size_t i = 1; i < launch.archives.size(); ++i) {
+    const std::wstring& extra = launch.archives[i];
+    if (prism::tabs::PathKey(prism::win::WideToUtf8(extra)) ==
+        prism::tabs::PathKey(prism::win::WideToUtf8(archive))) {
+      continue;  // duplicate argument: TabSet would dedupe it; do not probe twice
+    }
+    prism::win::ArchiveReader probe(app->library);
+    if (!probe.Open(extra)) {
+      ++extraTabsSkipped;
+      logger.Emit(prism::log::Level::kInfo, "tabs",
+                  "command-line archive skipped (missing or unreadable)",
+                  {{"path", prism::win::WideToUtf8(extra)}});
+      continue;
+    }
+    const prism::tabs::OpenOutcome opened =
+        window.OpenTab(prism::win::WideToUtf8(extra), true, /*activate=*/false);
+    if (opened.verdict != prism::tabs::TabVerdict::kOk) ++extraTabsSkipped;
+  }
+  std::fprintf(stderr, "tabs opened=%zu skipped=%d active=%s\n", window.Tabs().size(),
+               extraTabsSkipped,
+               window.Tabs().active() != nullptr ? window.Tabs().active()->path.c_str() : "");
 
   // ---- C31/V3 + C53: the Settings... menu item and its modal gate ----------
   //
@@ -891,8 +921,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // item itself in RebuildMenu; the V3 patch's SettingsDialog::InstallMenu
   // replaces the WHOLE bar, which would erase File > Compress/Exit. InstallMenu
   // is used only when no menu exists, so the delivered helper is still wired.
+  // C64: the item's word is the app's (menu.settings), like every other title.
+  const std::wstring settingsMenuText =
+      tr.Or("menu.settings", language.tag == L"zh-CN" ? L"\u8BBE\u7F6E(\u0026S)..." : L"&Settings...");
+  window.SetSettingsMenuLabel(settingsMenuText);
   if (GetMenu(window.Hwnd()) == nullptr) {
-    prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd());
+    prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd(), settingsMenuText);
   }
   // The dialog must read and write the document THIS launch loaded (a portable
   // build puts it beside the exe, not in %LOCALAPPDATA%), and a save must not
@@ -1350,16 +1384,28 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // failed switch therefore leaves the session on the archive it was showing.
   window.SetArchiveChangedHandler([&window, app, tr, &session, &logger](
                                      const std::wstring& newPath) {
+    // C64: was this message caused by a TAB CLICK (or Ctrl+Tab)? A background
+    // re-pack posts the same message, and its failure must not move the strip.
+    const bool fromTab = window.ConsumeTabSwitchIntent(prism::win::WideToUtf8(newPath));
     if (app->extractReader.load() != nullptr || app->sweepReader.load() != nullptr) {
       // C40: the sentence (and its real-Chinese fallback) lives in AppWiring so
       // the suite can assert its bytes; C38's audit found it double-escaped.
+      if (fromTab) (void)window.RefuseTabSwitch(prism::win::WideToUtf8(newPath));
       window.SetStatus(prism::app::RefreshDeferredStatus(tr));
       return;
     }
     prism::app::ArchiveSession archiveSession{&app->library, &app->ops, &app->catalog, &app->items,
                                               &app->archivePath, 2};
-    const prism::app::ArchiveSwitch switched = prism::app::SwitchArchive(archiveSession, newPath);
+    // C64: SwitchArchive moves the session; ApplyArchiveSwitch republishes the
+    // rows and the tab. Without the second half the strip says beta while the
+    // grid still paints alpha (the defect this card closes).
+    const prism::app::ArchiveSwitch switched =
+        prism::app::ApplyArchiveSwitch(window, archiveSession, newPath);
     if (!switched.ok) {
+      // The tab is already active in the model (the click activated it first).
+      // Put it back: the user keeps the archive whose rows are still on screen,
+      // and the readable reason names the file that could not be opened.
+      if (fromTab) (void)window.RefuseTabSwitch(prism::win::WideToUtf8(newPath));
       // C40: error.open is the table's key (it names the file); the engine's own
       // reason stays verbatim after the colon.
       window.SetStatus(prism::app::OpenFailedStatus(tr, FileNameWide(newPath)) + L"\uFF1A" +
@@ -1379,11 +1425,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // does not pretend to do.
     ++app->archiveGeneration;
     window.SetThumbs(nullptr);
-    window.SetItems(&app->items);
-    window.SetRootLabel(FileNameWide(app->archivePath));
-    // C60: every successful switch records its tab (de-duplicated by path, so
-    // a re-pack of the same archive does not grow a second tab).
-    window.OpenTab(prism::win::WideToUtf8(app->archivePath), true);
+    // ApplyArchiveSwitch already republished the rows, the root label and the
+    // tab (C64) -- doing it twice would reset the navigator's folder after the
+    // switch had just landed.
     // C54: the file may have changed on disk (an edit wrote a new container),
     // so the read-only/lock/volume diagnosis is re-run for the SAME path.
     {

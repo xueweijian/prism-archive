@@ -466,6 +466,13 @@ class GalleryWindow {
     editNewFolderLabel_ = std::move(newFolderText);
     RebuildMenu();
   }
+  // C64: the Settings item's word, from the same translator as the rest of the
+  // bar (see RebuildMenu; SettingsDialog::InstallMenu takes the same string for
+  // the no-menu fallback).
+  void SetSettingsMenuLabel(std::wstring text) {
+    settingsMenuLabel_ = std::move(text);
+    RebuildMenu();
+  }
 
   // Requirement 3: a read-only archive, a multi-volume set or a file another
   // process holds exclusively DISABLES the entries before the user confirms a
@@ -1074,6 +1081,52 @@ class GalleryWindow {
   void SetTabHandler(std::function<void(const std::string&)> handler) {
     onTab_ = std::move(handler);
   }
+  // C64: how the app tells a REFUSED switch apart from a successful one.
+  //
+  // A tab click activates its tab in the model FIRST (so the strip shows what
+  // the user asked for) and then asks the app to load the file. If the app
+  // cannot (missing/deleted/corrupt archive), the tab must go back to the one
+  // whose content is still on screen -- "the strip says beta while the rows are
+  // alpha" is the defect this pair exists to prevent. The app consumes the
+  // intent when the archive-changed message arrives, then either commits (the
+  // normal C34 path) or calls RefuseTabSwitch.
+  //
+  // Only a CLICK/Ctrl+Tab intent counts: a background re-pack also posts
+  // archive-changed, and a failed refresh must not teleport the strip to an
+  // unrelated tab.
+  bool ConsumeTabSwitchIntent(std::string_view utf8Path) {
+    if (pendingTabSwitch_.empty()) return false;
+    const bool matches =
+        prism::tabs::PathKey(pendingTabSwitch_) == prism::tabs::PathKey(utf8Path);
+    if (matches) pendingTabSwitch_.clear();
+    return matches;
+  }
+  // The switch failed: put the active tab back where it was and count the
+  // refusal (RefusedOperationCount is the same diagnostic the edit gate uses).
+  // Returns false when there is nothing to restore (the tab was closed, or the
+  // active path is no longer the one that failed).
+  bool RefuseTabSwitch(std::string_view failedPath) {
+#if defined(PRISM_C64_MUTANT_FAILED_SWITCH_KEEPS_TAB)
+    // NEGATIVE CONTROL: the failed tab stays active while the rows still show
+    // the previous archive. The suite's "still on the original tab" assertion
+    // MUST go red.
+    (void)failedPath;
+    ++refusedOperations_;
+    return false;
+#else
+    const prism::tabs::Tab* active = tabs_.active();
+    if (active == nullptr) return false;
+    if (prism::tabs::PathKey(active->path) != prism::tabs::PathKey(failedPath)) return false;
+    const int origin = tabs_.IndexOf(tabSwitchOrigin_);
+    if (origin < 0) return false;
+    tabs_.Activate(origin);
+    pendingTabSwitch_.clear();
+    ++refusedOperations_;
+    RecomputeLayout();
+    Invalidate();
+    return true;
+#endif
+  }
   // The confirmation seam. nullptr (the default) means the REAL C54 dialog:
   // the window builds C54's EditDialogModel and shows C54's EditConfirmDialog,
   // which completes asynchronously through its result handler. A suite injects
@@ -1096,18 +1149,28 @@ class GalleryWindow {
   // Open (or re-activate) a tab. This is the APP's call after C34's
   // SwitchArchive succeeded -- it deliberately does NOT fire the tab handler,
   // or opening an archive would re-enter the switch that just opened it.
-  prism::tabs::OpenOutcome OpenTab(const std::string& utf8Path, bool exists = true) {
+  // 'activate' defaults to true: a user-opened archive becomes the one shown.
+  // C64's command-line loop passes false for tabs 2..N so the FIRST argument
+  // stays active while the rest are merely opened (and validated) as tabs.
+  prism::tabs::OpenOutcome OpenTab(const std::string& utf8Path, bool exists = true,
+                                  bool activate = true) {
     prism::tabs::OpenRequest request;
     request.path = utf8Path;
     request.exists = exists;
-    const std::string activeBefore = ActiveTabPath();
+    const int activeBefore = tabs_.activeIndex();
     prism::tabs::OpenOutcome outcome = tabs_.Open(request);
     if (outcome.verdict == prism::tabs::TabVerdict::kOk) {
+      // "keep the current tab" must also undo the ACTIVATION Open() performs
+      // when the path was already open: otherwise a duplicate argument would
+      // steal the active tab from the first archive.
+      if (!activate && activeBefore >= 0) {
+        (void)tabs_.Activate(activeBefore);
+        outcome.activatedExisting = false;
+      }
       // A new tab, or an existing one activated: the strip changed either way.
       RecomputeLayout();
       Invalidate();
     }
-    (void)activeBefore;
     return outcome;
   }
 
@@ -1154,6 +1217,13 @@ class GalleryWindow {
   bool ActivateTab(int index) {
     const std::string activeBefore = ActiveTabPath();
     if (!tabs_.Activate(index)) return false;
+    const std::string activeAfter = ActiveTabPath();
+    // C64: remember where a REAL switch started. If the app cannot load the
+    // target, RefuseTabSwitch() puts this tab back (no blank window).
+    if (activeAfter != activeBefore) {
+      tabSwitchOrigin_ = activeBefore;
+      pendingTabSwitch_ = activeAfter;
+    }
     AfterTabsChanged(activeBefore);
     return true;
   }
@@ -2214,7 +2284,7 @@ class GalleryWindow {
     // that would REPLACE this one. (SettingsDialog::InstallMenu builds a whole
     // bar of its own; Main only falls back to it when the window has no menu.)
     AppendMenuW(bar, MF_STRING, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
-                L"Settings...");
+                settingsMenuLabel_.c_str());
     HMENU previous = GetMenu(host_.hwnd);
     if (!SetMenu(host_.hwnd, bar)) {
       DestroyMenu(bar);
@@ -2950,6 +3020,10 @@ class GalleryWindow {
   std::wstring fileMenuLabel_ = L"&File";
   std::wstring compressMenuLabel_ = L"&Compress...";
   std::wstring exitMenuLabel_ = L"E&xit";
+  // C64: the Settings item is part of the same bar, so its label comes from the
+  // app's translator like every other menu title (it used to be a literal here
+  // AND in SettingsDialog::InstallMenu -- the one English item in a zh build).
+  std::wstring settingsMenuLabel_ = L"Settings...";
   // C54: the Edit menu starts DISABLED and English-defaulted. An app that never
   // calls SetEditAvailability must not offer a delete that can only fail; the
   // window created by a test opts in explicitly.
@@ -2986,6 +3060,10 @@ class GalleryWindow {
   prism::sidebar::SidebarStore* sidebarStore_ = nullptr;  // C14 port (not owned)
   bool sidebarRestored_ = false;
   std::function<void(const std::wstring&)> onArchiveChanged_;  // C34: names the new file
+  // C64: the tab a pending click came from. A successful switch clears the
+  // intent in ConsumeTabSwitchIntent; a failed one restores this path.
+  std::string tabSwitchOrigin_;
+  std::string pendingTabSwitch_;
   prism::gallery::ThumbnailLru thumbnails_{256ull * 1024 * 1024};  // blueprint budget
   std::vector<prism::list::SortItem> listItems_;  // what list mode PAINTS
   // C13: the view behind list mode. listRows_ is the sorted/filtered model row

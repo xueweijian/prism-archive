@@ -267,7 +267,9 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // progress three, status.refreshDeferred, and the five CLI/verification
   // errors); that is why this number moved from 39 -- and it moves only when
   // RequiredKeys() moves, which is the point of the census.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{61});
+  // C64: +1 for menu.settings (the Settings item was an English literal), so
+  // the census is 62 and the table must define exactly that many keys.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{62});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

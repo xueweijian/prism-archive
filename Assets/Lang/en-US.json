@@ -3,6 +3,7 @@
   "language": "en-US",
   "strings": {
     "menu.file": "&File",
+    "menu.settings": "&Settings...",
     "menu.smart.extract.here": "Smart Extract Here",
     "menu.extract.here": "Extract Here",
     "menu.extract.to.subfolder": "Extract to \"{name}\"",

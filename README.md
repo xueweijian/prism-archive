@@ -1,93 +1,154 @@
 # PrismArchive
 
-**7-Zip 的工业级压缩引擎 × Bandizip 的零摩擦交互 × Apple iOS 26 Liquid Glass 的光学美学。**
+**把 7-Zip 的引擎装进一个 Windows 11 的外壳：双击就看，右键就解，键盘优先。**
 
-PrismArchive 是一个面向 Windows 11（x64）的开源归档管理器：用 7-Zip 的 C/C++ 算法内核做解压/压缩，
-用 Bandizip 式的零摩擦交互组织界面，再用自定义 HLSL 管线绘制 Liquid Glass 材质。
-当前版本 **0.1.0（开发版）**，MIT 许可；7-Zip 引擎不随包分发。
+PrismArchive 是一个 Windows 11 x64 归档管理器：引擎用 7-Zip 的 `7z.dll`（运行时加载，不随包分发），
+界面、交互与文件关联都是本仓库自己的实现。当前版本 **0.1.0（开发版）**，MIT 许可。
 
-> **截图位（待人工补）**
-> 在 Windows 11 上安装后截取主界面，保存为 `docs/assets/screenshot-main.png`，
-> 再把本段替换为 `![PrismArchive 主界面](docs/assets/screenshot-main.png)`。
-> 截图请包含侧边栏、归档列表和一张真实的 `.7z`；不要提交占位图或模拟图。
+装完最常见的问题是「右键没有菜单」。它不是安装失败，是 Windows 11 的菜单分层，
+见下文 [为什么右键在「显示更多选项」里](#为什么右键在显示更多选项里)。
 
-## 是什么
+## 截图
 
-- **打开就看**：双击归档进入画廊，目录树、文件列表、缩略图一次加载；密码、乱码、套娃归档有明确的决策路径。
-- **右键即用**：为 `.7z` / `.zip` / `.rar` 等 22 种格式注册每用户关联（`PrismArchive.<ext>`），
-  卸载时逐键恢复安装前的处理器。
-- **不碰管理员**：所有文件写入 `%LOCALAPPDATA%\PrismArchive`，所有注册表写入 `HKCU`；
-  不需要 UAC，也不写机器级关联。
-- **引擎外置**：`7z.dll` 是 LGPL，永不入库、永不进包；安装器只记录你机器上 7-Zip 的位置。
+四张图是本项目的发布素材，**尚未拍**（不提交模拟图或占位图，规范见
+[docs/assets/README.md](docs/assets/README.md)）。下表就是四张图各自要证明的东西：
 
-## 安装（每用户，免管理员）
+| 文件 | 拍什么 | 要证明的事 |
+|---|---|---|
+| `docs/assets/screenshot-gallery.png` | 主界面打开一个真实 `.7z`：标题栏、动作岛、侧边栏、网格缩略图、状态栏 | 打开归档后一屏能看到目录、缩略图与状态 |
+| `docs/assets/screenshot-context-menu.png` | 资源管理器右键 →「显示更多选项」里的「用 PrismArchive 打开」「用 PrismArchive 解压到此处」 | 右键动词确实注册到了 HKCU，且位于经典菜单 |
+| `docs/assets/screenshot-preview.png` | 选中一行按空格后的 Quick Look 预览层 | 空格预览不离开列表 |
+| `docs/assets/screenshot-palette.png` | Ctrl+K 命令面板，输入 `png` 后的过滤结果 | 面板同时搜归档内路径和命令 |
 
-从 [Releases](https://github.com/xueweijian/prism-archive/releases) 下载
-`PrismArchive-0.1.0-win-x64.zip`，解压后：
+拍完后把上面四张图换成 Markdown 图片引用即可；`docs/assets/README.md` 里写明了每张图的
+窗口尺寸、必须出现的元素和禁止出现的内容（真实路径、真实用户名）。
 
-    # 在解压目录打开 PowerShell
-    pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+## 安装（三步，免管理员）
 
-安装器会复制载荷到 `%LOCALAPPDATA%\PrismArchive`、写 HKCU 关联和卸载项，并打印
-`INSTALL: OK ...`。不想装到默认位置时加 `-InstallDir D:\Apps\PrismArchive`。
-只想带走、不写注册表时加 `-Portable`。
+1. 从 [Releases](https://github.com/xueweijian/prism-archive/releases) 下载
+   `PrismArchive-0.1.0-win-x64.zip`，解压到任意目录（例如 `D:\Apps\PrismArchive`）。
+2. 装 [7-Zip](https://www.7-zip.org/) x64。**引擎不入包**（LGPL，见下文）。
+3. 在解压目录执行安装脚本：
 
-### 7-Zip 依赖怎么满足
+```pwsh
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+成功的最后一行是这样（`engine=` 后面就是你机器上的 `7z.dll`）：
+
+```text
+INSTALL: OK C:\...\PrismArchive (22 associations, engine=E:\DevTools\7-Zip\7z.dll)
+```
+
+安装器只写 `HKCU` 和 `%LOCALAPPDATA%\PrismArchive`，不弹 UAC、不写机器级关联。
+不想装到默认位置加 `-InstallDir`；只想带走、不写注册表加 `-Portable`：
+
+```pwsh
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir D:\Apps\PrismArchive
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Portable -SourceDir . -InstallDir .
+```
+
+先看它打算写什么，再真装（`-DryRun` 不落盘、不写注册表）：
+
+```pwsh
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DryRun
+```
+
+## 三条最常见的用法
+
+**1. 双击打开。** 安装器把 22 个扩展指到 PrismArchive。如果双击后打开的是别的程序，
+说明这个扩展被 Windows 的「用户选择」钉住了——那不是安装器能改的，见
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#关联被别的软件锁定双击还是打开别的程序)。
+
+**2. 右键解压。** 资源管理器里右键归档 →「显示更多选项」→「用 PrismArchive 解压到此处」。
+这条动词由安装器写进注册表（`HKCU\Software\Classes\*\shell\PrismArchiveExtract`），
+命令行是 `PrismArchive.exe --extract-here "<归档路径>"`。
+
+**3. 右键压缩。** 这一步**安装器不做**：压缩类动词来自经典右键菜单处理器
+（`PrismShellExtClassic.dll`），需要单独注册一次（仍然免管理员）：
+
+```pwsh
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\msix\register-classic.ps1 -DllPath "$env:LOCALAPPDATA\PrismArchive\PrismShellExtClassic.dll"
+```
+
+注册后右键非归档文件 →「显示更多选项」里会出现「压缩为 .7z 归档」「压缩为 .zip 归档」。
+不注册也有等价入口：应用内 **文件 → 压缩为 .7z…**，或命令行 `--compress-7z`。
+
+## 为什么右键在「显示更多选项」里
+
+Windows 11 把右键菜单拆成两层：
+
+- **一级菜单**只收「有包标识」的处理器：`IExplorerCommand` + 已签名的 MSIX 稀疏包。
+  绿色 zip 发布物没有包标识、也没有签名，所以进不去。
+- **经典菜单**（一级菜单底部的「显示更多选项」，或直接按 `Shift+F10`）收的是
+  `HKCU\Software\Classes\*\shell\...` 这类传统动词——这正是 `install.ps1` 写的那两条。
+
+所以「右键没有」通常是找错层了。一条命令确认动词在不在：
+
+```pwsh
+$cls = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes')
+'open    = ' + [bool]$cls.OpenSubKey('*\shell\PrismArchiveOpen')
+'extract = ' + [bool]$cls.OpenSubKey('*\shell\PrismArchiveExtract')
+```
+
+两行都是 `True` 就说明注册好了，只是要去「显示更多选项」里找。想把它搬进一级菜单，
+必须自己构建并签名 MSIX 稀疏包（`tools/msix/build-sparse.ps1`，证书主体须为
+`CN=PrismArchive Contributors`）；这是开发路径，不在绿色包范围内。
+
+## 7z.dll 依赖
 
 PrismArchive **不附带** `7z.dll`。任选其一：
 
-1. 安装 [7-Zip](https://www.7-zip.org/) x64（默认路径即可，安装器会自动找到）；
-2. 设置用户环境变量 `PRISM_7Z_DLL` 指向你的 `7z.dll`；
+1. 安装 7-Zip x64（默认路径即可，安装器会自动找到并写进 `PRISM_7Z_DLL`）；
+2. 自己设用户环境变量 `PRISM_7Z_DLL` 指向 `7z.dll` 的**完整路径**；
 3. 把 `7z.dll` 放到 `PrismArchive.exe` 同目录（便携场景）。
 
-安装器找不到引擎时会打印 `WARN No 7z.dll found ...`，但不会假装安装成功；
-应用启动时会列出它尝试过的路径。
+解析顺序是：`PRISM_7Z_DLL` → exe 同目录 → 7-Zip 自己的注册表 `InstallDir` → 两个
+`Program Files` 探测路径。找不到时应用不会假装成功：弹窗会列出**每一条尝试过的路径及其来源**
+（`[PRISM_7Z_DLL]` / `[registry]` / `[appdir]` …）。诊断信息怎么复制见
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#7zdll-找不到)。
 
-## 使用
+## 命令行
 
-- **双击** `.7z`：若 Windows 询问“如何打开”，选 **PrismArchive**；若已把 `.7z` 默认应用设为别的程序，
-  到 **设置 → 应用 → 默认应用** 改一次即可（Windows 的 UserChoice 是哈希保护的，安装器不能替你改）。
-- **右键 → 打开方式 → PrismArchive**：每用户安装会注册这个入口；Win11 的一级右键菜单由 MSIX 稀疏包提供，
-  不在 `install.ps1` 的范围内。
-- **无窗口校验**：`PrismArchive.exe --test D:\path\archive.7z`，成功时 stderr 打印
-  `verify ok=1 ...` 并以 0 退出。
-- **解压到当前目录**：`PrismArchive.exe --extract-here D:\path\archive.7z`。
+无窗口动词（右键菜单调用的就是这些），退出码即裁决：
+
+| 命令 | 作用 | 退出码 |
+|---|---|---|
+| `PrismArchive.exe "<归档>"` | 打开界面 | 0 |
+| `--extract-here "<归档>"` | 解压到归档所在目录 | 0 成功 / 1 失败 / 2 缺参数 |
+| `--extract-sub "<归档>"` | 解压到以归档名命名的子目录 | 同上 |
+| `--test "<归档>"` | 只校验、不开窗；stderr 打印 `verify ok=...` | 0 通过 / 1 失败 |
+| `--compress-7z "<文件或目录>" ...` | 压缩成 `.7z` | 0 成功 / 1 失败 / 2 缺参数 |
+| `--compress-zip "<文件或目录>" ...` | 压缩成 `.zip` | 同上 |
+| `--smart-extract` / `--smart-extract-each` | 智能解压（单个 / 各归各的目录） | 同上 |
+
+不认识的参数不会开对话框卡住调用方，而是向 stderr 说明并退出 2：
+
+```text
+verb refused: unsupported flag --nope; supported: --smart-extract --extract-here --extract-sub --test --compress-here --compress-7z --compress-zip --smart-extract-each
+```
+
+加密归档的动词会先弹密码框（每次调用都要人工输入一次），批处理脚本里请注意这一点。
 
 ## 卸载
 
-- **设置 → 应用 → 已安装的应用 → PrismArchive → 卸载**；或
-- `pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PrismArchive\uninstall.ps1"`。
+```pwsh
+pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PrismArchive\uninstall.ps1"
+```
 
-卸载会删除安装目录、卸载项和 `PrismArchive.*` ProgID，并把每个扩展名恢复成安装前的处理器
-（逐键比对，见 `tools/verify-install.ps1`）。重复卸载会打印 `UNINSTALL: already clean`。
-
-## 验证安装（开发 / 发布前）
-
-    # 安全模式：只写唯一的 HKCU 临时键和 %TEMP% 目录，跑完自动清理
-    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin -Sandbox
-
-    # 真实用户视角：备份当前 HKCU 关联 -> 安装 -> --test 打开 -> 卸载 -> 逐键比对恢复
-    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin
-
-真实模式遇到已有安装会拒绝覆盖；先卸载，或加 `-CleanFirst` 让脚本先备份再卸载旧安装。
-两个否定对照（`-Mutate UnquotedVerb` / `-Mutate NoRestore`）只允许在 `-Sandbox` 下运行。
-
-## 从源码构建
-
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-    cmake --build build --parallel
-    ctest --test-dir build --output-on-failure
-    pwsh -File tools\verify-install.ps1 -SourceDir build\Src\PrismWin -Sandbox
-
-Windows 集成测试会真实加载 `7z.dll`；找不到时打印显式 `SKIP` 并以 77 退出，不会假装通过。
+或者 **设置 → 应用 → 已安装的应用 → PrismArchive → 卸载**。卸载会删除安装目录、卸载项和
+`PrismArchive.*` ProgID，并把每个扩展恢复成安装前的处理器（逐键比对）。重复卸载打印
+`UNINSTALL: already clean`，不是错误。
 
 ## 文档
 
-- 发布步骤（构建 → 打包 → 校验 → 签名 → `gh release`）：[docs/RELEASE.md](docs/RELEASE.md)
-- 架构蓝图：[docs/BLUEPRINT.md](docs/BLUEPRINT.md)
-- 跨层契约：[docs/CONTRACTS.md](docs/CONTRACTS.md)
+- 装完之后怎么用（动作岛、快捷键、拖放、密码、归档内编辑）：[docs/USAGE.md](docs/USAGE.md)
+- 出问题先查这里（右键没有、7z.dll 找不到、乱码、被占用、关联被锁）：[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- 截图规范与拍摄清单：[docs/assets/README.md](docs/assets/README.md)
+- 从源码构建 / 打包 / 校验 / 发布：[docs/RELEASE.md](docs/RELEASE.md)
+- 界面规格：[docs/DESIGN.md](docs/DESIGN.md) · 跨层契约：[docs/CONTRACTS.md](docs/CONTRACTS.md)
+- 安装器细节（注册表逐键、`-Verify` 的三种结局）：[Installer/README.md](Installer/README.md)
 - 进度与路线：[docs/PROGRESS.md](docs/PROGRESS.md) · [ROADMAP.md](ROADMAP.md)
-- 测试方法：[docs/TESTING.md](docs/TESTING.md)
 
 ## 许可
 

@@ -7,7 +7,8 @@
 // the main window paints now comes from here, and the rules are pure integer
 // math -- a Linux CI job can assert them without a window station:
 //
-//   * bands:   title 32 | action island 56 | sidebar 220 (0 when collapsed)
+//   * bands:   title 32 | TAB BAR 32 (C60: only while an archive is open) |
+//              action island 56 | sidebar 220 (0 when collapsed)
 //              | content padding 16 | status bar 28
 //   * siblings do not intersect (tolerance 0): the bands tile the window and
 //     the content starts exactly where the sidebar ends;
@@ -90,6 +91,13 @@ inline constexpr std::string_view ActiveMutation() {
 inline constexpr int kTitleBarHeight = 32;
 inline constexpr int kActionIslandHeight = 56;
 inline constexpr int kTopBandHeight = kTitleBarHeight + kActionIslandHeight;  // 88
+// C60 (DESIGN.md §2.1): the tab strip sits BETWEEN the title and the action
+// island, is 32 px tall and -- this is the part that is easy to get wrong --
+// is HIDDEN, not empty, when no archive is open: with no tabs the rect is
+// Empty() and the action island moves back up to y = 32, so the 32 px is not
+// reserved for a strip that would paint nothing. A band that keeps its space
+// while showing nothing is dead air above every archive-less window.
+inline constexpr int kTabBarHeight = 32;
 inline constexpr int kSidebarWidth = 220;
 inline constexpr int kContentPadding = 16;
 inline constexpr int kStatusBarHeight = 28;
@@ -176,8 +184,11 @@ struct Layout {
   bool sidebarVisible = false;
   bool listMode = false;
 
-  // Siblings: these five tile the window and are pairwise disjoint.
+  // Siblings: these six tile the window and are pairwise disjoint.
   Rect titleBar;
+  // C60: empty (and tabBarVisible false) when no archive is open.
+  Rect tabBar;
+  bool tabBarVisible = false;
   Rect actionIsland;
   Rect sidebar;      // empty when collapsed
   Rect content;      // starts at sidebar.right
@@ -211,18 +222,30 @@ inline bool RailVisible(bool userWantsRail, bool listMode) {
 }
 
 // The complete geometry of the main window for one client size.
-inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMode) {
+inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMode,
+                      bool tabBarVisible = false) {
   Layout l;
   l.windowW = (std::max)(0, windowW);
   l.windowH = (std::max)(0, windowH);
   l.sidebarVisible = sidebarVisible;
   l.listMode = listMode;
+  l.tabBarVisible = tabBarVisible;
 
   const int w = l.windowW;
   const int h = l.windowH;
 
   l.titleBar = Rect{0, 0, w, (std::min)(kTitleBarHeight, h)};
-  l.actionIsland = Rect{0, l.titleBar.bottom, w, (std::min)(kTopBandHeight, h)};
+  // C60: the strip is inserted between the two bands that already existed, so
+  // the action island (and everything under it) slides down by exactly 32 px
+  // while tabs are open and returns to y = 32 when the last one closes. The
+  // default (false) keeps every pre-C60 caller -- and every pre-C60 assertion
+  // about title/action/content -- byte-for-byte identical.
+  const int tabTop = l.titleBar.bottom;
+  l.tabBar = tabBarVisible
+                 ? Rect{0, tabTop, w, (std::min)(tabTop + kTabBarHeight, h)}
+                 : Rect{};
+  const int topBand = tabBarVisible ? kTopBandHeight + kTabBarHeight : kTopBandHeight;
+  l.actionIsland = Rect{0, l.tabBar.bottom, w, (std::min)(topBand, h)};
   const int contentTop = l.actionIsland.bottom;
   const int statusTop = (std::max)(contentTop, h - kStatusBarHeight);
 

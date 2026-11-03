@@ -38,6 +38,7 @@
 #include "../PrismCore/ProgressHud.hpp"
 #include "../PrismCore/SidebarModel.hpp"
 #include "../PrismCore/ThemeTokens.hpp"
+#include "TabBar.hpp"  // C60: the tab strip (geometry + pixels)
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "ActionBar.hpp"    // C-V2: the action-band painter (DESIGN.md §2)
@@ -170,6 +171,13 @@ class GalleryRenderer {
     int actionHover = -1;    // button index under the pointer (-1: none)
     int actionPressed = -1;  // button index held down (-1: none)
     prism::theme::Variant actionTheme = prism::theme::Variant::Midnight;
+
+    // C60: the tab strip. nullptr -> no strip at all (every pre-C60 scene, and
+    // the "no archive is open" state, where the band is hidden and the action
+    // island sits directly under the title). The band's rectangle comes from
+    // V1's layout (Layout::tabBar); this view only says what to paint in it.
+    const prism::win::tabbar::View* tabs = nullptr;
+    prism::theme::Variant tabTheme = prism::theme::Variant::Midnight;
   };
 
   HRESULT Initialize() {
@@ -263,6 +271,9 @@ class GalleryRenderer {
     // action-bar scene pays one brush and two text formats.
     hr = actionBar_.CreateDeviceResources(target);
     if (FAILED(hr)) return hr;
+    // C60: the tab strip's one brush + two formats (same shape as the rail and
+    // the band: recoloured per token, never one brush per colour).
+    if (!tabPainter_.CreateDeviceResources(target, writeFactory_.Get())) return E_FAIL;
     return S_OK;
   }
 
@@ -284,6 +295,11 @@ class GalleryRenderer {
                                      scene.listMode);
     target->Clear(kBackdrop);
     DrawBands(target, layout);
+    // C60: the tab strip is a BAND of the layout (DESIGN.md §2.1), painted with
+    // the bands and before the content, so the content's clip never covers it
+    // and a tab can never be drawn over a tile. A null view or a hidden band
+    // paints nothing at all -- case 7 of the suite measures the pixels.
+    if (scene.tabs != nullptr) tabPainter_.Paint(target, layout, *scene.tabs, scene.tabTheme);
     // V4: the 28 px band carries its four segments; an empty strip was symptom
     // #4 of the screenshot.
     DrawStatusBar(target, scene, layout);
@@ -1390,6 +1406,8 @@ class GalleryRenderer {
   ComPtr<IDWriteTextFormat> statusFormat_;
   // C-V2: the action band's painter (own brush + text formats).
   prism::win::actionbar::ActionBarPainter actionBar_;
+  // C60: the tab strip's painter (own brush + two text formats).
+  prism::win::tabbar::Painter tabPainter_;
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
   std::unordered_map<uint32_t, ComPtr<ID2D1Bitmap>> thumbBitmaps_;
   uint64_t thumbVersion_ = 0;
@@ -1436,6 +1454,13 @@ class GalleryRenderer {
   int dbgActionDropdowns = 0;
   // V4: proof that the status band painted its segments (four per frame).
   int dbgStatusSegments = 0;
+  // C60: proof that the TAB STRIP reached pixels. TabsPainted() == 0 while no
+  // archive is open is the positive half of case 7 ("the band is not drawn"),
+  // and > 0 with two tabs is what makes case 1 a paint assertion instead of a
+  // model assertion.
+  int TabBarTabsPainted() const { return tabPainter_.TabsPainted(); }
+  int TabBarDirtyDotsPainted() const { return tabPainter_.DirtyDotsPainted(); }
+  int TabBarInsertMarksPainted() const { return tabPainter_.InsertMarksPainted(); }
 
  private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;

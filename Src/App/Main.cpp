@@ -864,6 +864,27 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   window.SetItems(&app->items);
   window.SetRootLabel(FileNameWide(archive));
 
+  // ---- C60: the tab strip ------------------------------------------------
+  //
+  // ONE door for "show this archive": the strip posts C34's archive-changed
+  // message, whose handler runs prism::app::SwitchArchive and then records the
+  // tab. A tab click, Ctrl+Tab, a middle-click close and a menu open therefore
+  // all end in the SAME switch -- the card's requirement 4, and the reason the
+  // window owns no file handling of its own.
+  //
+  // An EMPTY path is the empty state (the last tab was closed): the window has
+  // already cleared its rows and hidden the strip, and the app only says so.
+  window.SetTabHandler([&window, tr](const std::string& utf8Path) {
+    if (utf8Path.empty()) {
+      window.SetStatus(tr.Or("sidebar.empty.noArchive", L"\u6CA1\u6709\u6253\u5F00\u7684\u5F52\u6863"));
+      return;
+    }
+    window.PostArchiveChanged(prism::win::Utf8ToWide(utf8Path));
+  });
+  // The archive this launch opened is tab 0. OpenTab only tells the MODEL, so
+  // it cannot re-enter the switch above.
+  window.OpenTab(prism::win::WideToUtf8(archive), true);
+
   // ---- C31/V3 + C53: the Settings... menu item and its modal gate ----------
   //
   // The window already owns the menu bar (C27's File menu), so it appends the
@@ -1360,6 +1381,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     window.SetThumbs(nullptr);
     window.SetItems(&app->items);
     window.SetRootLabel(FileNameWide(app->archivePath));
+    // C60: every successful switch records its tab (de-duplicated by path, so
+    // a re-pack of the same archive does not grow a second tab).
+    window.OpenTab(prism::win::WideToUtf8(app->archivePath), true);
     // C54: the file may have changed on disk (an edit wrote a new container),
     // so the read-only/lock/volume diagnosis is re-run for the SAME path.
     {

@@ -25,7 +25,7 @@ using prism::dragout::Stage;
 
 // D3 predicate: did the injected defect actually fire? Asked of a FRESH gate,
 // so a red for an unrelated reason can never be reported as CAUGHT.
-bool EagerInjectionFired() {
+[[maybe_unused]] bool EagerInjectionFired() {
   int extractions = 0;
   MaterializeGate gate([&extractions]() {
     ++extractions;

@@ -57,11 +57,13 @@
 #include <psapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -84,6 +86,16 @@ namespace {
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
 using prism::win::gallery::GalleryWindow;
+
+// C65: when true this binary reports as the C65 re-measurement (3 memory
+// repeats, a 10k-row frame cell, first-payload latency, Private Bytes beside
+// Working Set). The default run is still C49's and its BENCH lines are
+// unchanged -- the C65 suite compiles the same source and passes --c65.
+bool gC65Mode = false;
+
+// Set from inside the mutant branch, so the D27 predicate proves the injection
+// really executed instead of inferring it from the binary name (D3).
+std::atomic<bool> gNoFirstPaintFired{false};
 
 // ---------------------------------------------------------------------------
 // instrument (D4: calibrate it before believing any digit)
@@ -123,31 +135,56 @@ double P95(std::vector<double> values) {
 
 double Mb(size_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); }
 
-size_t CurrentWorkingSet(HANDLE process) {
+// Card C65: ADR-006's tiers are budgets on the PROCESS, so two INDEPENDENT
+// counters are read for every sample. They move for different reasons and the
+// gap between them is itself evidence:
+//   * WorkingSetSize -- resident pages (Task Manager's "Memory"); Windows may
+//     trim it at any time, so it can look healthy while commit grows;
+//   * PagefileUsage  -- private committed bytes ("Private Bytes"); a trim does
+//     NOT return it, so a leak cannot hide behind an idle trim.
+// A tier is never judged on one of them alone.
+struct ProcessMemory {
+  size_t workingSet = 0;
+  size_t privateBytes = 0;
+  bool measured = false;
+};
+
+ProcessMemory CurrentMemory(HANDLE process) {
   PROCESS_MEMORY_COUNTERS pmc{};
-  if (!GetProcessMemoryInfo(process, &pmc, sizeof(pmc))) return 0;
-  return pmc.WorkingSetSize;
+  ProcessMemory memory;
+  if (!GetProcessMemoryInfo(process, &pmc, sizeof(pmc))) return memory;
+  memory.workingSet = pmc.WorkingSetSize;
+  memory.privateBytes = pmc.PagefileUsage;
+  memory.measured = true;
+  return memory;
 }
 
-// Samples another process's working set: 20 reads 20 ms apart, after the caller
-// has let the state settle. Median and p95 come from those reads, so a single
-// spike cannot become the reported tier.
+// Samples another process: 20 reads 20 ms apart, after the caller has let the
+// state settle. Median and p95 come from those reads, so a single spike cannot
+// become the reported tier.
 struct WsSample {
   double medianMb = 0.0;
   double p95Mb = 0.0;
   double peakMb = 0.0;
+  double privateMedianMb = 0.0;
+  double privateP95Mb = 0.0;
+  double privatePeakMb = 0.0;
   bool measured = false;
 };
 
 WsSample SampleWorkingSet(HANDLE process, int reads = 20, int intervalMs = 20) {
   WsSample sample;
   std::vector<double> values;
+  std::vector<double> privateValues;
   size_t peak = 0;
+  size_t privatePeak = 0;
   for (int i = 0; i < reads; ++i) {
-    const size_t now = CurrentWorkingSet(process);
-    if (now > 0) {
-      values.push_back(Mb(now));
-      if (now > peak) peak = now;
+    const ProcessMemory now = CurrentMemory(process);
+    if (now.measured) {
+      values.push_back(Mb(now.workingSet));
+      privateValues.push_back(Mb(now.privateBytes));
+      if (now.workingSet > peak) peak = now.workingSet;
+      if (now.privateBytes > privatePeak) privatePeak = now.privateBytes;
     }
     Sleep(static_cast<DWORD>(intervalMs));
   }
@@ -155,6 +192,9 @@ WsSample SampleWorkingSet(HANDLE process, int reads = 20, int intervalMs = 20) {
   sample.medianMb = Median(values);
   sample.p95Mb = P95(values);
   sample.peakMb = Mb(peak);
+  sample.privateMedianMb = Median(privateValues);
+  sample.privateP95Mb = P95(privateValues);
+  sample.privatePeakMb = Mb(privatePeak);
   return sample;
 }
 
@@ -279,9 +319,18 @@ FirstFrameArm MeasureFirstFrame(std::vector<prism::ArchiveItem>& items) {
     InvalidateRect(window.Hwnd(), nullptr, FALSE);
     // UpdateWindow sends WM_PAINT synchronously: the digit ends when the first
     // frame has really been drawn (and the glass frame presented).
+#if defined(PRISM_C65_MUTANT_NO_FIRST_PAINT)
+    // Negative control: the paint is never delivered, so the smoke's
+    // "painted" conjunction must go red. The predicate below is set HERE, at
+    // the injection site, so the D27 verdict cannot be claimed by a red that
+    // happened for another reason (D3).
+    gNoFirstPaintFired.store(true, std::memory_order_relaxed);
+    arm.painted = false;
+#else
     UpdateWindow(window.Hwnd());
-    arm.paintMs = paint.Ms();
     arm.painted = true;
+#endif
+    arm.paintMs = paint.Ms();
     arm.totalMs = total.Ms();
     // Destroying the window is NOT part of the first-frame cell; the destructor
     // runs at the end of this scope, after the timestamp.
@@ -660,6 +709,8 @@ struct OpenSample {
   uint64_t bytes = 0;
   uint64_t sniffBytes = 0;
   double ms = 0.0;
+  double firstPayloadMs = 0.0;  // C65: call start -> first entry's payload read
+  bool firstPayloadRead = false;
   bool opened = false;
   std::string trace;
 };
@@ -675,6 +726,16 @@ OpenSample MeasureOpen(prism::win::SevenZipLibrary& library, const fs::path& fil
   sample.bytes = prism::win::IoCounters().bytesRead.load();
   sample.sniffBytes = prism::win::IoCounters().sniffBytes.load();
   sample.trace = reader.openTrace();
+  // C65: "open -> first byte" is TWO calls, not one. Open() returns once the
+  // catalogue is readable; the first payload byte needs an extraction. The
+  // 4 GiB fixtures carry a 22-byte stored item, so the return of this call is
+  // within microseconds of the first payload byte. C49's line is unchanged:
+  // the extraction runs only in C65 mode, after sample.bytes was captured.
+  if (gC65Mode && sample.opened) {
+    const std::optional<std::vector<uint8_t>> payload = reader.ExtractToMemory(0);
+    sample.firstPayloadMs = timer.Ms();
+    sample.firstPayloadRead = payload.has_value();
+  }
   reader.Close();
   return sample;
 }
@@ -966,6 +1027,46 @@ ThumbRun RunThumbBatch(BenchHost& host, size_t workerCount) {
   return run;
 }
 
+// ---------------------------------------------------------------------------
+// C65: the 3-second smoke (`perf_smoke`)
+// ---------------------------------------------------------------------------
+// A merge-time tripwire, not a measurement: one real assembled window to its
+// first paint, then 60 frames of a 10k-row list, then both memory counters on
+// ourselves. Every wait here is bounded (D29); the digits are report-only, the
+// assertions are shape checks (painted, virtualisation, counters readable).
+int RunSmoke() {
+  Timer total;
+  total.Begin();
+  std::printf("=== C65 perf smoke (assembled window, 10k rows) ===\n");
+  std::vector<prism::ArchiveItem> items = MakeItems(1000);
+  const FirstFrameArm first = MeasureFirstFrame(items);
+  PRISM_CHECK(first.created);
+  PRISM_CHECK(first.painted);
+  PRISM_CHECK(first.totalMs < 5000.0);  // hang detector only
+  if (prism::test::FailureCount() != 0) return 1;
+
+  const FrameArm frame = RunFrameRound(10000, 60);
+  PRISM_CHECK(frame.ok);
+  PRISM_CHECK(frame.maxRows > 0 && frame.maxRows < 100);  // virtualisation
+  PRISM_CHECK(frame.totalP95 < 5000.0);                  // hang detector only
+  if (prism::test::FailureCount() != 0) return 1;
+
+  const ProcessMemory self = CurrentMemory(GetCurrentProcess());
+  PRISM_CHECK(self.measured);
+  PRISM_CHECK(self.workingSet > 0);
+  PRISM_CHECK(self.privateBytes > 0);
+  if (prism::test::FailureCount() != 0) return 1;
+
+  const double elapsed = total.Ms();
+  std::printf("BENCH_C65_SMOKE {\"elapsed_ms\":%.1f,\"first_frame_ms\":%.1f,"
+              "\"frame_median_ms\":%.3f,\"frame_p95_ms\":%.3f,\"rows\":10000,"
+              "\"rows_drawn\":%u,\"ws_mb\":%.2f,\"private_mb\":%.2f}\n",
+              elapsed, first.totalMs, frame.totalMedian, frame.totalP95, frame.maxRows,
+              Mb(self.workingSet), Mb(self.privateBytes));
+  std::printf("ALL PERF SMOKE CHECKS PASSED\n");
+  return 0;
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -997,6 +1098,24 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  bool smoke = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--c65") == 0) gC65Mode = true;
+    if (std::strcmp(argv[i], "--smoke") == 0) smoke = true;
+  }
+
+  // CONTRACTS D28: the mutant banner sits beside its guard.
+#if defined(PRISM_C65_MUTANT_NO_FIRST_PAINT)
+  std::printf("C65 MUTANT ACTIVE: no_first_paint\n");
+  // CONTRACTS D27 + D3: the verdict prefix is printed at the FIRST failed
+  // assertion, and only when the runtime predicate proves the injection ran.
+  prism::test::SetMutationVerdict("C65 MUTATION CAUGHT: no_first_paint", [] {
+    return gNoFirstPaintFired.load(std::memory_order_relaxed);
+  });
+#endif
+
+  if (smoke) return RunSmoke();
+
   // CONTRACTS D27 + D3: armed with the caller's complete prefix and the runtime
   // predicate that proves the injection really fired. A red from an unrelated
   // cause records the failure and stays red (no false CAUGHT).
@@ -1006,7 +1125,11 @@ int main(int argc, char** argv) {
   });
   std::printf("=== c49 remeasure [MUTANT: sniff disabled] ===\n");
 #else
-  std::printf("=== c49 remeasure (assembled app, after V1/V2/C29/C45/C43/C28) ===\n");
+  if (gC65Mode) {
+    std::printf("=== C65 post-assembly re-measure (tabs/search/edit/vault) ===\n");
+  } else {
+    std::printf("=== c49 remeasure (assembled app, after V1/V2/C29/C45/C43/C28) ===\n");
+  }
 #endif
 
   // ---- 0. calibrate the instrument (D4) before believing a digit ----
@@ -1144,26 +1267,37 @@ int main(int argc, char** argv) {
   }
 
   // -----------------------------------------------------------------------
-  // 2. resident memory: four states, each a FRESH process (ADR-006 tiers)
+  // 2. resident memory: fresh process per state (ADR-006 tiers).
+  //    C49 repeats 5x; C65 repeats 3x AND records BOTH counters (C65's card
+  //    asks for Working Set and Private Bytes as two independent measurements).
   // -----------------------------------------------------------------------
-  std::printf("  -- resident memory (fresh process per state, 5 samples each) --\n");
+  const int kMemoryRepeats = gC65Mode ? 3 : 5;
+  std::printf("  -- resident memory (fresh process per state, %d samples each) --\n",
+              kMemoryRepeats);
   struct MemoryArm {
-    std::vector<double> values;
+    std::vector<double> values;         // Working Set medians
+    std::vector<double> privateValues;  // Private Bytes medians
     bool measured = false;
     bool glass = false;
     std::string reason;
   };
   auto stageArm = [&](const char* stage) {
     MemoryArm arm;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < kMemoryRepeats; ++i) {
       const StageResult result = MeasureStage(stage, work);
       if (!result.measured) {
         arm.reason = result.reason;
         continue;
       }
       arm.values.push_back(result.ws.medianMb);
+      arm.privateValues.push_back(result.ws.privateMedianMb);
       arm.measured = true;
       arm.glass = arm.glass || result.glassReady;
+      if (gC65Mode) {
+        std::printf("      stage %-7s run %d/%d: Working Set %.2f MB, Private Bytes %.2f MB\n",
+                    stage, i + 1, kMemoryRepeats, result.ws.medianMb,
+                    result.ws.privateMedianMb);
+      }
     }
     return arm;
   };
@@ -1173,30 +1307,44 @@ int main(int argc, char** argv) {
 
   auto appArm = [&](bool minimize) {
     MemoryArm arm;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < kMemoryRepeats; ++i) {
       const AppState state = MeasureAppState(appExe, appArchive, minimize);
       if (!state.measured) {
         arm.reason = state.reason;
         continue;
       }
       arm.values.push_back(state.ws.medianMb);
+      arm.privateValues.push_back(state.ws.privateMedianMb);
       arm.measured = true;
+      if (gC65Mode) {
+        std::printf("      app %-9s run %d/%d: Working Set %.2f MB, Private Bytes %.2f MB\n",
+                    minimize ? "minimised" : "archive", i + 1, kMemoryRepeats,
+                    state.ws.medianMb, state.ws.privateMedianMb);
+      }
     }
     return arm;
   };
   const MemoryArm appArchiveArm = appArm(false);
   const MemoryArm appMinArm = appArm(true);
 
-  std::printf("    empty window (no archive, no glass): %.1f MB median (p95 %.1f)\n",
-              Median(emptyArm.values), P95(emptyArm.values));
-  std::printf("    + 1000-entry catalog: %.1f MB median (p95 %.1f)\n",
-              Median(archiveArm.values), P95(archiveArm.values));
-  std::printf("    + glass island live: %.1f MB median (p95 %.1f, glass=%s)\n",
-              Median(glassArm.values), P95(glassArm.values), glassArm.glass ? "on" : "off");
-  std::printf("    shipped app, archive open: %.1f MB median (p95 %.1f)\n",
-              Median(appArchiveArm.values), P95(appArchiveArm.values));
-  std::printf("    shipped app, minimised: %.1f MB median (p95 %.1f)\n",
-              Median(appMinArm.values), P95(appMinArm.values));
+  std::printf("    empty window (no archive, no glass): WS %.1f MB (p95 %.1f) | "
+              "Private %.1f MB (p95 %.1f)\n",
+              Median(emptyArm.values), P95(emptyArm.values),
+              Median(emptyArm.privateValues), P95(emptyArm.privateValues));
+  std::printf("    + 1000-entry catalog: WS %.1f MB (p95 %.1f) | Private %.1f MB (p95 %.1f)\n",
+              Median(archiveArm.values), P95(archiveArm.values),
+              Median(archiveArm.privateValues), P95(archiveArm.privateValues));
+  std::printf("    + glass island live: WS %.1f MB (p95 %.1f) | Private %.1f MB (p95 %.1f), "
+              "glass=%s\n",
+              Median(glassArm.values), P95(glassArm.values),
+              Median(glassArm.privateValues), P95(glassArm.privateValues),
+              glassArm.glass ? "on" : "off");
+  std::printf("    shipped app, archive open: WS %.1f MB (p95 %.1f) | Private %.1f MB (p95 %.1f)\n",
+              Median(appArchiveArm.values), P95(appArchiveArm.values),
+              Median(appArchiveArm.privateValues), P95(appArchiveArm.privateValues));
+  std::printf("    shipped app, minimised: WS %.1f MB (p95 %.1f) | Private %.1f MB (p95 %.1f)\n",
+              Median(appMinArm.values), P95(appMinArm.values),
+              Median(appMinArm.privateValues), P95(appMinArm.privateValues));
   PRISM_CHECK(emptyArm.measured);
   PRISM_CHECK(archiveArm.measured);
   PRISM_CHECK(glassArm.measured);
@@ -1205,14 +1353,17 @@ int main(int argc, char** argv) {
   }
 
   // -----------------------------------------------------------------------
-  // 3. 4 GiB open: BYTES READ (median + p95 over five opens)
+  // 3. 4 GiB open: BYTES READ (median + p95 over five opens). C65 also
+  //    records open -> first payload byte (Open() + entry 0's payload).
   // -----------------------------------------------------------------------
   std::printf("  -- 4 GiB open: bytes read, not seconds --\n");
   struct OpenArm {
     std::vector<double> byteValues;
     std::vector<double> msValues;
     std::vector<double> sniffValues;
+    std::vector<double> firstPayloadValues;
     bool opened = false;
+    bool firstPayloadRead = false;
     std::string trace;
   };
   auto openArm = [&](const fs::path& file) {
@@ -1220,9 +1371,11 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 5; ++i) {
       const OpenSample sample = MeasureOpen(library, file);
       arm.opened = arm.opened || sample.opened;
+      arm.firstPayloadRead = arm.firstPayloadRead || sample.firstPayloadRead;
       arm.byteValues.push_back(static_cast<double>(sample.bytes));
       arm.sniffValues.push_back(static_cast<double>(sample.sniffBytes));
       arm.msValues.push_back(sample.ms);
+      arm.firstPayloadValues.push_back(sample.firstPayloadMs);
       if (arm.trace.empty()) arm.trace = sample.trace;
     }
     return arm;
@@ -1235,6 +1388,14 @@ int main(int argc, char** argv) {
   std::printf("    sparse4g.7z : %.0f bytes median (p95 %.0f), %.1f ms median | %s\n",
               Median(sevenArm.byteValues), P95(sevenArm.byteValues), Median(sevenArm.msValues),
               sevenArm.trace.c_str());
+  if (gC65Mode) {
+    std::printf("    open -> first payload byte: zip %.3f ms, 7z %.3f ms (median of 5; "
+                "payload read: zip=%s, 7z=%s)\n",
+                Median(zipArm.firstPayloadValues), Median(sevenArm.firstPayloadValues),
+                zipArm.firstPayloadRead ? "yes" : "no", sevenArm.firstPayloadRead ? "yes" : "no");
+    PRISM_CHECK(zipArm.firstPayloadRead);
+    PRISM_CHECK(sevenArm.firstPayloadRead);
+  }
   PRISM_CHECK(zipArm.opened);
   PRISM_CHECK(sevenArm.opened);
   // C28's gate, unchanged: identifying + indexing a 4 GiB archive must not read
@@ -1243,37 +1404,56 @@ int main(int argc, char** argv) {
   PRISM_CHECK(Median(sevenArm.byteValues) <= static_cast<double>(kOpenByteBudget));
 
   // -----------------------------------------------------------------------
-  // 4. 100 000 rows: frame time median + p95 (five rounds x 60 frames)
+  // 4. frame time median + p95 (five rounds x 60 frames). C65 measures BOTH
+  //    10k rows (the card's cell) and 100k rows (C49's cell) so the two are
+  //    comparable instead of conflated.
   // -----------------------------------------------------------------------
-  std::printf("  -- 100k rows: frame time (5 rounds x 60 frames, 1200x800 software) --\n");
-  std::vector<double> roundMedian, roundP95;
-  double worstDrawP95 = 0.0, worstEndP95 = 0.0;
-  uint32_t rowsDrawn = 0;
-  bool framePainted = false;
-  for (int round = 0; round < 5; ++round) {
-    const FrameArm arm = RunFrameRound(100000, 60);
-    if (!PRISM_CHECK(arm.ok)) break;
-    roundMedian.push_back(arm.totalMedian);
-    roundP95.push_back(arm.totalP95);
-    worstDrawP95 = (std::max)(worstDrawP95, arm.drawP95);
-    worstEndP95 = (std::max)(worstEndP95, arm.endP95);
-    rowsDrawn = (std::max)(rowsDrawn, arm.maxRows);
-    framePainted = framePainted || arm.painted;
-    std::printf("    round %d: median %.3f ms, p95 %.3f ms (draw p95 %.3f + flush p95 %.3f), "
-                "rows %u\n",
-                round + 1, arm.totalMedian, arm.totalP95, arm.drawP95, arm.endP95, arm.maxRows);
-  }
-  const double frameMedian = Median(roundMedian);
-  const double frameP95 = Median(roundP95);
+  struct FrameCell {
+    uint32_t rows = 0;
+    std::vector<double> medians;
+    std::vector<double> p95s;
+    double drawP95 = 0.0;
+    double endP95 = 0.0;
+    uint32_t rowsDrawn = 0;
+    bool painted = false;
+  };
+  auto runFrameCell = [&](uint32_t rows) {
+    FrameCell cell;
+    cell.rows = rows;
+    std::printf("  -- %u rows: frame time (5 rounds x 60 frames, 1200x800 software) --\n", rows);
+    for (int round = 0; round < 5; ++round) {
+      const FrameArm arm = RunFrameRound(rows, 60);
+      if (!PRISM_CHECK(arm.ok)) break;
+      cell.medians.push_back(arm.totalMedian);
+      cell.p95s.push_back(arm.totalP95);
+      cell.drawP95 = (std::max)(cell.drawP95, arm.drawP95);
+      cell.endP95 = (std::max)(cell.endP95, arm.endP95);
+      cell.rowsDrawn = (std::max)(cell.rowsDrawn, arm.maxRows);
+      cell.painted = cell.painted || arm.painted;
+      std::printf("    round %d: median %.3f ms, p95 %.3f ms (draw p95 %.3f + flush p95 %.3f), "
+                  "rows %u\n",
+                  round + 1, arm.totalMedian, arm.totalP95, arm.drawP95, arm.endP95, arm.maxRows);
+    }
+    return cell;
+  };
+  const FrameCell frameCell = runFrameCell(gC65Mode ? 10000u : 100000u);
+  const FrameCell frameCell100k = gC65Mode ? runFrameCell(100000u) : FrameCell{};
+  const double frameMedian = Median(frameCell.medians);
+  const double frameP95 = Median(frameCell.p95s);
   std::printf("    across rounds: median %.3f ms, p95 %.3f ms -> %.1f FPS median, %.1f FPS p95\n",
               frameMedian, frameP95, frameMedian > 0.0 ? 1000.0 / frameMedian : 0.0,
               frameP95 > 0.0 ? 1000.0 / frameP95 : 0.0);
-  PRISM_CHECK(framePainted);
+  PRISM_CHECK(frameCell.painted);
   // Virtualisation is the assertion (a count check, not a stopwatch): the
   // viewport, not the row count, decides how many rows are drawn.
-  PRISM_CHECK(rowsDrawn > 0 && rowsDrawn < 100);
+  PRISM_CHECK(frameCell.rowsDrawn > 0 && frameCell.rowsDrawn < 100);
   // Hang detector only.
   PRISM_CHECK(frameP95 < 5000.0);
+  if (gC65Mode) {
+    PRISM_CHECK(frameCell100k.painted);
+    PRISM_CHECK(frameCell100k.rowsDrawn > 0 && frameCell100k.rowsDrawn < 100);
+    PRISM_CHECK(Median(frameCell100k.p95s) < 5000.0);
+  }
 
   // -----------------------------------------------------------------------
   // 5. 800 thumbnails: serial vs parallel (C45's pipeline, re-run)
@@ -1317,60 +1497,141 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  const char* tag = gC65Mode ? "C65" : "C49";
   std::printf(
-      "BENCH_C49_STARTUP {\"first_frame_median_ms\":%.3f,\"first_frame_p95_ms\":%.3f,"
+      "BENCH_%s_STARTUP {\"mode\":\"%s\",\"first_frame_median_ms\":%.3f,"
+      "\"first_frame_p95_ms\":%.3f,"
       "\"samples\":%zu,\"create_median_ms\":%.3f,\"glass_median_ms\":%.3f,"
       "\"paint_median_ms\":%.3f,\"paint_p95_ms\":%.3f,\"glass\":\"%s\",\"painted\":%s}\n",
-      firstFrameMedian, firstFrameP95, firstFrameMs.size(), Median(firstCreateMs),
+      tag, tag, firstFrameMedian, firstFrameP95, firstFrameMs.size(), Median(firstCreateMs),
       Median(firstGlassMs), Median(firstPaintMs), P95(firstPaintMs), glassReady ? "on" : "off",
       firstFramePainted ? "true" : "false");
-  std::printf(
-      "BENCH_C49_MEMORY {\"empty_mb\":%.2f,\"empty_p95_mb\":%.2f,"
-      "\"archive_mb\":%.2f,\"archive_p95_mb\":%.2f,"
-      "\"glass_full_mb\":%.2f,\"glass_full_p95_mb\":%.2f,\"glass_live\":%s,"
-      "\"app_archive_mb\":%.2f,\"app_archive_p95_mb\":%.2f,"
-      "\"app_minimized_mb\":%.2f,\"app_minimized_p95_mb\":%.2f,"
-      "\"app_measured\":%s,\"samples\":5,\"adr006_glass_budget_mb\":96,"
-      "\"adr006_min_budget_mb\":40}\n",
-      Median(emptyArm.values), P95(emptyArm.values), Median(archiveArm.values),
-      P95(archiveArm.values), Median(glassArm.values), P95(glassArm.values),
-      glassArm.glass ? "true" : "false",
-      appArchiveArm.measured ? Median(appArchiveArm.values) : -1.0,
-      appArchiveArm.measured ? P95(appArchiveArm.values) : -1.0,
-      appMinArm.measured ? Median(appMinArm.values) : -1.0,
-      appMinArm.measured ? P95(appMinArm.values) : -1.0,
-      appArchiveArm.measured && appMinArm.measured ? "true" : "false");
-  std::printf(
-      "BENCH_C49_OPEN4G {\"zip_bytes\":%.0f,\"zip_p95_bytes\":%.0f,\"zip_ms\":%.1f,"
-      "\"sevenz_bytes\":%.0f,\"sevenz_p95_bytes\":%.0f,\"sevenz_ms\":%.1f,"
-      "\"zip_sniff_bytes\":%.0f,\"sevenz_sniff_bytes\":%.0f,"
-      "\"budget_bytes\":%llu,\"file_bytes\":%llu,\"samples\":5}\n",
-      Median(zipArm.byteValues), P95(zipArm.byteValues), Median(zipArm.msValues),
-      Median(sevenArm.byteValues), P95(sevenArm.byteValues), Median(sevenArm.msValues),
-      Median(zipArm.sniffValues), Median(sevenArm.sniffValues),
-      static_cast<unsigned long long>(kOpenByteBudget),
-      static_cast<unsigned long long>(kFourGiB));
-  std::printf(
-      "BENCH_C49_FRAME {\"rows\":100000,\"rounds\":%zu,\"frames_per_round\":60,"
-      "\"median_ms\":%.3f,\"p95_ms\":%.3f,\"median_fps\":%.1f,\"p95_fps\":%.1f,"
-      "\"draw_p95_ms\":%.3f,\"flush_p95_ms\":%.3f,\"rows_drawn\":%u,\"painted\":%s}\n",
-      roundMedian.size(), frameMedian, frameP95,
-      frameMedian > 0.0 ? 1000.0 / frameMedian : 0.0,
-      frameP95 > 0.0 ? 1000.0 / frameP95 : 0.0, worstDrawP95, worstEndP95, rowsDrawn,
-      framePainted ? "true" : "false");
-  std::printf(
-      "BENCH_C49_THUMBS {\"items\":%u,\"side\":%u,\"serial_ms\":%.3f,\"serial_p95_ms\":%.3f,"
-      "\"parallel_ms\":%.3f,\"parallel_p95_ms\":%.3f,\"speedup\":%.3f,\"workers\":%zu,"
-      "\"decoded\":%llu,\"second_pass_hits\":%llu,\"resident_bytes\":%zu,"
-      "\"budget_bytes\":%zu,\"pixel_digest\":\"%016llx\",\"rounds\":%zu}\n",
-      static_cast<unsigned>(kThumbItems), static_cast<unsigned>(kThumbSide), serialMedian,
-      P95(serialMs), parallelMedian, P95(parallelMs), speedup, parallel.workers,
-      static_cast<unsigned long long>(parallel.decoded),
-      static_cast<unsigned long long>(parallel.secondPassHits), parallel.residentBytes,
-      kThumbBudget, static_cast<unsigned long long>(parallel.digest), serialMs.size());
+  if (gC65Mode) {
+    // Two independent counters for every tier: Working Set (resident) and
+    // Private Bytes (committed). Median over kMemoryRepeats fresh processes.
+    std::printf(
+        "BENCH_C65_MEMORY {\"empty_mb\":%.2f,\"empty_p95_mb\":%.2f,"
+        "\"empty_private_mb\":%.2f,\"empty_private_p95_mb\":%.2f,"
+        "\"archive_mb\":%.2f,\"archive_p95_mb\":%.2f,"
+        "\"archive_private_mb\":%.2f,\"archive_private_p95_mb\":%.2f,"
+        "\"glass_full_mb\":%.2f,\"glass_full_p95_mb\":%.2f,"
+        "\"glass_full_private_mb\":%.2f,\"glass_full_private_p95_mb\":%.2f,"
+        "\"glass_live\":%s,"
+        "\"app_archive_mb\":%.2f,\"app_archive_p95_mb\":%.2f,"
+        "\"app_archive_private_mb\":%.2f,\"app_archive_private_p95_mb\":%.2f,"
+        "\"app_minimized_mb\":%.2f,\"app_minimized_p95_mb\":%.2f,"
+        "\"app_minimized_private_mb\":%.2f,\"app_minimized_private_p95_mb\":%.2f,"
+        "\"app_measured\":%s,\"samples\":%d,\"adr006_glass_budget_mb\":96,"
+        "\"adr006_min_budget_mb\":40}\n",
+        Median(emptyArm.values), P95(emptyArm.values), Median(emptyArm.privateValues),
+        P95(emptyArm.privateValues), Median(archiveArm.values), P95(archiveArm.values),
+        Median(archiveArm.privateValues), P95(archiveArm.privateValues),
+        Median(glassArm.values), P95(glassArm.values), Median(glassArm.privateValues),
+        P95(glassArm.privateValues), glassArm.glass ? "true" : "false",
+        appArchiveArm.measured ? Median(appArchiveArm.values) : -1.0,
+        appArchiveArm.measured ? P95(appArchiveArm.values) : -1.0,
+        appArchiveArm.measured ? Median(appArchiveArm.privateValues) : -1.0,
+        appArchiveArm.measured ? P95(appArchiveArm.privateValues) : -1.0,
+        appMinArm.measured ? Median(appMinArm.values) : -1.0,
+        appMinArm.measured ? P95(appMinArm.values) : -1.0,
+        appMinArm.measured ? Median(appMinArm.privateValues) : -1.0,
+        appMinArm.measured ? P95(appMinArm.privateValues) : -1.0,
+        appArchiveArm.measured && appMinArm.measured ? "true" : "false", kMemoryRepeats);
+    std::printf(
+        "BENCH_C65_OPEN4G {\"zip_bytes\":%.0f,\"zip_p95_bytes\":%.0f,\"zip_ms\":%.3f,"
+        "\"zip_first_byte_ms\":%.3f,\"sevenz_bytes\":%.0f,\"sevenz_p95_bytes\":%.0f,"
+        "\"sevenz_ms\":%.3f,\"sevenz_first_byte_ms\":%.3f,"
+        "\"first_payload_read\":%s,"
+        "\"zip_sniff_bytes\":%.0f,\"sevenz_sniff_bytes\":%.0f,"
+        "\"budget_bytes\":%llu,\"file_bytes\":%llu,\"samples\":5}\n",
+        Median(zipArm.byteValues), P95(zipArm.byteValues), Median(zipArm.msValues),
+        Median(zipArm.firstPayloadValues), Median(sevenArm.byteValues),
+        P95(sevenArm.byteValues), Median(sevenArm.msValues),
+        Median(sevenArm.firstPayloadValues),
+        zipArm.firstPayloadRead && sevenArm.firstPayloadRead ? "true" : "false",
+        Median(zipArm.sniffValues), Median(sevenArm.sniffValues),
+        static_cast<unsigned long long>(kOpenByteBudget),
+        static_cast<unsigned long long>(kFourGiB));
+    const double frame100kMedian = Median(frameCell100k.medians);
+    const double frame100kP95 = Median(frameCell100k.p95s);
+    std::printf(
+        "BENCH_C65_FRAME {\"rows\":%u,\"rounds\":%zu,\"frames_per_round\":60,"
+        "\"median_ms\":%.3f,\"p95_ms\":%.3f,\"median_fps\":%.1f,\"p95_fps\":%.1f,"
+        "\"draw_p95_ms\":%.3f,\"flush_p95_ms\":%.3f,\"rows_drawn\":%u,\"painted\":%s}\n",
+        frameCell.rows, frameCell.medians.size(), frameMedian, frameP95,
+        frameMedian > 0.0 ? 1000.0 / frameMedian : 0.0,
+        frameP95 > 0.0 ? 1000.0 / frameP95 : 0.0, frameCell.drawP95, frameCell.endP95,
+        frameCell.rowsDrawn, frameCell.painted ? "true" : "false");
+    std::printf(
+        "BENCH_C65_FRAME_100K {\"rows\":%u,\"rounds\":%zu,\"frames_per_round\":60,"
+        "\"median_ms\":%.3f,\"p95_ms\":%.3f,\"median_fps\":%.1f,\"p95_fps\":%.1f,"
+        "\"draw_p95_ms\":%.3f,\"flush_p95_ms\":%.3f,\"rows_drawn\":%u,\"painted\":%s}\n",
+        frameCell100k.rows, frameCell100k.medians.size(), frame100kMedian, frame100kP95,
+        frame100kMedian > 0.0 ? 1000.0 / frame100kMedian : 0.0,
+        frame100kP95 > 0.0 ? 1000.0 / frame100kP95 : 0.0, frameCell100k.drawP95,
+        frameCell100k.endP95, frameCell100k.rowsDrawn, frameCell100k.painted ? "true" : "false");
+    std::printf(
+        "BENCH_C65_THUMBS {\"items\":%u,\"side\":%u,\"serial_ms\":%.3f,"
+        "\"serial_p95_ms\":%.3f,\"parallel_ms\":%.3f,\"parallel_p95_ms\":%.3f,"
+        "\"speedup\":%.3f,\"items_per_sec\":%.1f,\"workers\":%zu,"
+        "\"decoded\":%llu,\"second_pass_hits\":%llu,\"resident_bytes\":%zu,"
+        "\"budget_bytes\":%zu,\"pixel_digest\":\"%016llx\",\"rounds\":%zu}\n",
+        static_cast<unsigned>(kThumbItems), static_cast<unsigned>(kThumbSide), serialMedian,
+        P95(serialMs), parallelMedian, P95(parallelMs), speedup,
+        parallelMedian > 0.0 ? 1000.0 * static_cast<double>(kThumbItems) / parallelMedian : 0.0,
+        parallel.workers, static_cast<unsigned long long>(parallel.decoded),
+        static_cast<unsigned long long>(parallel.secondPassHits), parallel.residentBytes,
+        kThumbBudget, static_cast<unsigned long long>(parallel.digest), serialMs.size());
+  } else {
+    std::printf(
+        "BENCH_C49_MEMORY {\"empty_mb\":%.2f,\"empty_p95_mb\":%.2f,"
+        "\"archive_mb\":%.2f,\"archive_p95_mb\":%.2f,"
+        "\"glass_full_mb\":%.2f,\"glass_full_p95_mb\":%.2f,\"glass_live\":%s,"
+        "\"app_archive_mb\":%.2f,\"app_archive_p95_mb\":%.2f,"
+        "\"app_minimized_mb\":%.2f,\"app_minimized_p95_mb\":%.2f,"
+        "\"app_measured\":%s,\"samples\":%d,\"adr006_glass_budget_mb\":96,"
+        "\"adr006_min_budget_mb\":40}\n",
+        Median(emptyArm.values), P95(emptyArm.values), Median(archiveArm.values),
+        P95(archiveArm.values), Median(glassArm.values), P95(glassArm.values),
+        glassArm.glass ? "true" : "false",
+        appArchiveArm.measured ? Median(appArchiveArm.values) : -1.0,
+        appArchiveArm.measured ? P95(appArchiveArm.values) : -1.0,
+        appMinArm.measured ? Median(appMinArm.values) : -1.0,
+        appMinArm.measured ? P95(appMinArm.values) : -1.0,
+        appArchiveArm.measured && appMinArm.measured ? "true" : "false", kMemoryRepeats);
+    std::printf(
+        "BENCH_C49_OPEN4G {\"zip_bytes\":%.0f,\"zip_p95_bytes\":%.0f,\"zip_ms\":%.1f,"
+        "\"sevenz_bytes\":%.0f,\"sevenz_p95_bytes\":%.0f,\"sevenz_ms\":%.1f,"
+        "\"zip_sniff_bytes\":%.0f,\"sevenz_sniff_bytes\":%.0f,"
+        "\"budget_bytes\":%llu,\"file_bytes\":%llu,\"samples\":5}\n",
+        Median(zipArm.byteValues), P95(zipArm.byteValues), Median(zipArm.msValues),
+        Median(sevenArm.byteValues), P95(sevenArm.byteValues), Median(sevenArm.msValues),
+        Median(zipArm.sniffValues), Median(sevenArm.sniffValues),
+        static_cast<unsigned long long>(kOpenByteBudget),
+        static_cast<unsigned long long>(kFourGiB));
+    std::printf(
+        "BENCH_C49_FRAME {\"rows\":%u,\"rounds\":%zu,\"frames_per_round\":60,"
+        "\"median_ms\":%.3f,\"p95_ms\":%.3f,\"median_fps\":%.1f,\"p95_fps\":%.1f,"
+        "\"draw_p95_ms\":%.3f,\"flush_p95_ms\":%.3f,\"rows_drawn\":%u,\"painted\":%s}\n",
+        frameCell.rows, frameCell.medians.size(), frameMedian, frameP95,
+        frameMedian > 0.0 ? 1000.0 / frameMedian : 0.0,
+        frameP95 > 0.0 ? 1000.0 / frameP95 : 0.0, frameCell.drawP95, frameCell.endP95,
+        frameCell.rowsDrawn, frameCell.painted ? "true" : "false");
+    std::printf(
+        "BENCH_C49_THUMBS {\"items\":%u,\"side\":%u,\"serial_ms\":%.3f,"
+        "\"serial_p95_ms\":%.3f,\"parallel_ms\":%.3f,\"parallel_p95_ms\":%.3f,"
+        "\"speedup\":%.3f,\"workers\":%zu,"
+        "\"decoded\":%llu,\"second_pass_hits\":%llu,\"resident_bytes\":%zu,"
+        "\"budget_bytes\":%zu,\"pixel_digest\":\"%016llx\",\"rounds\":%zu}\n",
+        static_cast<unsigned>(kThumbItems), static_cast<unsigned>(kThumbSide), serialMedian,
+        P95(serialMs), parallelMedian, P95(parallelMs), speedup, parallel.workers,
+        static_cast<unsigned long long>(parallel.decoded),
+        static_cast<unsigned long long>(parallel.secondPassHits), parallel.residentBytes,
+        kThumbBudget, static_cast<unsigned long long>(parallel.digest), serialMs.size());
+  }
 
   fs::remove_all(work, ec);
-  std::printf("ALL C49 REMEASURE CHECKS PASSED\n");
+  std::printf("ALL %s REMEASURE CHECKS PASSED\n", tag);
   return 0;
 #endif  // PRISM_C49_MUTANT_NO_SNIFF
 }

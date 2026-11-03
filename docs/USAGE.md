@@ -277,6 +277,72 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PrismArchive\un
 | 记住的口令（DPAPI 加密） | `%LOCALAPPDATA%\PrismArchive\passwords.vault` |
 | 引擎 | **不在包里**：`7z.dll` 由 `PRISM_7Z_DLL` 或本机 7-Zip 提供 |
 
+## 16. 无障碍：屏幕阅读器与自动化（C80）
+
+PrismArchive 的客户端区域（动作岛、标签栏、列表、侧栏、状态栏）全部是自绘的，
+所以它们**不是**子窗口控件。在 C80 之前，无障碍客户端（UI Automation）抓这个窗口
+只能看到 **9 个元素**：标题栏三个按钮 + 系统菜单 + 菜单栏四项。读屏用户无法使用
+软件，自动化也只能做像素断言。
+
+现在窗口实现了 `WM_GETOBJECT(OBJID_CLIENT)`，返回一棵自定义的 **MSAA
+（IAccessible）** 树；Windows 的 MSAA 代理会把它翻译成 UI Automation 元素
+（名称、角色、可用/禁用、屏幕矩形、Invoke / SelectionItem）。**绘制方式没有改变**
+——这是桥，不是把界面换成标准控件。
+
+### 能被读到的对象
+
+| 区域 | MSAA 角色 | 名称 | 状态 |
+|---|---|---|---|
+| 窗口本身 | `ROLE_SYSTEM_CLIENT` | 窗口标题（`PrismArchive -- 归档名`） | 焦点在它上面时 `FOCUSED` |
+| 动作岛 8 个按钮 | `ROLE_SYSTEM_PUSHBUTTON` | **当前语言**的按钮文字（打开 / 解压到… / 压缩 / 添加 / 删除 / 测试 / 查看 / 搜索） | 可用/禁用跟随按钮启用规则（无选中时「添加」「删除」「查看」为禁用）；`Alt+O/E/C/A/D/T/V/S` 作为快捷键报告 |
+| 标签栏每个标签 | `ROLE_SYSTEM_PAGETAB` | 归档文件名 | 当前标签 `SELECTED`；描述里写「可关闭」/「已修改，可关闭」 |
+| 列表容器 | `ROLE_SYSTEM_LIST` | 当前路径（面包屑文本） | — |
+| 列表每一行 | `ROLE_SYSTEM_LISTITEM` | 文件名；值 = 字节数 | 选中行 `SELECTED`；描述「文件」/「文件夹」 |
+| 侧栏归档树 | `ROLE_SYSTEM_OUTLINE` / `ROLE_SYSTEM_OUTLINEITEM` | 归档名 / 文件夹名 | 当前文件夹 `SELECTED`；可展开项 `EXPANDED`/`COLLAPSED` |
+| 状态栏 | `ROLE_SYSTEM_STATUSBAR` | 状态文字（如「共 12 项」） | 值 = 路径栏文本 |
+| 搜索框（打开时） | `ROLE_SYSTEM_TEXT` | 「搜索框」 | 值 = 当前输入（含输入法预览） |
+
+### 能做的动作
+
+- **按下动作按钮**：`accDoDefaultAction`（UIA 的 InvokePattern）走的是**和鼠标点击同一条路径**
+  （`ActionBarClick` → `FireAction`），所以「搜索」按下去真的会打开搜索框，
+  禁用按钮按下去什么也不会发生。
+- **选中列表行**：`accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION)`（UIA 的
+  SelectionItem.Select）会**真的改变窗口的选中状态**（选中集合、动作岛的启用规则、
+  下一次解压的目标都跟着变）。
+- **切换标签**：对标签调用默认动作或 `accSelect` 等于点击该标签（会去加载那个归档）。
+- **进入侧栏文件夹**：对树项调用默认动作等于在侧栏里点该文件夹。
+- **焦点**：`accFocus` 回答当前焦点元素——顺序与键盘路由一致：搜索框（打开时）→
+  动作岛焦点环 → 选中的行 → 窗口本身。
+- **命中测试**：`accHitTest` 用 `accLocation` 报告的屏幕矩形做最深匹配。
+
+### 已知边界（如实写出来，不假装支持）
+
+- 搜索框是**只读**的无障碍值：UIA 的 SetValue 不会写入文本（返回 `E_NOTIMPL`），
+  请用键盘输入（聚焦后直接打字；`Esc` 关闭）。
+- 侧栏树项的展开/折叠只**报告状态**，不提供 ExpandCollapse 动作（用键盘或点击箭头）。
+- 多选（Ctrl/Shift）通过每一行的 `SELECTED` 状态暴露；`accSelection` 只返回一个元素。
+- UIA 看到的是 **MSAA 代理元素**（LegacyIAccessible），不是原生 UIA Provider：
+  Windows 讲述人、NVDA、Inspect.exe 都能用，但个别只认原生 UIA 属性的工具会退化。
+
+### 自己验证（不需要看屏幕）
+
+```powershell
+# 元素数（修复前是 9；现在打开的归档有 20+ 个元素）
+agent-desktop snapshot --app PrismArchive.exe -i --compact
+
+# 按名称点「搜索」，然后确认搜索框出现（窗口状态变了，而不是只有像素变了）
+agent-desktop click <snapshot 里「搜索」按钮的 ref>
+agent-desktop snapshot --app PrismArchive.exe -i --compact
+```
+
+自动化测试在仓库里：
+
+```text
+ctest -R "a11y"            # core.a11y_tree / c80.a11y / c80.a11y_uia
+ctest -R no_getobject      # 负向控制：把 WM_GETOBJECT 注掉后必须红
+```
+
 ## 本版本的边界
 
 这些入口**画出来了但还没接线**，或者只完成了一部分。写在这里是为了让「点了没反应」

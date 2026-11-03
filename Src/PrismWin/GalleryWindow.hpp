@@ -64,6 +64,7 @@
 #include <dwrite.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <memory>
@@ -98,6 +99,8 @@
 #include "../PrismCore/TabSet.hpp"      // C59: several archives, one window
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "AboutDialog.hpp"                  // C57: Help > About (one menu item, one modal)
+#include "Accessible.hpp"                    // C80: WM_GETOBJECT -> IAccessible (MSAA)
+#include "../PrismCore/A11yTree.hpp"         // C80: what the client area publishes
 #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
 #include "EditConfirmDialog.hpp"            // C54: edit intents, confirmation model, gate
 #include "PaletteOverlay.hpp"               // C53: Ctrl+K paints THIS layer (C31)
@@ -210,7 +213,10 @@ class GalleryWindow {
   // this runs on the UI thread after Run() returned and after every worker was
   // joined -- the only point where the HWND and the renderer are guaranteed to
   // be quiescent.
-  ~GalleryWindow() { DestroyHostWindow(); }
+  ~GalleryWindow() {
+    DetachAccessibility();
+    DestroyHostWindow();
+  }
 
   struct Host {
     HWND hwnd = nullptr;
@@ -1387,6 +1393,25 @@ class GalleryWindow {
     Invalidate();
   }
 
+  // ---------- card C80: the client area made visible to MSAA/UIA ----------
+  //
+  // BuildAccessibleTree() (defined with the other C80 members, next to
+  // FireAction) is the ONE description of what a screen reader is told, derived
+  // from the same state the renderer paints: band layout, tab rectangles, folder
+  // rows, sidebar model, status line. PrismWin/Accessible.hpp turns it into
+  // IAccessible objects; WM_GETOBJECT(OBJID_CLIENT) hands the root to the
+  // platform, whose MSAA proxy is what UIA clients then read.
+  //
+  // WHY A TREE, NOT A WIDGET PER ROW: our drawing is the product. The bridge
+  // describes it; it does not replace it with standard controls.
+  //
+  // The verbs an accessible element may perform route through the SAME window
+  // path a click and a key use (ActionBarClick / ActivateRow / ActivateTab /
+  // GoToFolder) -- there is no second implementation of an action. Every live
+  // IAccessible is detached on WM_DESTROY, so a client that kept a reference
+  // across the close gets an empty answer, never a use-after-free.
+  int AccessibleElementCount() { return prism::a11y::CountNodes(BuildAccessibleTree()); }
+
   // The painted bar band (client pixels). Exposed so the Windows integration
   // test can aim a click at the bar it can SEE instead of guessing constants.
   // These four are LAZY: the island geometry is only measured when the crumbs
@@ -1925,6 +1950,20 @@ class GalleryWindow {
       }
       case WM_ERASEBKGND:
         return 1;  // D2D paints the whole client area
+      // CARD C80: every pixel below the menu bar is ours (D2D), so the client
+      // area has no child HWNDs for the OS to introspect. WM_GETOBJECT is the
+      // ONE door that makes painted content visible to assistive technology:
+      // answer OBJID_CLIENT with an IAccessible and the platform's MSAA proxy
+      // turns that tree into UIA elements (Name/Role/Bounds/Enabled/Invoke).
+      // OBJID_WINDOW is deliberately NOT ours -- the frame keeps the OS object.
+      case WM_GETOBJECT: {
+        if (static_cast<LONG>(lparam) != OBJID_CLIENT) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix state in one line.
+        if (!prism::win::a11y::kAccessibleBridgeArmed) return 0;
+        return prism::win::a11y::HandleGetObject(a11y_, wparam, lparam);
+      }
       // CARD V2: an Alt chord never reaches TranslateMessage as a plain key --
       // it arrives as WM_SYSKEYDOWN. That is the ONLY door an Alt mnemonic can
       // come through, which is why the window-level test dispatches THIS
@@ -2107,6 +2146,9 @@ class GalleryWindow {
         }
         return 0;
       case WM_DESTROY:
+        // C80: the accessible tree is a view of THIS window; once the HWND is
+        // gone every element a client still holds must answer nothing.
+        DetachAccessibility();
         if (idleTimer_ && host_.hwnd) {
           KillTimer(host_.hwnd, kIdleTimerId);
           idleTimer_ = false;
@@ -2412,6 +2454,257 @@ class GalleryWindow {
                  prism::actionbar::ActionName(action), item);
     SetStatus(std::wstring(L"\u52A8\u4F5C\u672A\u63A5\u7EBF\uFF1A") +
               Utf8ToWide(prism::actionbar::ActionName(action)));
+  }
+
+  // ---------- card C80: the accessibility tree and its verbs -------------
+  //
+  // ONE tree, built on demand from live state. Nothing is cached here on
+  // purpose: a cached accessible tree is a screenshot of an interface that has
+  // moved on, and the client would then press a button that no longer exists.
+  prism::a11y::Node BuildAccessibleTree() {
+    using prism::a11y::Node;
+    using prism::a11y::Role;
+
+    Node root;
+    root.role = Role::Client;
+    root.bounds =
+        prism::layout::Rect{0, 0, static_cast<int>(clientW_), static_cast<int>(clientH_)};
+    {
+      // The window's own title is what a screen reader announces when focus
+      // lands in the client area; falling back to the archive name keeps the
+      // name non-empty before the first paint.
+      wchar_t title[512]{};
+      const int length = host_.hwnd != nullptr
+                             ? ::GetWindowTextW(host_.hwnd, title, 511)
+                             : 0;
+      root.name = length > 0
+                      ? WideToUtf8(std::wstring(title, static_cast<std::size_t>(length)))
+                      : WideToUtf8(rootLabel_);
+    }
+    // ONE focus owner, in the order the KEY ROUTER actually uses (Proc sends
+    // every key to the open search field before the band sees it): the search
+    // field, else the band's ring, else the selected row, else the window.
+    // accFocus answers exactly one element, because a tree where two claim
+    // focus is a lie the client cannot resolve.
+    const bool searchFocused = search_.IsOpen();
+    const bool bandFocused = !searchFocused && actionBar_.FocusIndex() >= 0;
+    root.focused = !bandFocused && !searchFocused && selection_ < 0;
+
+    // (1) the eight actions, in BAND order -- the order the user sees, so the
+    // screen reader's list matches the toolbar left to right.
+    const prism::actionbar::Layout band = BandLayout();
+    for (int i = 0; i < prism::actionbar::kActionCount; ++i) {
+      const prism::actionbar::Spec& spec = prism::actionbar::SpecOf(i);
+      Node button;
+      button.role = Role::PushButton;
+      button.name = actionBar_.Label(i);  // C74: the ACTIVE language's word
+      button.description = prism::actionbar::ActionName(spec.id);
+      button.action = "\u6309\u4E0B";  // 按下: what accDoDefaultAction does
+      button.shortcut = std::string("Alt+") + spec.mnemonic;
+      button.index = i;
+      // The band's ONE legality rule, not a second opinion: a disabled action
+      // is UNAVAILABLE to a screen reader exactly when the band paints it grey.
+      button.enabled = actionBar_.Enabled(spec.id);
+      button.focused = bandFocused && actionBar_.FocusIndex() == i;
+      if (i < static_cast<int>(band.buttons.size())) {
+        button.bounds = band.buttons[static_cast<std::size_t>(i)].rect;
+      }
+      root.children.push_back(std::move(button));
+    }
+
+    // (2) the tab strip. A tab is a PAGE TAB with its file name; "selected"
+    // is the active tab, and the description carries the close/dirty state a
+    // PAGETAB role cannot express in a state bit.
+    const std::vector<prism::win::tabbar::TabGeometry> tabRects = TabBarRects();
+    for (int i = 0; i < static_cast<int>(tabs_.size()); ++i) {
+      const prism::tabs::Tab* tab = tabs_.At(i);
+      if (tab == nullptr) continue;
+      Node node;
+      node.role = Role::PageTab;
+      node.name = tab->displayName;  // the archive's file name
+      node.index = i;
+      node.selected = i == tabs_.activeIndex();
+      node.action = "\u9009\u62E9";  // 选择
+      node.description = tab->dirty ? "\u5DF2\u4FEE\u6539\uFF0C\u53EF\u5173\u95ED"
+                                    : "\u53EF\u5173\u95ED";
+      for (const prism::win::tabbar::TabGeometry& geometry : tabRects) {
+        if (geometry.index == i) {
+          node.bounds = geometry.rect;
+          break;
+        }
+      }
+      root.children.push_back(std::move(node));
+    }
+
+    // (3) the search field, only while it is open. Its VALUE is the visible
+    // text (an IME composition included), so the element a client reads is the
+    // string the user is looking at.
+    if (search_.IsOpen()) {
+      const prism::win::searchbox::Box box = SearchBounds();
+      Node field;
+      field.role = Role::Text;
+      field.name = "\u641C\u7D22\u6846";  // 搜索框
+      field.value = search_.DisplayText();
+      field.focused = searchFocused;
+      field.bounds = prism::layout::Rect{static_cast<int>(box.left), static_cast<int>(box.top),
+                                        static_cast<int>(box.right),
+                                        static_cast<int>(box.bottom)};
+      root.children.push_back(std::move(field));
+    }
+
+    // (4) the current folder's rows. The container exists even when the list is
+    // empty (a folder with no entries is not the same thing as no archive), and
+    // an absent catalog simply yields zero children -- the card's "does not
+    // crash" requirement is a property of the build, not of a special case.
+    Node list;
+    list.role = Role::List;
+    list.name = breadcrumbText_.empty() ? WideToUtf8(rootLabel_)
+                                        : WideToUtf8(breadcrumbText_);
+    list.bounds = layout_.content;
+    for (int row = 0; row < ItemCount(); ++row) {
+      const prism::ArchiveItem& item = folderItems_[static_cast<std::size_t>(row)];
+      Node entry;
+      entry.role = Role::ListItem;
+      entry.name = A11yLeafName(item.path);
+      entry.value = std::to_string(static_cast<unsigned long long>(item.size));
+      entry.index = row;
+      entry.action = "\u6253\u5F00";  // 打开
+      entry.description = item.isDir ? "\u6587\u4EF6\u5939" : "\u6587\u4EF6";
+      entry.selected = sel_.Contains(row);
+      entry.focused = !bandFocused && !searchFocused && selection_ == row;
+      entry.bounds = A11yRowRect(row);
+      list.children.push_back(std::move(entry));
+    }
+    root.children.push_back(std::move(list));
+
+    // (4) the sidebar's archive tree. Exposed even while the rail is folded:
+    // navigation by tree is exactly what a screen reader user wants, and the
+    // pixels not being painted is no reason to hide the structure.
+    Node outline;
+    outline.role = Role::Outline;
+    outline.name = WideToUtf8(rootLabel_);
+    if (sidebarRailVisible_) outline.bounds = layout_.sidebar;
+    const std::vector<prism::sidebar::TreeRow>& rows = sidebar_.Tree();
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      Node item;
+      item.role = Role::OutlineItem;
+      item.name = rows[i].name;
+      item.key = rows[i].path;
+      item.index = static_cast<int>(i);
+      item.level = rows[i].depth;
+      item.expandable = rows[i].expandable;
+      item.expanded = rows[i].expanded;
+      item.selected = rows[i].path == nav_.Folder();
+      item.action = "\u6253\u5F00";  // 打开
+      item.description = rows[i].isRoot ? "\u5F52\u6863\u6839" : "\u6587\u4EF6\u5939";
+      // The rail's own RowHit box is the rectangle its click test uses, so the
+      // element a client is told about is the one the user can see and press.
+      item.bounds = A11ySidebarRowRect(static_cast<int>(i));
+      outline.children.push_back(std::move(item));
+    }
+    root.children.push_back(std::move(outline));
+
+    // (5) the status line: one element, its text as both name and value, so both
+    // "read the status bar" and UIA's Name property answer the same sentence.
+    Node status;
+    status.role = Role::StatusBar;
+    status.name = WideToUtf8(status_);
+    status.value = WideToUtf8(breadcrumbText_);
+    status.bounds = layout_.statusBar;
+    root.children.push_back(std::move(status));
+
+    return root;
+  }
+
+  // A row's leaf name: catalog paths are archive-relative ("dir/file.txt"), and
+  // a screen reader announcing the whole path for every row is noise.
+  static std::string A11yLeafName(const std::string& path) {
+    const std::size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos || slash + 1 >= path.size()) return path;
+    return path.substr(slash + 1);
+  }
+
+  // The rectangle the renderer gave this row, in the CURRENT view mode. Both
+  // branches read the one layout authority, so the element a client is told
+  // about is the rectangle the user can see.
+  prism::layout::Rect A11yRowRect(int folderRow) {
+    if (listMode_) {
+      const int viewRow = ListRowForFolderRow(folderRow);
+      if (viewRow < 0) return prism::layout::Rect{};
+      return prism::layout::ListRowRect(layout_, viewRow,
+                                        static_cast<int>(viewport_.Scroll()));
+    }
+    return ItemRect(folderRow);
+  }
+
+  // The rail's painted row box for tree row 'row'. RowHit is the same command
+  // the sidebar's own click test resolves, so the published rectangle and the
+  // pressable one cannot disagree.
+  prism::layout::Rect A11ySidebarRowRect(int row) {
+    if (!sidebarRailVisible_) return prism::layout::Rect{};
+    EnsureSidebar();
+    for (const prism::win::sidebar::Command& command : sidebarLayout_.commands) {
+      if (command.kind != prism::win::sidebar::PrimKind::RowHit) continue;
+      if (command.section != prism::sidebar::Section::Tree) continue;
+      if (command.payload != row) continue;
+      return prism::layout::Rect{static_cast<int>(command.box.left),
+                                 static_cast<int>(command.box.top),
+                                 static_cast<int>(command.box.right),
+                                 static_cast<int>(command.box.bottom)};
+    }
+    return prism::layout::Rect{};
+  }
+
+  // A button pressed by assistive technology. When the band painted the button,
+  // this IS ActionBarClick at its centre -- including the arrow zone, the focus
+  // ring and the enable matrix. Only a button the band could not fit (a window
+  // too narrow for eight buttons) falls back to the mnemonic path, which is the
+  // same PressAction -> FireAction chain without a pixel.
+  void A11yInvokeAction(int index) {
+    if (index < 0 || index >= prism::actionbar::kActionCount) return;
+    const prism::actionbar::Layout band = BandLayout();
+    if (index < static_cast<int>(band.buttons.size())) {
+      const prism::actionbar::Rect& rect = band.buttons[static_cast<std::size_t>(index)].rect;
+      if (!rect.Empty()) {
+        ActionBarClick((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        return;
+      }
+    }
+    const prism::actionbar::Spec& spec = prism::actionbar::SpecOf(index);
+    actionBar_.SetFocusIndex(index);
+    const prism::actionbar::Effect effect = actionBar_.PressAction(spec.id);
+    if (effect.kind == prism::actionbar::Effect::Kind::Invoke && effect.enabled) {
+      FireAction(effect.action, effect.item);
+    }
+    Invalidate();
+  }
+
+  void A11yFocusAction(int index) {
+    actionBar_.SetFocusIndex(index);
+    Invalidate();
+  }
+
+  // accSelect on a row: the same two lines a click runs (the navigator keeps the
+  // row Backspace restores, the selection drives the band's legality), plus the
+  // repaint. "Synchronised with the window state" is that, not a second flag.
+  void A11ySelectRow(int row) {
+    if (row < 0 || row >= ItemCount()) return;
+    nav_.SetSelection(row);
+    ApplySelection(row);
+  }
+
+  void A11yActivateRow(int row) { (void)ActivateRow(row); }
+  void A11yActivateTab(int index) { (void)ActivateTab(index); }
+
+  void A11yActivateFolder(const std::string& path) {
+    if (!path.empty()) (void)GoToFolder(path);
+  }
+
+  // After this, every live IAccessible answers with an empty tree and a null
+  // HWND: an assistive-technology client that kept a reference across the close
+  // gets no answer instead of a use-after-free.
+  void DetachAccessibility() {
+    if (a11y_) a11y_->Detach();
   }
 
   // Tab / Enter / arrows / Esc -- but only for the keys the band actually owns:
@@ -3947,8 +4240,58 @@ class GalleryWindow {
     return static_cast<double>(counter.QuadPart) / static_cast<double>(freq.QuadPart);
   }
 
+  // ---------- card C80: the bridge's view of THIS window -------------------
+  //
+  // Nested so it reaches the private helpers without widening the public
+  // surface, and shared (not a raw pointer) so an IAccessible a client still
+  // holds after the window dies answers "empty" instead of following a dead
+  // pointer. Detach() is the one write that makes that guarantee true.
+  struct A11yHost final : prism::win::a11y::Host {
+    explicit A11yHost(GalleryWindow* owner) : window(owner) {}
+
+    HWND Window() const override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      return owner != nullptr ? owner->host_.hwnd : nullptr;
+    }
+    prism::a11y::Node Tree() override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      return owner != nullptr ? owner->BuildAccessibleTree() : prism::a11y::Node{};
+    }
+    void InvokeAction(int index) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11yInvokeAction(index);
+    }
+    void FocusAction(int index) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11yFocusAction(index);
+    }
+    void SelectRow(int row) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11ySelectRow(row);
+    }
+    void ActivateRow(int row) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11yActivateRow(row);
+    }
+    void ActivateTab(int index) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11yActivateTab(index);
+    }
+    void ActivateFolder(const std::string& path) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11yActivateFolder(path);
+    }
+
+    void Detach() { window.store(nullptr, std::memory_order_release); }
+
+    std::atomic<GalleryWindow*> window;
+  };
+
   // ---------------------------------------------------------------- state
   static constexpr double kWheelScrollPixels = 120.0 * 3.0;
+
+  // C80: created with the window, detached when the HWND dies.
+  std::shared_ptr<A11yHost> a11y_ = std::make_shared<A11yHost>(this);
 
   Host host_;
   // V1: the layout the window paints AND hit-tests with. Rebuilt on WM_SIZE,

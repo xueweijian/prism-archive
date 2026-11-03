@@ -950,7 +950,25 @@ ADR-006 的 40 MB 档仍**未达标**（测试打印 `C75_ADR006 {"met":false}`�
 - `mutation.c75.no_restore_rebuild`：恢复的 Resize 不重建不重画 → 首帧像素
   `non_backdrop=0.0000`，空白帧断言红，打印 `C75 MUTATION CAUGHT: no_restore_rebuild`。
 
-2. **帧/缩略图数字的负载噪声**：同一二进制在 90 分钟内读到 10k p95 5.78–34.46 ms、
+**ASan lane 的判据（CI 实测教训）**：Windows CI 用 `/fsanitize=address` 构建，ASan 的
+quarantine 会把已释放的分配留着不还给 OS——同一轮测试里对象已证死（target/thumb/glass
+全为 0），WS 却是 112.90 → 112.73 MB（只回 0.17 MB），而且每次 restore 再涨约 4.8 MB。
+所以字节判据**不能**写死在 ASan lane 上：`c75_mem_idle` 检测到 ASan 时只断言**行为**
+（对象已释放、target 不再存活、首帧非空白），字节数只打印；非 ASan 构建用**相对判据**
+（回落量 ≥ 最小化前 WS 的 15 %，本机实测约 30 %）。轮次增长在 ASan 上同样不判，
+非 ASan 改判“第 N 轮 ≤ 第 1 轮 + 2 MB”（不是逐轮 +1 MB，避免一轮噪声把预算抬高）。
+恢复预算用后续轮次的**中位数** ≤ 首次 × 1.2 + 10 ms（10 ms 是本机计时/调度粒度；
+完整重建设备是 60–100 ms，仍会红）。
+
+C34 的守卫也重新接上：`ReleaseRenderMemory` 现在经 `ReleaseGlassLayer()` 释放玻璃
+（该函数才是 `PRISM_C34_MUTANT_NO_TRIM` 的注入点），所以 `mutation.host_wiring.no-trim`
+重新在 `GlassTransientBytes()==0` 处变红；C52 `win.drop_in` 的“一次失效一次绘制”契约
+也不再被多余同步帧破坏（只有 `idleReleased_` 为真、即最小化路径确实跑过时才在
+WM_SIZE 里同步重建+画一帧）。
+
+#### 9.5 其余待办（原 C65 §9 的第 2–3 项）
+
+1. **帧/缩略图数字的负载噪声**：同一二进制在 90 分钟内读到 10k p95 5.78–34.46 ms、
    串行缩略图 75.9–177.3 ms；交错跑 C49/C65 两次，pair 1 里 C65 更快、pair 2 里更慢。
    这说明差值主要来自机器而不是 lane，但**没有**排除“C65 先跑 10k 再跑 100k”的顺序效应。
    最小复现（三次交替，比较同窗口内的 p95）：
@@ -962,7 +980,7 @@ ADR-006 的 40 MB 档仍**未达标**（测试打印 `C75_ADR006 {"met":false}`�
 
    若同窗口内 C65 的 p95 稳定高出 >10 %，再查 RunFrameRound 的复用/顺序（这是测试代码，不动产品）。
 
-3. **没有 >10 % 回归项**，所以没有“回归 issue”；产品代码、docs/PROGRESS.md、
+2. **没有 >10 % 回归项**，所以没有“回归 issue”；产品代码、docs/PROGRESS.md、
    ROADMAP.md、CONTRACTS.md、ci.yml、Tests/CMakeLists.txt 均未改。
 
 ### 10. 复现（C65 全套）

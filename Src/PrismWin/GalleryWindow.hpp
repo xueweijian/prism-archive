@@ -919,8 +919,14 @@ class GalleryWindow {
     return 0;
 #else
     size_t returned = 0;
+    // Route through the C34 seam, not glass_->SetVisible directly: that seam is
+    // what PRISM_C34_MUTANT_NO_TRIM instruments, and a minimise path that
+    // bypasses it silently disarms C34's "no trim must be red" guard (the CI
+    // failure that prompted this). The seam is idempotent and reports the bytes
+    // it really returned; zero first so a no-glass window cannot report a stale
+    // number from an earlier release.
     glassReleasedBytes_ = 0;
-    if (glass_) glassReleasedBytes_ = glass_->SetVisible(false);
+    ReleaseGlassLayer();
     returned += glassReleasedBytes_;
     returned += ReleaseAllThumbnails();
     // Count what the target holds before dropping it, so the report is honest
@@ -943,6 +949,7 @@ class GalleryWindow {
     (void)trimmed;
     returned += targetBytes;
     lastReleasedTargetBytes_ = targetBytes;
+    idleReleased_ = true;
     ++idleReleases_;
     return returned;
 #endif
@@ -965,6 +972,7 @@ class GalleryWindow {
       PresentGlassFrame();
     }
     Render();
+    idleReleased_ = false;
     ++restoreRebuilds_;
     return true;
   }
@@ -1656,7 +1664,14 @@ class GalleryWindow {
         // MUTATION (CONTRACTS D3/D27): the restore path does not rebuild. The
         // blank-frame assertion in c75.mem_idle must go red.
 #else
-        if (wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) RestoreRenderMemory();
+        // ONLY after the minimise path really ran. CreateWindowEx sends a
+        // first WM_SIZE(SIZE_RESTORED), and an ordinary Resize has a live
+        // target: painting synchronously there adds a frame without a
+        // WM_PAINT and breaks the "one invalidation, one draw" contract other
+        // suites pin (C52 drop-in: paints 1 vs draws 2).
+        if ((wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) && idleReleased_) {
+          RestoreRenderMemory();
+        }
 #endif
         Invalidate();
         return 0;
@@ -3859,6 +3874,7 @@ class GalleryWindow {
   size_t lastReleasedTargetBytes_ = 0;  // back buffer the last release dropped
   int idleReleases_ = 0;                // times the minimise path really ran
   int restoreRebuilds_ = 0;             // Resize callbacks that rebuilt + painted
+  bool idleReleased_ = false;           // released and not yet rebuilt/painted
   std::function<void()> onIdle_;   // the app's companion-preview poll
   bool idleTimer_ = false;
 

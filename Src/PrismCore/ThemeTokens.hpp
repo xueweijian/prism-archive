@@ -114,14 +114,14 @@ static_assert(sizeof(kTokenNames) / sizeof(kTokenNames[0]) == kTokenCount,
               "every TokenId needs exactly one CSS name");
 
 inline constexpr Kind kTokenKinds[] = {
-    Kind::Color,    Kind::Color, Kind::Gradient, Kind::Gradient,
-    Kind::Font,     Kind::Spring, Kind::Spring,  Kind::Color,
-    Kind::Color,    Kind::Color, Kind::Color,    Kind::Color,
-    Kind::Color,
-    Kind::Color,    Kind::Color,  Kind::Gradient, Kind::Gradient,
-    Kind::Font,     Kind::Spring, Kind::Spring,   Kind::Color,
-    Kind::Color,    Kind::Color,  Kind::Color,    Kind::Color,
-    Kind::Color,    Kind::Color,  Kind::Color,
+    // One row per TokenId, in enum order (18 tokens: 12 base + C77's three
+    // panel numbers + C79's five chrome surfaces).
+    Kind::Color, Kind::Color, Kind::Gradient, Kind::Gradient,  // canvas, island, rim, accent
+    Kind::Font, Kind::Spring, Kind::Spring,                    // font stack, two springs
+    Kind::Color, Kind::Color, Kind::Color,                     // text primary/secondary, backdrop ref
+    Kind::Color, Kind::Color, Kind::Color,                     // C77: ghost, veil, panel shadow
+    Kind::Color, Kind::Color, Kind::Color,                     // C79: selection, tab active, tab hover
+    Kind::Color, Kind::Color,                                  // C79: divider, ambient shadow
 };
 static_assert(sizeof(kTokenKinds) / sizeof(kTokenKinds[0]) == kTokenCount,
               "every TokenId needs exactly one kind");

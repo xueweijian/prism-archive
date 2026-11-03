@@ -587,6 +587,17 @@ inline Layout Compute(const prism::layout::Layout& window) {
     }
     x += buttonWidth + kButtonGap;
   }
+  // C66: "a dropped button means NO buttons". The tail-drop loop above can, in
+  // principle, keep the first N buttons while reporting dropped > 0 -- and that
+  // is exactly the half-painted toolbar the user photographed (six buttons on
+  // screen, 添加/删除/测试 missing). A band that cannot show all eight shows
+  // none: the island disappears and the app keeps the Alt chords. Asserted by
+  // win.c66_window at 800/1280/1536 px.
+  if (out.dropped > 0) {
+    out.buttons.clear();
+    out.island = Rect{};
+    return out;
+  }
   if (out.buttons.empty()) return out;
 
   out.island =

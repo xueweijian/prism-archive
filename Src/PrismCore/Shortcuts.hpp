@@ -71,6 +71,9 @@ enum class Command : uint8_t {
   // 9.1 row 3: Ctrl+K -> command palette.
   OpenPalette,
   ClosePalette,
+  // C62: Ctrl+F -> the archive list's search box (the field itself is a
+  // non-modal filter; the window owns the text buffer it edits).
+  OpenSearch,
   // 9.1 row 4: Ctrl+E / Alt+double-click -> smart extract, no dialog.
   SmartExtract,
   // 9.1 row 5: Ctrl+Shift+N -> virtual folder in the archive (CoW transaction).
@@ -104,6 +107,7 @@ inline std::ostream& operator<<(std::ostream& os, Command command) {
     case Command::ZoomNext: return os << "ZoomNext";
     case Command::OpenPalette: return os << "OpenPalette";
     case Command::ClosePalette: return os << "ClosePalette";
+    case Command::OpenSearch: return os << "OpenSearch";
     case Command::SmartExtract: return os << "SmartExtract";
     case Command::NewFolder: return os << "NewFolder";
     case Command::DeleteSelected: return os << "DeleteSelected";
@@ -162,6 +166,7 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
   if (CtrlOnly(stroke)) {
     switch (key) {
       case 'K': return Command::OpenPalette;   // 9.1 row 3
+      case 'F': return Command::OpenSearch;    // C62: find in the list
       case 'E': return Command::SmartExtract;  // 9.1 row 4
       case '1': return Command::ToggleGrid;    // batch A, kept in the table
       case '2': return Command::ToggleList;

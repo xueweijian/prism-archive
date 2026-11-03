@@ -196,9 +196,24 @@ inline constexpr int kDefaultThumbnailMb = 512;
 inline constexpr int kExtractDirMaxBytes = 260;   // the schema's byte cap
 inline constexpr int kLanguageTagMaxBytes = 16;
 
+// C74: a diagnostic is a KEY plus its substitutions plus the English sentence
+// this dialog showed before the key existed. The pure state keeps returning the
+// fallback (so every pre-C74 assertion still reads the same bytes); the Win shell
+// asks IssueText(field, translator) for the translated one.
+struct Message {
+  std::string key;
+  std::vector<prism::i18n::Substitution> subs;
+  std::string text;
+};
+
+inline Message MakeMessage(std::string key, std::vector<prism::i18n::Substitution> subs,
+                           std::string text) {
+  return Message{std::move(key), std::move(subs), std::move(text)};
+}
+
 struct Issue {
   Field field = Field::Language;
-  std::string text;
+  Message message;
 };
 
 // ---------------------------------------------------------------------------
@@ -319,7 +334,10 @@ class DialogState {
   bool Validate() const;
   const std::vector<Issue>& issues() const { return issues_; }
   bool HasIssue(Field field) const;
+  // The pre-C74 English sentence (pure callers, tests, a table-less build).
   std::string IssueFor(Field field) const;
+  // C74: the same diagnostic through the table; the fallback is IssueFor().
+  std::string IssueText(Field field, const prism::i18n::Translator* translator) const;
   bool Valid() const { return issues_.empty(); }
   // "Save" is enabled only when nothing is wrong. A dialog that let the user
   // press it and then refused would be a worse version of the same thing.
@@ -358,11 +376,14 @@ class DialogState {
     return -1;
   }
 
-  void AddIssue(Field field, std::string text) const {
+  void AddIssue(Field field, Message message) const {
     for (const Issue& existing : issues_) {
       if (existing.field == field) return;  // one message per field, first wins
     }
-    issues_.push_back(Issue{field, std::move(text)});
+    issues_.push_back(Issue{field, std::move(message)});
+  }
+  void AddIssue(Field field, const char* key, std::string fallback) const {
+    AddIssue(field, MakeMessage(key, {}, std::move(fallback)));
   }
 
   static Field FieldForPath(std::string_view path) {
@@ -389,17 +410,20 @@ class DialogState {
 
   void CheckLanguageTag() const {
     if (languageTag_.empty()) {
-      AddIssue(Field::Language, "Choose a language (Auto follows Windows).");
+      AddIssue(Field::Language, "settings.issue.languageEmpty",
+               "Choose a language (Auto follows Windows).");
       return;
     }
     if (languageTag_.size() > static_cast<std::size_t>(kLanguageTagMaxBytes)) {
-      AddIssue(Field::Language, "\"" + languageTag_ + "\" is too long to be a language tag.");
+      AddIssue(Field::Language,
+               MakeMessage("settings.issue.languageTooLong", {{"tag", languageTag_}},
+                           "\"" + languageTag_ + "\" is too long to be a language tag."));
     }
   }
 
   void CheckExtractDir() const {
-    const std::string problem = ExtractDirProblem(extractDirText_);
-    if (problem.empty()) return;
+    const Message problem = ExtractDirProblem(extractDirText_);
+    if (problem.text.empty()) return;
 #if defined(PRISM_C31_MUTANT_ACCEPT_BAD_DIR)
     // MUTANT (CONTRACTS D3): the complaint is dropped, so an illegal path is
     // saved. The suite asserts the file's content did not change -> it goes red.
@@ -412,8 +436,8 @@ class DialogState {
 
   void CheckThumbnail() const {
     int mb = 0;
-    const std::string problem = ThumbnailProblem(thumbnailText_, thumbnailUnit_, &mb);
-    if (problem.empty()) return;
+    const Message problem = ThumbnailProblem(thumbnailText_, thumbnailUnit_, &mb);
+    if (problem.text.empty()) return;
 #if defined(PRISM_C31_MUTANT_ACCEPT_BAD_THUMBNAIL)
     // MUTANT (CONTRACTS D3): an out-of-range / unparseable cap is accepted, so
     // the persisted document carries a value the UI promised not to write.
@@ -428,8 +452,8 @@ class DialogState {
   // apply -> serialize -> Load() -> read the store's own repair list.
   void ProbeStore() const;
 
-  static std::string ExtractDirProblem(std::string_view raw);
-  static std::string ThumbnailProblem(std::string_view raw, SizeUnit unit, int* mb);
+  static Message ExtractDirProblem(std::string_view raw);
+  static Message ThumbnailProblem(std::string_view raw, SizeUnit unit, int* mb);
 
   std::vector<std::string> languages_{"auto", "zh-CN", "en-US"};
   std::string languageTag_{"auto"};
@@ -463,26 +487,32 @@ inline std::string DialogState::NormalizeExtractDir(std::string_view text) {
   return collapsed;
 }
 
-inline std::string DialogState::ExtractDirProblem(std::string_view raw) {
-  if (raw.empty()) return std::string();  // empty = "ask every time", a real answer
+inline Message DialogState::ExtractDirProblem(std::string_view raw) {
+  if (raw.empty()) return Message{};  // empty = "ask every time", a real answer
   const std::string normalized = NormalizeExtractDir(raw);
-  if (normalized.empty()) return std::string();
+  if (normalized.empty()) return Message{};
   if (normalized.size() > static_cast<std::size_t>(kExtractDirMaxBytes)) {
-    return "The path is longer than the " + std::to_string(kExtractDirMaxBytes) +
-           "-byte settings cap.";
+    return MakeMessage("settings.issue.pathTooLong",
+                       {{"max", std::to_string(kExtractDirMaxBytes)}},
+                       "The path is longer than the " + std::to_string(kExtractDirMaxBytes) +
+                           "-byte settings cap.");
   }
   const bool driveAbsolute = normalized.size() >= 3 &&
                              ((normalized[0] >= 'A' && normalized[0] <= 'Z') ||
                               (normalized[0] >= 'a' && normalized[0] <= 'z')) &&
                              normalized[1] == ':' && normalized[2] == '\\';
   if (!driveAbsolute) {
-    return "Enter an absolute path such as C:\\Users\\you\\Extracted (or leave it empty to ask "
-           "each time).";
+    return MakeMessage(
+        "settings.issue.pathNotAbsolute", {},
+        "Enter an absolute path such as C:\\Users\\you\\Extracted (or leave it empty to ask "
+        "each time).");
   }
   for (std::size_t i = 2; i < normalized.size(); ++i) {
     const char ch = normalized[i];
     if (ch == '<' || ch == '>' || ch == '"' || ch == '|' || ch == '?' || ch == '*') {
-      return std::string("The path contains '") + ch + "', which Windows does not allow.";
+      return MakeMessage("settings.issue.pathBadChar", {{"char", std::string(1, ch)}},
+                         std::string("The path contains '") + ch +
+                             "', which Windows does not allow.");
     }
   }
   // A ".." COMPONENT is refused; ".." inside a name ("a..b") is fine.
@@ -492,14 +522,17 @@ inline std::string DialogState::ExtractDirProblem(std::string_view raw) {
     const std::string_view component =
         std::string_view(normalized).substr(start, (end == std::string::npos ? normalized.size()
                                                                            : end) - start);
-    if (component == "..") return std::string("The path must not contain a '..' component.");
+    if (component == "..") {
+      return MakeMessage("settings.issue.pathParent", {},
+                         "The path must not contain a '..' component.");
+    }
     if (end == std::string::npos) break;
     start = end + 1;
   }
-  return std::string();
+  return Message{};
 }
 
-inline std::string DialogState::ThumbnailProblem(std::string_view raw, SizeUnit unit, int* mb) {
+inline Message DialogState::ThumbnailProblem(std::string_view raw, SizeUnit unit, int* mb) {
   if (mb != nullptr) *mb = -1;
   // Trim ASCII spaces only: a stray '\t' is a paste accident, not whitespace the
   // settings format documents.
@@ -508,7 +541,10 @@ inline std::string DialogState::ThumbnailProblem(std::string_view raw, SizeUnit 
   while (begin < end && raw[begin] == ' ') ++begin;
   while (end > begin && raw[end - 1] == ' ') --end;
   const std::string_view text = raw.substr(begin, end - begin);
-  if (text.empty()) return std::string("Enter the cache cap, for example 512 MB.");
+  if (text.empty()) {
+    return MakeMessage("settings.issue.cacheEmpty", {},
+                       "Enter the cache cap, for example 512 MB.");
+  }
   bool seenDigit = false;
   bool seenDot = false;
   for (const char ch : text) {
@@ -517,33 +553,47 @@ inline std::string DialogState::ThumbnailProblem(std::string_view raw, SizeUnit 
     } else if (ch == '.' && !seenDot) {
       seenDot = true;
     } else {
-      return std::string("\"") + std::string(text) +
-             "\" is not a number. Enter digits, optionally with a decimal point.";
+      return MakeMessage(
+          "settings.issue.cacheNotNumber", {{"text", std::string(text)}},
+          std::string("\"") + std::string(text) +
+              "\" is not a number. Enter digits, optionally with a decimal point.");
     }
   }
-  if (!seenDigit) return std::string("Enter a number of ") + SizeUnitName(unit) + ".";
+  if (!seenDigit) {
+    return MakeMessage("settings.issue.cacheNoDigits", {{"unit", SizeUnitName(unit)}},
+                       std::string("Enter a number of ") + SizeUnitName(unit) + ".");
+  }
   const double value = std::strtod(std::string(text).c_str(), nullptr);
   const double megabytes = value * (unit == SizeUnit::GB ? 1024.0 : 1.0);
-  if (!std::isfinite(megabytes)) return std::string("That number is out of range.");
+  if (!std::isfinite(megabytes)) {
+    return MakeMessage("settings.issue.cacheOutOfRange", {}, "That number is out of range.");
+  }
   const double rounded = std::floor(megabytes + 0.5);
   if (std::fabs(megabytes - rounded) > 1e-6) {
-    return std::string("The cache cap must be a whole number of megabytes (") +
-           std::to_string(static_cast<long long>(std::floor(megabytes))) +
-           " MB is not one).";
+    return MakeMessage(
+        "settings.issue.cacheWhole",
+        {{"mb", std::to_string(static_cast<long long>(std::floor(megabytes)))}},
+        std::string("The cache cap must be a whole number of megabytes (") +
+            std::to_string(static_cast<long long>(std::floor(megabytes))) +
+            " MB is not one).");
   }
   if (rounded < static_cast<double>(kThumbnailMinMb)) {
-    return "The cache cap must be at least " + std::to_string(kThumbnailMinMb) + " MB.";
+    return MakeMessage("settings.issue.cacheMin", {{"min", std::to_string(kThumbnailMinMb)}},
+                       "The cache cap must be at least " + std::to_string(kThumbnailMinMb) +
+                           " MB.");
   }
   if (rounded > static_cast<double>(kThumbnailMaxMb)) {
-    return "The cache cap must be at most " + std::to_string(kThumbnailMaxMb) + " MB (16 GB).";
+    return MakeMessage("settings.issue.cacheMax", {{"max", std::to_string(kThumbnailMaxMb)}},
+                       "The cache cap must be at most " + std::to_string(kThumbnailMaxMb) +
+                           " MB (16 GB).");
   }
   if (mb != nullptr) *mb = static_cast<int>(rounded);
-  return std::string();
+  return Message{};
 }
 
 inline int DialogState::ThumbnailMb() const {
   int mb = -1;
-  if (!ThumbnailProblem(thumbnailText_, thumbnailUnit_, &mb).empty()) return -1;
+  if (!ThumbnailProblem(thumbnailText_, thumbnailUnit_, &mb).text.empty()) return -1;
   return mb;
 }
 
@@ -558,7 +608,7 @@ inline std::string DialogState::ThumbnailLabel() const {
 
 inline void DialogState::ProbeStore() const {
   if (!base_.writable()) {
-    AddIssue(Field::Theme,
+    AddIssue(Field::Theme, "settings.issue.readOnly",
              "This settings file was written by a newer build; it is read-only until that "
              "build changes it.");
     return;
@@ -578,12 +628,17 @@ inline void DialogState::ProbeStore() const {
   return;
 #endif
   if (report.status == prism::settings::LoadStatus::Corrupt || roundTrip.repairs().empty()) {
-    AddIssue(Field::Theme, "The settings store refused this document: " + report.error);
+    AddIssue(Field::Theme,
+             MakeMessage("settings.issue.storeRefused", {{"detail", report.error}},
+                         "The settings store refused this document: " + report.error));
     return;
   }
   const prism::settings::Repair& repair = roundTrip.repairs().front();
   AddIssue(FieldForPath(repair.path),
-           "The settings store would repair " + repair.path + ": " + repair.detail);
+           MakeMessage("settings.issue.storeRepair",
+                       {{"path", repair.path}, {"detail", repair.detail}},
+                       "The settings store would repair " + repair.path + ": " +
+                           repair.detail));
 }
 
 inline void DialogState::Adopt(const prism::settings::SettingsStore& store) {
@@ -629,7 +684,20 @@ inline bool DialogState::HasIssue(Field field) const {
 
 inline std::string DialogState::IssueFor(Field field) const {
   for (const Issue& issue : issues_) {
-    if (issue.field == field) return issue.text;
+    if (issue.field == field) return issue.message.text;
+  }
+  return std::string();
+}
+
+inline std::string DialogState::IssueText(Field field,
+                                          const prism::i18n::Translator* translator) const {
+  for (const Issue& issue : issues_) {
+    if (issue.field != field) continue;
+    const Message& message = issue.message;
+    if (translator != nullptr && !message.key.empty() && translator->Has(message.key)) {
+      return prism::i18n::FormatPattern(translator->Translate(message.key), message.subs);
+    }
+    return message.text;
   }
   return std::string();
 }
@@ -818,8 +886,10 @@ class SettingsDialog {
   // false with the store's own complaint and the file on disk is untouched.
   bool Save(std::string* error) {
     if (!state_.Validate()) {
-      const std::string why = state_.issues().empty() ? "the draft is not valid"
-                                                      : state_.issues().front().text;
+      const std::string why =
+          state_.issues().empty()
+              ? std::string("the draft is not valid")
+              : state_.IssueText(state_.issues().front().field, translator_);
       if (error != nullptr) *error = why;
       SyncControls();
       FocusFirstIssue();
@@ -875,6 +945,20 @@ class SettingsDialog {
     if (translator_ == nullptr || key == nullptr) return fallback != nullptr ? fallback : L"";
     if (!translator_->Has(key)) return fallback != nullptr ? fallback : L"";
     return WideFromUtf8(translator_->Translate(key));
+  }
+
+  // C74: the same discipline for the UTF-8 diagnostics (summary + hint lines).
+  // The fallback is the sentence this dialog printed before the keys existed, so
+  // a table-less build reads exactly as it did.
+  std::string Text8(const char* key, const std::string& fallback) const {
+    if (translator_ == nullptr || key == nullptr || !translator_->Has(key)) return fallback;
+    return translator_->Translate(key);
+  }
+  std::string Text8(const char* key,
+                    const std::vector<prism::i18n::Substitution>& subs,
+                    const std::string& fallback) const {
+    if (translator_ == nullptr || key == nullptr || !translator_->Has(key)) return fallback;
+    return translator_->Translate(key, subs);
   }
 
   // state -> controls. Also the validation pump: every handler ends here, and
@@ -1100,7 +1184,7 @@ class SettingsDialog {
     const Field fields[] = {Field::Language, Field::Theme, Field::ExtractDir,
                             Field::ThumbnailLimit, Field::LogLevel, Field::Motw};
     for (int row = 0; row < 6; ++row) {
-      const std::string issue = state_.IssueFor(fields[row]);
+      const std::string issue = state_.IssueText(fields[row], translator_);
       if (!issue.empty()) {
         hint(WideFromUtf8(issue), kControlX, rowY(row) + 32.0f,
              static_cast<float>(kClientWidth) - kControlX - 16.0f, 16.0f, true);
@@ -1535,14 +1619,27 @@ inline int HintY(int row) { return RowY(row) + 30; }
 }  // namespace layout
 
 inline std::string SettingsDialog::SummaryLine() const {
-  if (!loadError_.empty()) return "The settings file could not be loaded: " + loadError_;
-  if (!state_.issues().empty()) {
-    const Issue& first = state_.issues().front();
-    return std::string(FieldName(first.field)) + ": " + first.text;
+  if (!loadError_.empty()) {
+    return Text8("settings.summary.loadFailed", {{"detail", loadError_}},
+                 "The settings file could not be loaded: " + loadError_);
   }
-  return std::string("Will save: ") + ThemeName(state_.theme()) + " theme, cache " +
-         state_.ThumbnailLabel() + ", log " + LogLevelKeyOf(state_.logLevel()) +
-         (state_.inheritMotw() ? ", MoTW inherited" : ", MoTW not inherited");
+  if (!state_.issues().empty()) {
+    // The hint under the offending row already names the field; repeating the
+    // machine name ("extract-dir: ...") here added a word nobody translated.
+    const Issue& first = state_.issues().front();
+    return state_.IssueText(first.field, translator_);
+  }
+  const std::string motw =
+      state_.inheritMotw() ? Text8("settings.summary.motwOn", "MoTW inherited")
+                           : Text8("settings.summary.motwOff", "MoTW not inherited");
+  return Text8("settings.summary.willSave",
+               {{"theme", ThemeName(state_.theme())},
+                {"cache", state_.ThumbnailLabel()},
+                {"level", LogLevelKeyOf(state_.logLevel())},
+                {"motw", motw}},
+               std::string("Will save: ") + ThemeName(state_.theme()) + " theme, cache " +
+                   state_.ThumbnailLabel() + ", log " + LogLevelKeyOf(state_.logLevel()) +
+                   (state_.inheritMotw() ? ", MoTW inherited" : ", MoTW not inherited"));
 }
 
 inline void SettingsDialog::SetTextIfDifferent(HWND control, const std::wstring& text) {
@@ -1579,7 +1676,7 @@ inline void SettingsDialog::SyncControls() {
   for (std::size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
     const HWND hint = Control(hintIds[i]);
     if (hint == nullptr) continue;
-    SetWindowTextW(hint, WideFromUtf8(state_.IssueFor(fields[i])).c_str());
+    SetWindowTextW(hint, WideFromUtf8(state_.IssueText(fields[i], translator_)).c_str());
   }
   SetTextIfDifferent(summaryText_, WideFromUtf8(SummaryLine()));
   EnableWindow(saveButton_, state_.SaveEnabled() ? TRUE : FALSE);
@@ -1738,7 +1835,9 @@ inline void SettingsDialog::OnSaveClicked() {
   }
   // The hint lines already say WHAT is wrong; the summary says that the disk was
   // deliberately not touched.
-  SetTextIfDifferent(summaryText_, WideFromUtf8("Not saved: " + error));
+  SetTextIfDifferent(summaryText_,
+                     WideFromUtf8(Text8("settings.summary.notSaved", {{"detail", error}},
+                                        "Not saved: " + error)));
 }
 
 inline void SettingsDialog::OnCommand(int id, int code, HWND control) {

@@ -41,11 +41,32 @@
 #include <string_view>
 
 #include "../PrismCore/ActionBarModel.hpp"
+#include "../PrismCore/I18n.hpp"  // C74: the eight band keys live in the tables
 #include "../PrismCore/ThemeTokens.hpp"
 
 namespace prism::win::actionbar {
 
 using Microsoft::WRL::ComPtr;
+
+// C74: the Win layer resolves the band's KEYS against the active table. A
+// missing key (or a null translator) keeps the model's built-in word, so a
+// table-less build still paints labels instead of empty buttons. The size is
+// kActionCount by construction, which is exactly what Model::SetLabels accepts.
+inline std::array<std::string, static_cast<std::size_t>(prism::actionbar::kActionCount)>
+LabelsFromTranslator(const prism::i18n::Translator* translator) {
+  std::array<std::string, static_cast<std::size_t>(prism::actionbar::kActionCount)> labels;
+  for (int i = 0; i < prism::actionbar::kActionCount; ++i) {
+    labels[static_cast<std::size_t>(i)] = prism::actionbar::DefaultLabels()[static_cast<std::size_t>(i)];
+  }
+  if (translator == nullptr) return labels;
+  for (int i = 0; i < prism::actionbar::kActionCount; ++i) {
+    const std::string_view key = prism::actionbar::kActions[static_cast<std::size_t>(i)].key;
+    if (translator->Has(key)) {
+      labels[static_cast<std::size_t>(i)] = translator->Translate(key);
+    }
+  }
+  return labels;
+}
 
 #if defined(PRISM_V2_MUTANT_NO_ACTION_PAINT)
 inline constexpr bool kPaintActions = false;
@@ -391,7 +412,10 @@ class ActionBarPainter {
     PaintGlyph(target, spec.icon, iconBox);
     ++dbgIcons;
 
-    const std::wstring label = Utf8(spec.label);
+    // C74: the word comes from the caller-injected table (or the built-in
+    // default), never from the compile-time table -- that is what makes a
+    // language switch reach this pixel.
+    const std::wstring label = Utf8(model.LabelOf(button.id));
     if (!label.empty() && labelFormat_) {
       const D2D1_RECT_F labelBox =
           D2D1::RectF(static_cast<float>(labelRect.left),

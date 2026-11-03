@@ -417,9 +417,11 @@ PRISM_TEST("v4.actionbar: every label fits its box (no truncation)") {
   const prism::actionbar::Layout band = prism::actionbar::Compute(window);
   PRISM_CHECK_EQ(static_cast<int>(band.buttons.size()), 8);
   for (const prism::actionbar::Button& button : band.buttons) {
-    const prism::actionbar::Spec& spec = prism::actionbar::SpecOf(
-        prism::actionbar::IndexOf(button.id));
-    const std::wstring wide = Wide(std::string(spec.label));
+    // C74: the table carries keys; the shipping words are the built-in default
+    // (what this band paints with no translator installed).
+    const std::size_t index =
+        static_cast<std::size_t>(prism::actionbar::IndexOf(button.id));
+    const std::wstring wide = Wide(prism::actionbar::DefaultLabels()[index]);
     ComPtr<IDWriteTextLayout> layout;
     if (!PRISM_CHECK(SUCCEEDED(write->CreateTextLayout(
             wide.c_str(), static_cast<UINT32>(wide.size()), format.Get(), 1000.0f, 32.0f,

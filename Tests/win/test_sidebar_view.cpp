@@ -338,7 +338,9 @@ PRISM_TEST("TestEmptyStateWithoutArchive") {
   PRISM_CHECK(FindSection(layout, "FAVORITES") == nullptr);
   PRISM_CHECK(FindSection(layout, "RECENT") == nullptr);
   PRISM_CHECK(FindSection(layout, "ARCHIVE TREE") != nullptr);
-  PRISM_CHECK(FindStatus(layout, "NO ARCHIVE") != nullptr);
+  // C74: the capsule's empty line is the table's sidebar.empty.noArchive, the
+  // same key the empty state uses (it used to be a literal "NO ARCHIVE").
+  PRISM_CHECK(FindStatus(layout, "NO ARCHIVE OPEN") != nullptr);
   PRISM_CHECK(OfKind(layout, PrimKind::RatioBar).empty());
   // The capsule is dimmed, not missing.
   bool dimmedPill = false;
@@ -379,11 +381,14 @@ PRISM_TEST("TestFormattingHelpers") {
                  std::string("64.0 MB"));
   PRISM_CHECK_EQ(prism::win::sidebar::FormatBytes(1420000000ull),
                  std::string("1.3 GB"));
-  PRISM_CHECK_EQ(prism::win::sidebar::EncryptionLabel(Encryption::Aes256),
+  // C74: the words come from a Labels value; the DEFAULT Labels are the exact
+  // pre-C74 English, which is what a table-less build still paints.
+  const prism::win::sidebar::Labels defaults;
+  PRISM_CHECK_EQ(prism::win::sidebar::EncryptionLabel(Encryption::Aes256, defaults),
                  std::string("AES-256 ENCRYPTED"));
-  PRISM_CHECK_EQ(prism::win::sidebar::EncryptionLabel(Encryption::Unknown),
+  PRISM_CHECK_EQ(prism::win::sidebar::EncryptionLabel(Encryption::Unknown, defaults),
                  std::string("ENCRYPTED"));
-  PRISM_CHECK_EQ(prism::win::sidebar::EncryptionLabel(Encryption::None),
+  PRISM_CHECK_EQ(prism::win::sidebar::EncryptionLabel(Encryption::None, defaults),
                  std::string("NOT ENCRYPTED"));
   // A favorite with no label falls back to the path's leaf.
   PRISM_CHECK_EQ(prism::win::sidebar::RowLabel("", "D:/Work/Archives"),

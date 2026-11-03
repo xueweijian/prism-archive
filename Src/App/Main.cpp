@@ -832,17 +832,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     return code;
   }
 
-  // C40: the sidebar's four section headings come from the same tables as every
-  // other sentence. The renderer's call site belongs to another card, so the
-  // translator is installed here, once, before the first layout is built.
-  prism::win::sidebar::SetTranslator(&language.translator);
-
   prism::win::gallery::GalleryWindow window;
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) {
     app->ops->Close();
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
+  // C40 + C74: the sidebar's headings and the action band's eight words come
+  // from the same tables as every other sentence. ONE door (ApplyLanguage) so a
+  // language switch re-reads both, and a band that forgot to rebuild is the
+  // defect the switch suite can see.
+  window.ApplyLanguage(&language.translator);
   // ---- C27: restored view state, sidebar port, menu bar -------------------
   // The geometry/mode/sort the user closed with is applied BEFORE the first
   // paint, so the window never flashes a layout it is about to replace.
@@ -996,6 +996,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       prism::app::ApplyMenuLabels(
           window, prism::app::BuildMenuLabels(liveTr, prism::win::Utf8ToWide(tag)));
       window.SetStatus(prism::app::ItemsCountStatus(liveTr, app->items.size()));
+      // C74: the action band and the sidebar's info card read the same table as
+      // the menu, so the language picked in the dialog reaches every one of them
+      // before the user presses Save.
+      window.ApplyLanguage(liveTr.translator);
       dialog.SetTranslator(liveTr.translator);
     });
     std::string loadError;

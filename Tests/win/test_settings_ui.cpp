@@ -776,7 +776,9 @@ PRISM_TEST("win: an illegal folder is refused in place and the file is untouched
   TypeInto(dialog, su::ids::kExtractDir, L"relative\\folder");
   PRISM_CHECK(!dialog.ControlEnabled(su::ids::kSave));
   PRISM_CHECK(Contains(dialog.ControlTextUtf8(su::ids::kExtractDirHint), "absolute"));
-  PRISM_CHECK(Contains(dialog.ControlTextUtf8(su::ids::kSummary), "extract-dir"));
+  // C74: the summary is the first complaint itself (the field name prefix was
+  // a machine token, not a word); it must repeat the hint the row shows.
+  PRISM_CHECK(Contains(dialog.ControlTextUtf8(su::ids::kSummary), "absolute"));
 
   ClickButton(dialog, su::ids::kSave);
   // D2: the CONTENT is what proves "not written", not a file count.

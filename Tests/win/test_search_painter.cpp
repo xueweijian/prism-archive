@@ -19,6 +19,7 @@
 // 96 and 144 are both asserted, so a hard-coded pixel constant cannot hide.
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -72,6 +73,67 @@ bool InField(const sb::Box& outer, const sb::Box& inner) {
   return inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right &&
          inner.bottom <= outer.bottom;
 }
+
+// A 1x CPU flattening of the instruction list. It is NOT a renderer: it paints
+// the AXIS-ALIGNED extent of the filled primitives (background, selection,
+// caret, clear button, badge), so the suite can assert PIXELS -- coverage
+// counts and the colour that actually lands at a point -- without a D2D device.
+// Strokes, rounded corners, rotated glyphs and text runs are skipped on
+// purpose: the rectangle assertions above already pin their geometry, and a
+// test-local text shaper would be a second font engine, not evidence.
+class Canvas {
+ public:
+  Canvas(int width, int height)
+      : width_(width),
+        height_(height),
+        pixels_(static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
+                theme::Rgba(0.0f, 0.0f, 0.0f, 0.0f)) {}
+
+  void Fill(const sb::Box& box, const theme::Rgba& color) {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    Bounds(box, &x0, &y0, &x1, &y1);
+    for (int y = y0; y < y1; ++y) {
+      for (int x = x0; x < x1; ++x) pixels_[Index(x, y)] = color;
+    }
+  }
+
+  theme::Rgba At(int x, int y) const { return pixels_[Index(x, y)]; }
+
+  std::size_t CountIn(const sb::Box& box, const theme::Rgba& color) const {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    Bounds(box, &x0, &y0, &x1, &y1);
+    std::size_t count = 0;
+    for (int y = y0; y < y1; ++y) {
+      for (int x = x0; x < x1; ++x) {
+        if (SameColor(pixels_[Index(x, y)], color)) ++count;
+      }
+    }
+    return count;
+  }
+
+ private:
+  void Bounds(const sb::Box& box, int* x0, int* y0, int* x1, int* y1) const {
+    *x0 = (std::max)(0, static_cast<int>(std::floor(box.left)));
+    *y0 = (std::max)(0, static_cast<int>(std::floor(box.top)));
+    *x1 = (std::min)(width_, static_cast<int>(std::ceil(box.right)));
+    *y1 = (std::min)(height_, static_cast<int>(std::ceil(box.bottom)));
+  }
+
+  std::size_t Index(int x, int y) const {
+    return static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
+           static_cast<std::size_t>(x);
+  }
+
+  int width_;
+  int height_;
+  std::vector<theme::Rgba> pixels_;
+};
 
 }  // namespace
 
@@ -180,6 +242,64 @@ PRISM_TEST("painter.caret_tracks_the_caret_not_the_text_end") {
   sb::SearchBoxPainter painter;
   const sb::Scene scene = painter.Build(model, sb::Box{0.0f, 0.0f, 320.0f, 32.0f});
   PRISM_CHECK_EQ(scene.caret.left, 10.0f + sb::EstimateTextWidth("ab", 14.0f));
+}
+
+// PIXELS, not just rectangles: flatten the instruction list and assert what a
+// naive device would actually put where. The counts are derived from the
+// emitted geometry, so a painter that moved the caret or shrank the badge
+// changes the number even if every individual rectangle still "looks right".
+PRISM_TEST("painter.flattened_instructions_cover_the_expected_pixels") {
+  core::Model model;
+  model.SetRows(Fixture());
+  model.Open();
+  model.InsertText("报告");
+
+  sb::SearchBoxPainter painter;
+  const sb::Scene scene = painter.Build(model, sb::Box{0.0f, 0.0f, 320.0f, 32.0f});
+  Canvas canvas(320, 32);
+  for (const sb::Instruction& instruction : scene.instructions) {
+    switch (instruction.primitive) {
+      case sb::Primitive::FieldBackground:
+      case sb::Primitive::TextSelection:
+      case sb::Primitive::Caret:
+      case sb::Primitive::ClearButton:
+      case sb::Primitive::Badge:
+        canvas.Fill(instruction.rect, instruction.color);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // 1. Between the query run (10..38 px) and the badge (left ~194 px) the field
+  // fill is whatever --surface-floating-island resolves to in this theme.
+  const theme::Rgba field =
+      theme::Lookup(theme::TokenId::SurfaceFloatingIsland, theme::Variant::Midnight).color;
+  PRISM_CHECK(SameColor(canvas.At(120, 16), field));
+
+  // 2. The caret is 1.5 DIP wide and 14 DIP tall: 2 x 14 = exactly 28 pixels.
+  const sb::Instruction* caret = scene.Find(sb::Primitive::Caret);
+  if (!PRISM_CHECK(caret != nullptr)) return;
+  PRISM_CHECK_EQ(canvas.CountIn(scene.caret, caret->color), std::size_t{28});
+
+  // 3. The clear button's centre pixel is its own fill; the two X strokes are
+  // skipped by this flattening, so nothing else can claim that pixel.
+  const theme::Rgba button =
+      theme::Lookup(theme::TokenId::SurfaceCanvasBase, theme::Variant::Midnight).color;
+  PRISM_CHECK(SameColor(canvas.At(304, 16), button));
+
+  // 4. The badge covers its whole rounded rect (the corners are part of the
+  // rect; this flattening deliberately ignores the radius).
+  const sb::Instruction* badge = scene.Find(sb::Primitive::Badge);
+  if (!PRISM_CHECK(badge != nullptr)) return;
+  const int badgeW = static_cast<int>(std::ceil(scene.badge.right)) -
+                     static_cast<int>(std::floor(scene.badge.left));
+  const int badgeH = static_cast<int>(std::ceil(scene.badge.bottom)) -
+                     static_cast<int>(std::floor(scene.badge.top));
+  PRISM_CHECK(badgeW > 0);
+  PRISM_CHECK(badgeH > 0);
+  PRISM_CHECK_EQ(canvas.CountIn(scene.badge, badge->color),
+                 static_cast<std::size_t>(badgeW) * static_cast<std::size_t>(badgeH));
 }
 
 // ---------------------------------------------------------------------------

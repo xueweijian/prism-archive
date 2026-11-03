@@ -171,6 +171,30 @@ PRISM_TEST("search.utf8_caret_and_backspace_never_split_a_code_point") {
   PRISM_CHECK_EQ(model.Caret(), std::size_t{4});
 }
 
+PRISM_TEST("search.delete_forward_and_ctrl_backspace_respect_code_points") {
+  Model model;
+  model.Open();
+  model.InsertText("报告.txt");  // 10 bytes
+  model.Press(Key::Home);
+  model.Press(Key::Right);  // caret 3: before 告
+  const Effect deleted = model.Press(Key::Delete);
+  PRISM_CHECK_EQ(deleted.kind, Effect::Kind::FilterChanged);
+  PRISM_CHECK(deleted.queryChanged);
+  PRISM_CHECK_EQ(model.Query(), std::string("报.txt"));  // whole 告, 7 bytes
+  PRISM_CHECK_EQ(model.Query().size(), std::size_t{7});
+  PRISM_CHECK_EQ(model.Caret(), std::size_t{3});
+
+  // Delete at the end has nothing to remove and must not claim the key.
+  model.Press(Key::End);
+  PRISM_CHECK_EQ(model.Press(Key::Delete).kind, Effect::Kind::None);
+
+  // Ctrl+Backspace removes one WORD (the whole last token), not one byte.
+  model.SetQuery("alpha beta");
+  PRISM_CHECK_EQ(model.Press(Key::Backspace, true).kind, Effect::Kind::FilterChanged);
+  PRISM_CHECK_EQ(model.Query(), std::string("alpha "));
+  PRISM_CHECK_EQ(model.Caret(), std::size_t{6});
+}
+
 PRISM_TEST("search.select_all_and_typing_replaces") {
   Model model;
   model.Open();
@@ -284,12 +308,19 @@ PRISM_TEST("search.ime_composition_in_the_middle_replaces_the_selection") {
   model.Open();
   model.InsertText("年度.txt");
   model.Press(Key::Home);
-  model.Press(Key::Right);  // after 年 (3 bytes)
+  model.Press(Key::Right);               // after 年 (3 bytes)
+  model.Press(Key::Right, false, true);  // Shift+Right selects 度 (3..6)
+  PRISM_CHECK(model.HasSelection());
+  PRISM_CHECK_EQ(model.SelectionStart(), std::size_t{3});
+  PRISM_CHECK_EQ(model.SelectionEnd(), std::size_t{6});
   model.BeginComposition();
   model.UpdateComposition("报告");
-  PRISM_CHECK_EQ(model.DisplayText(), std::string("年报告度.txt"));
+  // The preview REPLACES the selected code point (度 disappears), and it still
+  // does not touch Query(): commit is the only filter-visible transition.
+  PRISM_CHECK_EQ(model.DisplayText(), std::string("年报告.txt"));
+  PRISM_CHECK_EQ(model.Query(), std::string("年度.txt"));
   model.CommitComposition("报告");
-  PRISM_CHECK_EQ(model.Query(), std::string("年报告度.txt"));
+  PRISM_CHECK_EQ(model.Query(), std::string("年报告.txt"));
   PRISM_CHECK_EQ(model.Caret(), std::size_t{9});  // 3 + 6 bytes
 }
 

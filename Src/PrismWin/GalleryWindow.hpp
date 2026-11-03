@@ -1817,7 +1817,7 @@ class GalleryWindow {
     std::fprintf(stderr, "action unhandled id=%s item=%d\n",
                  prism::actionbar::ActionName(action), item);
     SetStatus(std::wstring(L"\u52A8\u4F5C\u672A\u63A5\u7EBF\uFF1A") +
-              prism::win::Utf8ToWide(prism::actionbar::ActionName(action)));
+              Utf8ToWide(prism::actionbar::ActionName(action)));
   }
 
   // Tab / Enter / arrows / Esc -- but only for the keys the band actually owns:

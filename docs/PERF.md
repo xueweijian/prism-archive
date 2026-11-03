@@ -927,6 +927,29 @@ C65 的 BENCH 行（每轮一行，C42 report lane 可直接解析）：
     BENCH_C65_THUMBS    {"items":800,"serial_ms":..,"parallel_ms":..,"speedup":..,"items_per_sec":..,
                          "decoded":800,"second_pass_hits":800,"resident_bytes":52428800,"pixel_digest":".."}
 
+### 11. 全量 `ctest -R bench`（12 项）与第 5 轮
+
+`ctest --test-dir E:\build\wt-c65 -R "bench" --output-on-failure -V` 把 bench 家族一次跑完。
+本次跑到宿主的 16 分钟后台作业上限时，**11/12 已通过**（core.bench_sweep、win.bench_solid、
+c45.bench_thumbs、report.extract_bench、c49.bench_current、c65.bench_remeasure、
+win.bench_startup + 其变异、win.bench_memory + 其变异、win.bench_scale）；被截断的是**既有的**
+`mutation.bench_scale.temp_write`（本卡没有改它，也不是 C65 的测量项）。单独重跑：
+
+    283:     4 GB: open 0.2 ms, sweep 259491.0 ms, extract 262591.1 ms, temp entries 0 -> 1
+    283:       temp: staging.7z|4294967418
+    283:     FAIL Tests/win/bench_scale.cpp:539  expected (tempAfter.size()) == (0)
+    283:     FAIL: the pipeline wrote into %TEMP% (1 entries)
+    1/12 Test #283: mutation.bench_scale.temp_write ...   Passed  1228.42 sec
+
+它按预期变红并通过（WILL_FAIL 型负向控制）；20.5 分钟里 sweep 259.5 s、extract 262.6 s，
+是磁盘时间，不是挂死（D29 的 TIMEOUT 是 1800 s）。所以“16 分钟跑完全量 bench”在这台
+共享机器上不成立，但 12 项都被跑到了：11 项在全量 lane 内，1 项单独重跑。
+
+这一跑里的 C65 是第 5 轮（表中 R5）：首帧 **164.5/183.2 ms**、10k **3.50/5.84 ms**、
+100k **4.24/6.18 ms**、串行/并行 **73.9/54.9 ms**、开归档 **76.5/49.9 MB**、
+最小化 **71.6/45.2 MB**，与 R2/R3 同带；C49 默认 lane 也再次通过（72.7 s），说明 C65 的
+测试改动没有破坏 C49 的口径。
+
 **契约落点**：D1（每条 ctest 都钉 PASS_REGULAR_EXPRESSION，静默 SKIP 不算过）、
 D3/D26/D27（mutation.c65.no_first_paint 的 CAUGHT 由运行时谓词决定）、D7（整块替换，无索引手术）、
 D9（在 E:\wg\c65 自己的 clone 工作树）、D29（子进程/轮询全部有上限，TIMEOUT 写成真实预算：

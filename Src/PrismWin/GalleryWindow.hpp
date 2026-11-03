@@ -3156,6 +3156,14 @@ class GalleryWindow {
     // to read scene.listScroll (always 0) while clicks used the viewport.
     scene.listScroll = listMode_ ? static_cast<uint32_t>(viewport_.Scroll()) : 0u;
     scene.breadcrumb = breadcrumbText_;
+    // C77: the glass layer. BOTH flags come from the appearance setting, which
+    // defaults ON -- a window that shipped with the refraction layer off would
+    // have shipped the pre-C77 look (a translucent panel over a flat colour).
+    scene.glassPanels = prism::theme::BackdropRefractionEnabled();
+    scene.backdropRefraction = scene.glassPanels;
+    // glassTheme keeps its Midnight default: no window code sets a Variant yet
+    // (sidebarTheme / actionTheme / tabTheme are all the same default), so
+    // inventing a fourth source here would be a second theme authority.
     // V4: the status band's four segments read the archive properties the
     // engine reported (encryption from SetArchiveInfo, the rest from
     // SetArchiveStatus). Unknown is a state, not an empty strip.

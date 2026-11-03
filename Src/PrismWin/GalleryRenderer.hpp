@@ -42,6 +42,7 @@
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "ActionBar.hpp"    // C-V2: the action-band painter (DESIGN.md §2)
+#include "GlassPanel.hpp"   // C77: the ONE glass-panel helper (fill/rim/shadow)
 #include "SidebarView.hpp"  // C12 draw commands -- painted since C27, refined by C29
 
 namespace prism::win::gallery {
@@ -178,6 +179,29 @@ class GalleryRenderer {
     // V1's layout (Layout::tabBar); this view only says what to paint in it.
     const prism::win::tabbar::View* tabs = nullptr;
     prism::theme::Variant tabTheme = prism::theme::Variant::Midnight;
+
+    // ------------------------------------------------------------- C77 glass
+    // The BACKDROP LAYER: the current items rendered at 1/8 resolution, blurred
+    // and desaturated, painted under everything. It is what makes a translucent
+    // panel read as glass -- a semi-transparent fill over a flat colour is just
+    // grey, which is exactly what the user reported.
+    //
+    // OFF by default, like every other optional layer in this renderer (a null
+    // action model paints no band; a null sidebar paints no rail): a pre-C77
+    // scene keeps its exact framing, and the window turns both on from the
+    // appearance setting, which defaults ON.
+    bool backdropRefraction = false;
+    // The panel language (fill + top specular rim + drop shadow + squircle 14)
+    // for the breadcrumb island, the action island's base, the rail's base and
+    // the Quick Look card. Same opt-in rule as above.
+    bool glassPanels = false;
+    // Which theme's C77 tokens the glass resolves. Midnight is the shipping
+    // default and the pre-C77 scenes never read these tokens at all.
+    prism::theme::Variant glassTheme = prism::theme::Variant::Midnight;
+    // A caller-side bump for "the items changed". The renderer ALSO fingerprints
+    // the catalog (count + first/middle/last path), so a rename rebuilds even
+    // when nobody bumps this; the field exists so a test can force the change.
+    uint64_t contentRevision = 0;
   };
 
   HRESULT Initialize() {
@@ -274,6 +298,9 @@ class GalleryRenderer {
     // C60: the tab strip's one brush + two formats (same shape as the rail and
     // the band: recoloured per token, never one brush per colour).
     if (!tabPainter_.CreateDeviceResources(target, writeFactory_.Get())) return E_FAIL;
+    // C77: the glass helper BORROWS the rail's recolourable brush, so the device
+    // accounting C75 pins does not grow by one object nobody counted.
+    glassPanel_.Bind(target, sidebarBrush_.Get());
     return S_OK;
   }
 
@@ -300,6 +327,10 @@ class GalleryRenderer {
                                      static_cast<int>(size.height), railColumn,
                                      scene.listMode);
     target->Clear(kBackdrop);
+    // C77: the refraction layer sits under EVERYTHING -- bands, content, chrome.
+    // It is built from the content only (the items), never from the chrome, so
+    // a hover or a focus pill cannot make the wallpaper shimmer.
+    if (scene.backdropRefraction) DrawBackdrop(target, scene, layout);
     DrawBands(target, layout);
     // C60: the tab strip is a BAND of the layout (DESIGN.md §2.1), painted with
     // the bands and before the content, so the content's clip never covers it
@@ -324,6 +355,19 @@ class GalleryRenderer {
     }
     target->PopAxisAlignedClip();
 
+    // C77: the rail's BASE -- the drop shadow of the column, painted under it.
+    // The column's own fill belongs to DrawSidebar (C29/C79) and is not touched
+    // here: only the depth layer is added, so the rail's pinned surface colour
+    // is still exactly what the C29 suite measured.
+    if (scene.glassPanels && SidebarShown(scene)) {
+      const prism::win::sidebar::Layout& rail = *scene.sidebar;
+      const D2D1_RECT_F railBox =
+          D2D1::RectF(rail.panel.left, (std::max)(rail.panel.top, 0.0f), rail.panel.right,
+                      (std::min)(rail.panel.bottom, size.height));
+      if (railBox.right > railBox.left && railBox.bottom > railBox.top) {
+        glassPanel_.PaintShadow(target, railBox, scene.glassTheme, &glassStats_);
+      }
+    }
     // NEGATIVE CONTROL (CONTRACTS D3): the rail is never painted, so the suite's
     // "the command list reached pixels" assertion MUST go red.
     if (kPaintSidebar) DrawSidebar(target, scene, size);
@@ -333,6 +377,187 @@ class GalleryRenderer {
     DrawBreadcrumbIsland(target, scene, layout);
     DrawProgressCapsule(target, scene, layout);
     if (scene.quickLookOpen) DrawQuickLookCard(target, scene, layout);
+  }
+
+  // ------------------------------------------------------------------- C77
+  // THE BACKDROP LAYER (DESIGN.md 2.1, "the content is the wallpaper").
+  //
+  // The items are re-rendered into a 1/8-resolution compatible bitmap, blurred
+  // with a 15-tap separable gaussian (sigma 3.5 mini px = 28 px at 1:1), then
+  // composited at the ghost token's strength and washed with the veil token,
+  // which is what cuts its chroma to ~0.35. Only THEN does the chrome paint.
+  //
+  // WHY 1/8 AND NOT A FULL-SIZE BLUR: at 1/8 a 28 px blur is a 3.5 px blur --
+  // 30 DrawBitmap calls on a 200x125 surface instead of a full-window pass, and
+  // the upscale back to 1:1 is free (the bilinear tap IS the last blur step).
+  //
+  // REBUILD POLICY: only on a SIZE or CONTENT change. Scrolling does not
+  // rebuild (a backdrop that chased the scroll would be a full-window blur per
+  // frame); the ghost is a still of the content, which is what a refraction
+  // layer is. dbgBackdropRebuilds / dbgBackdropDraws are the evidence.
+  struct BackdropKey {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    size_t count = 0;
+    const void* items = nullptr;
+    uint64_t fingerprint = 0;
+    uint64_t revision = 0;
+    bool listMode = false;
+    bool operator==(const BackdropKey& other) const {
+      return width == other.width && height == other.height && count == other.count &&
+             items == other.items && fingerprint == other.fingerprint &&
+             revision == other.revision && listMode == other.listMode;
+    }
+  };
+
+  // Count + first/middle/last path: enough to notice a rename or a navigation
+  // without hashing a 100k-entry catalog on every frame. A caller that knows
+  // better bumps Scene::contentRevision.
+  static uint64_t FingerprintOf(const Scene& scene) {
+    if (scene.items == nullptr || scene.items->empty()) return 0;
+    const auto hashOne = [](uint64_t seed, const std::string& path) {
+      uint64_t h = seed ^ 1469598103934665603ull;
+      for (char c : path) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 1099511628211ull;
+      }
+      return h;
+    };
+    const std::vector<prism::ArchiveItem>& items = *scene.items;
+    uint64_t h = 1469598103934665603ull;
+    const size_t picks[3] = {0, items.size() / 2, items.size() - 1};
+    for (size_t index : picks) h = hashOne(h, items[index].path);
+    return h;
+  }
+
+  static BackdropKey MakeBackdropKey(const Scene& scene, const D2D1_SIZE_F& size) {
+    BackdropKey key;
+    key.width = static_cast<uint32_t>(size.width);
+    key.height = static_cast<uint32_t>(size.height);
+    key.count = scene.items != nullptr ? scene.items->size() : 0u;
+    key.items = scene.items;
+    key.fingerprint = FingerprintOf(scene);
+    key.revision = scene.contentRevision;
+    key.listMode = scene.listMode;
+    return key;
+  }
+
+  void DrawBackdrop(ID2D1RenderTarget* target, const Scene& scene,
+                    const prism::layout::Layout& layout) {
+#if defined(PRISM_C77_MUTANT_NO_BACKDROP)
+    // C77 MUTANT ACTIVE: no-backdrop -- the layer is compiled out, so the
+    // suite's "the backdrop differs from the flat colour" check MUST go red.
+    return;
+#endif
+    const D2D1_SIZE_F size = target->GetSize();
+    if (!(size.width >= 8.0f) || !(size.height >= 8.0f)) return;
+    const BackdropKey key = MakeBackdropKey(scene, size);
+    if (!backdropBitmap_ || !(key == backdropKey_)) {
+      if (!BuildBackdrop(target, scene, layout, key)) return;  // fall back to flat
+    }
+    if (!backdropBitmap_) return;
+    const prism::theme::Rgba ghost =
+        prism::theme::Lookup(prism::theme::TokenId::SurfaceBackdropGhost, scene.glassTheme).color;
+    const prism::theme::Rgba veil =
+        prism::theme::Lookup(prism::theme::TokenId::SurfaceBackdropVeil, scene.glassTheme).color;
+    target->DrawBitmap(backdropBitmap_.Get(), D2D1::RectF(0.0f, 0.0f, size.width, size.height),
+                       ghost.a, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    if (sidebarBrush_ && veil.a > 0.0f) {
+      sidebarBrush_->SetColor(ToD2d(veil));
+      target->FillRectangle(D2D1::RectF(0.0f, 0.0f, size.width, size.height),
+                            sidebarBrush_.Get());
+    }
+    ++dbgBackdropDraws;
+  }
+
+  bool BuildBackdrop(ID2D1RenderTarget* target, const Scene& scene,
+                     const prism::layout::Layout& layout, const BackdropKey& key) {
+    const D2D1_SIZE_F size = target->GetSize();
+    constexpr float kDownsample = 8.0f;
+    const UINT32 miniW = static_cast<UINT32>((std::max)(1.0f, std::floor(size.width / kDownsample)));
+    const UINT32 miniH =
+        static_cast<UINT32>((std::max)(1.0f, std::floor(size.height / kDownsample)));
+    const D2D1_PIXEL_FORMAT format = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                                       D2D1_ALPHA_MODE_PREMULTIPLIED);
+    const D2D1_SIZE_F miniSize = D2D1::SizeF(static_cast<float>(miniW), static_cast<float>(miniH));
+    const D2D1_SIZE_U miniPixels = D2D1::SizeU(miniW, miniH);
+
+    const auto makeTarget = [&](ID2D1BitmapRenderTarget** out) {
+      return target->CreateCompatibleRenderTarget(&miniSize, &miniPixels, &format,
+                                                  D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, out);
+    };
+
+    // 1. the content, at 1/8. The counters are saved and restored: this pass is
+    //    not the frame's paint, and inflating dbgTileCells here would have made
+    //    the C29/C36 pixel assertions read a number no frame ever produced.
+    ComPtr<ID2D1BitmapRenderTarget> content;
+    if (FAILED(makeTarget(content.ReleaseAndGetAddressOf()))) return false;
+    content->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    content->BeginDraw();
+    content->Clear(D2D1::ColorF(0, 0, 0, 0));
+    content->SetTransform(D2D1::Matrix3x2F::Scale(1.0f / kDownsample, 1.0f / kDownsample));
+    const int savedTiles = dbgTileCells;
+    const int savedRows = dbgRowCells;
+    const int savedThumbDraws = dbgThumbDraws;
+    if (scene.listMode) {
+      DrawListMode(content.Get(), scene, layout);
+    } else if (scene.items != nullptr) {
+      DrawGrid(content.Get(), scene, layout);
+    }
+    dbgTileCells = savedTiles;
+    dbgRowCells = savedRows;
+    dbgThumbDraws = savedThumbDraws;
+    content->SetTransform(D2D1::Matrix3x2F::Identity());
+    if (FAILED(content->EndDraw())) return false;
+    ComPtr<ID2D1Bitmap> stage;
+    if (FAILED(content->GetBitmap(stage.ReleaseAndGetAddressOf()))) return false;
+
+    // 2. the blur: two separable passes, 15 taps each (sigma = 28 px at 1:1).
+    constexpr float kBlurRadiusPx = 28.0f;
+    constexpr int kTaps = 7;  // +-7 mini px, sigma 3.5
+    const float sigma = kBlurRadiusPx / kDownsample * 0.5f;
+    float weights[2 * kTaps + 1];
+    float total = 0.0f;
+    for (int d = -kTaps; d <= kTaps; ++d) {
+      const float w = std::exp(-static_cast<float>(d * d) / (2.0f * sigma * sigma));
+      weights[d + kTaps] = w;
+      total += w;
+    }
+    // "over" accumulation realizes a weighted average if each tap's alpha is
+    // g_i / (1 - sum of the earlier taps): the visible weights then ARE g_i.
+    float alphas[2 * kTaps + 1];
+    float consumed = 0.0f;
+    for (int i = 0; i < 2 * kTaps + 1; ++i) {
+      const float g = weights[i] / total;
+      alphas[i] = consumed < 0.999f ? g / (1.0f - consumed) : 0.0f;
+      consumed += g;
+    }
+    const auto blurPass = [&](ID2D1Bitmap* source, bool horizontal,
+                              ComPtr<ID2D1Bitmap>* out) {
+      ComPtr<ID2D1BitmapRenderTarget> pass;
+      if (FAILED(makeTarget(pass.ReleaseAndGetAddressOf()))) return false;
+      pass->BeginDraw();
+      pass->Clear(D2D1::ColorF(0, 0, 0, 0));
+      for (int i = 0; i < 2 * kTaps + 1; ++i) {
+        if (!(alphas[i] > 0.0f)) continue;
+        const float offset = static_cast<float>(i - kTaps);
+        const D2D1_RECT_F dest =
+            horizontal ? D2D1::RectF(offset, 0.0f, offset + miniSize.width, miniSize.height)
+                       : D2D1::RectF(0.0f, offset, miniSize.width, offset + miniSize.height);
+        pass->DrawBitmap(source, dest, alphas[i], D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+      }
+      if (FAILED(pass->EndDraw())) return false;
+      return SUCCEEDED(pass->GetBitmap(out->ReleaseAndGetAddressOf()));
+    };
+    ComPtr<ID2D1Bitmap> horizontal;
+    if (!blurPass(stage.Get(), true, &horizontal)) return false;
+    ComPtr<ID2D1Bitmap> vertical;
+    if (!blurPass(horizontal.Get(), false, &vertical)) return false;
+
+    backdropBitmap_ = vertical;
+    backdropKey_ = key;
+    ++dbgBackdropRebuilds;
+    return true;
   }
 
   static D2D1_RECT_F ToRectF(const prism::layout::Rect& r) {
@@ -1312,8 +1537,21 @@ class GalleryRenderer {
     const int beforeHover = actionBar_.dbgHover;
     const int beforePressed = actionBar_.dbgPressed;
     const int beforeDropdowns = actionBar_.dbgDropdowns;
+    // C77: the island's BASE and EDGE only. Its FILL stays ActionBarPainter's
+    // (C64 pins it to CompositeOver(SurfaceFloatingIsland, canvas), and a second
+    // fill under it would have repainted that contract from the outside).
+    if (scene.glassPanels && !band.island.Empty()) {
+      glassPanel_.PaintShadow(target, ToRectF(band.island), scene.glassTheme, &glassStats_);
+    }
     actionBar_.Draw(target, band, *scene.actions, scene.actionHover, scene.actionPressed,
                     scene.actionTheme);
+    if (scene.glassPanels && !band.island.Empty()) {
+      prism::win::glass::Parts parts;
+      parts.shadow = false;
+      parts.fill = false;
+      parts.border = false;
+      glassPanel_.PaintRim(target, ToRectF(band.island), scene.glassTheme, parts, &glassStats_);
+    }
     dbgActionButtons += actionBar_.dbgButtons - beforeButtons;
     dbgActionIcons += actionBar_.dbgIcons - beforeIcons;
     dbgActionLabels += actionBar_.dbgLabels - beforeLabels;
@@ -1345,9 +1583,16 @@ class GalleryRenderer {
                                  : prism::layout::NavTextRect(layout);
     const D2D1_RECT_F pill = ToRectF(pillRect);
     const float height = static_cast<float>(pillRect.Height());
-    const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(pill, height / 2.0f, height / 2.0f);
-    target->FillRoundedRectangle(shape, island_.Get());
-    target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.0f);
+    if (scene.glassPanels) {
+      // C77: fill + top specular rim + drop shadow + squircle 14, in one call.
+      prism::win::glass::Parts parts;
+      glassPanel_.Paint(target, pill, scene.glassTheme, parts, &glassStats_);
+    } else {
+      const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(pill, height / 2.0f, height / 2.0f);
+      target->FillRoundedRectangle(shape, island_.Get());
+      target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.0f);
+    }
+    (void)height;
     DrawLabel(target, title_.Get(), scene.breadcrumb, ToRectF(textRect), textPrimary_.Get());
     if (scene.islands) {
       // Pointer-tracked specular rim (blueprint ch. 3.1 Layer 5): a bright
@@ -1415,9 +1660,15 @@ class GalleryRenderer {
     if (cardRect.Empty()) return;
     const D2D1_RECT_F card = ToRectF(cardRect);
     const float height = static_cast<float>(cardRect.Height());
-    const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(card, 24.0f, 24.0f);
-    target->FillRoundedRectangle(shape, card_.Get());
-    target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.2f);
+    if (scene.glassPanels) {
+      // C77: the Quick Look sheet is a glass panel like the rest of the chrome.
+      prism::win::glass::Parts parts;
+      glassPanel_.Paint(target, card, scene.glassTheme, parts, &glassStats_);
+    } else {
+      const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(card, 24.0f, 24.0f);
+      target->FillRoundedRectangle(shape, card_.Get());
+      target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.2f);
+    }
 
     // Preview area: gradient stand-in for the decoded texture.
     thumbs_[1]->SetStartPoint(D2D1::Point2F(card.left, card.top));
@@ -1516,6 +1767,11 @@ class GalleryRenderer {
     for (auto& gradient : thumbs_) gradient.Reset();
     thumbBitmaps_.clear();
     thumbVersion_ = 0;
+    // C77: the cached backdrop is a device object too; a minimised window must
+    // let it go with everything else (C75's whole point).
+    glassPanel_.Unbind();
+    backdropBitmap_.Reset();
+    backdropKey_ = BackdropKey{};
     actionBar_.ReleaseDeviceResources();
     tabPainter_.ReleaseDeviceResources();
   }
@@ -1540,6 +1796,12 @@ class GalleryRenderer {
   ComPtr<ID2D1LinearGradientBrush> thumbs_[3];
   std::unordered_map<uint32_t, ComPtr<ID2D1Bitmap>> thumbBitmaps_;
   uint64_t thumbVersion_ = 0;
+  // C77: the cached refraction layer (1/8 size, already blurred) and its key.
+  ComPtr<ID2D1Bitmap> backdropBitmap_;
+  BackdropKey backdropKey_{};
+  // C77: the glass-panel helper (borrows sidebarBrush_, owns nothing).
+  prism::win::glass::PanelPainter glassPanel_;
+  prism::win::glass::Stats glassStats_;
 
  public:
   // Debug counters (printed by the snapshot; drop when the pipeline is
@@ -1586,10 +1848,25 @@ class GalleryRenderer {
   int dbgActionDropdowns = 0;
   // V4: proof that the status band painted its segments (four per frame).
   int dbgStatusSegments = 0;
+  // C77: the backdrop layer's build/draw counters (see BackdropRebuilds).
+  int dbgBackdropRebuilds = 0;
+  int dbgBackdropDraws = 0;
   // C60: proof that the TAB STRIP reached pixels. TabsPainted() == 0 while no
   // archive is open is the positive half of case 7 ("the band is not drawn"),
   // and > 0 with two tabs is what makes case 1 a paint assertion instead of a
   // model assertion.
+  // C77: the refraction layer's evidence. Rebuilds counts the expensive builds
+  // (size/content changes only); draws counts every frame that composited it.
+  int BackdropRebuilds() const { return dbgBackdropRebuilds; }
+  int BackdropDraws() const { return dbgBackdropDraws; }
+  int BackdropBitmapPixels() const {
+    if (!backdropBitmap_) return 0;
+    const D2D1_SIZE_U size = backdropBitmap_->GetPixelSize();
+    return static_cast<int>(size.width * size.height);
+  }
+  // C77: what the panel helper painted (fill / rim / shadow counts).
+  const prism::win::glass::Stats& GlassStats() const { return glassStats_; }
+  void ResetGlassStats() { glassStats_ = prism::win::glass::Stats{}; }
   int TabBarTabsPainted() const { return tabPainter_.TabsPainted(); }
   int TabBarDirtyDotsPainted() const { return tabPainter_.DirtyDotsPainted(); }
   int TabBarInsertMarksPainted() const { return tabPainter_.InsertMarksPainted(); }

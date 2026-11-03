@@ -475,6 +475,20 @@ class Painter {
                      D2D1_DRAW_TEXT_OPTIONS_CLIP);
   }
 
+ public:
+  int BrushCount() const { return brush_ ? 1 : 0; }
+  int TextFormatCount() const { return (label_ ? 1 : 0) + (close_ ? 1 : 0); }
+
+  // C75: the strip's target-bound resources, droppable while minimised.
+  void ReleaseDeviceResources() {
+    factory_.Reset();
+    brush_.Reset();
+    label_.Reset();
+    close_.Reset();
+    ellipsis_.Reset();
+  }
+
+ private:
   ComPtr<IDWriteFactory> factory_;
   ComPtr<ID2D1SolidColorBrush> brush_;
   ComPtr<IDWriteTextFormat> label_;

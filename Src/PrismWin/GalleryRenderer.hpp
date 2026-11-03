@@ -1450,6 +1450,77 @@ class GalleryRenderer {
                      brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
   }
 
+ public:
+  // ------------------------------------------------------------------ C75
+  // What the last CreateDeviceResources() bound to the target, and how to let
+  // it go. A minimised window cannot use any of it; the whole set is rebuilt by
+  // CreateDeviceResources() inside the restore Resize, before the next paint.
+  // Counts are derived from the live COM pointers (C33's rule: accounting from
+  // what is held, never from a parallel counter that can drift).
+  int BrushCount() const {
+    int n = 0;
+    if (accent_) ++n;
+    if (tile_) ++n;
+    if (tileBorder_) ++n;
+    if (island_) ++n;
+    if (card_) ++n;
+    if (islandBorder_) ++n;
+    if (textPrimary_) ++n;
+    if (textSecondary_) ++n;
+    if (sidebarBrush_) ++n;
+    for (const auto& gradient : thumbs_) {
+      if (gradient) ++n;
+    }
+    return n + actionBar_.BrushCount() + tabPainter_.BrushCount();
+  }
+  int TextFormatCount() const {
+    int n = 0;
+    if (caption_) ++n;
+    if (title_) ++n;
+    if (small_) ++n;
+    if (sidebarLabel_) ++n;
+    if (sidebarSmall_) ++n;
+    if (statusFormat_) ++n;
+    return n + actionBar_.TextFormatCount() + tabPainter_.TextFormatCount();
+  }
+  size_t ThumbBitmapCount() const { return thumbBitmaps_.size(); }
+  size_t ThumbBitmapBytes() const {
+    size_t bytes = 0;
+    for (const auto& entry : thumbBitmaps_) {
+      if (!entry.second) continue;
+      const D2D1_SIZE_U size = entry.second->GetPixelSize();
+      bytes += static_cast<size_t>(size.width) * size.height * 4u;
+    }
+    return bytes;
+  }
+  bool DeviceResourcesLive() const { return accent_ != nullptr; }
+  // Drops every target-bound object (brushes, text formats, gradient stops, the
+  // device-bitmap cache of decoded thumbnails). The D2D/DWrite FACTORIES are
+  // kept: they are small, shared, and re-creating them costs more than they hold.
+  void ReleaseDeviceResources() {
+    accent_.Reset();
+    tile_.Reset();
+    tileBorder_.Reset();
+    island_.Reset();
+    card_.Reset();
+    islandBorder_.Reset();
+    textPrimary_.Reset();
+    textSecondary_.Reset();
+    sidebarBrush_.Reset();
+    caption_.Reset();
+    title_.Reset();
+    small_.Reset();
+    sidebarLabel_.Reset();
+    sidebarSmall_.Reset();
+    statusFormat_.Reset();
+    for (auto& gradient : thumbs_) gradient.Reset();
+    thumbBitmaps_.clear();
+    thumbVersion_ = 0;
+    actionBar_.ReleaseDeviceResources();
+    tabPainter_.ReleaseDeviceResources();
+  }
+
+ private:
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> writeFactory_;
   // C71: the live colours this frame resolved (see Draw).

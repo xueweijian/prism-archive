@@ -76,6 +76,15 @@ enum class TokenId : uint8_t {
                              // mixed toward, alpha = the refraction STRENGTH
   SurfaceBackdropVeil,       // desaturation wash drawn over the ghost
   ShadowFloatingPanel,       // drop shadow: colour + peak alpha
+  // C79 chrome tokens. The sidebar/tab-bar/status-bar surfaces used to be
+  // resolved by hardcoded alphas inside GalleryRenderer; each one is now a row
+  // in this table, in all three variants, so HighContrast cannot inherit a
+  // wash that is invisible on black.
+  SelectionTint,      // sidebar selected-row wash (accent @ ~14%)
+  SurfaceTabActive,   // raised tab plate (brighter than the canvas)
+  SurfaceTabHover,    // 4%-lift hover wash for an inactive tab
+  DividerSubtle,      // 1 px status-bar divider (alpha .08)
+  ShadowAmbient,      // large-radius low-alpha depth under a raised surface
   Count
 };
 
@@ -95,6 +104,11 @@ inline constexpr std::string_view kTokenNames[] = {
     "--surface-backdrop-ghost",
     "--surface-backdrop-veil",
     "--shadow-floating-panel",
+    "--selection-tint",
+    "--surface-tab-active",
+    "--surface-tab-hover",
+    "--divider-subtle",
+    "--shadow-ambient",
 };
 static_assert(sizeof(kTokenNames) / sizeof(kTokenNames[0]) == kTokenCount,
               "every TokenId needs exactly one CSS name");
@@ -104,6 +118,10 @@ inline constexpr Kind kTokenKinds[] = {
     Kind::Font,     Kind::Spring, Kind::Spring,  Kind::Color,
     Kind::Color,    Kind::Color, Kind::Color,    Kind::Color,
     Kind::Color,
+    Kind::Color,    Kind::Color,  Kind::Gradient, Kind::Gradient,
+    Kind::Font,     Kind::Spring, Kind::Spring,   Kind::Color,
+    Kind::Color,    Kind::Color,  Kind::Color,    Kind::Color,
+    Kind::Color,    Kind::Color,  Kind::Color,
 };
 static_assert(sizeof(kTokenKinds) / sizeof(kTokenKinds[0]) == kTokenCount,
               "every TokenId needs exactly one kind");
@@ -332,6 +350,47 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.82f)},
     {TokenId::ShadowFloatingPanel, Variant::HighContrast,
      Rgba(0.0f, 0.0f, 0.0f, 0.30f)},
+
+    // C79 chrome roles -- one row per variant, no inherited wash. Daylight and
+    // Midnight keep the Liquid Glass materials (semi-opaque accent/surface);
+    // HighContrast is opaque enough to stay legible on pure black.
+    // Sidebar selected row: the accent at 14% (blueprint 3.2's wash).
+    {TokenId::SelectionTint, Variant::Daylight,
+     Rgba(ChannelFromByte(0), ChannelFromByte(122), ChannelFromByte(255), 0.14f)},
+    {TokenId::SelectionTint, Variant::Midnight,
+     Rgba(ChannelFromByte(10), ChannelFromByte(132), ChannelFromByte(255), 0.16f)},
+    {TokenId::SelectionTint, Variant::HighContrast,
+     Rgba(ChannelFromByte(102), ChannelFromByte(179), ChannelFromByte(255), 0.24f)},
+    // Raised tab plate: brighter than the canvas, still a translucent material
+    // so the backdrop's colour shows through (Daylight/Midnight).
+    {TokenId::SurfaceTabActive, Variant::Daylight,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.85f)},
+    {TokenId::SurfaceTabActive, Variant::Midnight,
+     Rgba(ChannelFromByte(58), ChannelFromByte(64), ChannelFromByte(80), 0.88f)},
+    {TokenId::SurfaceTabActive, Variant::HighContrast,
+     Rgba(ChannelFromByte(40), ChannelFromByte(40), ChannelFromByte(44), 1.0f)},
+    // Inactive-tab hover: a ~4% lift, never a second plate.
+    {TokenId::SurfaceTabHover, Variant::Daylight,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.32f)},
+    {TokenId::SurfaceTabHover, Variant::Midnight,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.08f)},
+    {TokenId::SurfaceTabHover, Variant::HighContrast,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.20f)},
+    // 1 px status divider: alpha .08 (HighContrast raises it so the rule is not
+    // lost between two opaque clusters).
+    {TokenId::DividerSubtle, Variant::Daylight,
+     Rgba(ChannelFromByte(29), ChannelFromByte(29), ChannelFromByte(31), 0.08f)},
+    {TokenId::DividerSubtle, Variant::Midnight,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.08f)},
+    {TokenId::DividerSubtle, Variant::HighContrast,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.40f)},
+    // Depth: a large-radius, low-alpha shadow token (no literal black).
+    {TokenId::ShadowAmbient, Variant::Daylight,
+     Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.10f)},
+    {TokenId::ShadowAmbient, Variant::Midnight,
+     Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.40f)},
+    {TokenId::ShadowAmbient, Variant::HighContrast,
+     Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.70f)},
 };
 
 // --border-specular-rim and --accent-liquid-primary.

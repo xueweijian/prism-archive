@@ -55,6 +55,7 @@ enum class PrimKind : std::uint8_t {
   SectionLabel, // "FAVORITES" / "RECENT" / "ARCHIVE TREE"
   RowHit,       // hit-test region for one row (not painted)
   Selection,    // keyboard focus highlight behind a row
+  SelectionBar, // C79: the 3 px accent rule at the left edge of that highlight
   Glyph,        // icon id at an explicit box
   Label,        // one text run at an explicit box
   Chevron,      // tree expander glyph
@@ -72,6 +73,7 @@ inline std::ostream& operator<<(std::ostream& os, PrimKind kind) {
     case PrimKind::SectionLabel: return os << "SectionLabel";
     case PrimKind::RowHit: return os << "RowHit";
     case PrimKind::Selection: return os << "Selection";
+    case PrimKind::SelectionBar: return os << "SelectionBar";
     case PrimKind::Glyph: return os << "Glyph";
     case PrimKind::Label: return os << "Label";
     case PrimKind::Chevron: return os << "Chevron";
@@ -140,6 +142,11 @@ struct Command {
   float opacity = 1.0f;
   int payload = -1;  // row index inside its section (RowHit / Selection / Glyph / Label)
   prism::sidebar::Section section = prism::sidebar::Section::None;
+  // C79: extra tracking for a text run, in DIPs at the run's own size. A group
+  // heading is 11 px with .5 px tracking (Finder's sidebar); the renderer turns
+  // this into DWrite's em-relative SetCharacterSpacing, so the number stays a
+  // design token rather than a per-call-site magic constant.
+  float letterSpacing = 0.0f;
 };
 
 // Tokens from blueprint 3.3, translated to a 236 px column. Every number is an
@@ -155,7 +162,10 @@ struct Metrics {
   float sectionGap = 14.0f;
   float iconSize = 16.0f;
   float iconGap = 8.0f;
-  float indent = 14.0f;
+  // C79: one indent step is 16 px (blueprint 3.2's 4 px scale), and the focus
+  // rule is exactly 3 px wide.
+  float indent = 16.0f;
+  float selectionBarWidth = 3.0f;
   float statusHeight = 86.0f;
   float statusGapAbove = 12.0f;
   float statusPadding = 10.0f;
@@ -329,8 +339,12 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
     const Box box{metrics.paddingX, y, metrics.width - metrics.paddingX,
                   y + metrics.sectionHeaderHeight};
     if (visible(box)) {
-      push(Command{PrimKind::SectionLabel, box, std::string(text), {},
-                   ColorToken::SectionLabel, 0.9f, -1, section});
+      // C79: 11 px, .5 px tracking, uppercase (the labels already are) and a
+      // dimmer secondary role -- Finder's group heading, not another row.
+      Command heading{PrimKind::SectionLabel, box, std::string(text), {},
+                      ColorToken::SectionLabel, 0.75f, -1, section};
+      heading.letterSpacing = 0.5f;
+      push(std::move(heading));
     }
     y += metrics.sectionHeaderHeight;
   };
@@ -346,6 +360,15 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
       if (focused) {
         push(Command{PrimKind::Selection, row, {}, {},
                      ColorToken::SelectedBackground, 1.0f, index, section});
+        // C79: the 3 px accent rule at the highlight's left edge. It is a
+        // separate primitive (not a border on Selection) so the width is a
+        // number the pixel suite can measure, and so the fill's alpha stays the
+        // token's (14%) instead of being fused with an opaque edge.
+        const float barTop = row.top + 2.0f;
+        const float barBottom = row.bottom - 2.0f;
+        push(Command{PrimKind::SelectionBar,
+                     Box{row.left, barTop, row.left + metrics.selectionBarWidth, barBottom},
+                     {}, {}, ColorToken::Accent, 1.0f, index, section});
       }
       if (chevron) {
         const Box box = detail::GlyphBox(metrics, row);
@@ -472,7 +495,7 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
     push(Command{PrimKind::StatusText,
                  Box{textLeft, top, layout.pill.right - metrics.statusPadding,
                      top + metrics.statusLineHeight},
-                 lines[i], {}, ColorToken::PrimaryText, 1.0f, i, Section::None});
+                 lines[i], {}, ColorToken::SecondaryText, 1.0f, i, Section::None});
   }
   const float fraction =
       (std::min)(1.0f, static_cast<float>(status.ratioPermille) / 1000.0f);

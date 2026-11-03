@@ -23,6 +23,7 @@
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
+#include <dwrite_1.h>  // C79: IDWriteTextLayout1::SetCharacterSpacing (heading tracking)
 
 #include <cmath>
 #include <string>
@@ -281,11 +282,20 @@ class GalleryRenderer {
       sidebarLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     if (sidebarSmall_) sidebarSmall_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    // V4: the status band's readout format (11 px, one line, leading, centred
-    // in its 20 px inner band so the four segments share one baseline).
+    // C79: the status capsule's readout is 12 px secondary text (the group
+    // headings reuse sidebarSmall_, the existing 11 px semibold format).
     writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    11.0f, L"en-US", statusFormat_.ReleaseAndGetAddressOf());
+                                    12.0f, L"en-US", sidebarStatus_.ReleaseAndGetAddressOf());
+    if (sidebarStatus_) {
+      sidebarStatus_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+      sidebarStatus_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+    // V4/C79: the status band's readout format (12 px, one line, leading,
+    // centred in its 20 px inner band so the six segments share one baseline).
+    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                    12.0f, L"en-US", statusFormat_.ReleaseAndGetAddressOf());
     if (statusFormat_) {
       statusFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       statusFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -616,18 +626,43 @@ class GalleryRenderer {
   void DrawStatusBar(ID2D1RenderTarget* target, const Scene& scene,
                      const prism::layout::Layout& layout) {
     if (!statusFormat_ || layout.statusBar.Empty()) return;
+    // C79: the counts are the scene's, unless the caller supplied them. Deriving
+    // them HERE keeps GalleryWindow's contract unchanged while still letting the
+    // snapshot and every list-mode frame show real numbers.
+    prism::layout::StatusInfo info = scene.status;
+    if (info.itemCount < 0) {
+      if (scene.listItems != nullptr) {
+        info.itemCount = static_cast<int>(scene.listItems->size());
+      } else if (scene.items != nullptr) {
+        info.itemCount = static_cast<int>(scene.items->size());
+      }
+    }
+    if (info.selectedCount < 0) {
+      info.selectedCount = scene.listMode ? (scene.selectedRow >= 0 ? 1 : 0)
+                                          : (scene.selectedItem >= 0 ? 1 : 0);
+    }
     const std::vector<prism::layout::StatusSegment> segments =
-        prism::layout::StatusSegments(layout, scene.status);
+        prism::layout::StatusSegments(layout, info);
     for (const prism::layout::StatusSegment& segment : segments) {
       const D2D1_RECT_F rect = ToRectF(segment.rect);
+      if (segment.id == prism::layout::StatusId::Divider) {
+        // C79: a 1 px alpha-.08 rule at the midpoint of the empty middle. It is
+        // a token, so HighContrast can raise it without a second code path.
+        island_->SetColor(ToD2d(
+            prism::theme::Lookup(prism::theme::TokenId::DividerSubtle, scene.actionTheme)
+                .color));
+        target->FillRectangle(rect, island_.Get());
+        island_->SetColor(islandColor_);
+        continue;
+      }
       float textLeft = rect.left;
       if (segment.id == prism::layout::StatusId::Encryption) {
         // A 6 px state dot: accent while encrypted, secondary while not, hollow
         // while unknown. Colour is never the ONLY signal (the text says it too).
         const D2D1_COLOR_F dot =
-            scene.status.crypto == prism::layout::CryptoState::Encrypted
+            info.crypto == prism::layout::CryptoState::Encrypted
                 ? accentColor_
-                : (scene.status.crypto == prism::layout::CryptoState::Unencrypted
+                : (info.crypto == prism::layout::CryptoState::Unencrypted
                        ? kTextSecondary
                        : kIslandBorder);
         const float cy = (rect.top + rect.bottom) * 0.5f;
@@ -638,10 +673,13 @@ class GalleryRenderer {
         textLeft = rect.left + 12.0f;
       }
       std::wstring text = Utf8(segment.text);
-      if (segment.id == prism::layout::StatusId::Ratio && segment.value >= 0) {
-        text += L" " + std::to_wstring(segment.value) + L"%";
+      if (segment.value >= 0) {
+        text += L" " + std::to_wstring(segment.value);
+        if (segment.id == prism::layout::StatusId::Ratio) text += L"%";
       }
       if (text.empty()) continue;
+      // C79: secondary role at 12 px (the format is 12 px now), so the band is
+      // a readout rather than a second heading row.
       target->DrawText(text.c_str(), static_cast<UINT32>(text.size()), statusFormat_.Get(),
                        D2D1::RectF(textLeft, rect.top, rect.right, rect.bottom),
                        textSecondary_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -732,11 +770,11 @@ class GalleryRenderer {
         return color(TokenId::TextPrimary);
       case prism::win::sidebar::ColorToken::SecondaryText:
         return color(TokenId::TextSecondary);
-      case prism::win::sidebar::ColorToken::SelectedBackground: {
-        prism::theme::Rgba c = liquidFrom();
-        c.a = 0.32f;
-        return c;
-      }
+      case prism::win::sidebar::ColorToken::SelectedBackground:
+        // C79: the wash is a C15 token now (accent @14% in Daylight, @16% in
+        // Midnight, @24% in HighContrast), not a hardcoded .32 that made the
+        // selected row heavier than the design's 12-18% band.
+        return color(TokenId::SelectionTint);
       case prism::win::sidebar::ColorToken::Accent:
       case prism::win::sidebar::ColorToken::Locked: {
         prism::theme::Rgba c = liquidFrom();
@@ -991,14 +1029,38 @@ class GalleryRenderer {
       case PrimKind::Panel:
       case PrimKind::RowHit:
         return;  // the panel is painted up front; a hit region paints nothing
-      case PrimKind::SectionLabel:
+      case PrimKind::SectionLabel: {
         ++dbgSidebarLabels;
-        DrawSidebarText(target, sidebarSmall_.Get(), command.text, box,
-                        sidebarBrush_.Get(), 2.0f);
+        // C79: 11 px semibold + the command's tracking. DWrite exposes letter
+        // spacing on the LAYOUT (not the format), so a heading is the one run
+        // that gets its own layout; em units = DIPs / 11 px.
+        const std::wstring wide = Utf8(command.text);
+        ComPtr<IDWriteTextLayout> layout;
+        if (sidebarSmall_ && !wide.empty() &&
+            SUCCEEDED(writeFactory_->CreateTextLayout(
+                wide.c_str(), static_cast<UINT32>(wide.size()), sidebarSmall_.Get(),
+                box.right - box.left, box.bottom - box.top,
+                layout.ReleaseAndGetAddressOf()))) {
+          ComPtr<IDWriteTextLayout1> tracked;
+          if (SUCCEEDED(layout.As(&tracked))) {
+            tracked->SetCharacterSpacing(
+                command.letterSpacing / 11.0f, 0.0f, 0.0f,
+                DWRITE_TEXT_RANGE{0, static_cast<UINT32>(wide.size())});
+          }
+          target->DrawTextLayout(D2D1::Point2F(box.left, box.top + 2.0f), layout.Get(),
+                                 sidebarBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
         return;
+      }
       case PrimKind::Selection:
         // The focus pill: squircle radius 8 (blueprint 3.2 row highlight).
         FillSquircleRoundedRect(target, box, 8.0f, sidebarBrush_.Get());
+        return;
+      case PrimKind::SelectionBar:
+        // C79: the 3 px accent rule. A squircle is the wrong shape for a 3 px
+        // bar, so this is a plain rounded rect whose radius is half its width.
+        target->FillRoundedRectangle(
+            D2D1::RoundedRect(box, 1.5f, 1.5f), sidebarBrush_.Get());
         return;
       case PrimKind::Glyph:
       case PrimKind::Chevron:
@@ -1038,7 +1100,9 @@ class GalleryRenderer {
       }
       case PrimKind::StatusText:
         ++dbgSidebarLabels;
-        DrawSidebarText(target, sidebarSmall_.Get(), command.text, box,
+        // C79: the capsule's readout is 12 px secondary text, not 11 px
+        // semibold chrome.
+        DrawSidebarText(target, sidebarStatus_.Get(), command.text, box,
                         sidebarBrush_.Get(), 3.0f, 2.0f);
         return;
       case PrimKind::RatioBar:
@@ -1731,6 +1795,7 @@ class GalleryRenderer {
     if (small_) ++n;
     if (sidebarLabel_) ++n;
     if (sidebarSmall_) ++n;
+    if (sidebarStatus_) ++n;
     if (statusFormat_) ++n;
     return n + actionBar_.TextFormatCount() + tabPainter_.TextFormatCount();
   }
@@ -1763,6 +1828,7 @@ class GalleryRenderer {
     small_.Reset();
     sidebarLabel_.Reset();
     sidebarSmall_.Reset();
+    sidebarStatus_.Reset();
     statusFormat_.Reset();
     for (auto& gradient : thumbs_) gradient.Reset();
     thumbBitmaps_.clear();
@@ -1787,7 +1853,8 @@ class GalleryRenderer {
   // C29 sidebar: one recolourable brush + the two single-line text formats.
   ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
   ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
-  // V4: the status band's readout format (11 px, one line).
+  // C79: the capsule readout (12 px secondary); headings reuse sidebarSmall_.
+  ComPtr<IDWriteTextFormat> sidebarStatus_;
   ComPtr<IDWriteTextFormat> statusFormat_;
   // C-V2: the action band's painter (own brush + text formats).
   prism::win::actionbar::ActionBarPainter actionBar_;

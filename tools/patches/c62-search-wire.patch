@@ -1,0 +1,462 @@
+C62 patch -- wire the search box into the gallery window (two files, no new
+dependencies). Generated with git diff against main@4ae3b38 and verified with
+"git apply --check" and a real PrismArchive build.
+
+The card itself delivers the MODEL (Src/PrismCore/SearchBoxModel.hpp) and the
+DRAWING INSTRUCTIONS (Src/PrismWin/SearchBoxPainter.hpp) plus their tests. This
+patch is the wiring C60 can apply verbatim when it finishes the window rework;
+nothing here changes the model's rules.
+
+What it does:
+  * Ctrl+F -> Command::OpenSearch (the ONE key table, Shortcuts.hpp) opens the
+    field and switches the view to list mode, because the filtered rows are the
+    list;
+  * WM_CHAR feeds committed text, WM_KEYDOWN maps Backspace/Delete/arrows/
+    Home/End/Esc/Enter, and WM_IME_* feeds the composition PREVIEW (GCS_COMPSTR)
+    and the commit (GCS_RESULTSTR) -- the window never edits bytes itself;
+  * the query owns FilterSpec::substring only, so search narrows an existing
+    type/size/glob filter instead of resetting it; an empty query restores the
+    rows;
+  * the painter's instruction list is built each frame from the layout and the
+    same model the keys edit; DrawSearchBox is the only Direct2D knowledge;
+  * hit testing is Scene::HitTest on the SAME instructions that were painted.
+
+Known limits, on purpose:
+  * the search covers the CURRENT folder's list view (item.path names), not the
+    whole catalog; widening it is a row-projection change in the window, not a
+    model change -- SearchBoxModel already speaks catalog indices;
+  * the field's rectangle is a 320 x 32 DIP box at the content's top-right; C60
+    owns the final placement (action band vs content), so SearchBounds is one
+    function;
+  * the injected measure callback uses the window's crumb format (15 px), so
+    the caret/badge rectangles match what DrawText paints; a DPI-aware target
+    should pass its real DWrite format and DPI.
+
+Contracts touched: D1 (stdout marker untouched), D3/D26/D27 (the model's own
+mutants still decide the C62 suite), B1 ((std::max) parenthesised), B2 (headers
+include what they use), D7 (whole-block additions, no index surgery).
+Apply:  git apply tools/patches/c62-search-wire.patch
+
+diff --git a/Src/PrismCore/Shortcuts.hpp b/Src/PrismCore/Shortcuts.hpp
+index a2dd471..1df0f91 100644
+--- a/Src/PrismCore/Shortcuts.hpp
++++ b/Src/PrismCore/Shortcuts.hpp
+@@ -71,6 +71,9 @@ enum class Command : uint8_t {
+   // 9.1 row 3: Ctrl+K -> command palette.
+   OpenPalette,
+   ClosePalette,
++  // C62: Ctrl+F -> the archive list's search box (the field itself is a
++  // non-modal filter; the window owns the text buffer it edits).
++  OpenSearch,
+   // 9.1 row 4: Ctrl+E / Alt+double-click -> smart extract, no dialog.
+   SmartExtract,
+   // 9.1 row 5: Ctrl+Shift+N -> virtual folder in the archive (CoW transaction).
+@@ -104,6 +107,7 @@ inline std::ostream& operator<<(std::ostream& os, Command command) {
+     case Command::ZoomNext: return os << "ZoomNext";
+     case Command::OpenPalette: return os << "OpenPalette";
+     case Command::ClosePalette: return os << "ClosePalette";
++    case Command::OpenSearch: return os << "OpenSearch";
+     case Command::SmartExtract: return os << "SmartExtract";
+     case Command::NewFolder: return os << "NewFolder";
+     case Command::DeleteSelected: return os << "DeleteSelected";
+@@ -162,6 +166,7 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
+   if (CtrlOnly(stroke)) {
+     switch (key) {
+       case 'K': return Command::OpenPalette;   // 9.1 row 3
++      case 'F': return Command::OpenSearch;    // C62: find in the list
+       case 'E': return Command::SmartExtract;  // 9.1 row 4
+       case '1': return Command::ToggleGrid;    // batch A, kept in the table
+       case '2': return Command::ToggleList;
+diff --git a/Src/PrismWin/GalleryWindow.hpp b/Src/PrismWin/GalleryWindow.hpp
+index 0496284..5922612 100644
+--- a/Src/PrismWin/GalleryWindow.hpp
++++ b/Src/PrismWin/GalleryWindow.hpp
+@@ -57,6 +57,7 @@
+ // file first fails on "HDROP: undeclared" (the drop-in suite only compiled
+ // because it happened to include windows.h without the lean-and-mean).
+ #include <shellapi.h>
++#include <imm.h>  // C62: IME composition preview for the search field
+ 
+ #include <d2d1.h>
+ #include <d2d1helper.h>
+@@ -88,6 +89,7 @@
+ #include "../PrismCore/ListLayout.hpp"
+ #include "../PrismCore/ListSortModel.hpp"   // list view order (C13)
+ #include "../PrismCore/Preview.hpp"
++#include "../PrismCore/SearchBoxModel.hpp"  // C62: the search field's state machine
+ #include "../PrismCore/Shortcuts.hpp"       // the ONE key table (C8)
+ #include "../PrismCore/SidebarModel.hpp"    // sidebar state (C12)
+ #include "../PrismCore/SpringAnimator.hpp"
+@@ -96,6 +98,7 @@
+ #include "CommandPalette.hpp"               // palette shell: geometry + text buffer
+ #include "EditConfirmDialog.hpp"            // C54: edit intents, confirmation model, gate
+ #include "PaletteOverlay.hpp"               // C53: Ctrl+K paints THIS layer (C31)
++#include "SearchBoxPainter.hpp"              // C62: C15-tokened drawing instructions
+ #include "GalleryRenderer.hpp"
+ #include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
+ #include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
+@@ -114,6 +117,8 @@
+ // and each suite that creates a real window) linkable without per-target edits
+ // -- the same reason the three D3D/DComp libraries are named above.
+ #pragma comment(lib, "shell32.lib")
++// C62: ImmGetContext / ImmGetCompositionStringW (IME preview).
++#pragma comment(lib, "imm32.lib")
+ 
+ namespace prism::win::gallery {
+ 
+@@ -753,6 +758,44 @@ class GalleryWindow {
+     Invalidate();
+   }
+   const prism::list::FilterSpec& Filter() const { return filter_; }
++
++  // ---------- card C62: the search box --------------------------------------
++  // The field is pure PrismCore state (SearchBoxModel) plus a list of drawing
++  // instructions (SearchBoxPainter). The window feeds it keys and applies its
++  // QUERY to the list filter; it never re-decides Escape, IME or code-point
++  // boundaries. C60 owns the final placement, so the rectangle comes from the
++  // ONE layout authority, never from a constant in the message handler.
++  prism::search::Model& SearchModel() { return search_; }
++  const prism::search::Model& SearchModel() const { return search_; }
++  bool SearchOpen() const { return search_.IsOpen(); }
++  const prism::win::searchbox::Scene& SearchScene() const { return searchScene_; }
++
++  void OpenSearch() {
++    if (search_.IsOpen()) {
++      search_.SelectAll();  // a second Ctrl+F selects the current query
++      Invalidate();
++      return;
++    }
++    // Not a modal overlay -- the list stays visible and filters live -- but it
++    // IS a second keyboard owner, so the other two give up the keyboard.
++    DismissOtherOverlays(ActiveOverlay::None);
++    if (!listMode_) SetListMode(true);  // search results are the list view
++    prism::win::searchbox::Options options;
++    options.variant = prism::theme::Variant::Daylight;  // the window's palette
++    options.dpi = 96;    // HwndRenderTarget coordinates are DIPs already
++    options.fontSize = 15.0f;  // matches crumbFormat_ (MeasureUtf8 below)
++    options.measure = [this](std::string_view text) {
++      return static_cast<float>(MeasureUtf8(text));
++    };
++    searchPainter_ = prism::win::searchbox::SearchBoxPainter(std::move(options));
++    search_.Open();
++    Invalidate();
++  }
++
++  void CloseSearch() {
++    search_.Close();       // clearing restores the rows: one rule, not two
++    ApplySearchFilter();
++  }
+   const std::vector<prism::list::Row>& ListRows() const { return listRows_; }
+   int ListRowCount() const { return static_cast<int>(listItems_.size()); }
+   // The view row <-> folder row glue, exposed so the suite can prove the two
+@@ -1081,6 +1124,72 @@ class GalleryWindow {
+         }
+         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+       }
++      case WM_CHAR: {
++        // C62: only the search field consumes characters. WM_KEYDOWN already
++        // handled Backspace/Delete/arrows; this is text (and IME commits).
++        if (!search_.IsOpen()) return DefWindowProcW(host_.hwnd, message, wparam, lparam);
++        const wchar_t unit = static_cast<wchar_t>(wparam);
++        if (unit == L'\b') return 0;  // the key path edited; WM_CHAR repeats it
++        if (unit < L' ') return 0;     // Enter/Tab/Esc are keys, not text
++        if (unit >= 0xD800 && unit <= 0xDBFF) {
++          pendingHighSurrogate_ = unit;  // a surrogate pair arrives as two units
++          return 0;
++        }
++        std::wstring wide(1, unit);
++        if (unit >= 0xDC00 && unit <= 0xDFFF) {
++          if (pendingHighSurrogate_ == 0) return 0;  // lone low surrogate
++          wide.insert(wide.begin(), pendingHighSurrogate_);
++          pendingHighSurrogate_ = 0;
++        }
++        const prism::search::Effect effect = search_.InsertText(WideToUtf8(wide));
++        if (effect.queryChanged) ApplySearchFilter();
++        Invalidate();
++        return 0;
++      }
++      case WM_IME_STARTCOMPOSITION: {
++        if (!search_.IsOpen()) return DefWindowProcW(host_.hwnd, message, wparam, lparam);
++        search_.BeginComposition();
++        Invalidate();
++        return 0;
++      }
++      case WM_IME_COMPOSITION: {
++        // The preview is DisplayText only; Query()/matched count do not move
++        // until GCS_RESULTSTR commits. That split is the model's, not this TU's.
++        if (!search_.IsOpen()) return DefWindowProcW(host_.hwnd, message, wparam, lparam);
++        HIMC context = ImmGetContext(host_.hwnd);
++        if (context == nullptr) return 0;
++        if ((lparam & GCS_COMPSTR) != 0) {
++          const LONG bytes = ImmGetCompositionStringW(context, GCS_COMPSTR, nullptr, 0);
++          if (bytes > 0) {
++            std::wstring wide(static_cast<std::size_t>(bytes) / sizeof(wchar_t), L'\0');
++            ImmGetCompositionStringW(context, GCS_COMPSTR, wide.data(),
++                                     static_cast<DWORD>(bytes));
++            search_.UpdateComposition(WideToUtf8(wide));
++          }
++        }
++        if ((lparam & GCS_RESULTSTR) != 0) {
++          const LONG bytes = ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0);
++          if (bytes > 0) {
++            std::wstring wide(static_cast<std::size_t>(bytes) / sizeof(wchar_t), L'\0');
++            ImmGetCompositionStringW(context, GCS_RESULTSTR, wide.data(),
++                                     static_cast<DWORD>(bytes));
++            const prism::search::Effect effect = search_.CommitComposition(WideToUtf8(wide));
++            if (effect.queryChanged) ApplySearchFilter();
++          }
++        }
++        ImmReleaseContext(host_.hwnd, context);
++        Invalidate();
++        return 0;
++      }
++      case WM_IME_ENDCOMPOSITION: {
++        if (!search_.IsOpen()) return DefWindowProcW(host_.hwnd, message, wparam, lparam);
++        search_.CancelComposition();
++        Invalidate();
++        return 0;
++      }
++      case WM_IME_CHAR:
++        // GCS_RESULTSTR already delivered the text; WM_IME_CHAR would double it.
++        return search_.IsOpen() ? 0 : DefWindowProcW(host_.hwnd, message, wparam, lparam);
+       case WM_KEYDOWN: {
+         // CARD C25: the key chain that used to live here (a dozen ifs next to
+         // the pixel work) is now PrismCore's table. This case does ONE thing:
+@@ -1090,6 +1199,9 @@ class GalleryWindow {
+         // Enter on a focused button, arrows inside a menu). Only keys it
+         // declines fall through to the gallery table below, so no existing
+         // chord changes meaning.
++        // C62: an open search field owns every key on this path; WM_CHAR is
++        // the text route, so a letter can never fall through to DeleteSelected.
++        if (search_.IsOpen()) return HandleSearchKey(static_cast<UINT>(wparam));
+         if (HandleActionBarKey(static_cast<UINT>(wparam))) return 0;
+         prism::keys::Stroke stroke;
+         stroke.key = static_cast<uint32_t>(wparam);
+@@ -1195,6 +1307,9 @@ class GalleryWindow {
+         return 0;
+       }
+       case WM_LBUTTONDOWN: {
++        // C62: the field's clear button is a real hit target derived from the
++        // same instructions that were painted -- no second copy of the layout.
++        if (HandleSearchClick(MouseX(lparam), MouseY(lparam))) return 0;
+         // C52: a click anywhere dismisses a drop hint that is still on screen
+         // (the app clears it as soon as it acts; this is the "user changed
+         // their mind" path, so an overlay can never become permanent chrome).
+@@ -1459,6 +1574,10 @@ class GalleryWindow {
+   }
+ 
+   LRESULT HandleKey(const prism::keys::Stroke& stroke) {
++    // C62: while the search field is open it owns the key route, including Esc
++    // (clear, then close) and Enter (move to the results). The model decides
++    // which stage a key is in; this router only forwards.
++    if (search_.IsOpen()) return HandleSearchKey(stroke.key);
+     // The palette owns the keyboard while it is open: it gets the stroke first
+     // (that is how typing reaches the query field) and only a stroke it declines
+     // is re-resolved against the gallery table.
+@@ -1510,6 +1629,9 @@ class GalleryWindow {
+       case prism::keys::Command::OpenPalette:
+         OpenPalette();
+         return;
++      case prism::keys::Command::OpenSearch:
++        OpenSearch();
++        return;
+       case prism::keys::Command::ClosePalette:
+         // C53: one close closes both halves (Esc reaching the shell directly is
+         // still one surface going away, never a dead card left painted).
+@@ -2173,7 +2295,13 @@ class GalleryWindow {
+       }
+       scene.hud = hud_.Render(NowMs());
+     }
++    // C62: the field's instructions are built from the SAME model the keys edit
++    // and the SAME layout the frame painted. A closed field emits nothing.
++    searchScene_ = search_.IsOpen()
++                       ? searchPainter_.Build(search_, SearchBounds())
++                       : prism::win::searchbox::Scene{};
+     renderer_.Draw(target_.Get(), scene);
++    DrawSearchBox();
+     // C52: the drop hint is a TRANSIENT overlay, not part of the scene snapshot
+     // (the renderer must not grow a fourth "mode" for something that lives for
+     // one drag). It is painted over the same target, in the same frame, from
+@@ -2245,6 +2373,168 @@ class GalleryWindow {
+   }
+ 
+ 
++  // ---------- card C62: search plumbing -------------------------------------
++  // The field floats over the top-right of the content. The rectangle comes
++  // from the layout the frame is painting; SearchBounds is the ONLY authority,
++  // so the painted field and the clear-button hit test cannot drift.
++  prism::win::searchbox::Box SearchBounds() const {
++    const prism::layout::Rect& content = layout_.contentInner;
++    const float right = static_cast<float>(content.right);
++    const float left = (std::max)(static_cast<float>(content.left), right - 320.0f);
++    const float top = static_cast<float>(content.top);
++    return prism::win::searchbox::Box{left, top, right, top + 32.0f};
++  }
++
++  // The query owns C13's SUBSTRING field only: a glob/type/size filter the
++  // caller already set survives, so search narrows the view instead of
++  // resetting it. Clearing the query restores every row (empty == no filter).
++  void ApplySearchFilter() {
++    prism::list::FilterSpec spec = filter_;
++    spec.substring = search_.Query();
++    SetFilter(spec);
++    RebuildLayout();  // a shorter result list starts at its first row again
++  }
++
++  bool HandleSearchClick(int x, int y) {
++    if (!search_.IsOpen()) return false;
++    switch (searchScene_.HitTest(static_cast<float>(x), static_cast<float>(y))) {
++      case prism::win::searchbox::Target::ClearButton:
++        search_.ClearQuery();
++        ApplySearchFilter();
++        Invalidate();
++        return true;
++      case prism::win::searchbox::Target::Field:
++        search_.SetCaret(search_.Query().size());  // click puts the pen at the end
++        Invalidate();
++        return true;
++      case prism::win::searchbox::Target::Badge:
++        return true;  // the count is a label, not a button
++      case prism::win::searchbox::Target::None:
++        return false;
++    }
++    return false;
++  }
++
++  // One key -> one KeyEvent -> one Effect. Printable input does NOT come from
++  // here: WM_CHAR is the only route that honours the layout and the IME.
++  LRESULT HandleSearchKey(UINT vk) {
++    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
++    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
++    prism::search::KeyEvent event;
++    bool mapped = true;
++    switch (vk) {
++      case VK_BACK:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Backspace, ctrl);
++        break;
++      case VK_DELETE:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Delete, ctrl);
++        break;
++      case VK_LEFT:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Left, ctrl, shift);
++        break;
++      case VK_RIGHT:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Right, ctrl, shift);
++        break;
++      case VK_HOME:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Home, ctrl, shift);
++        break;
++      case VK_END:
++        event = prism::search::KeyEvent::Press(prism::search::Key::End, ctrl, shift);
++        break;
++      case VK_ESCAPE:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Escape);
++        break;
++      case VK_RETURN:
++        event = prism::search::KeyEvent::Press(prism::search::Key::Enter);
++        break;
++      case 'A':
++        if (!ctrl) {
++          mapped = false;
++          break;
++        }
++        event = prism::search::KeyEvent::Press(prism::search::Key::SelectAll);
++        break;
++      default:
++        mapped = false;
++        break;
++    }
++    // Unmapped key down: consume it anyway (the field owns the keyboard) and
++    // let TranslateMessage produce the WM_CHAR that carries the character.
++    if (!mapped) return 0;
++
++    const prism::search::Effect effect = search_.HandleKey(event);
++    if (effect.kind == prism::search::Effect::Kind::Closed) {
++      CloseSearch();
++      return 0;
++    }
++    if (effect.kind == prism::search::Effect::Kind::Accepted && !listRowToFolder_.empty()) {
++      SetSelection(listRowToFolder_.front());  // Enter hands focus to the results
++    }
++    if (effect.queryChanged) ApplySearchFilter();
++    Invalidate();
++    return 0;
++  }
++
++  // Draw the instruction list. The painter owns geometry/colour/tokens; this
++  // loop is the only place that knows Direct2D. Rounded corners and the X
++  // strokes are applied here because they are properties of the PRIMITIVE.
++  void DrawSearchBox() {
++    if (!search_.IsOpen() || !target_) return;
++    EnsureTextMeasurement();
++    if (!crumbFormat_) return;
++    for (const prism::win::searchbox::Instruction& instruction : searchScene_.instructions) {
++      ComPtr<ID2D1SolidColorBrush> brush;
++      if (FAILED(target_->CreateSolidColorBrush(ToD2DColor(instruction.color),
++                                                brush.GetAddressOf()))) {
++        continue;
++      }
++      const D2D1_RECT_F rect =
++          D2D1::RectF(instruction.rect.left, instruction.rect.top, instruction.rect.right,
++                      instruction.rect.bottom);
++      switch (instruction.primitive) {
++        case prism::win::searchbox::Primitive::FieldBackground:
++        case prism::win::searchbox::Primitive::TextSelection:
++        case prism::win::searchbox::Primitive::ClearButton:
++        case prism::win::searchbox::Primitive::Badge: {
++          const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(
++              rect, instruction.cornerRadius, instruction.cornerRadius);
++          target_->FillRoundedRectangle(shape, brush.Get());
++          break;
++        }
++        case prism::win::searchbox::Primitive::Caret:
++          target_->FillRectangle(rect, brush.Get());
++          break;
++        case prism::win::searchbox::Primitive::FieldBorder:
++        case prism::win::searchbox::Primitive::FocusRing: {
++          const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(
++              rect, instruction.cornerRadius, instruction.cornerRadius);
++          target_->DrawRoundedRectangle(shape, brush.Get(), 1.0f);
++          break;
++        }
++        case prism::win::searchbox::Primitive::ClearGlyph: {
++          const float cx = (instruction.rect.left + instruction.rect.right) * 0.5f;
++          const float cy = (instruction.rect.top + instruction.rect.bottom) * 0.5f;
++          target_->SetTransform(D2D1::Matrix3x2F::Rotation(
++              instruction.rotationDegrees, D2D1::Point2F(cx, cy)));
++          target_->FillRectangle(rect, brush.Get());
++          target_->SetTransform(D2D1::Matrix3x2F::Identity());
++          break;
++        }
++        case prism::win::searchbox::Primitive::QueryText:
++        case prism::win::searchbox::Primitive::CompositionText:
++        case prism::win::searchbox::Primitive::Placeholder:
++        case prism::win::searchbox::Primitive::BadgeText: {
++          if (instruction.text.empty()) break;
++          const std::wstring wide = Utf8ToWide(instruction.text);
++          target_->DrawText(wide.c_str(), static_cast<UINT32>(wide.size()), crumbFormat_.Get(),
++                            rect, brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP,
++                            DWRITE_MEASURING_MODE_NATURAL);
++          break;
++        }
++      }
++    }
++  }
++
+   // List mode rows are a SORTED, FILTERED VIEW over the current folder (C13).
+   //
+   // The folder rows keep the navigator's order because the GRID paints those;
+@@ -2602,6 +2892,13 @@ class GalleryWindow {
+   std::vector<int> listRowToFolder_;   // view row -> folder row
+   std::vector<int> folderToListRow_;   // folder row -> view row (-1: filtered out)
+   prism::list::FilterSpec filter_;     // "" / nullopt everywhere == show everything
++  // C62: the field. The painter is rebuilt on OpenSearch so its injected
++  // measure callback points at THIS window's DirectWrite factory, never a
++  // global one; the scene is the frame's instructions (empty while closed).
++  prism::search::Model search_;
++  prism::win::searchbox::SearchBoxPainter searchPainter_;
++  prism::win::searchbox::Scene searchScene_;
++  wchar_t pendingHighSurrogate_ = 0;
+   prism::list::MultiSortSpec sortSpec_{
+       {{prism::list::SortKey::kName, prism::list::SortDirection::kAscending}}, true};
+   // C-V2: the action band. The model owns the table/rules/geometry; the window

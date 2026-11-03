@@ -338,7 +338,7 @@ agent-desktop snapshot --app PrismArchive.exe -i --compact
 
 自动化测试在仓库里：
 
-```
+```text
 ctest -R "a11y"            # core.a11y_tree / c80.a11y / c80.a11y_uia
 ctest -R no_getobject      # 负向控制：把 WM_GETOBJECT 注掉后必须红
 ```

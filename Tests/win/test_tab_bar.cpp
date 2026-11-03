@@ -10,8 +10,8 @@
 //   1. two opened archives -> TWO tabs, the second one active, the strip
 //      occupying DESIGN.md §2.1's 32 px band between the title and the action
 //      island -- asserted on the window's own layout, then on PIXELS (the
-//      active plate is the SurfaceFloatingIsland token, an inactive one is the
-//      canvas token);
+//      active plate is the SurfaceTabActive token, an inactive one is the
+//      canvas token, and C79 adds brightness/rule/shadow probes);
 //   2. clicking the first tab switches the active tab AND asks the app for that
 //      archive (the same call C34's SwitchArchive path makes), so the content
 //      really follows;
@@ -172,6 +172,32 @@ prism::theme::Rgba AccentColor() {
 UINT32 Backdrop() { return ToPixel(kBackdropPixel); }
 UINT32 CanvasOverBackdrop() { return ToPixel(CanvasPlate()); }
 UINT32 IslandOverCanvas() { return ToPixel(IslandPlate()); }
+// C79: the ACTIVE tab is its own token now (brighter than the island) and the
+// bottom 2 px rule is the accent gradient over that plate.
+prism::theme::Rgba ActivePlateRgba() {
+  return prism::theme::CompositeOver(
+      prism::theme::Lookup(prism::theme::TokenId::SurfaceTabActive,
+                           prism::theme::Variant::Midnight)
+          .color,
+      CanvasPlate());
+}
+UINT32 ActivePlate() { return ToPixel(ActivePlateRgba()); }
+UINT32 AccentOverActive() {
+  return ToPixel(prism::theme::CompositeOver(AccentColor(), ActivePlateRgba()));
+}
+// The bottom rule is painted opaque (see TabBar::Paint), so its expected pixel
+// is the token's RGB with alpha 1, not a composite.
+UINT32 AccentOpaque() {
+  prism::theme::Rgba c = AccentColor();
+  c.a = 1.0f;
+  return ToPixel(c);
+}
+int MeanChannel(UINT32 pixel) {
+  return (static_cast<int>((pixel >> 16) & 0xFFu) +
+          static_cast<int>((pixel >> 8) & 0xFFu) +
+          static_cast<int>(pixel & 0xFFu)) /
+         3;
+}
 UINT32 AccentPixel() { return ToPixel(AccentColor()); }
 UINT32 AccentOverCanvas() {
   return ToPixel(prism::theme::CompositeOver(AccentColor(), CanvasPlate()));
@@ -364,9 +390,56 @@ PRISM_TEST("c60 open two archives: two tabs, second active, strip painted") {
     // so nothing but the plate's own fill can be at that pixel.
     return frame.At(r.left + 5, r.top + r.Height() / 2);
   };
-  PRISM_CHECK(ColorDistance(plateProbe(1), IslandOverCanvas()) <= 2);
+  PRISM_CHECK(ColorDistance(plateProbe(1), ActivePlate()) <= 2);
   PRISM_CHECK(ColorDistance(plateProbe(0), CanvasOverBackdrop()) <= 2);
-  PRISM_CHECK(ColorDistance(IslandOverCanvas(), CanvasOverBackdrop()) > 8);
+  PRISM_CHECK(ColorDistance(ActivePlate(), CanvasOverBackdrop()) > 8);
+
+  // C79 PIXEL ASSERTION 1: at the SAME coordinate of two plates in the SAME
+  // frame, the active tab is at least 6 levels brighter per channel. This is
+  // the "raised" half of "brighter fill + bottom accent line".
+  const int activeMean = MeanChannel(plateProbe(1));
+  const int inactiveMean = MeanChannel(plateProbe(0));
+  PRISM_CHECK(activeMean - inactiveMean >= 6);
+  std::printf("C79 tab brightness: active=%d inactive=%d delta=%d\n", activeMean,
+              inactiveMean, activeMean - inactiveMean);
+
+  // C79 PIXEL ASSERTION 4: with no pointer over an INACTIVE tab, its close box
+  // is bit-identical to the strip background -- the x only exists on the
+  // active tab or under the pointer.
+  const prism::layout::Rect inactiveClose = rects[0].close;
+  const UINT32 closePixel = frame.At((inactiveClose.left + inactiveClose.right) / 2,
+                                     (inactiveClose.top + inactiveClose.bottom) / 2);
+  PRISM_CHECK(ColorDistance(closePixel, CanvasOverBackdrop()) <= 2);
+  PRISM_CHECK(ColorDistance(closePixel,
+                            frame.At((inactiveClose.left + inactiveClose.right) / 2 + 8,
+                                     (inactiveClose.top + inactiveClose.bottom) / 2)) == 0);
+  // ...while the ACTIVE tab's x is real ink on its plate.
+  const prism::layout::Rect activeClose = rects[1].close;
+  const UINT32 activeClosePixel = frame.At((activeClose.left + activeClose.right) / 2,
+                                           (activeClose.top + activeClose.bottom) / 2);
+  PRISM_CHECK(ColorDistance(activeClosePixel, ActivePlate()) > 8);
+
+  // C79: the active plate's bottom 2 px rule is the accent token.
+  const UINT32 linePixel = frame.At(rects[1].rect.left + 20, rects[1].rect.bottom - 1);
+  std::printf("C79 accent line: got=%08X want=%08X dist=%d\n", linePixel, AccentOpaque(),
+              ColorDistance(linePixel, AccentOpaque()));
+  PRISM_CHECK(ColorDistance(linePixel, AccentOpaque()) <= 2);
+  // ...and the 8 px corner is actually rounded: the top-left pixel of the plate
+  // rect is NOT the plate fill (a square plate would be).
+  PRISM_CHECK(ColorDistance(frame.At(rects[1].rect.left, rects[1].rect.top), ActivePlate()) >
+              8);
+  // C79 depth (round 3): the top 1 px is a specular highlight (brighter than
+  // the plate) and there is an ambient shadow just below the plate (darker than
+  // the canvas). Both are token-driven; a missing shadow or a flat top fails.
+  const UINT32 topEdge = frame.At(rects[1].rect.left + 20, rects[1].rect.top);
+  PRISM_CHECK(ChannelSum(topEdge) > ChannelSum(plateProbe(1)) + 20);
+  const UINT32 belowPlate = frame.At(rects[1].rect.left + 20, rects[1].rect.bottom + 1);
+  PRISM_CHECK(ChannelSum(belowPlate) < ChannelSum(CanvasOverBackdrop()) - 6);
+  std::printf("C79 tab depth: topEdge=%d plate=%d shadowBelow=%d canvas=%d\n",
+              ChannelSum(topEdge), ChannelSum(plateProbe(1)), ChannelSum(belowPlate),
+              ChannelSum(CanvasOverBackdrop()));
+  // C79: the gap between plates is 4 px (the 4/8/12/16 scale).
+  PRISM_CHECK_EQ(rects[1].rect.left - rects[0].rect.right, 4);
   // The active plate's 1 px specular rim must be BRIGHTER than the plate. The
   // rim is a GRADIENT token, and reading TokenValue::color for it yields opaque
   // black -- a dark seam, i.e. a DARKER edge than the plate. This is the
@@ -472,8 +545,10 @@ PRISM_TEST("c60 dirty tab: the close asks first, cancel keeps the tab") {
   PRISM_CHECK_EQ(dirtyPainted, 2);
   PRISM_CHECK_EQ(dirtyDots, 1);
   const D2D1_POINT_2F dot = prism::win::tabbar::DirtyDotCentre(dirtyRects[1]);
+  // C79: the dirty dot sits on the ACTIVE tab's raised plate, not on the old
+  // island plate, so its expected composite is accent over SurfaceTabActive.
   PRISM_CHECK(ColorDistance(dirtyFrame.At(static_cast<int>(dot.x), static_cast<int>(dot.y)),
-                            AccentOverIsland()) <= 2);
+                            AccentOverActive()) <= 2);
 
   // The injected confirmer IS the user: "no".
   int asked = 0;
@@ -710,9 +785,9 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   PRISM_CHECK_EQ(rects.size(), static_cast<std::size_t>(2));
   const prism::layout::Rect active = rects[1].rect;
   PRISM_CHECK(ColorDistance(strip.At(active.left + 5, active.top + active.Height() / 2),
-                            IslandOverCanvas()) <= 2);
+                            ActivePlate()) <= 2);
   // The plate exists at y = 48 in THIS frame...
-  PRISM_CHECK(ColorDistance(strip.At(active.left + 5, 48), IslandOverCanvas()) <= 2);
+  PRISM_CHECK(ColorDistance(strip.At(active.left + 5, 48), ActivePlate()) <= 2);
   // ...and in the empty frame that point is NOT the strip's canvas plate: it is
   // the breadcrumb pill, which is a different surface (island tint over the
   // action band, not over the canvas). Measured, not assumed: the pill and the
@@ -729,7 +804,7 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
     int count = 0;
     for (int y = top; y < top + prism::layout::kTabBarHeight; ++y) {
       for (int x = 0; x < static_cast<int>(f.width); ++x) {
-        if (ColorDistance(f.At(x, y), IslandOverCanvas()) <= 2) ++count;
+        if (ColorDistance(f.At(x, y), ActivePlate()) <= 2) ++count;
       }
     }
     return count;

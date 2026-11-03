@@ -504,15 +504,35 @@ struct StatusInfo {
   std::string_view dictionary;          // empty -> "字典未知"
   int ratioPercent = -1;                // < 0 -> unknown
   bool compressing = false;             // wins over the ratio
+  // C79: the RIGHT cluster's two counts. -1 means "not reported", which paints
+  // the label with an explicit "--" rather than a fabricated 0.
+  int itemCount = -1;
+  int selectedCount = -1;
 };
 
-enum class StatusId : std::uint8_t { Encryption, Method, Dictionary, Ratio, Count };
+// C79: two clusters. The left one answers "what is this archive"; the right
+// one answers "how much of it am I looking at". Divider is a real segment (a
+// 1 px rule) so its rect is laid out with the same arithmetic as the text and
+// the painter never invents an x coordinate.
+enum class StatusId : std::uint8_t {
+  Encryption,
+  Method,
+  Dictionary,
+  Divider,
+  ItemCount,
+  SelectedCount,
+  Ratio,
+  Count
+};
 
 inline std::ostream& operator<<(std::ostream& os, StatusId id) {
   switch (id) {
     case StatusId::Encryption: return os << "Encryption";
     case StatusId::Method: return os << "Method";
     case StatusId::Dictionary: return os << "Dictionary";
+    case StatusId::Divider: return os << "Divider";
+    case StatusId::ItemCount: return os << "ItemCount";
+    case StatusId::SelectedCount: return os << "SelectedCount";
     case StatusId::Ratio: return os << "Ratio";
     case StatusId::Count: return os << "Count";
   }
@@ -543,6 +563,16 @@ inline std::string_view RatioText(const StatusInfo& info) {
   return info.ratioPercent >= 0 ? "压缩率" : "压缩率未知";
 }
 
+// C79: the right cluster's labels. The NUMBER travels in StatusSegment::value,
+// exactly like Ratio's percentage, so this header owns no buffer.
+inline std::string_view ItemCountText(const StatusInfo& info) {
+  return info.itemCount >= 0 ? "条目" : "条目 --";
+}
+
+inline std::string_view SelectedCountText(const StatusInfo& info) {
+  return info.selectedCount >= 0 ? "选中" : "选中 --";
+}
+
 struct StatusSegment {
   StatusId id = StatusId::Count;
   Rect rect;
@@ -554,27 +584,64 @@ inline constexpr int kStatusPad = 12;
 inline constexpr int kStatusGap = 24;
 inline constexpr int kStatusSegmentMinWidth = 96;
 
-// The four segments, left to right, inside the status bar. Widths are fixed
-// minima (a status line is a readout, not a flexible table) and every rect is
-// padded inside the bar, so "the bar is empty" cannot come back unnoticed.
+// C79: TWO clusters, laid out from the bar's two edges. The left cluster
+// (encryption | method | dictionary) starts at the left padding; the right
+// cluster (items | selected | ratio) is RIGHT-aligned, so the empty middle is
+// the "40% blank" the design asks for and it grows with the window instead of
+// leaving a ragged tail. A 1 px Divider sits at the midpoint of that gap.
 inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const StatusInfo& info) {
   std::vector<StatusSegment> out;
   if (layout.statusBar.Empty()) return out;
   const int top = layout.statusBar.top + 4;
   const int bottom = layout.statusBar.bottom - 4;
   if (bottom <= top) return out;
-  const int widths[] = {168, 128, 140, 112};
-  const std::string_view texts[] = {CryptoText(info), MethodText(info), DictionaryText(info),
-                                    RatioText(info)};
-  const int values[] = {-1, -1, -1, (info.compressing ? -1 : info.ratioPercent)};
+
+  // C79: tighter than the pre-C79 168/128/140 so the left cluster reads as one
+  // group; the freed width becomes the blank middle (>= 40% at 1600 px).
+  const int leftWidths[] = {150, 110, 120};
+  const std::string_view leftTexts[] = {CryptoText(info), MethodText(info), DictionaryText(info)};
   int x = layout.statusBar.left + kContentPadding;
-  for (int i = 0; i < 4; ++i) {
-    const int width = (std::max)(kStatusSegmentMinWidth, widths[i]);
+  int leftEnd = x;
+  for (int i = 0; i < 3; ++i) {
+    const int width = (std::max)(kStatusSegmentMinWidth, leftWidths[i]);
     const Rect rect{x, top, (std::min)(x + width, layout.statusBar.right - kContentPadding), bottom};
     if (rect.Empty()) break;
-    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, texts[i], values[i]});
+    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, leftTexts[i], -1});
+    leftEnd = rect.right;
     x = rect.right + kStatusGap;
-    if (x >= layout.statusBar.right - kContentPadding) break;
+  }
+
+  // The right cluster is measured from the RIGHT edge: items, selected, ratio.
+  // Its width is fixed, so the ratio column never jumps when a count changes.
+  const int rightWidths[] = {96, 96, 112};
+  int rightWidth = 2 * kStatusGap;
+  for (int i = 0; i < 3; ++i) rightWidth += (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
+  int rightStart = layout.statusBar.right - kContentPadding - rightWidth;
+  if (rightStart < leftEnd + kStatusGap) {
+    // Narrow window: keep the right cluster's right edge (the ratio stays
+    // readable) and let the gap collapse. The divider is omitted rather than
+    // drawn through a label.
+    rightStart = leftEnd + kStatusGap;
+  }
+  const int gap = rightStart - leftEnd;
+  if (gap >= 2 * kStatusGap) {
+    const int dividerX = leftEnd + gap / 2;
+    out.push_back(StatusSegment{StatusId::Divider,
+                                Rect{dividerX, top, dividerX + 1, bottom}, {}, -1});
+  }
+  const std::string_view rightTexts[] = {ItemCountText(info), SelectedCountText(info),
+                                         RatioText(info)};
+  const int rightValues[] = {info.itemCount, info.selectedCount,
+                             (info.compressing ? -1 : info.ratioPercent)};
+  int rx = rightStart;
+  for (int i = 0; i < 3; ++i) {
+    const int width = (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
+    const Rect rect{rx, top, (std::min)(rx + width, layout.statusBar.right - kContentPadding),
+                    bottom};
+    if (rect.Empty()) break;
+    out.push_back(StatusSegment{static_cast<StatusId>(4 + i), rect, rightTexts[i],
+                                rightValues[i]});
+    rx = rect.right + kStatusGap;
   }
   return out;
 }

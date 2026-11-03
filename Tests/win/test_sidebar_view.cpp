@@ -32,6 +32,7 @@ using prism::sidebar::Encryption;
 using prism::sidebar::FocusTarget;
 using prism::sidebar::Section;
 using prism::win::sidebar::Box;
+using prism::win::sidebar::ColorToken;
 using prism::win::sidebar::Command;
 using prism::win::sidebar::Layout;
 using prism::win::sidebar::Metrics;
@@ -188,8 +189,10 @@ PRISM_TEST("TestSectionStackAndRowBoxes") {
   const Command* design = FindLabel(layout, "Design_Assets");
   PRISM_CHECK(design != nullptr);
   if (design != nullptr) {
-    // depth 1: left = paddingX + indent
-    PRISM_CHECK(SameBox(design->box, Box{70.0f, 206.0f, 220.0f, 234.0f}));
+    // C79: depth 1 -> left = paddingX (16) + indent (16) = 32, then the
+    // reserved chevron slot (16) + icon (16) + gap (8) = 72. The indent moved
+    // from 14 to 16 so the tree step is on the 4 px scale.
+    PRISM_CHECK(SameBox(design->box, Box{72.0f, 206.0f, 220.0f, 234.0f}));
     PRISM_CHECK_EQ(design->payload, 1);
   }
 }
@@ -206,8 +209,9 @@ PRISM_TEST("TestTreeIndentAndChevrons") {
   }
   PRISM_CHECK(brand != nullptr);
   if (brand != nullptr) {
-    // depth 2: left = 16 + 2 * 14 = 44, text at +16 chevron +16 icon +8 gap
-    PRISM_CHECK(Near(brand->box.left, 44.0f + 16.0f + 8.0f + 16.0f));
+    // C79: depth 2: left = 16 + 2 * 16 = 48, text at +16 chevron +16 icon
+    // +8 gap.
+    PRISM_CHECK(Near(brand->box.left, 48.0f + 16.0f + 8.0f + 16.0f));
   }
 
   // Open folder -> chevron-down on its row; closed -> chevron-right.
@@ -232,7 +236,7 @@ PRISM_TEST("TestTreeIndentAndChevrons") {
   const Command* raw = FindLabel(expanded, "03_Raw");
   PRISM_CHECK(raw != nullptr);
   if (raw != nullptr) {
-    PRISM_CHECK_EQ(static_cast<int>(raw->box.left), 44 + 16 + 8 + 16);
+    PRISM_CHECK_EQ(static_cast<int>(raw->box.left), 48 + 16 + 8 + 16);
   }
 }
 
@@ -244,7 +248,8 @@ PRISM_TEST("TestSelectionFollowsKeyboardFocus") {
   const auto selection = OfKind(layout, PrimKind::Selection);
   PRISM_CHECK_EQ(selection.size(), std::size_t{1});
   if (!selection.empty()) {
-    PRISM_CHECK(SameBox(selection[0]->box, Box{30.0f, 206.0f, 220.0f, 234.0f}));
+    // C79: the row's left edge is paddingX + indent = 32 (was 30 at 14 px).
+    PRISM_CHECK(SameBox(selection[0]->box, Box{32.0f, 206.0f, 220.0f, 234.0f}));
     PRISM_CHECK_EQ(selection[0]->section, Section::Tree);
     PRISM_CHECK_EQ(selection[0]->payload, 1);
   }
@@ -348,6 +353,62 @@ PRISM_TEST("TestEmptyStateWithoutArchive") {
     dimmedPill = Near(pill->opacity, 0.6);
   }
   PRISM_CHECK(dimmedPill);
+}
+
+// C79: the selected row is a 14% accent wash PLUS a 3 px accent rule at its
+// left edge. The rule is its own primitive, so its width is measured, not
+// inferred from the fill's edge.
+PRISM_TEST("TestSelectionAccentRule") {
+  auto items = SampleCatalog();
+  prism::sidebar::Model model = FullModel(&items);
+  PRISM_CHECK(model.SetFocus(FocusTarget{Section::Tree, 1}));
+  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+
+  const auto bars = OfKind(layout, PrimKind::SelectionBar);
+  const auto fills = OfKind(layout, PrimKind::Selection);
+  PRISM_CHECK_EQ(bars.size(), std::size_t{1});
+  PRISM_CHECK_EQ(fills.size(), std::size_t{1});
+  if (!bars.empty() && !fills.empty()) {
+    PRISM_CHECK(Near(bars[0]->box.Width(), 3.0f));  // 3 +/- 0: the token value
+    PRISM_CHECK(Near(bars[0]->box.left, fills[0]->box.left));
+    PRISM_CHECK(bars[0]->box.top > fills[0]->box.top);
+    PRISM_CHECK(bars[0]->box.bottom < fills[0]->box.bottom);
+    PRISM_CHECK_EQ(bars[0]->payload, 1);
+    PRISM_CHECK_EQ(bars[0]->section, Section::Tree);
+    PRISM_CHECK_EQ(bars[0]->color, ColorToken::Accent);
+    PRISM_CHECK_EQ(fills[0]->color, ColorToken::SelectedBackground);
+  }
+}
+
+// C79: a group heading is 11 px with .5 px tracking and a dimmed secondary
+// role -- the difference between a heading and a row must be in the command,
+// not only in the renderer's mood.
+PRISM_TEST("TestSectionHeadingTrackingAndRole") {
+  auto items = SampleCatalog();
+  prism::sidebar::Model model = FullModel(&items);
+  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Command* header = FindSection(layout, "FAVORITES");
+  PRISM_CHECK(header != nullptr);
+  if (header != nullptr) {
+    PRISM_CHECK(Near(header->letterSpacing, 0.5));
+    PRISM_CHECK(Near(header->opacity, 0.75));
+    PRISM_CHECK_EQ(header->color, ColorToken::SectionLabel);
+  }
+}
+
+// C79: the telemetry capsule is secondary text (12 px at paint time), not the
+// primary role it used to borrow.
+PRISM_TEST("TestCapsuleReadoutUsesSecondaryRole") {
+  std::vector<ArchiveItem> items = {File("payload.bin", 0, 1420, 608)};
+  prism::sidebar::Model model(&items);
+  model.SetArchiveInfo(
+      prism::sidebar::ArchiveInfo{"LZMA2", 64ull * 1024 * 1024, Encryption::Aes256});
+  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const auto readouts = OfKind(layout, PrimKind::StatusText);
+  PRISM_CHECK_EQ(readouts.size(), std::size_t{3});
+  for (const Command* readout : readouts) {
+    PRISM_CHECK_EQ(readout->color, ColorToken::SecondaryText);
+  }
 }
 
 PRISM_TEST("TestRowPayloadsCoverEverySection") {

@@ -12,10 +12,12 @@
 //      is the one geometry authority (DESIGN.md §2.1: 32 px, between the title
 //      and the action island, hidden when no archive is open). Nothing here
 //      invents an absolute coordinate.
-//   2. PIXELS -- the active tab's SurfaceFloatingIsland plate, the inactive
-//      canvas plate, the dirty dot behind the title and the "x" close glyph.
-//      Every colour is a C15 TOKEN (prism::theme::Lookup); a literal RGBA in
-//      this file would be a design-drift bug, so there are none.
+//   2. PIXELS -- the active tab's raised plate (SurfaceTabActive + a top
+//      specular highlight + an ambient shadow + a 2 px accent rule), the
+//      text-only inactive tab, the dirty dot and the "x" close glyph (shown on
+//      the active tab and under the pointer only). Every colour is a C15 TOKEN
+//      (prism::theme::Lookup); a literal RGBA in this file would be a
+//      design-drift bug, so there are none.
 //
 // It decides NO rule: "which tab is active after closing", "does a dirty tab
 // ask first", "11 tabs means tab 0" are C59's answers and this file only paints
@@ -88,11 +90,17 @@ inline std::string_view ActiveMutation() {
 struct Metrics {
   static constexpr int kHeight = prism::layout::kTabBarHeight;  // 32
   static constexpr int kMargin = 8;        // strip inset on both sides
-  static constexpr int kGap = 2;           // between two tabs
+  // C79: 4 px between plates (the 4/8/12/16 scale) and an 8 px continuous
+  // corner; a raised plate also carries a 2 px accent line on its bottom edge.
+  static constexpr int kGap = 4;           // between two tabs
+  static constexpr int kRadius = 8;        // plate corner
+  static constexpr int kAccentLine = 2;    // active plate's bottom accent line
   static constexpr int kMinWidth = 120;    // below this a name is unreadable
   static constexpr int kMaxWidth = 224;
   static constexpr int kPadX = 12;         // text inset inside a tab
-  static constexpr int kPadY = 6;
+  // C79: a 24 px plate in the 32 px band (was 20) -- the extra 4 px is what
+  // makes the 8 px corner and the 2 px bottom rule read as a raised surface.
+  static constexpr int kPadY = 4;
   static constexpr int kCloseSize = 16;    // the x hit box
   static constexpr int kCloseInset = 8;    // from the tab's right edge
   static constexpr int kTextGap = 6;       // title -> x
@@ -293,6 +301,19 @@ class Painter {
       label_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
       label_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
+    // C79: the ACTIVE tab's name is one step up the type scale (12 px
+    // semibold) so the active/inactive hierarchy is a weight/size difference,
+    // not only a plate difference.
+    if (FAILED(factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                         12.0f, L"en-US", labelActive_.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    if (labelActive_) {
+      labelActive_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+      labelActive_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+      labelActive_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
     if (FAILED(factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                          12.0f, L"en-US", close_.ReleaseAndGetAddressOf()))) {
@@ -309,7 +330,8 @@ class Painter {
                                                       ellipsis_.ReleaseAndGetAddressOf()))) {
       trimming_ = DWRITE_TRIMMING{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
     }
-    return brush_ != nullptr && label_ != nullptr && close_ != nullptr;
+    return brush_ != nullptr && label_ != nullptr && labelActive_ != nullptr &&
+           close_ != nullptr;
   }
 
   // The strip paints NOTHING when it is hidden: an empty view (or an empty
@@ -336,25 +358,59 @@ class Painter {
 
     for (const TabGeometry& tab : tabs) {
       const Item& item = view.items[static_cast<std::size_t>(tab.index)];
-      if (tab.index == view.active) {
-        // Active plate: SurfaceFloatingIsland composited over the canvas, i.e.
-        // exactly the window's island surface (DESIGN.md §4).
-        SetComposite(prism::theme::TokenId::SurfaceFloatingIsland,
+      const bool active = tab.index == view.active;
+      const D2D1_ROUNDED_RECT plate =
+          D2D1::RoundedRect(ToRectF(tab.rect), static_cast<float>(Metrics::kRadius),
+                            static_cast<float>(Metrics::kRadius));
+      if (active) {
+        // C79 depth: a large-radius, low-alpha ambient shadow under the raised
+        // plate, then the plate itself (SurfaceTabActive, a brighter material
+        // than the canvas), then the 1 px specular rim. Every colour is a C15
+        // token; the shadow token exists in all three variants.
+        SetToken(prism::theme::TokenId::ShadowAmbient, variant);
+        target->FillRoundedRectangle(
+            D2D1::RoundedRect(
+                D2D1::RectF(tab.rect.left + 2.0f, tab.rect.top + 3.0f,
+                            tab.rect.right - 2.0f, tab.rect.bottom + 3.0f),
+                static_cast<float>(Metrics::kRadius), static_cast<float>(Metrics::kRadius)),
+            brush_.Get());
+        SetComposite(prism::theme::TokenId::SurfaceTabActive,
                      prism::theme::TokenId::SurfaceCanvasBase, variant);
-        target->FillRectangle(ToRectF(tab.rect), brush_.Get());
-        // The 1 px specular rim is what makes the plate read as glass, and it
-        // is a token, not a lighter grey.
+        target->FillRoundedRectangle(plate, brush_.Get());
+        // C79 depth: a 1 px specular highlight along the TOP edge, composited
+        // from the rim token a second time so it reads brighter than the rest
+        // of the outline (the "light from above" cue). Inset by the corner
+        // radius so it never pokes past the 8 px squircle.
         SetComposite(prism::theme::TokenId::BorderSpecularRim,
-                     prism::theme::TokenId::SurfaceFloatingIsland, variant);
-        target->DrawRectangle(ToRectF(tab.rect), brush_.Get(), 1.0f);
-      } else {
-        // Inactive: the canvas itself. A hovered tab gets the island at a low
-        // alpha so the pointer is visible without inventing a new colour.
-        if (tab.index == view.hover) {
-          SetComposite(prism::theme::TokenId::SurfaceFloatingIsland,
-                       prism::theme::TokenId::SurfaceCanvasBase, variant, 0.45f);
-          target->FillRectangle(ToRectF(tab.rect), brush_.Get());
-        }
+                     prism::theme::TokenId::SurfaceTabActive, variant);
+        target->FillRectangle(
+            D2D1::RectF(static_cast<float>(tab.rect.left + Metrics::kRadius),
+                        static_cast<float>(tab.rect.top),
+                        static_cast<float>(tab.rect.right - Metrics::kRadius),
+                        static_cast<float>(tab.rect.top) + 1.0f),
+            brush_.Get());
+        target->DrawRoundedRectangle(plate, brush_.Get(), 1.0f);
+        // The 2 px accent rule on the bottom edge is the "this tab is the one
+        // you are looking at" signal; inset by 1 px so it stays inside the
+        // 8 px corners instead of leaking past them.
+        // The line is OPAQUE: the rim's antialiased bottom edge would otherwise
+        // tint the 18% of background the token's .82 alpha lets through, and a
+        // 2 px indicator must be exactly the accent at every pixel.
+        prism::theme::Rgba line =
+            Token(prism::theme::TokenId::AccentLiquidPrimary, variant);
+        line.a = 1.0f;
+        brush_->SetColor(ToD2d(line));
+        target->FillRectangle(
+            D2D1::RectF(static_cast<float>(tab.rect.left) + 1.0f,
+                        static_cast<float>(tab.rect.bottom - Metrics::kAccentLine),
+                        static_cast<float>(tab.rect.right) - 1.0f,
+                        static_cast<float>(tab.rect.bottom)),
+            brush_.Get());
+      } else if (tab.index == view.hover) {
+        // Inactive tabs are TEXT ONLY; hover adds a ~4% lift, never a plate.
+        SetComposite(prism::theme::TokenId::SurfaceTabHover,
+                     prism::theme::TokenId::SurfaceCanvasBase, variant);
+        target->FillRoundedRectangle(plate, brush_.Get());
       }
       if (item.dirty) {
         SetToken(prism::theme::TokenId::AccentLiquidPrimary, variant);
@@ -365,8 +421,14 @@ class Painter {
             brush_.Get());
         ++lastDirtyDots_;
       }
-      DrawTitle(target, tab, item, tab.index == view.active, variant);
-      DrawClose(target, tab, view, variant);
+      DrawTitle(target, tab, item, active, variant);
+      // C79: the x is chrome, not content -- it appears on the ACTIVE tab and on
+      // whatever the pointer is over. A resting inactive tab shows no glyph at
+      // all, so its close box is bit-identical to the canvas (pixel assertion).
+      if (active || tab.index == view.hover || view.hoverClose == tab.index ||
+          view.pressedClose == tab.index) {
+        DrawClose(target, tab, view, active, variant);
+      }
       ++lastPainted_;
     }
 
@@ -445,9 +507,10 @@ class Painter {
     const float width = static_cast<float>(tab.title.Width());
     const float height = static_cast<float>(tab.title.Height());
     ComPtr<IDWriteTextLayout> layout;
+    IDWriteTextFormat* format = active && labelActive_ ? labelActive_.Get() : label_.Get();
     if (FAILED(factory_->CreateTextLayout(item.title.c_str(),
                                           static_cast<std::uint32_t>(item.title.size()),
-                                          label_.Get(), width, height,
+                                          format, width, height,
                                           layout.ReleaseAndGetAddressOf()))) {
       return;
     }
@@ -464,12 +527,16 @@ class Painter {
   }
 
   void DrawClose(ID2D1RenderTarget* target, const TabGeometry& tab, const View& view,
-                 prism::theme::Variant variant) {
+                 bool active, prism::theme::Variant variant) {
     if (tab.close.Empty()) return;
     const bool hot = view.hoverClose == tab.index || view.pressedClose == tab.index;
+    // The glyph composites over the surface it actually sits on: the raised
+    // plate on the active tab, the canvas on a hovered inactive one.
     SetComposite(hot ? prism::theme::TokenId::TextPrimary
                      : prism::theme::TokenId::TextSecondary,
-                 prism::theme::TokenId::SurfaceCanvasBase, variant);
+                 active ? prism::theme::TokenId::SurfaceTabActive
+                        : prism::theme::TokenId::SurfaceCanvasBase,
+                 variant);
     static constexpr wchar_t kCloseGlyph[] = L"\u00D7";  // multiplication sign
     target->DrawText(kCloseGlyph, 1, close_.Get(), ToRectF(tab.close), brush_.Get(),
                      D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -477,13 +544,16 @@ class Painter {
 
  public:
   int BrushCount() const { return brush_ ? 1 : 0; }
-  int TextFormatCount() const { return (label_ ? 1 : 0) + (close_ ? 1 : 0); }
+  int TextFormatCount() const {
+    return (label_ ? 1 : 0) + (labelActive_ ? 1 : 0) + (close_ ? 1 : 0);
+  }
 
   // C75: the strip's target-bound resources, droppable while minimised.
   void ReleaseDeviceResources() {
     factory_.Reset();
     brush_.Reset();
     label_.Reset();
+    labelActive_.Reset();
     close_.Reset();
     ellipsis_.Reset();
   }
@@ -492,6 +562,7 @@ class Painter {
   ComPtr<IDWriteFactory> factory_;
   ComPtr<ID2D1SolidColorBrush> brush_;
   ComPtr<IDWriteTextFormat> label_;
+  ComPtr<IDWriteTextFormat> labelActive_;
   ComPtr<IDWriteTextFormat> close_;
   ComPtr<IDWriteInlineObject> ellipsis_;
   DWRITE_TRIMMING trimming_{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};

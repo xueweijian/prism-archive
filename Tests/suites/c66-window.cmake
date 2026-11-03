@@ -83,6 +83,22 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
       SKIP_RETURN_CODE 77
       PASS_REGULAR_EXPRESSION "C66 MUTATION CAUGHT: no_workarea_clamp")
 
+  # D3 control 4: the clamp is removed from the PERSIST path only. Restore still
+  # clamps, so "the window came back inside the screen" stays green -- what goes
+  # red is "the file never holds a frame bigger than the screen", which is the
+  # invariant the CI runner's smaller desktop exposed (the first version of this
+  # suite trusted the local desktop and went green there).
+  add_executable(win_c66_window_mutant_no_persist_clamp win/test_c66_window.cpp)
+  target_link_libraries(win_c66_window_mutant_no_persist_clamp PRIVATE ${PRISM_C66_WINDOW_LIBS})
+  target_compile_options(win_c66_window_mutant_no_persist_clamp PRIVATE /WX-)
+  target_compile_definitions(win_c66_window_mutant_no_persist_clamp
+                             PRIVATE PRISM_C66_MUTANT_NO_PERSIST_CLAMP=1)
+  add_test(NAME "c66.mutation.window.no_persist_clamp"
+           COMMAND win_c66_window_mutant_no_persist_clamp)
+  set_tests_properties(c66.mutation.window.no_persist_clamp PROPERTIES TIMEOUT 120
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "C66 MUTATION CAUGHT: no_persist_clamp")
+
   # PROCESS LEVEL: the number the SHIPPED exe writes to settings.json. The card's
   # own verification method -- open, close, read the file, five times -- with
   # %LOCALAPPDATA% redirected so the user's real settings are untouched. A seeded

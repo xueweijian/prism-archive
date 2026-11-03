@@ -142,20 +142,52 @@ inline Rect WorkAreaOfWindow(HWND hwnd) {
   return WorkAreaFor(Rect{});
 }
 
+// The frame the app should WRITE for a given visible frame: clamped into the
+// work area of THIS window's monitor.
+//
+// Clamping on the way OUT as well as on the way IN is not belt-and-braces -- it
+// is what makes "the settings file never holds a frame the screen cannot show"
+// true for EVERY path. Without it, a window whose normal rectangle is larger
+// than the desktop (created at a default size on a small screen, or carried over
+// from a monitor that was unplugged) writes that oversized number and is only
+// corrected by the NEXT restore. The CI runner is exactly that machine: a
+// default-sized window on a smaller desktop made FrameToPersist return a frame
+// wider than rcWork, and win.c66_window caught it (CONTRACTS R1: the runner was
+// right and the local desktop was the coincidence).
+//
+// The floor stays the schema's documented 640x480 (SettingsStore window.width /
+// window.height): ClampFrameToWorkArea never returns less than the minimum
+// unless the work area itself is smaller, which is the degenerate case the
+// restore path also has to survive.
+inline Rect PersistFrame(HWND hwnd, const Rect& visible) {
+  if (hwnd == nullptr) return visible;
+  const Rect work = WorkAreaOfWindow(hwnd);
+#if defined(PRISM_C66_MUTANT_NO_PERSIST_CLAMP)
+  // NEGATIVE CONTROL (CONTRACTS D3): write the frame as measured, unclamped.
+  // The suite feeds an EXPLICIT frame bigger than the work area, so it goes red
+  // on any desktop size -- the assertion never depends on the runner's screen.
+  (void)work;
+  return visible;
+#else
+  return prism::layout::ClampFrameToWorkArea(visible, work);
+#endif
+}
+
 // What the app should write to settings.json for THIS window. A maximized (or
 // minimized) window answers with its NORMAL rectangle: persisting the maximized
-// window rect is rule (1) above, and it is what produced 1552x832.
+// window rect is rule (1) above, and it is what produced 1552x832. Either way
+// the answer goes through PersistFrame, so it fits the work area.
 inline Rect FrameToPersist(HWND hwnd) {
   if (hwnd == nullptr) return Rect{};
 #if defined(PRISM_C66_MUTANT_NO_DWM)
   // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix rule in one line -- persist
   // GetWindowRect, which is the visible frame PLUS the shadow border, and is the
   // work area plus that border when the window is maximized (the user's
-  // 1552x832 on a 1536x816 screen). The suite's "what gets persisted fits the
-  // work area" assertion goes red here, and the five-cycle case adds the border
-  // again on every DWM-capable machine.
+  // 1552x832 on a 1536x816 screen). Deliberately NOT clamped: the pre-fix code
+  // did not clamp either, and the suite's "what gets persisted fits the work
+  // area" assertion is what has to catch it.
   return ReadWindowRect(hwnd);
-#endif
+#else
   WINDOWPLACEMENT placement{};
   placement.length = sizeof(placement);
   const bool placed = ::GetWindowPlacement(hwnd, &placement) != FALSE;
@@ -164,9 +196,11 @@ inline Rect FrameToPersist(HWND hwnd) {
   if (placed && (zoomed || ::IsIconic(hwnd) != FALSE)) {
     const RECT& normal = placement.rcNormalPosition;
     const Rect normalWindow{normal.left, normal.top, normal.right, normal.bottom};
-    return prism::layout::VisibleFrameForWindowRect(normalWindow, m.borders);
+    return PersistFrame(hwnd,
+                        prism::layout::VisibleFrameForWindowRect(normalWindow, m.borders));
   }
-  return m.visible;
+  return PersistFrame(hwnd, m.visible);
+#endif
 }
 
 // The outcome of one restore, kept whole so the caller (and the suite) can

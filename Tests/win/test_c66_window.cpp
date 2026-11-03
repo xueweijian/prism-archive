@@ -61,9 +61,16 @@ bool g_noWindowStation = false;
 // It is both the failing assertion and the "the injected defect really fired"
 // predicate for the mutation verdict (CONTRACTS D3: red is not CAUGHT).
 bool g_persistedOverflowsWork = false;
+// Set by the explicit persist case: PersistFrame() handed back a frame bigger
+// than the work area it was given. That is the predicate for the persist-clamp
+// arm -- and it is driven by an INPUT the test builds, so it never depends on
+// the desktop size of the machine running it.
+bool g_explicitPersistOverflowsWork = false;
 
 #if defined(PRISM_C66_MUTANT_NO_DWM)
 constexpr const char* kMutation = "no_dwm";
+#elif defined(PRISM_C66_MUTANT_NO_PERSIST_CLAMP)
+constexpr const char* kMutation = "no_persist_clamp";
 #elif defined(PRISM_C66_MUTANT_NO_WORKAREA_CLAMP)
 constexpr const char* kMutation = "no_workarea_clamp";
 #else
@@ -110,6 +117,10 @@ int main(int argc, char** argv) {
                                         // window rect -- i.e. it does not fit
                                         // the screen, which is case 1's failure.
                                         return g_persistedOverflowsWork;
+#elif defined(PRISM_C66_MUTANT_NO_PERSIST_CLAMP)
+                                        // The injection fired when an explicitly
+                                        // oversized frame came back unclamped.
+                                        return g_explicitPersistOverflowsWork;
 #else
                                         const Rect work{0, 0, 1536, 816};
                                         return prism::layout::ClampFrameToWorkArea(
@@ -164,7 +175,9 @@ PRISM_TEST("c66 root cause: a maximized window's GetWindowRect does not fit the 
     PRISM_CHECK(m.borders.left > 0 || m.borders.top > 0);
   }
   // THE FIX: what gets persisted is the NORMAL frame (never the maximized
-  // rectangle), so it fits the screen it will be restored onto.
+  // rectangle) AND it is clamped into the work area before it is written, so it
+  // fits the screen it will be restored onto -- on any desktop, not just this
+  // one (case 1b builds an oversized input on purpose).
   // What is WRITTEN to settings.json is a SIZE, so "fits" is a size test: the
   // position is the window's own and is clamped on restore (case 2).
   const Rect persisted = prism::win::frame::FrameToPersist(window.Hwnd());
@@ -175,6 +188,54 @@ PRISM_TEST("c66 root cause: a maximized window's GetWindowRect does not fit the 
   PRISM_CHECK(persisted.Height() <= work.Height());
   std::printf("  [persist] rect=%d,%d %dx%d (work %dx%d)\n", persisted.left, persisted.top,
               persisted.Width(), persisted.Height(), work.Width(), work.Height());
+  window.Dispatch(WM_DESTROY, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. PERSIST is clamped as well as RESTORE.
+//
+// WHY THIS CASE EXISTS: the first version of case 1 above trusted the window's
+// own default size and went green on a 1536x816 desktop while the CI runner --
+// whose desktop is smaller than the default window -- persisted a frame wider
+// than its work area and went red. The input here is BUILT by the test (the
+// screen plus 400 x 300), so the assertion says the same thing on every machine
+// and the pre-fix behaviour cannot hide behind a convenient desktop.
+// ---------------------------------------------------------------------------
+PRISM_TEST("c66 persisting an oversized frame writes one that fits the work area") {
+  GalleryWindow window;
+  if (!MakeWindow(&window, L"PrismArchive c66 persist")) return;
+  window.SetItems(nullptr);
+  const Rect work = prism::win::frame::WorkAreaOfWindow(window.Hwnd());
+  if (!PRISM_CHECK(!work.Empty())) {
+    window.Dispatch(WM_DESTROY, 0, 0);
+    return;
+  }
+  const Rect oversized{work.left, work.top, work.left + work.Width() + 400,
+                       work.top + work.Height() + 300};
+  const Rect persisted = prism::win::frame::PersistFrame(window.Hwnd(), oversized);
+  std::printf("  [persist-explicit] in=%dx%d out=%dx%d work=%dx%d\n", oversized.Width(),
+              oversized.Height(), persisted.Width(), persisted.Height(), work.Width(),
+              work.Height());
+  g_explicitPersistOverflowsWork =
+      persisted.Width() > work.Width() || persisted.Height() > work.Height();
+  PRISM_CHECK(!g_explicitPersistOverflowsWork);
+  PRISM_CHECK(persisted.Width() <= work.Width());
+  PRISM_CHECK(persisted.Height() <= work.Height());
+  // The schema's floor is never broken when the screen can hold it (the store
+  // repairs window.width/height up to 640x480, so a persisted value below it
+  // would come back as an overflow this card exists to prevent).
+  if (work.Width() >= prism::layout::kMinWindowWidth) {
+    PRISM_CHECK(persisted.Width() >= prism::layout::kMinWindowWidth);
+  }
+  if (work.Height() >= prism::layout::kMinWindowHeight) {
+    PRISM_CHECK(persisted.Height() >= prism::layout::kMinWindowHeight);
+  }
+  // ...and the window's own answer obeys the same rule on every desktop.
+  const Rect real = prism::win::frame::FrameToPersist(window.Hwnd());
+  std::printf("  [persist-real] %dx%d work=%dx%d\n", real.Width(), real.Height(),
+              work.Width(), work.Height());
+  PRISM_CHECK(real.Width() <= work.Width());
+  PRISM_CHECK(real.Height() <= work.Height());
   window.Dispatch(WM_DESTROY, 0, 0);
 }
 

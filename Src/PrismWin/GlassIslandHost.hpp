@@ -708,6 +708,19 @@ class GlassIslandHost {
 
   bool TransientLive() const { return chain_.Live() || AnySurfaceLive(); }
 
+  // C75: the device survives the idle release (re-creating D3D11 + D2D + the
+  // effect factories is the expensive half), but its driver-side caches are
+  // exactly what IDXGIDevice3::Trim can hand back. This is the public form of
+  // the call ReleaseTransient already makes internally, so a window that also
+  // drops its own D2D target can trim the shared stack once, at the end.
+  bool TrimDevice() {
+    ComPtr<IDXGIDevice3> dxgiDevice;
+    if (FAILED(d3d_.As(&dxgiDevice)) || !dxgiDevice) return false;
+    dxgiDevice->Trim();
+    return true;
+  }
+  bool DeviceLive() const { return d3d_ != nullptr; }
+
   // Gives back everything transient. Safe to call repeatedly; returns the bytes
   // that were actually freed (0 the second time -- which is how the negative
   // control proves the injection ran instead of guessing).

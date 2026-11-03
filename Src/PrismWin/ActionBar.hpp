@@ -588,6 +588,23 @@ class ActionBarPainter {
     return out;
   }
 
+ public:
+  int BrushCount() const { return brush_ ? 1 : 0; }
+  int TextFormatCount() const {
+    return (labelFormat_ ? 1 : 0) + (mnemonicFormat_ ? 1 : 0);
+  }
+
+  // C75: drop everything bound to a render target (and the DWrite factory this
+  // painter holds) so a minimised window returns it. CreateDeviceResources
+  // rebuilds it; the band's layout lives in PrismCore and never moves.
+  void ReleaseDeviceResources() {
+    brush_.Reset();
+    writeFactory_.Reset();
+    labelFormat_.Reset();
+    mnemonicFormat_.Reset();
+  }
+
+ private:
   ComPtr<ID2D1SolidColorBrush> brush_;
   ComPtr<IDWriteFactory> writeFactory_;
   ComPtr<IDWriteTextFormat> labelFormat_, mnemonicFormat_;

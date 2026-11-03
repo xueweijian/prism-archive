@@ -831,6 +831,182 @@ class GalleryWindow {
     lastThumbTrimBytes_ = thumbs_->Trim(thumbs_->BudgetBytes() / 8);
   }
 
+  // C75: a minimised window shows no tile, so every cached pixel is dead weight.
+  // ReleaseAll (not the eighth) is the idle state: ADR-006's tier is a budget on
+  // the PROCESS, and keeping 8 MiB of invisible thumbnails is what kept the
+  // minimised tier above it. The store is keyed by catalog index, so a restore
+  // that re-sweeps repopulates exactly the same entries.
+  size_t ReleaseAllThumbnails() {
+    std::lock_guard<std::mutex> lock(thumbMutex_);
+    if (!thumbs_) return 0;
+    lastThumbTrimBytes_ = thumbs_->ReleaseAll();
+    return lastThumbTrimBytes_;
+  }
+
+  // ---------- card C75: the idle RESIDENT set, counted from live objects -----
+  // C33's rule: numbers come from what is actually held (live COM pointers,
+  // container sizes), never from a parallel counter that can drift. The test
+  // suite prints these before/after the minimise path; docs/PERF.md §9 carries
+  // the resulting table.
+  struct MemorySnapshot {
+    size_t catalogItems = 0;
+    size_t catalogNameBytes = 0;
+    size_t folderItems = 0;
+    size_t folderNameBytes = 0;
+    size_t listItems = 0;
+    size_t thumbBytes = 0;
+    size_t thumbEntries = 0;
+    size_t thumbBudget = 0;
+    size_t glassTransientBytes = 0;
+    size_t glassIslands = 0;
+    bool glassDeviceLive = false;
+    bool targetLive = false;
+    size_t targetWidth = 0;
+    size_t targetHeight = 0;
+    size_t targetBytes = 0;  // one BGRA back buffer
+    int rendererBrushes = 0;
+    int rendererTextFormats = 0;
+    size_t rendererThumbBitmaps = 0;
+    size_t rendererThumbBitmapBytes = 0;
+    size_t sidebarCommands = 0;
+    size_t tabs = 0;
+    size_t textFormats = 0;  // renderer formats + the window's crumb format
+  };
+  MemorySnapshot CountMemory() {
+    MemorySnapshot m;
+    if (catalog_) {
+      m.catalogItems = catalog_->size();
+      for (const prism::ArchiveItem& item : *catalog_) m.catalogNameBytes += item.path.size();
+    }
+    m.folderItems = folderItems_.size();
+    for (const prism::ArchiveItem& item : folderItems_) m.folderNameBytes += item.path.size();
+    m.listItems = listItems_.size();
+    {
+      std::lock_guard<std::mutex> lock(thumbMutex_);
+      if (thumbs_) {
+        m.thumbBytes = thumbs_->SizeBytes();
+        m.thumbEntries = thumbs_->Count();
+        m.thumbBudget = thumbs_->BudgetBytes();
+      }
+    }
+    if (glass_) {
+      m.glassTransientBytes = glass_->TransientBytes();
+      m.glassIslands = glass_->IslandCount();
+      m.glassDeviceLive = glass_->DeviceLive();
+    }
+    if (target_) {
+      const D2D1_SIZE_U pixels = target_->GetPixelSize();
+      m.targetLive = true;
+      m.targetWidth = pixels.width;
+      m.targetHeight = pixels.height;
+      m.targetBytes = static_cast<size_t>(pixels.width) * pixels.height * 4u;
+    }
+    m.rendererBrushes = renderer_.BrushCount();
+    m.rendererTextFormats = renderer_.TextFormatCount();
+    m.rendererThumbBitmaps = renderer_.ThumbBitmapCount();
+    m.rendererThumbBitmapBytes = renderer_.ThumbBitmapBytes();
+    m.sidebarCommands = sidebarLayout_.commands.size();
+    m.tabs = tabs_.size();
+    m.textFormats = static_cast<size_t>(m.rendererTextFormats) + (crumbFormat_ ? 1u : 0u);
+    return m;
+  }
+
+  // ---------- card C75: release / rebuild the idle resident set -------------
+  // Order matters only for the accounting: the glass graph and the thumbnails
+  // go first (they are the big blocks), then the renderer's target-bound objects
+  // and finally the D2D hwnd target itself -- its D3D device owns the back
+  // buffer and the driver's intermediate surfaces.
+  //
+  // The D3D11 device of the glass host is deliberately KEPT: re-creating D3D11 +
+  // D2D + the effect factories costs ~19 ms (C65's glass cell) and a restore
+  // must stay inside the pre-C75 frame budget. IDXGIDevice3::Trim is what turns
+  // the released pointers into working set (C33 measured: without it, 0 bytes).
+  size_t ReleaseRenderMemory() {
+#if defined(PRISM_C75_MUTANT_NO_TRIM)
+    // MUTATION (CONTRACTS D3/D27): the idle path releases nothing. The memory
+    // assertion in c75.mem_idle must go red; the runtime predicate is the
+    // return value, so a red from another cause cannot claim the mutation.
+    glassReleasedBytes_ = 0;
+    lastThumbTrimBytes_ = 0;
+    return 0;
+#else
+    size_t returned = 0;
+    // Route through the C34 seam, not glass_->SetVisible directly: that seam is
+    // what PRISM_C34_MUTANT_NO_TRIM instruments, and a minimise path that
+    // bypasses it silently disarms C34's "no trim must be red" guard (the CI
+    // failure that prompted this). The seam is idempotent and reports the bytes
+    // it really returned; zero first so a no-glass window cannot report a stale
+    // number from an earlier release.
+    glassReleasedBytes_ = 0;
+    ReleaseGlassLayer();
+    returned += glassReleasedBytes_;
+    returned += ReleaseAllThumbnails();
+    // Count what the target holds before dropping it, so the report is honest
+    // about the bytes the release is about (not what Windows later reclaims).
+    size_t targetBytes = 0;
+    if (target_) {
+      const D2D1_SIZE_U pixels = target_->GetPixelSize();
+      targetBytes = static_cast<size_t>(pixels.width) * pixels.height * 4u;
+    }
+    renderer_.ReleaseDeviceResources();
+    rendererReady_ = false;
+    // The window's own text-measurement factory/format are target-independent
+    // but a minimised window measures nothing; dropping them also drops the
+    // window's reference to the shared DWrite font cache.
+    crumbFormat_.Reset();
+    writeFactory_.Reset();
+    target_.Reset();
+    // One trim for the whole stack, after every pointer is gone.
+    const bool trimmed = glass_ ? glass_->TrimDevice() : TrimOwnDevice();
+    (void)trimmed;
+    returned += targetBytes;
+    lastReleasedTargetBytes_ = targetBytes;
+    idleReleased_ = true;
+    ++idleReleases_;
+    return returned;
+#endif
+  }
+
+  // Rebuilds the target and every target-bound object, then paints ONCE,
+  // synchronously, so the window can never present an unpainted client area
+  // between the restore and the first WM_PAINT. Called from WM_SIZE
+  // (SIZE_RESTORED / SIZE_MAXIMIZED) with the new client size already applied.
+  bool RestoreRenderMemory() {
+    EnsureTextMeasurement();  // the font side of what the minimise path dropped
+    if (!EnsureDeviceResources()) return false;
+    if (!rendererInitialized_) rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
+    if (!rendererInitialized_) return false;
+    rendererReady_ = SUCCEEDED(renderer_.CreateDeviceResources(target_.Get()));
+    if (!rendererReady_) return false;
+    if (glass_) {
+      glass_->SetVisible(true);
+      if (FAILED(glass_->EnsureTransient())) return false;
+      PresentGlassFrame();
+    }
+    Render();
+    idleReleased_ = false;
+    ++restoreRebuilds_;
+    return true;
+  }
+
+  size_t LastReleasedTargetBytes() const { return lastReleasedTargetBytes_; }
+  int IdleReleases() const { return idleReleases_; }
+  int RestoreRebuilds() const { return restoreRebuilds_; }
+  bool RendererReady() const { return rendererReady_; }
+  bool TargetLive() const { return target_ != nullptr; }
+
+  // The window's own D2D hwnd target creates its D3D device internally; D2D
+  // does not expose it as IDXGIDevice (QueryInterface is attempted here, and a
+  // failure is not fatal). When composition is on this is a no-op: the glass
+  // host's device is the one TrimDevice above already trimmed.
+  bool TrimOwnDevice() {
+    if (!target_) return false;
+    ComPtr<IDXGIDevice3> dxgi;
+    if (FAILED(target_.As(&dxgi)) || !dxgi) return false;
+    dxgi->Trim();
+    return true;
+  }
+
   // ---------- card C34: the idle pump ----------
   // The app's companion preview (C30) is woken by an auto-reset event. The
   // window owns the message loop, so it offers ONE timer tick; the handler runs
@@ -1489,14 +1665,15 @@ class GalleryWindow {
     switch (message) {
       case WM_SIZE: {
         if (wparam == SIZE_MINIMIZED) {
-          // C34: nothing of this window is on screen, so the transient device
-          // layers go back to the system -- the glass swapchains + effect graph
-          // through ReleaseTransient (C33's IDXGIDevice3::Trim is what makes the
-          // release real) and the thumbnail pixels down to their idle target.
-          // No resize here: the client rect keeps the size it had, so a restore
-          // repaints exactly what was there instead of a 0x0 frame.
-          ReleaseGlassLayer();
-          TrimThumbnails();
+          // C34 + C75: nothing of this window is on screen, so the entire
+          // resident set that a visible frame needs goes back to the system:
+          // the glass swapchains + effect graph through ReleaseTransient,
+          // EVERY cached thumbnail pixel, the renderer's target-bound objects
+          // and the D2D hwnd target itself (its D3D device owns the back
+          // buffer). IDXGIDevice3::Trim then makes the release real (C33: no
+          // Trim, no bytes). No resize here: the client rect keeps the size it
+          // had, so a restore repaints exactly what was there.
+          ReleaseRenderMemory();
           return 0;
         }
         if (target_) {
@@ -1511,8 +1688,23 @@ class GalleryWindow {
         barKnown_ = false;  // the island is a fraction of the client width
         sidebarDirty_ = true;  // the sidebar's status pill is bottom-anchored
         UpdateBreadcrumbLayout();
-        // C34: back on screen -> rebuild what the minimise path dropped.
-        if (wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) RestoreGlassLayer();
+        // C75: back on screen -> rebuild AND paint inside THIS Resize. Painting
+        // lazily on the next WM_PAINT is what leaves an unpainted client area
+        // between the restore and the first frame; the suite captures the
+        // window right after ShowWindow returns and requires content.
+#if defined(PRISM_C75_MUTANT_NO_RESTORE_REBUILD)
+        // MUTATION (CONTRACTS D3/D27): the restore path does not rebuild. The
+        // blank-frame assertion in c75.mem_idle must go red.
+#else
+        // ONLY after the minimise path really ran. CreateWindowEx sends a
+        // first WM_SIZE(SIZE_RESTORED), and an ordinary Resize has a live
+        // target: painting synchronously there adds a frame without a
+        // WM_PAINT and breaks the "one invalidation, one draw" contract other
+        // suites pin (C52 drop-in: paints 1 vs draws 2).
+        if ((wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) && idleReleased_) {
+          RestoreRenderMemory();
+        }
+#endif
         Invalidate();
         return 0;
       }
@@ -3714,6 +3906,11 @@ class GalleryWindow {
   std::unique_ptr<prism::win::glass::GlassIslandHost> glass_;
   size_t glassReleasedBytes_ = 0;  // C33's accounting, last release
   size_t lastThumbTrimBytes_ = 0;  // bytes the idle Trim returned
+  // ---- card C75: idle/release accounting ----
+  size_t lastReleasedTargetBytes_ = 0;  // back buffer the last release dropped
+  int idleReleases_ = 0;                // times the minimise path really ran
+  int restoreRebuilds_ = 0;             // Resize callbacks that rebuilt + painted
+  bool idleReleased_ = false;           // released and not yet rebuilt/painted
   std::function<void()> onIdle_;   // the app's companion-preview poll
   bool idleTimer_ = false;
 

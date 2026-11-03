@@ -876,21 +876,99 @@ TIMEOUT 15 是挂死预算，不是期望时长。负向控制 mutation.c65.no_f
 谓词是注入点实际写下的 gNoFirstPaintFired，不是“程序名带 mutant”——因无关原因变红
 不会打印 CAUGHT。
 
-### 9. 待办（未改代码；每项带最小复现）
+### 9. C75：最小化内存分解与回落（2026-11-03，feat/c75-trim）
 
-1. **ADR-006 最小化 ≤ 40 MB 仍未达标**（71.5–71.7 MB WS / 45.2 MB PB，超 31.5 MB / 5.2 MB）。
-   这是 C34 之后的既有缺口，不是本卡回归。最小复现：
+C65 的 71.5–71.7 MB 不是猜的，是每次最小化只还 4.2–4.9 MB。C75 先做分解，再按
+“最大且可安全释放”的顺序改。所有对象数字来自活 COM 指针/容器大小（C33 的会计规则），
+进程数字来自 `GetProcessMemoryInfo`；测试是 `Tests/win/c75_mem_idle.cpp`（真实
+`GalleryWindow`、真实 D2D hwnd target、DWrite、玻璃岛、64 张 320×240 缩略图 = 18.75 MB）。
 
-       . E:\wg\env.ps1 -Card c65
-       cmake --build E:\build\wt-c65 --target c65_bench_current PrismArchive
-       ctest --test-dir E:\build\wt-c65 -R "^c65\.bench_remeasure$" -V
-       # 看 BENCH_C65_MEMORY 的 app_minimized_mb / app_minimized_private_mb；期望 ≤ 40
+#### 9.1 最小化前/后的分解（同一进程，`C75_BREAKDOWN` 两行）
 
-   原因假设（仍需下一张卡证伪）：最小化只触发 ReleaseGlassLayer + TrimThumbnails，
-   渲染器的 D2D/DWrite 设备资源、字体缓存与 catalog 不在瞬态路径上；要够到 40 MB，
-   必须让渲染器设备资源也进 ReleaseTransient 并对空闲态做 IDXGIDevice3::Trim。
+| 类别 | 最小化前 | 最小化后 | 说明 |
+|---|---:|---:|---|
+| 缩略图像素（ThumbStore） | **18.75 MB**（64 项，64 MiB 预算的 29 %） | **0** | C34 只裁到预算的 1/8（8 MiB），C75 改为 `ReleaseAll` |
+| D2D hwnd target（后台缓冲 1100×740×4） | **3.57 MB** | **0**（target 本身销毁） | 同时带走它内部 D3D 设备的驱动缓存 |
+| 玻璃瞬态（交换链 2×960×48 + 效果图） | **0.35 MB** | **0** | 原有 `ReleaseTransient` 路径 |
+| 渲染器设备对象 | 14 画刷 + 11 文本格式 | **0 + 0** | 新增 `ReleaseDeviceResources`；含 tab/action 画刷与 DWrite 格式 |
+| DWrite 工厂 / 字体引用 | 2 个工厂 + 1 crumb 格式 | 0 | 随 target 一起释放，恢复时重建 |
+| catalog + 行模型 | 800 项 / 15 890 B 名字 + 1 行视图 | 不变 | 小且恢复要用；不释放 |
+| 其它（进程堆、引擎、映射 DLL） | 余量 | 余量 | 不可由窗口释放（见 9.3） |
 
-2. **帧/缩略图数字的负载噪声**：同一二进制在 90 分钟内读到 10k p95 5.78–34.46 ms、
+进程总数（同一测试进程）：**最小化前 66.6 MB WS / 41.8 MB PB → 最小化后 44.0 MB WS /
+19.1 MB PB**；**实际还回 22.1 MB WS / 22.6 MB PB**，是 C65 那 4.2–4.9 MB 的约 4.6 倍。
+
+出厂 `PrismArchive.exe`（64 张真实 PNG 的 7z，含缩略图扫描）外部采样：
+**开归档 71.4 MB WS / 43.3 MB PB → 最小化 60.7 MB WS / 33.0 MB PB**（两轮 60.71/60.94）。
+同一 exe 用“全是坏 PNG、解码不出缩略图”的归档量到的**地板**是 49.8 MB WS / 22.3 MB PB：
+这 10.9 MB 差就是“解码过 18.75 MB 缩略图后，堆把已释放的页留在提交里”的部分，不是仍在
+被引用的对象（`C75_BREAKDOWN` 的 thumb_bytes 已是 0）。
+
+#### 9.2 改了什么（产品）
+
+- `GalleryWindow::ReleaseRenderMemory()`：最小化路径一次性释放玻璃瞬态、**全部**缩略图、
+  渲染器 target 绑定对象、窗口的 crumb 格式/DWrite 引用，最后销毁 `ID2D1HwndRenderTarget`
+  并调用 `IDXGIDevice3::Trim()`（有玻璃时走 `GlassIslandHost::TrimDevice()`）。
+- `GalleryWindow::RestoreRenderMemory()`：在 **WM_SIZE(SIZE_RESTORED) 内同步**
+  重建 target + 设备对象 + 玻璃瞬态，并立刻 `Render()` 一帧；不把首帧留给下一次
+  `WM_PAINT`（空白帧的成因）。
+- `GalleryRenderer::ReleaseDeviceResources()` 与两个 painter 的同类方法：从活指针推导
+  画刷/格式/缩略图设备位图的数量与字节。
+- 恢复代价：五次循环的“重建+首帧”为 **8–28 ms**（中位约 10–16 ms），与 C65 的一次
+  完整首帧 paint（中位 92.2 ms）同量级或更低；循环内断言 ≤ 第一次的 1.2× + 2 ms
+  （QPC 计时；本机调度抖动可见 8–28 ms 的离散，20 % 是合同线，2 ms 是计时粒度）。
+
+#### 9.3 40 MB 没达到：差在哪，为什么
+
+最小化后仍有 **44.0 MB**（测试窗口）/ **60.7 MB**（出厂进程）。把窗口侧能释放的**全部**
+释放后，进程地板仍是 44 MB 左右：这部分是
+D3D11/D2D/DWrite/Windows.Storage/igd 驱动等**已映射的 DLL 代码页**（约 2.4 MB DWrite、
+6.2 MB d2d1、2.4 MB d3d11、8.7 MB Windows.Storage、以及 Intel 驱动的 igc64/igd10iumd
+映射）和进程堆的常驻页。它们不在任何 COM 对象上，`ReleaseTransient`/`Trim` 也够不到。
+
+出厂进程比测试窗口多的约 16.7 MB 是**应用层**持有的：7z.dll 引擎与 reader pool、
+缩略图解码后的堆保留页（上面那 10.9 MB）以及设置/会话/语言表。要让 60.7 → 40，
+必须（a）在最小化时 park/关闭 reader pool 与解码管线（下一张卡，产品生命周期改动），
+以及（b）让堆把已释放的 10 MB 真正还给系统（`HeapCompact`/空闲态清理，需单独验证
+恢复代价）。本卡**没有**用 `SetProcessWorkingSetSize(-1,-1)`/`EmptyWorkingSet` 把
+数字做成绿色：那是把代码页换出，恢复首帧会付页错误，和“≤ 原恢复时间 + 20 %”冲突，
+也不是 ADR-006 写的“靠 ReleaseTransient + Trim 回落”。
+
+因此本卡交付的是：**分解表 + 22 MB 的真实回落 + 恢复不空白 + 两条负向控制**；
+ADR-006 的 40 MB 档仍**未达标**（测试打印 `C75_ADR006 {"met":false}`，不伪造绿色）。
+
+#### 9.4 复现
+
+    . E:\wg\env.ps1 -Card c75
+    cmake --build E:\build\wt-c75 --target c75_mem_idle c75_mem_idle_mutant_no_trim c75_mem_idle_mutant_no_restore_rebuild PrismArchive
+    ctest --test-dir E:\build\wt-c75 -R "c75|mutation\.c75" -V
+
+负向控制（D3/D26/D27，无 WILL_FAIL）：
+
+- `mutation.c75.no_trim`：最小化路径不释放 → `!window.TargetLive()` 第一条红，
+  打印 `C75 MUTATION CAUGHT: no_trim`（实测最小化 66.0 MB，与开归档 66.0 MB 持平）。
+- `mutation.c75.no_restore_rebuild`：恢复的 Resize 不重建不重画 → 首帧像素
+  `non_backdrop=0.0000`，空白帧断言红，打印 `C75 MUTATION CAUGHT: no_restore_rebuild`。
+
+**ASan lane 的判据（CI 实测教训）**：Windows CI 用 `/fsanitize=address` 构建，ASan 的
+quarantine 会把已释放的分配留着不还给 OS——同一轮测试里对象已证死（target/thumb/glass
+全为 0），WS 却是 112.90 → 112.73 MB（只回 0.17 MB），而且每次 restore 再涨约 4.8 MB。
+所以字节判据**不能**写死在 ASan lane 上：`c75_mem_idle` 检测到 ASan 时只断言**行为**
+（对象已释放、target 不再存活、首帧非空白），字节数只打印；非 ASan 构建用**相对判据**
+（回落量 ≥ 最小化前 WS 的 15 %，本机实测约 30 %）。轮次增长在 ASan 上同样不判，
+非 ASan 改判“第 N 轮 ≤ 第 1 轮 + 2 MB”（不是逐轮 +1 MB，避免一轮噪声把预算抬高）。
+恢复预算用后续轮次的**中位数** ≤ 首次 × 1.2 + 10 ms（10 ms 是本机计时/调度粒度；
+完整重建设备是 60–100 ms，仍会红）。
+
+C34 的守卫也重新接上：`ReleaseRenderMemory` 现在经 `ReleaseGlassLayer()` 释放玻璃
+（该函数才是 `PRISM_C34_MUTANT_NO_TRIM` 的注入点），所以 `mutation.host_wiring.no-trim`
+重新在 `GlassTransientBytes()==0` 处变红；C52 `win.drop_in` 的“一次失效一次绘制”契约
+也不再被多余同步帧破坏（只有 `idleReleased_` 为真、即最小化路径确实跑过时才在
+WM_SIZE 里同步重建+画一帧）。
+
+#### 9.5 其余待办（原 C65 §9 的第 2–3 项）
+
+1. **帧/缩略图数字的负载噪声**：同一二进制在 90 分钟内读到 10k p95 5.78–34.46 ms、
    串行缩略图 75.9–177.3 ms；交错跑 C49/C65 两次，pair 1 里 C65 更快、pair 2 里更慢。
    这说明差值主要来自机器而不是 lane，但**没有**排除“C65 先跑 10k 再跑 100k”的顺序效应。
    最小复现（三次交替，比较同窗口内的 p95）：
@@ -902,7 +980,7 @@ TIMEOUT 15 是挂死预算，不是期望时长。负向控制 mutation.c65.no_f
 
    若同窗口内 C65 的 p95 稳定高出 >10 %，再查 RunFrameRound 的复用/顺序（这是测试代码，不动产品）。
 
-3. **没有 >10 % 回归项**，所以没有“回归 issue”；产品代码、docs/PROGRESS.md、
+2. **没有 >10 % 回归项**，所以没有“回归 issue”；产品代码、docs/PROGRESS.md、
    ROADMAP.md、CONTRACTS.md、ci.yml、Tests/CMakeLists.txt 均未改。
 
 ### 10. 复现（C65 全套）

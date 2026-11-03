@@ -4,6 +4,7 @@
 
 PrismArchive 是一个 Windows 11 x64 归档管理器：引擎用 7-Zip 的 `7z.dll`（运行时加载，不随包分发），
 界面、交互与文件关联都是本仓库自己的实现。当前版本 **0.1.0（开发版）**，MIT 许可。
+已经画出来但还没接线的入口，统一列在 [docs/USAGE.md](docs/USAGE.md#本版本的边界)。
 
 装完最常见的问题是「右键没有菜单」。它不是安装失败，是 Windows 11 的菜单分层，
 见下文 [为什么右键在「显示更多选项」里](#为什么右键在显示更多选项里)。
@@ -39,6 +40,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```text
 INSTALL: OK C:\...\PrismArchive (22 associations, engine=E:\DevTools\7-Zip\7z.dll)
 ```
+
+脚本从**自己所在目录**取 payload（zip 解压后 `PrismArchive.exe`、`install.ps1`、`uninstall.ps1`、
+`register-static-verbs.ps1` 同级），再退回构建目录；所以解压到哪都能直接跑。
 
 安装器只写 `HKCU` 和 `%LOCALAPPDATA%\PrismArchive`，不弹 UAC、不写机器级关联。
 不想装到默认位置加 `-InstallDir`；只想带走、不写注册表加 `-Portable`：
@@ -103,10 +107,19 @@ PrismArchive **不附带** `7z.dll`。任选其一：
 2. 自己设用户环境变量 `PRISM_7Z_DLL` 指向 `7z.dll` 的**完整路径**；
 3. 把 `7z.dll` 放到 `PrismArchive.exe` 同目录（便携场景）。
 
-解析顺序是：`PRISM_7Z_DLL` → exe 同目录 → 7-Zip 自己的注册表 `InstallDir` → 两个
-`Program Files` 探测路径。找不到时应用不会假装成功：弹窗会列出**每一条尝试过的路径及其来源**
-（`[PRISM_7Z_DLL]` / `[registry]` / `[appdir]` …）。诊断信息怎么复制见
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#7zdll-找不到)。
+解析顺序（每条都带来源标签，弹窗里原样列出）：
+
+| 顺序 | 来源 | 路径 |
+|---|---|---|
+| 1 | `[env]` | 环境变量 `PRISM_7Z_DLL` |
+| 2 | `[app-dir]` | `PrismArchive.exe` 同目录 |
+| 3 | `[registry:*]` | 7-Zip 自己的 `InstallDir`（HKLM / WOW6432Node / HKCU） |
+| 4 | `[path]` | `PATH` 里每个目录（去重） |
+| 5 | `[common:*]` | `%LOCALAPPDATA%\Programs\7-Zip`、scoop |
+| 6 | `[probe]` | 两个 `Program Files\7-Zip` 兜底 |
+
+找不到时应用不会假装成功：弹窗列出每一条尝试过的路径及其来源，按 `Ctrl+C` 即可复制全文。
+更多诊断见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#7zdll-找不到)。
 
 ## 命令行
 
@@ -136,9 +149,9 @@ verb refused: unsupported flag --nope; supported: --smart-extract --extract-here
 pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\PrismArchive\uninstall.ps1"
 ```
 
-或者 **设置 → 应用 → 已安装的应用 → PrismArchive → 卸载**。卸载会删除安装目录、卸载项和
-`PrismArchive.*` ProgID，并把每个扩展恢复成安装前的处理器（逐键比对）。重复卸载打印
-`UNINSTALL: already clean`，不是错误。
+或者 **设置 → 应用 → 已安装的应用 → PrismArchive → 卸载**。卸载会删除安装目录、卸载项、
+`PrismArchive.*` ProgID 与右键动词，并把每个扩展恢复成安装前的处理器（逐键比对）。
+重复卸载打印 `UNINSTALL: already clean`，不是错误。
 
 ## 文档
 

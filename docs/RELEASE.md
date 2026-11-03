@@ -405,4 +405,5 @@ pwsh -File tools\verify-package.ps1 -ZipDir dist -Mutate SkipVerbs      # 期望
 - `7z.dll` 是 7-Zip 的 LGPL 组件：随包分发必须保留 `THIRD-PARTY-NOTICES.txt` 里的许可与来源，发布页也要给出对应的 7-Zip 源码获取方式。
 - 验证里"用自带引擎解压"是在清空 `PRISM_7Z_DLL` 后跑的，但机器上注册过的 7-Zip 仍可能被运行时候选列表兜底；因此第 3 步单独断言了安装目录里的 `7z.dll` 与包内字节相同。
 - 不做 MSIX/AppX 分发（C61 的稀疏包是另一条线），本包只走 `INSTALL.cmd` → `install.ps1`。
+- 打包进 zip 的 `.ps1` 必须保持 ASCII（或带 UTF-8 BOM）。`INSTALL.cmd` 用 Windows PowerShell 5.1，它在没有 BOM 时按 ANSI 代码页读脚本；英文 runner（cp1252）会把 UTF-8 中文里的字节 0x94 解成 U+201D（PowerShell 当作引号），整个脚本解析失败。`register-static-verbs.ps1` 的中文标签因此用 `[char]0x...` 构造（C68 的 CI 实测：解析失败 → 安装仍在跑但不写动词键）。
 

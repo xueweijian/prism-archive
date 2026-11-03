@@ -14,9 +14,19 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not (Test-Path -LiteralPath $ExePath) -and -not $Unregister) { throw "exe not found: $ExePath" }
 
+# The labels are the user-visible Chinese strings but they are built from code
+# points, NOT written as literals. Reason, measured on the C68 clean-machine run:
+# Windows PowerShell 5.1 reads a BOM-less script with the ANSI code page (1252
+# on an English runner). UTF-8 Chinese bytes then decode to characters such as
+# U+201D (a smart quote PowerShell treats as a string delimiter), so the file
+# does not even PARSE -- the whole verb registration dies before writing a key,
+# and the install used to fail with it. An ASCII-only file parses in every code
+# page and still writes the correct labels.
+$labelExtract = ([string][char]0x7528) + ' PrismArchive ' + ([string][char]0x89E3) + ([string][char]0x538B) + ([string][char]0x5230) + ([string][char]0x6B64) + ([string][char]0x5904)
+$labelOpen = ([string][char]0x7528) + ' PrismArchive ' + ([string][char]0x6253) + ([string][char]0x5F00)
 $verbs = @(
-  @{ id = "PrismArchiveExtract"; label = "用 PrismArchive 解压到此处"; args = "--extract-here" },
-  @{ id = "PrismArchiveOpen";    label = "用 PrismArchive 打开";       args = "" }
+  @{ id = "PrismArchiveExtract"; label = $labelExtract; args = "--extract-here" },
+  @{ id = "PrismArchiveOpen";    label = $labelOpen;    args = "" }
 )
 
 # CreateSubKey, not OpenSubKey: on a brand-new user profile (and on a clean CI

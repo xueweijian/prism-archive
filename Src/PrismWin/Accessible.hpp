@@ -75,8 +75,21 @@ inline constexpr bool kAccessibleBridgeArmed = false;
 inline constexpr bool kAccessibleBridgeArmed = true;
 #endif
 
+// C80's second arm. The search field is visible and focusable, but its VALUE is
+// read-only: put_accValue answers E_NOTIMPL, which is exactly the state the UIA
+// driver reported as "POLICY_DENIED: supported_action" -- a screen reader can
+// find the field and cannot type into it.
+#if defined(PRISM_C80_MUTANT_READONLY_SEARCH)
+// MUTANT ACTIVE (C80 arm readonly_search): the writable-value bridge is gone.
+inline constexpr bool kSearchValueWritable = false;
+#else
+inline constexpr bool kSearchValueWritable = true;
+#endif
+
 inline constexpr std::string_view ActiveMutation() {
-  return kAccessibleBridgeArmed ? std::string_view() : std::string_view("no_getobject");
+  if (!kAccessibleBridgeArmed) return std::string_view("no_getobject");
+  if (!kSearchValueWritable) return std::string_view("readonly_search");
+  return std::string_view();
 }
 
 // --------------------------------------------------------------- conversions
@@ -137,9 +150,14 @@ inline long StateOf(const prism::a11y::Node& node) {
       node.role == prism::a11y::Role::PageTab ||
       node.role == prism::a11y::Role::ListItem ||
       node.role == prism::a11y::Role::OutlineItem ||
-      node.role == prism::a11y::Role::List) {
+      node.role == prism::a11y::Role::List ||
+      node.role == prism::a11y::Role::Text) {
     state |= STATE_SYSTEM_FOCUSABLE;
   }
+  // NO STATE_SYSTEM_READONLY on the search field: the UIA proxy derives
+  // IsReadOnly from that bit, and the field accepts put_accValue. Getting this
+  // wrong is invisible in the tree and fatal in use (the driver reports
+  // "editable pass / supported_action fail").
   if (!node.enabled) state |= STATE_SYSTEM_UNAVAILABLE;
   if (node.focused) state |= STATE_SYSTEM_FOCUSED;
   if (node.role == prism::a11y::Role::PageTab ||
@@ -172,6 +190,10 @@ class Host {
   virtual void ActivateRow(int row) = 0;
   virtual void ActivateTab(int index) = 0;
   virtual void ActivateFolder(const std::string& key) = 0;
+  // The search field's two verbs (C80 follow-up): a VALUE write and "put the
+  // keyboard in it". Both must reach the SAME model the keyboard uses.
+  virtual void SetSearchValue(const std::string& utf8) = 0;
+  virtual void FocusSearchField() = 0;
 };
 
 class Accessible final : public IAccessible {
@@ -400,6 +422,10 @@ class Accessible final : public IAccessible {
       case prism::a11y::Role::OutlineItem:
         if (host_) host_->ActivateFolder(node->key);
         return S_OK;
+      case prism::a11y::Role::Text:
+        // TAKEFOCUS on the field is the same verb as its default action.
+        if (host_) host_->FocusSearchField();
+        return S_OK;
       case prism::a11y::Role::Client:
       case prism::a11y::Role::List:
       case prism::a11y::Role::Outline:
@@ -517,6 +543,10 @@ class Accessible final : public IAccessible {
       case prism::a11y::Role::OutlineItem:
         if (host_) host_->ActivateFolder(node->key);
         return S_OK;
+      case prism::a11y::Role::Text:
+        // "Press the field" means "put the keyboard in it" (UIA Focus).
+        if (host_) host_->FocusSearchField();
+        return S_OK;
       case prism::a11y::Role::Client:
       case prism::a11y::Role::List:
       case prism::a11y::Role::Outline:
@@ -528,7 +558,29 @@ class Accessible final : public IAccessible {
   }
 
   STDMETHODIMP put_accName(VARIANT, BSTR) override { return E_NOTIMPL; }
-  STDMETHODIMP put_accValue(VARIANT, BSTR) override { return E_NOTIMPL; }
+
+  // WRITABLE VALUE (C80 follow-up). MSAA maps this to UIA's
+  // ValuePattern.SetValue -- the call a screen reader or an automation client
+  // uses to TYPE into the search field. Before this, the field was visible and
+  // focusable but answered E_NOTIMPL here, which the UIA driver reports as
+  // "POLICY_DENIED: supported_action": found, and impossible to use.
+  //
+  // It ends at the window's ONE search-text path (SetSearchValueFromAccessible
+  // -> the model's SetQuery + ApplySearchFilter), the same code WM_CHAR runs for
+  // a typed character. Only the field is editable: renaming a button through
+  // MSAA is not a feature, so every other role still answers E_NOTIMPL.
+  STDMETHODIMP put_accValue(VARIANT varChild, BSTR value) override {
+    const prism::a11y::Node* node = Resolve(varChild);
+    if (node == nullptr) return E_INVALIDARG;
+    if (node->role != prism::a11y::Role::Text) return E_NOTIMPL;
+    // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix read-only field.
+    if (!kSearchValueWritable) return E_NOTIMPL;
+    if (!host_) return E_FAIL;
+    const std::wstring text =
+        value != nullptr ? std::wstring(value, ::SysStringLen(value)) : std::wstring();
+    host_->SetSearchValue(WideToUtf8(text));
+    return S_OK;
+  }
 
   // ---- read-back seams (the suite asserts the object it handed out) --------
   const prism::a11y::Node& Snapshot() const { return node_; }

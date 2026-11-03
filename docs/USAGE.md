@@ -300,7 +300,7 @@ PrismArchive 的客户端区域（动作岛、标签栏、列表、侧栏、状�
 | 列表每一行 | `ROLE_SYSTEM_LISTITEM` | 文件名；值 = 字节数 | 选中行 `SELECTED`；描述「文件」/「文件夹」 |
 | 侧栏归档树 | `ROLE_SYSTEM_OUTLINE` / `ROLE_SYSTEM_OUTLINEITEM` | 归档名 / 文件夹名 | 当前文件夹 `SELECTED`；可展开项 `EXPANDED`/`COLLAPSED` |
 | 状态栏 | `ROLE_SYSTEM_STATUSBAR` | 状态文字（如「共 12 项」） | 值 = 路径栏文本 |
-| 搜索框（打开时） | `ROLE_SYSTEM_TEXT` | 「搜索框」 | 值 = 当前输入（含输入法预览） |
+| 搜索框（打开时） | `ROLE_SYSTEM_TEXT` | 「搜索框」 | 值 = 当前输入（含输入法预览）；**可写**（见下） |
 
 ### 能做的动作
 
@@ -312,14 +312,17 @@ PrismArchive 的客户端区域（动作岛、标签栏、列表、侧栏、状�
   下一次解压的目标都跟着变）。
 - **切换标签**：对标签调用默认动作或 `accSelect` 等于点击该标签（会去加载那个归档）。
 - **进入侧栏文件夹**：对树项调用默认动作等于在侧栏里点该文件夹。
+- **往搜索框里写字**：`put_accValue`（UIA 的 `ValuePattern.SetValue`）把整串文字写进
+  查询，走的是**和键盘输入同一条路径**（同一个 model 的 `SetQuery`/`InsertText` +
+  同一个 `ApplySearchFilter`），所以列表会立刻按查询过滤，写成空串则恢复全部行。
+  读屏/自动化因此可以「输入查询」，不只是「看见搜索框」。
+  对搜索框调用默认动作（或 `accSelect(TAKEFOCUS)`）把键盘焦点放进字段。
 - **焦点**：`accFocus` 回答当前焦点元素——顺序与键盘路由一致：搜索框（打开时）→
   动作岛焦点环 → 选中的行 → 窗口本身。
 - **命中测试**：`accHitTest` 用 `accLocation` 报告的屏幕矩形做最深匹配。
 
 ### 已知边界（如实写出来，不假装支持）
 
-- 搜索框是**只读**的无障碍值：UIA 的 SetValue 不会写入文本（返回 `E_NOTIMPL`），
-  请用键盘输入（聚焦后直接打字；`Esc` 关闭）。
 - 侧栏树项的展开/折叠只**报告状态**，不提供 ExpandCollapse 动作（用键盘或点击箭头）。
 - 多选（Ctrl/Shift）通过每一行的 `SELECTED` 状态暴露；`accSelection` 只返回一个元素。
 - UIA 看到的是 **MSAA 代理元素**（LegacyIAccessible），不是原生 UIA Provider：
@@ -334,13 +337,19 @@ agent-desktop snapshot --app PrismArchive.exe -i --compact
 # 按名称点「搜索」，然后确认搜索框出现（窗口状态变了，而不是只有像素变了）
 agent-desktop click <snapshot 里「搜索」按钮的 ref>
 agent-desktop snapshot --app PrismArchive.exe -i --compact
+
+# 再用 ValuePattern 真的「打字」：写 item01 → 列表只剩一行；清空 → 全部行回来
+agent-desktop set-value <snapshot 里「搜索框」的 ref> item01
+agent-desktop snapshot --app PrismArchive.exe -i --compact
+agent-desktop clear <snapshot 里「搜索框」的 ref>
 ```
 
 自动化测试在仓库里：
 
 ```text
-ctest -R "a11y"            # core.a11y_tree / c80.a11y / c80.a11y_uia
-ctest -R no_getobject      # 负向控制：把 WM_GETOBJECT 注掉后必须红
+ctest -R "a11y"                  # core.a11y_tree / c80.a11y / c80.a11y_uia
+ctest -R no_getobject            # 负向控制：把 WM_GETOBJECT 注掉后必须红
+ctest -R readonly_search         # 负向控制：把 put_accValue 注掉（只读搜索框）后两条测试必须红
 ```
 
 ## 本版本的边界

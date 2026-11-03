@@ -31,6 +31,26 @@ target_compile_definitions(PrismArchive PRIVATE UNICODE _UNICODE)
 # exactness-benign by construction; cast-polish is deferred, not forgotten).
 target_compile_options(PrismArchive PRIVATE /WX-)
 
+# ---------------------------------------------------------------------------
+# C80 negative control (CONTRACTS D3): the SAME application with the writable
+# search value disarmed (put_accValue -> E_NOTIMPL, the pre-fix state the UIA
+# driver reported as "POLICY_DENIED: supported_action"). The process-level
+# accessibility suite (Tests/suites/c80-a11y.cmake) drives THIS binary and must
+# observe the refusal; a build that quietly accepts the write leaves that target
+# red. Never installed -- it exists to prove the assertion is the thing that
+# catches the defect.
+# ---------------------------------------------------------------------------
+add_executable(PrismArchive_c80_readonly ../App/Main.cpp ../App/PrismArchive.rc)
+target_include_directories(PrismArchive_c80_readonly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(PrismArchive_c80_readonly PRIVATE prism_win_bridge
+                      user32.lib gdi32.lib d2d1.lib dwrite.lib windowscodecs.lib
+                      ole32.lib comdlg32.lib shell32.lib shlwapi.lib
+                      comctl32.lib)
+set_target_properties(PrismArchive_c80_readonly PROPERTIES WIN32_EXECUTABLE TRUE)
+target_compile_definitions(PrismArchive_c80_readonly PRIVATE UNICODE _UNICODE
+                           PRISM_C80_MUTANT_READONLY_SEARCH=1)
+target_compile_options(PrismArchive_c80_readonly PRIVATE /WX-)
+
 # Win11 modern context menu (IExplorerCommand). Needs package identity at
 # runtime (MSIX sparse package) but compiles and links standalone.
 add_library(PrismShellExt SHARED PrismShellCommand.cpp)

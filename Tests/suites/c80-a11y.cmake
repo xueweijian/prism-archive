@@ -69,6 +69,17 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
       SKIP_RETURN_CODE 77
       PASS_REGULAR_EXPRESSION "C80 MUTATION CAUGHT: no_getobject")
 
+  add_executable(win_c80_a11y_mutant_readonly_search win/test_c80_a11y.cpp)
+  target_link_libraries(win_c80_a11y_mutant_readonly_search PRIVATE ${PRISM_C80_LIBS})
+  target_compile_options(win_c80_a11y_mutant_readonly_search PRIVATE /WX-)
+  target_compile_definitions(win_c80_a11y_mutant_readonly_search
+                             PRIVATE PRISM_C80_MUTANT_READONLY_SEARCH=1)
+  add_test(NAME "c80.mutation.readonly_search"
+           COMMAND win_c80_a11y_mutant_readonly_search)
+  set_tests_properties(c80.mutation.readonly_search PROPERTIES TIMEOUT 180
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "C80 MUTATION CAUGHT: readonly_search")
+
   # The process-level UIA assertion. Registered on every Windows lane; the
   # script SKIPS (77) when agent-desktop or 7z.exe is absent, so CI without a
   # desktop driver stays honest instead of green.
@@ -78,4 +89,15 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                    -Exe "$<TARGET_FILE:PrismArchive>")
   set_tests_properties(c80.a11y_uia PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77
       PASS_REGULAR_EXPRESSION "C80 UIA CHECKS PASSED")
+
+  # The SAME process-level assertion against the read-only mutant app: the write
+  # MUST be refused, and only an observed refusal prints the D27 marker.
+  add_test(NAME "c80.mutation.readonly_search_uia"
+           COMMAND powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                   -File "${CMAKE_CURRENT_SOURCE_DIR}/../tools/c80-a11y-uia.ps1"
+                   -Exe "$<TARGET_FILE:PrismArchive_c80_readonly>"
+                   -Expect readonly)
+  set_tests_properties(c80.mutation.readonly_search_uia PROPERTIES TIMEOUT 300
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "C80 MUTATION CAUGHT: readonly_search")
 endif()

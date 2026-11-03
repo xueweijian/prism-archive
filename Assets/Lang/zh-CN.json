@@ -63,6 +63,17 @@
     "progress.edited": "已编辑归档",
     "progress.editFailed": "编辑失败",
     "progress.editCancelled": "已取消编辑，归档未改动",
-    "progress.editBlocked": "正在解压或扫描，稍后再编辑"
+    "progress.editBlocked": "正在解压或扫描，稍后再编辑",
+    "settings.title": "设置",
+    "settings.language": "语言",
+    "settings.theme": "主题",
+    "settings.extractDir": "默认解压文件夹",
+    "settings.thumbnailCap": "缩略图缓存上限",
+    "settings.logLevel": "日志级别",
+    "settings.motw": "网络标记（MOTW）",
+    "settings.inheritMotw": "继承归档的网络标记（MOTW）",
+    "settings.browse": "浏览…",
+    "settings.save": "保存",
+    "settings.cancel": "取消"
   }
 }

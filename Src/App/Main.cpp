@@ -845,20 +845,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // C19: the menu bar is the app's, painted by the window. The keys exist in
   // both shipped tables, so a language switch is visible here (the window's
   // read-back in the suite asserts exactly that).
-  const std::wstring fileMenuTitle =
-      tr.Or("menu.file", language.tag == L"zh-CN" ? L"\u6587\u4EF6" : L"&File");
-  window.SetMenuLabels(fileMenuTitle, tr("menu.compress.to.7z"),
-                       tr.Or("action.exit", language.tag == L"zh-CN" ? L"\u9000\u51FA"
-                                                                    : L"E&xit"));
-  // C54: the Edit menu. The labels are the app's words (the window only paints
-  // them), and the same three actions are bound to Delete / F2 / Ctrl+Shift+N in
-  // PrismCore's key table.
-  window.SetEditMenuLabels(
-      tr.Or("menu.edit", language.tag == L"zh-CN" ? L"\u7F16\u8F91" : L"&Edit"),
-      tr.Or("menu.edit.delete", language.tag == L"zh-CN" ? L"\u5220\u9664" : L"&Delete"),
-      tr.Or("menu.edit.rename", language.tag == L"zh-CN" ? L"\u91CD\u547D\u540D" : L"Rena&me"),
-      tr.Or("menu.edit.newFolder",
-            language.tag == L"zh-CN" ? L"\u65B0\u5EFA\u6587\u4EF6\u5939" : L"New &Folder"));
+  // C69: the words are a VALUE built in one place (AppWiring's BuildMenuLabels),
+  // so the same call can run again when the Settings dialog changes the language.
+  const prism::app::MenuLabels startupMenu = prism::app::BuildMenuLabels(tr, language.tag);
+  prism::app::ApplyMenuLabels(window, startupMenu);
   // Requirement 3: the entries are disabled BEFORE the user confirms something
   // that can only fail, and the reason is C51's own diagnosis (read-only /
   // multi-volume / held exclusively / wrong container).
@@ -935,18 +925,36 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // replaces the WHOLE bar, which would erase File > Compress/Exit. InstallMenu
   // is used only when no menu exists, so the delivered helper is still wired.
   // C64: the item's word is the app's (menu.settings), like every other title.
-  const std::wstring settingsMenuText =
-      tr.Or("menu.settings", language.tag == L"zh-CN" ? L"\u8BBE\u7F6E(\u0026S)..." : L"&Settings...");
-  window.SetSettingsMenuLabel(settingsMenuText);
+  const std::wstring settingsMenuText = startupMenu.settings;
   if (GetMenu(window.Hwnd()) == nullptr) {
     prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd(), settingsMenuText);
   }
   // The dialog must read and write the document THIS launch loaded (a portable
   // build puts it beside the exe, not in %LOCALAPPDATA%), and a save must not
   // leave the app's in-memory copy stale for the exit save to overwrite.
-  window.SetSettingsLauncher([&window, &settings]() {
+  // C69: the translator the launch resolved, held by reference for the launcher
+  // below (the dialog reads the SAME table the bar does).
+  const prism::i18n::Translator& startupTranslator = language.translator;
+  window.SetSettingsLauncher([&window, &settings, &app, &logger, &startupTranslator]() {
     prism::win::settingsui::SettingsDialog dialog;
     dialog.SetPaths(settings.paths);
+    dialog.SetTranslator(&startupTranslator);   // C69: the rows read the same table
+    // C69: a language picked in the OPEN dialog takes effect on the bar before
+    // the user presses Save -- and the translator it will keep reading lives for
+    // the whole modal call, not just for the handler.
+    prism::app::LanguageRuntime liveLanguage;
+    prism::app::Tr liveTr{&liveLanguage.translator};
+    dialog.SetLanguageHandler([&](const std::string& tag) {
+      prism::settings::SettingsStore staged = settings.store;
+      staged.SetString(prism::win::settingsui::kLanguageKey, tag);
+      liveLanguage = prism::app::LoadLanguageFor(LanguageDirectory(), staged,
+                                                 SystemLocaleUtf8(), &logger);
+      liveTr.translator = &liveLanguage.translator;
+      prism::app::ApplyMenuLabels(
+          window, prism::app::BuildMenuLabels(liveTr, prism::win::Utf8ToWide(tag)));
+      window.SetStatus(prism::app::ItemsCountStatus(liveTr, app->items.size()));
+      dialog.SetTranslator(liveTr.translator);
+    });
     std::string loadError;
     if (!dialog.LoadFrom(settings.paths, &loadError)) {
       window.SetStatus(L"\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A" +

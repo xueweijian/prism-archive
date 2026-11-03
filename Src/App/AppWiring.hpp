@@ -1610,6 +1610,67 @@ inline std::wstring ItemsCountStatus(const Tr& tr, std::size_t count) {
 }
 
 // ---------------------------------------------------------------------------
+// 7c. The menu bar's words, in ONE place (C69).
+//
+// Before this the nine labels were composed inline in wWinMain. That made the
+// language switch impossible to implement honestly: the settings dialog can
+// change language.tag while the app is running, but the bar's strings had no
+// call site that could be re-run. Here they are a value the app builds from the
+// translator and hands to the window -- once at startup and again after the
+// Settings dialog reports a new language.
+//
+// NEGATIVE CONTROL (CONTRACTS D3): PRISM_C69_MUTANT_NO_MENU_REBUILD makes
+// ApplyMenuLabels() a no-op, so the bar keeps the words it had before the
+// switch. The suite's "the menu says 压缩 after picking zh-CN" assertion must go
+// red; Tests/suites/c69-settings.cmake builds exactly that binary.
+// ---------------------------------------------------------------------------
+#if defined(PRISM_C69_MUTANT_NO_MENU_REBUILD)
+inline constexpr bool kRebuildMenuOnLanguageChange = false;
+#else
+inline constexpr bool kRebuildMenuOnLanguageChange = true;
+#endif
+
+struct MenuLabels {
+  std::wstring file;
+  std::wstring compress;
+  std::wstring exit;
+  std::wstring edit;
+  std::wstring deleteItem;
+  std::wstring rename;
+  std::wstring newFolder;
+  std::wstring settings;
+};
+
+// The fallbacks are the app's own words (C38's rule: real text, never an escape
+// sequence), used only when a table does not carry the key.
+inline MenuLabels BuildMenuLabels(const Tr& tr, const std::wstring& tag) {
+  const bool chinese = tag == L"zh-CN";
+  MenuLabels labels;
+  labels.file = tr.Or("menu.file", chinese ? L"文件" : L"&File");
+  labels.compress = tr.Or("menu.compress.to.7z", chinese ? L"压缩为 .7z 归档"
+                                                         : L"Compress to a .7z archive");
+  labels.exit = tr.Or("action.exit", chinese ? L"退出" : L"E&xit");
+  labels.edit = tr.Or("menu.edit", chinese ? L"编辑" : L"&Edit");
+  labels.deleteItem = tr.Or("menu.edit.delete", chinese ? L"删除" : L"&Delete");
+  labels.rename = tr.Or("menu.edit.rename", chinese ? L"重命名" : L"Rena&me");
+  labels.newFolder =
+      tr.Or("menu.edit.newFolder", chinese ? L"新建文件夹" : L"New &Folder");
+  labels.settings =
+      tr.Or("menu.settings", chinese ? L"设置(&S)..." : L"&Settings...");
+  return labels;
+}
+
+// The window owns the bar; this only says what it should say. A templated
+// WindowLike keeps the exe's GalleryWindow and a suite's instance the same path.
+template <typename WindowLike>
+inline void ApplyMenuLabels(WindowLike& window, const MenuLabels& labels) {
+  if (!kRebuildMenuOnLanguageChange) return;  // MUTANT: the old words stay
+  window.SetMenuLabels(labels.file, labels.compress, labels.exit);
+  window.SetEditMenuLabels(labels.edit, labels.deleteItem, labels.rename, labels.newFolder);
+  window.SetSettingsMenuLabel(labels.settings);
+}
+
+// ---------------------------------------------------------------------------
 // 8. Settings (C14): the document, its file, and the port that rides on it.
 //
 // The store is the ONLY in-memory truth for persisted state (schema, defaults,

@@ -652,6 +652,21 @@ inline const std::vector<std::string>& RequiredKeys() {
       // C64: the Settings item on the menu bar (it shipped as an English
       // literal in a Chinese build until this key existed).
       "menu.settings",
+      // C69: the Settings DIALOG's visible words. The rows and buttons were
+      // English literals with control id 0 -- a language switch could not
+      // retitle them and no test could even read them back. Required here so a
+      // table that drops one fails this suite instead of showing English.
+      "settings.title",
+      "settings.language",
+      "settings.theme",
+      "settings.extractDir",
+      "settings.thumbnailCap",
+      "settings.logLevel",
+      "settings.motw",
+      "settings.inheritMotw",
+      "settings.browse",
+      "settings.save",
+      "settings.cancel",
       // Right-click menu (5 items for a single archive + the group variants).
       "menu.smart.extract.here",
       "menu.extract.here",

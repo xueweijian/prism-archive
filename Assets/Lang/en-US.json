@@ -63,6 +63,17 @@
     "progress.edited": "Archive edited",
     "progress.editFailed": "Edit failed",
     "progress.editCancelled": "Edit cancelled, the archive was not changed",
-    "progress.editBlocked": "Extract or scan is running; edit later"
+    "progress.editBlocked": "Extract or scan is running; edit later",
+    "settings.title": "Settings",
+    "settings.language": "Language",
+    "settings.theme": "Theme",
+    "settings.extractDir": "Default extraction folder",
+    "settings.thumbnailCap": "Thumbnail cache cap",
+    "settings.logLevel": "Log level",
+    "settings.motw": "Mark-of-the-Web",
+    "settings.inheritMotw": "Inherit Mark-of-the-Web from the archive",
+    "settings.browse": "Browse...",
+    "settings.save": "Save",
+    "settings.cancel": "Cancel"
   }
 }

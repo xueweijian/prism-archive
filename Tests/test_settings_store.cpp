@@ -68,7 +68,8 @@ bool HasMigration(const SettingsStore& store, std::string_view fragment) {
 // and no repairs. Used by the round-trip case.
 const char* const kCurrentDocument = R"json({
   "schemaVersion": 3,
-  "appearance": {"theme": "dark", "glassIntensity": 0.5, "accentColor": "#112233"},
+  "appearance": {"theme": "dark", "glassIntensity": 0.5, "accentColor": "#112233",
+                 "backdropRefraction": true},
   "archive": {"recentCount": 7},
   "extract": {"overwrite": "replace", "closeWhenDone": true, "verifyAfterExtract": false},
   "language": {"tag": "ja-JP"},
@@ -88,6 +89,9 @@ PRISM_TEST("defaults: a fresh store carries every documented default") {
   PRISM_CHECK_EQ(store.GetString("appearance.theme"), std::string("system"));
   PRISM_CHECK(std::fabs(store.GetNumber("appearance.glassIntensity", 0.0) - 0.72) < 1e-12);
   PRISM_CHECK_EQ(store.GetString("appearance.accentColor"), std::string("#4F8CFF"));
+  // C77: additive at schema v3 -- a new key with a default needs no migration,
+  // so the version stays 3 and an OLD document simply gets this one filled in.
+  PRISM_CHECK(store.GetBool("appearance.backdropRefraction", false));
   PRISM_CHECK_EQ(store.GetInt("archive.recentCount", 0), 12);
   PRISM_CHECK_EQ(store.GetString("extract.overwrite"), std::string("ask"));
   PRISM_CHECK(!store.GetBool("extract.closeWhenDone", true));

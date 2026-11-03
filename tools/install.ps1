@@ -741,7 +741,7 @@ function Invoke-Install {
             try {
                 & $verbsScript -ExePath $exe -Quiet
             } catch {
-                Write-Warn ('static verbs skipped: ' + $_.Exception.Message)
+                Write-Warning ('static verbs skipped: ' + $_.Exception.Message)
             }
         }
     }

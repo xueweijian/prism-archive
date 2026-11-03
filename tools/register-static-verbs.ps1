@@ -19,8 +19,11 @@ $verbs = @(
   @{ id = "PrismArchiveOpen";    label = "用 PrismArchive 打开";       args = "" }
 )
 
-$classes = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\Classes", $true)
-if (-not $classes) { throw "cannot open HKCU\Software\Classes" }
+# CreateSubKey, not OpenSubKey: on a brand-new user profile (and on a clean CI
+# runner) HKCU\Software\Classes does not exist yet, and OpenSubKey returns null
+# there -- which used to abort the whole install with a null-reference throw.
+$classes = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Software\Classes")
+if (-not $classes) { throw "cannot create HKCU\Software\Classes" }
 $written = 0; $removed = 0
 foreach ($v in $verbs) {
   $path = "*\shell\" + $v.id

@@ -2,33 +2,29 @@
 
 **把 7-Zip 的引擎装进一个 Windows 11 的外壳：双击就看，右键就解，键盘优先。**
 
-PrismArchive 是一个 Windows 11 x64 归档管理器：引擎用 7-Zip 的 `7z.dll`（运行时加载，不随包分发），
+PrismArchive 是一个 Windows 11 x64 归档管理器：引擎用 7-Zip 的 `7z.dll`（**发布包里带**，也支持运行时到机器上找，见 [ADR-007](docs/ADR.md)），
 界面、交互与文件关联都是本仓库自己的实现。当前版本 **0.1.0（开发版）**，MIT 许可。
 已经画出来但还没接线的入口，统一列在 [docs/USAGE.md](docs/USAGE.md#本版本的边界)。
 
 装完最常见的问题是「右键没有菜单」。它不是安装失败，是 Windows 11 的菜单分层，
-见下文 [为什么右键在「显示更多选项」里](#为什么右键在显示更多选项里)。
+见下文 [右键菜单：两层，两种装法](#右键菜单两层两种装法)。
 
 ## 截图
 
-四张图是本项目的发布素材，**尚未拍**（不提交模拟图或占位图，规范见
-[docs/assets/README.md](docs/assets/README.md)）。下表就是四张图各自要证明的东西：
+四张图都是真机截图（1280×800，规范见 [docs/assets/README.md](docs/assets/README.md)）：
 
-| 文件 | 拍什么 | 要证明的事 |
-|---|---|---|
-| `docs/assets/screenshot-gallery.png` | 主界面打开一个真实 `.7z`：标题栏、动作岛、侧边栏、网格缩略图、状态栏 | 打开归档后一屏能看到目录、缩略图与状态 |
-| `docs/assets/screenshot-context-menu.png` | 资源管理器右键 →「显示更多选项」里的「用 PrismArchive 打开」「用 PrismArchive 解压到此处」 | 右键动词确实注册到了 HKCU，且位于经典菜单 |
-| `docs/assets/screenshot-preview.png` | 选中一行按空格后的 Quick Look 预览层 | 空格预览不离开列表 |
-| `docs/assets/screenshot-palette.png` | Ctrl+K 命令面板，输入 `png` 后的过滤结果 | 面板同时搜归档内路径和命令 |
+| 主界面 | 多标签 |
+|---|---|
+| ![主界面](docs/assets/screenshot-main.png) | ![多标签](docs/assets/screenshot-tabs.png) |
 
-拍完后把上面四张图换成 Markdown 图片引用即可；`docs/assets/README.md` 里写明了每张图的
-窗口尺寸、必须出现的元素和禁止出现的内容（真实路径、真实用户名）。
-
+| 空格预览 | 右键菜单 |
+|---|---|
+| ![预览](docs/assets/screenshot-preview.png) | ![右键菜单](docs/assets/screenshot-context-menu.png) |
 ## 安装（三步，免管理员）
 
 1. 从 [Releases](https://github.com/xueweijian/prism-archive/releases) 下载
    `PrismArchive-0.1.0-win-x64.zip`，解压到任意目录（例如 `D:\Apps\PrismArchive`）。
-2. 装 [7-Zip](https://www.7-zip.org/) x64。**引擎不入包**（LGPL，见下文）。
+2. **不需要再装 7-Zip**：包里带 `7z.dll`。若你想用机器上已有的引擎，安装器会自动优先用它（见下文 7z.dll 解析阶梯）。
 3. 在解压目录执行安装脚本：
 
 ```pwsh
@@ -78,16 +74,16 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\msix\register-classic.ps1 
 注册后右键非归档文件 →「显示更多选项」里会出现「压缩为 .7z 归档」「压缩为 .zip 归档」。
 不注册也有等价入口：应用内 **文件 → 压缩为 .7z…**，或命令行 `--compress-7z`。
 
-## 为什么右键在「显示更多选项」里
+## 右键菜单：两层，两种装法
 
-Windows 11 把右键菜单拆成两层：
+Windows 11 把右键菜单拆成两层，我们的入口在**两层都能出现**，但代价不同：
 
-- **一级菜单**只收「有包标识」的处理器：`IExplorerCommand` + 已签名的 MSIX 稀疏包。
-  绿色 zip 发布物没有包标识、也没有签名，所以进不去。
-- **经典菜单**（一级菜单底部的「显示更多选项」，或直接按 `Shift+F10`）收的是
-  `HKCU\Software\Classes\*\shell\...` 这类传统动词——这正是 `install.ps1` 写的那两条。
+| 层 | 怎么进去 | 要什么 | 看到什么 |
+|---|---|---|---|
+| **经典菜单**（「显示更多选项」/ `Shift+F10`） | `INSTALL.cmd` 自动写 `HKCU\Software\Classes\*\shell\…` | 什么都不用 | 「用 PrismArchive 解压到此处 / 打开」 |
+| **一级菜单**（新式） | 注册稀疏包：`tools\msix\enable-dev-mode-and-register.cmd` | **一次管理员**（开开发者模式），**不需要证书、不需要付费** | 「PrismArchive >」子菜单：智能解压到此处 / 解压到此处 / 解压到 "x" / 测试完整性 |
 
-所以「右键没有」通常是找错层了。一条命令确认动词在不在：
+两条路互不冲突。想验证经典层注册好了没：
 
 ```pwsh
 $cls = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes')
@@ -95,31 +91,21 @@ $cls = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes')
 'extract = ' + [bool]$cls.OpenSubKey('*\shell\PrismArchiveExtract')
 ```
 
-两行都是 `True` 就说明注册好了，只是要去「显示更多选项」里找。想把它搬进一级菜单，
-必须自己构建并签名 MSIX 稀疏包（`tools/msix/build-sparse.ps1`，证书主体须为
-`CN=PrismArchive Contributors`）；这是开发路径，不在绿色包范围内。
-
+两行都是 `True` 就说明在经典层；去「显示更多选项」里就能看到。
+想把入口搬进一级菜单，跑一次 `enable-dev-mode-and-register.cmd`（会弹一次 UAC），
+细节与三种免费方案见 [docs/MSIX-SIGNING.md](docs/MSIX-SIGNING.md)。
 ## 7z.dll 依赖
 
-PrismArchive **不附带** `7z.dll`。任选其一：
+**发布包自带 `7z.dll`**，解压即用，不需要额外安装 7-Zip（取舍见 [ADR-007](docs/ADR.md)：包体多 ~1.5 MB，
+随包附带 7-Zip 许可证正文与源码地址）。
 
-1. 安装 7-Zip x64（默认路径即可，安装器会自动找到并写进 `PRISM_7Z_DLL`）；
-2. 自己设用户环境变量 `PRISM_7Z_DLL` 指向 `7z.dll` 的**完整路径**；
-3. 把 `7z.dll` 放到 `PrismArchive.exe` 同目录（便携场景）。
+如果你希望用机器上已有的引擎（例如想升级 7-Zip 而不重装），解析阶梯会优先找它：
 
-解析顺序（每条都带来源标签，弹窗里原样列出）：
-
-| 顺序 | 来源 | 路径 |
-|---|---|---|
-| 1 | `[env]` | 环境变量 `PRISM_7Z_DLL` |
-| 2 | `[app-dir]` | `PrismArchive.exe` 同目录 |
-| 3 | `[registry:*]` | 7-Zip 自己的 `InstallDir`（HKLM / WOW6432Node / HKCU） |
-| 4 | `[path]` | `PATH` 里每个目录（去重） |
-| 5 | `[common:*]` | `%LOCALAPPDATA%\Programs\7-Zip`、scoop |
-| 6 | `[probe]` | 两个 `Program Files\7-Zip` 兜底 |
-
-找不到时应用不会假装成功：弹窗列出每一条尝试过的路径及其来源，按 `Ctrl+C` 即可复制全文。
-更多诊断见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#7zdll-找不到)。
+1. 用户环境变量 `PRISM_7Z_DLL` 指向 `7z.dll` 的**完整路径**；
+2. `PrismArchive.exe` 同目录的 `7z.dll`（便携场景，也是安装器部署的位置）；
+3. 7-Zip 自己的 `InstallDir`（HKLM / WOW6432Node / HKCU）；
+4. `%LOCALAPPDATA%\Programs\7-Zip`、scoop 等常见位置；
+5. 最后才回落到 `Program Files\7-Zip`。
 
 ## 命令行
 

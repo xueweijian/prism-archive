@@ -16,7 +16,11 @@ PrismArchive 有两条分发路径，**注册表内容逐字节一致**，区别
     pwsh -File tools\uninstall.ps1           # 卸干净（还原安装前的 handler）
     pwsh -File tools\install.ps1 -Portable -InstallDir D:\Apps\PrismArchive   # 便携：零注册表
 
-安装位置：`%LOCALAPPDATA%\PrismArchive`（exe + 两个 shell 扩展 DLL + `Assets\` + `uninstall.ps1`）。
+安装位置：`%LOCALAPPDATA%\PrismArchive`（exe + 两个 shell 扩展 DLL + `Assets\` + `install.ps1` /
+`uninstall.ps1` / `register-static-verbs.ps1`）。
+
+两条安装线都注册同样的右键动词：`install.ps1` 调用同目录的 `register-static-verbs.ps1`；
+`setup.exe` 没有自己的 PowerShell 步骤，所以在 `[Run]` 里调用同一个脚本（`[UninstallRun]` 负责删）。
 
 写入的东西全部在 HKCU：
 
@@ -24,6 +28,8 @@ PrismArchive 有两条分发路径，**注册表内容逐字节一致**，区别
     HKCU\Software\Classes\<ext>\OpenWithProgids      REG_NONE 标记
     HKCU\Software\Classes\PrismArchive.<ext>         "" / DefaultIcon / shell\open\command
     HKCU\Software\Classes\Applications\PrismArchive.exe\...  shell\open\command / SupportedTypes / DefaultIcon
+    HKCU\Software\Classes\*\shell\PrismArchiveOpen              用 PrismArchive 打开
+    HKCU\Software\Classes\*\shell\PrismArchiveExtract           用 PrismArchive 解压到此处
     HKCU\Software\PrismArchive                       安装标记 + AssocBackup\<ext>（原 handler 备份）
     HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismArchive
     HKCU\Environment                                 PRISM_7Z_DLL（找到 7-Zip 时写，保留原值以便还原）

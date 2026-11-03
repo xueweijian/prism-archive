@@ -3,6 +3,7 @@
   "language": "zh-CN",
   "strings": {
     "menu.file": "文件",
+    "menu.settings": "设置(&S)...",
     "menu.smart.extract.here": "智能解压到此处",
     "menu.extract.here": "解压到此处",
     "menu.extract.to.subfolder": "解压到 \"{name}\"",

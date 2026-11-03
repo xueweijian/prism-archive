@@ -649,6 +649,9 @@ inline const std::vector<std::string>& RequiredKeys() {
       // for it via Tr::Or() with a code default, so the miss was never recorded
       // and the English menu bar shipped in Chinese builds.
       "menu.file",
+      // C64: the Settings item on the menu bar (it shipped as an English
+      // literal in a Chinese build until this key existed).
+      "menu.settings",
       // Right-click menu (5 items for a single archive + the group variants).
       "menu.smart.extract.here",
       "menu.extract.here",

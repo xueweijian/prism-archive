@@ -887,11 +887,14 @@ class SettingsDialog {
   // Patch A's other half: the menu bar with the one item this card adds. Main.cpp
   // calls this with the gallery HWND; GalleryWindow's WM_COMMAND forwards
   // kMenuSettingsId here.
-  static void InstallMenu(HWND hwnd) {
+  // C64: the label is supplied by the app's translator (the key is
+  // menu.settings). There is no English default: a caller without a translator
+  // would reintroduce exactly the hardcoded item this card removed.
+  static void InstallMenu(HWND hwnd, const std::wstring& label) {
     if (hwnd == nullptr) return;
     HMENU menu = CreateMenu();
     if (menu == nullptr) return;
-    AppendMenuW(menu, MF_STRING, kMenuSettingsId, L"Settings...");
+    AppendMenuW(menu, MF_STRING, kMenuSettingsId, label.c_str());
     SetMenu(hwnd, menu);
     DrawMenuBar(hwnd);
   }

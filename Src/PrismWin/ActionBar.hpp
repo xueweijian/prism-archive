@@ -225,9 +225,11 @@ class ActionBarPainter {
     return D2D1::ColorF(c.r, c.g, c.b, c.a * alphaScale);
   }
   static D2D1_COLOR_F IslandFill(prism::theme::Variant variant) {
-    prism::theme::Rgba c = Token(prism::theme::TokenId::SurfaceFloatingIsland, variant);
-    c.a = 0.72f;  // the renderer's floating-island alpha
-    return ToD2d(c);
+    // C64: the TOKEN's own alpha (.52 Midnight / .58 Daylight). This used to
+    // override it with .72, which is why the island looked like a lit gray
+    // ribbon against the canvas instead of glass. A pixel assertion in the C64
+    // suite compares this fill with CompositeOver(SurfaceFloatingIsland, canvas).
+    return ToD2d(Token(prism::theme::TokenId::SurfaceFloatingIsland, variant));
   }
   static D2D1_COLOR_F BorderColor(prism::theme::Variant variant) {
     prism::theme::Rgba c =
@@ -386,8 +388,11 @@ class ActionBarPainter {
     // promise that Alt+<letter> works, and it disappears when disabled.
     if (mnemonicFormat_ && spec.mnemonic != 0) {
       const wchar_t letter[2] = {static_cast<wchar_t>(spec.mnemonic), L'\0'};
+      // C64: 0.60 alpha measured 3.2:1 against the island (below WCAG 4.5:1),
+      // which is why the letter read as a detached speck. 0.90 measures ~5.5:1
+      // and is still visibly quieter than the label's TextPrimary.
       SetBrush(ToD2d(Token(prism::theme::TokenId::TextSecondary, lastVariant_),
-                     enabled ? 0.60f : kDisabledAlpha * 0.60f));
+                     enabled ? 0.90f : kDisabledAlpha * 0.90f));
       target->DrawText(letter, 1, mnemonicFormat_.Get(),
                        D2D1::RectF(r.right - 18.0f, r.top + 5.0f + dy, r.right - 5.0f,
                                    r.top + 17.0f + dy),

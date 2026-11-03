@@ -884,6 +884,36 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // The archive this launch opened is tab 0. OpenTab only tells the MODEL, so
   // it cannot re-enter the switch above.
   window.OpenTab(prism::win::WideToUtf8(archive), true);
+  // ---- C64: every archive on the command line becomes a tab ---------------
+  //
+  // "PrismArchive.exe a.7z b.7z" opened only a.7z: C46 recorded b.7z in the
+  // session document, so the user saw ONE tab and the next launch restored the
+  // second archive as if it had been open. The FIRST argument stays active; the
+  // rest are OPENED (a header read each) and added as tabs. A missing/damaged
+  // extra argument is SKIPPED and counted -- never a message box per file (the
+  // same contract the session restore already follows).
+  int extraTabsSkipped = 0;
+  for (std::size_t i = 1; i < launch.archives.size(); ++i) {
+    const std::wstring& extra = launch.archives[i];
+    if (prism::tabs::PathKey(prism::win::WideToUtf8(extra)) ==
+        prism::tabs::PathKey(prism::win::WideToUtf8(archive))) {
+      continue;  // duplicate argument: TabSet would dedupe it; do not probe twice
+    }
+    prism::win::ArchiveReader probe(app->library);
+    if (!probe.Open(extra)) {
+      ++extraTabsSkipped;
+      logger.Emit(prism::log::Level::kInfo, "tabs",
+                  "command-line archive skipped (missing or unreadable)",
+                  {{"path", prism::win::WideToUtf8(extra)}});
+      continue;
+    }
+    const prism::tabs::OpenOutcome opened =
+        window.OpenTab(prism::win::WideToUtf8(extra), true, /*activate=*/false);
+    if (opened.verdict != prism::tabs::TabVerdict::kOk) ++extraTabsSkipped;
+  }
+  std::fprintf(stderr, "tabs opened=%zu skipped=%d active=%s\n", window.Tabs().size(),
+               extraTabsSkipped,
+               window.Tabs().active() != nullptr ? window.Tabs().active()->path.c_str() : "");
 
   // ---- C31/V3 + C53: the Settings... menu item and its modal gate ----------
   //
@@ -891,8 +921,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // item itself in RebuildMenu; the V3 patch's SettingsDialog::InstallMenu
   // replaces the WHOLE bar, which would erase File > Compress/Exit. InstallMenu
   // is used only when no menu exists, so the delivered helper is still wired.
+  // C64: the item's word is the app's (menu.settings), like every other title.
+  const std::wstring settingsMenuText =
+      tr.Or("menu.settings", language.tag == L"zh-CN" ? L"\u8BBE\u7F6E(\u0026S)..." : L"&Settings...");
+  window.SetSettingsMenuLabel(settingsMenuText);
   if (GetMenu(window.Hwnd()) == nullptr) {
-    prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd());
+    prism::win::settingsui::SettingsDialog::InstallMenu(window.Hwnd(), settingsMenuText);
   }
   // The dialog must read and write the document THIS launch loaded (a portable
   // build puts it beside the exe, not in %LOCALAPPDATA%), and a save must not
@@ -952,7 +986,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // unsynchronized), so every sentence it needs is BUILT HERE, on the UI
   // thread, and captured by value.
   const std::string extractHeadline = prism::win::WideToUtf8(tr("action.extract"));
-  window.SetActivateHandler([&window, app, &extractWorker, extractHeadline](int catalogIndex) {
+  std::function<void(int)> activateHandler =
+      [&window, app, &extractWorker, extractHeadline](int catalogIndex) {
     (void)catalogIndex;  // the whole-archive plan is v1's behaviour; see above
     if (app->extracting.exchange(true)) return;
     // A previous run must be finished before its std::thread is assigned over.
@@ -1009,7 +1044,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       app->extracting = false;
       CoUninitialize();
     });
-  });
+  };
+  window.SetActivateHandler(activateHandler);
   // ---- C52 + C53: a drop ONTO the window -----------------------------------
   //
   // The window turned Explorer's HDROP into a tree and asked PrismCore what it
@@ -1350,16 +1386,28 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // failed switch therefore leaves the session on the archive it was showing.
   window.SetArchiveChangedHandler([&window, app, tr, &session, &logger](
                                      const std::wstring& newPath) {
+    // C64: was this message caused by a TAB CLICK (or Ctrl+Tab)? A background
+    // re-pack posts the same message, and its failure must not move the strip.
+    const bool fromTab = window.ConsumeTabSwitchIntent(prism::win::WideToUtf8(newPath));
     if (app->extractReader.load() != nullptr || app->sweepReader.load() != nullptr) {
       // C40: the sentence (and its real-Chinese fallback) lives in AppWiring so
       // the suite can assert its bytes; C38's audit found it double-escaped.
+      if (fromTab) (void)window.RefuseTabSwitch(prism::win::WideToUtf8(newPath));
       window.SetStatus(prism::app::RefreshDeferredStatus(tr));
       return;
     }
     prism::app::ArchiveSession archiveSession{&app->library, &app->ops, &app->catalog, &app->items,
                                               &app->archivePath, 2};
-    const prism::app::ArchiveSwitch switched = prism::app::SwitchArchive(archiveSession, newPath);
+    // C64: SwitchArchive moves the session; ApplyArchiveSwitch republishes the
+    // rows and the tab. Without the second half the strip says beta while the
+    // grid still paints alpha (the defect this card closes).
+    const prism::app::ArchiveSwitch switched =
+        prism::app::ApplyArchiveSwitch(window, archiveSession, newPath);
     if (!switched.ok) {
+      // The tab is already active in the model (the click activated it first).
+      // Put it back: the user keeps the archive whose rows are still on screen,
+      // and the readable reason names the file that could not be opened.
+      if (fromTab) (void)window.RefuseTabSwitch(prism::win::WideToUtf8(newPath));
       // C40: error.open is the table's key (it names the file); the engine's own
       // reason stays verbatim after the colon.
       window.SetStatus(prism::app::OpenFailedStatus(tr, FileNameWide(newPath)) + L"\uFF1A" +
@@ -1379,11 +1427,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // does not pretend to do.
     ++app->archiveGeneration;
     window.SetThumbs(nullptr);
-    window.SetItems(&app->items);
-    window.SetRootLabel(FileNameWide(app->archivePath));
-    // C60: every successful switch records its tab (de-duplicated by path, so
-    // a re-pack of the same archive does not grow a second tab).
-    window.OpenTab(prism::win::WideToUtf8(app->archivePath), true);
+    // ApplyArchiveSwitch already republished the rows, the root label and the
+    // tab (C64) -- doing it twice would reset the navigator's folder after the
+    // switch had just landed.
     // C54: the file may have changed on disk (an edit wrote a new container),
     // so the read-only/lock/volume diagnosis is re-run for the SAME path.
     {
@@ -1406,6 +1452,78 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                   {{"detail", switchDetail}});
     }
   });
+
+  // ---- C64: the action island's missing wire -------------------------------
+  //
+  // The eight buttons (and their Alt chords) were painted, enabled and
+  // clickable -- and every click ended at FireAction with nowhere to go,
+  // because Main never called SetActionHandler. The window now refuses
+  // silently? No: with no handler it logs "action unhandled" and sets a status.
+  // This is the app's half, mapped onto the paths the rest of Main already
+  // owns (no second implementation of extraction/compression/edit).
+#if !defined(PRISM_C64_MUTANT_NO_ACTION_HANDLER)
+  window.SetActionHandler([&window, app, tr, &activateHandler](prism::actionbar::ActionId action,
+                                                              int item) {
+    std::fprintf(stderr, "action id=%s item=%d\n", prism::actionbar::ActionName(action), item);
+    switch (action) {
+      case prism::actionbar::ActionId::Open: {
+        // The SAME picker the no-argument start uses; a pick goes through the
+        // archive-changed door so the switch/tab/session rules stay in C34/C60.
+        const std::wstring picked = PickArchive();
+        if (!picked.empty()) window.PostArchiveChanged(picked);
+        break;
+      }
+      case prism::actionbar::ActionId::ExtractTo:
+        // The same worker double-click uses (whole-archive v1 plan). The
+        // dropdown item index is passed through untouched.
+        activateHandler(item);
+        break;
+      case prism::actionbar::ActionId::Compress:
+        // The File > Compress... menu item is the one C18/C27 entry.
+        window.Dispatch(WM_COMMAND, GalleryWindow::kMenuCompress, 0);
+        break;
+      case prism::actionbar::ActionId::Add:
+        // ArchiveWriter has no incremental append. Refuse with a reason instead
+        // of pretending; the refusal is counted (stderr) and visible (status).
+        std::fprintf(stderr, "action refused id=Add reason=no-incremental-write\n");
+        window.SetStatus(L"\u8FFD\u52A0\u6682\u4E0D\u652F\u6301\uFF1A"
+                         L"\u672C\u7248\u672C\u6CA1\u6709\u589E\u91CF\u5199\u5165");  // 追加暂不支持
+        break;
+      case prism::actionbar::ActionId::Delete:
+        // C54's edit request (confirmation + exclusive gate) owns the write.
+        window.Dispatch(WM_COMMAND, GalleryWindow::kMenuEditDelete, 0);
+        break;
+      case prism::actionbar::ActionId::Test: {
+        window.SetStatus(L"\u6B63\u5728\u6821\u9A8C\u5F52\u6863\u2026");  // 正在校验归档…
+        const prism::app::VerifyOutcome outcome =
+            prism::app::VerifyIntegrity(*app->ops, app->catalog, app->archivePath);
+        std::fprintf(stderr, "verify ok=%d items=%llu bytes=%llu failedIndex=%d %s\n",
+                     static_cast<int>(outcome.ok),
+                     static_cast<unsigned long long>(outcome.items),
+                     static_cast<unsigned long long>(outcome.bytes),
+                     static_cast<int>(outcome.failedIndex), outcome.error.c_str());
+        window.SetStatus(outcome.ok
+                             ? std::wstring(L"\u6821\u9A8C\u901A\u8FC7")  // 校验通过
+                             : tr.Or("error.verify.failed", L"\u6821\u9A8C\u5931\u8D25\uFF1A") +
+                                   prism::win::Utf8ToWide(outcome.error));
+        break;
+      }
+      case prism::actionbar::ActionId::QuickLook:
+        // Space is C48's one door; the window owns the overlay's lifetime.
+        window.Dispatch(WM_KEYDOWN, VK_SPACE, 0);
+        break;
+      case prism::actionbar::ActionId::Search:
+        // C62's search box is not wired into the window yet. Say "not wired"
+        // (and log it) instead of letting the button look broken.
+        std::fprintf(stderr, "action not-wired id=Search\n");
+        window.SetStatus(L"\u641C\u7D22\u5C1A\u672A\u63A5\u7EBF\uFF1A"
+                         L"C62 \u7684\u641C\u7D22\u6846\u8FD8\u6CA1\u6709\u63A5\u5165\u7A97\u53E3");
+        break;
+      case prism::actionbar::ActionId::Count:
+        break;
+    }
+  });
+#endif
 
   window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
 

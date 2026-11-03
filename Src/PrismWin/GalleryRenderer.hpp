@@ -345,11 +345,13 @@ class GalleryRenderer {
   void DrawBands(ID2D1RenderTarget* target, const prism::layout::Layout& layout) {
     if (layout.titleBar.Empty() || layout.statusBar.Empty()) return;
 
-    D2D1_COLOR_F actions = kBackdrop;
-    actions.r += 0.020f;
-    actions.g += 0.024f;
-    actions.b += 0.030f;
-    island_->SetColor(actions);
+    // C64: the action band is CANVAS, not a tinted ribbon. It used to be filled
+    // with a hand-lightened backdrop (kBackdrop + .020/.024/.030); combined with
+    // ActionBarPainter's hardcoded .72 island alpha that made the island about
+    // 19 levels brighter than the canvas instead of the token's ~13. The island
+    // itself is painted by ActionBarPainter (SurfaceFloatingIsland); everything
+    // outside its squircle must read as the canvas it floats on.
+    island_->SetColor(kBackdrop);
     target->FillRectangle(ToRectF(layout.actionIsland), island_.Get());
 
     D2D1_COLOR_F status = kBackdrop;

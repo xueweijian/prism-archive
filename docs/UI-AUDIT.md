@@ -61,3 +61,32 @@
 
 - 截图与 UIA 原始 JSON 含本机窗口标题，**不提交到仓库**；这里只记录结论。
 - 每条修复都必须附**前后截图**与**像素断言**。
+
+---
+
+## A6 搜索框对 UIA 只读（读屏能看见、输不进去）
+
+**证据**（C80 合并后，真实工具驱动）：
+```
+snapshot → 找到「搜索框」 → agent-desktop type <ref> "zzz"
+→ POLICY_DENIED: supported_action 不满足
+   visible pass / enabled pass / editable pass / supported_action fail
+```
+
+**后果**：读屏或自动化能点开搜索框，但**无法把查询串写进去**。
+**修法**：搜索框元素暴露可写的 `accValue`（MSAA → UIA 的 ValuePattern），写入后走与 `WM_CHAR` 同一条 model 更新路径；加"写入后列表被过滤 / 写空串恢复"的断言。
+**状态**：已派回 C80 补。
+
+---
+
+## 里程碑：UIA 从 9 个元素 → 33 个（C80）
+
+修复后同一个探针抓到：
+```
+打开 / 解压到… / 压缩 / 添加 / 删除 / 测试 / 查看 / 搜索
+Photos.7z / Backup.7z        （标签）
+one.txt                      （列表行）
+Photos.7z › 共 1 项           （面包屑）
+共 1 项 / 未加密 / …          （状态栏）
+```
+并且 `click` 动作岛上的「搜索」ref 后，树里出现「搜索框」——**工具驱动的端到端测试从此可用**。

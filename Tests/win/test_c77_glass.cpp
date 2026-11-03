@@ -57,11 +57,13 @@ constexpr UINT32 kHeight = 1000;
 // NEGATIVE CONTROL (CONTRACTS D3): the refraction layer is never painted, so
 // assertion (1) -- "the backdrop differs from the flat colour" -- MUST go red.
 inline constexpr bool kBackdropMutation = true;
+inline constexpr bool kShadowMutation = false;
 constexpr const char* kMutationName = "no-backdrop";
 #elif defined(PRISM_C77_MUTANT_NO_SHADOW)
 // C77 MUTANT ACTIVE: no-shadow
 // NEGATIVE CONTROL (CONTRACTS D3): the panel paints no drop shadow, so
 // assertion (3) -- "the band below the panel is darker" -- MUST go red.
+inline constexpr bool kBackdropMutation = false;
 inline constexpr bool kShadowMutation = true;
 constexpr const char* kMutationName = "no-shadow";
 #else
@@ -311,11 +313,21 @@ PRISM_TEST("C77-1 the backdrop layer really refracts the content (pixel 1)") {
   glass.glassPanels = true;
   glass.glassTheme = prism::theme::Variant::Midnight;
 
+  // The REFERENCE for assertion (1) is the same frame with the panels ON and
+  // the layer OFF: then the ONLY difference between the two renders is the
+  // refraction layer itself. Diffing against the pre-C77 frame would have let
+  // the panel language alone satisfy the count, and the no-backdrop mutant
+  // would have passed case 1 (it did, before this line existed).
+  GalleryRenderer::Scene panelsOnly = glass;
+  panelsOnly.backdropRefraction = false;
+
   Frame before;
+  Frame reference;
   Frame after;
   PRISM_CHECK(Render(flat, kWidth, kHeight, &before));
+  PRISM_CHECK(Render(panelsOnly, kWidth, kHeight, &reference));
   PRISM_CHECK(Render(glass, kWidth, kHeight, &after));
-  if (before.pixels.empty() || after.pixels.empty()) return;
+  if (before.pixels.empty() || reference.pixels.empty() || after.pixels.empty()) return;
 
   if (!WritePng(L"c77_before.png", before)) std::puts("  WARN: before PNG failed");
   if (!WritePng(L"c77_after.png", after)) std::puts("  WARN: after PNG failed");
@@ -335,8 +347,8 @@ PRISM_TEST("C77-1 the backdrop layer really refracts the content (pixel 1)") {
   int probeY = -1;
   for (int y = top; y < bottom; ++y) {
     for (int x = left; x < right; ++x) {
-      if (!before.In(x, y) || !after.In(x, y)) continue;
-      const int distance = ColorDistance(before.At(x, y), after.At(x, y));
+      if (!reference.In(x, y) || !after.In(x, y)) continue;
+      const int distance = ColorDistance(reference.At(x, y), after.At(x, y));
       if (distance > 8) {
         ++over8;
         if (distance > maxDistance) {
@@ -362,7 +374,7 @@ PRISM_TEST("C77-1 the backdrop layer really refracts the content (pixel 1)") {
   int steps = 0;
   for (int y = top + 2; y < bottom - 2; y += 3) {
     for (int x = left + 2; x < right - 2; x += 3) {
-      sharpStep += std::abs(before.Luminance(x, y) - before.Luminance(x + 1, y));
+      sharpStep += std::abs(reference.Luminance(x, y) - reference.Luminance(x + 1, y));
       ghostStep += std::abs(after.Luminance(x, y) - after.Luminance(x + 1, y));
       ++steps;
     }

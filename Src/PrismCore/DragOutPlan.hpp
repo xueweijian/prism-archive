@@ -119,7 +119,11 @@ class MaterializeGate {
   bool Run() {
     ++demands_;
     if (ready_) return true;
-    if (!extract_ || extracting_) return false;
+    // No extractor at all: the gate can never produce a path list, and saying so
+    // is the point of the state machine -- a demand that fails must not leave the
+    // stage at Offered (the caller would show a drag that can never land).
+    if (!extract_) { stage_ = Stage::Failed; return false; }
+    if (extracting_) return false;
     extracting_ = true;
     stage_ = Stage::Extracting;
     ++extractions_;

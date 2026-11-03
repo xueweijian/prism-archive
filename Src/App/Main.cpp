@@ -110,6 +110,7 @@
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
 #include "../PrismWin/SettingsDialog.hpp"   // C53: Settings... menu + dialog (C31/V3)
+#include "../PrismWin/StartupTrace.hpp"  // C76: the QPC segment recorder
 #include "../PrismWin/SidebarView.hpp"      // C40: SetTranslator (four headings)
 #include "../PrismWin/SolidSweeper.hpp"
 
@@ -504,6 +505,13 @@ std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  // C76: the startup timeline. Begin() is the FIRST thing this process does in
+  // our code, so every later span is measured on one clock and the gap between
+  // any two stages is arithmetic, not a guess. Off unless PRISM_C76_TRACE=1.
+  prism::win::startup::Trace& c76 = prism::win::startup::Trace::Instance();
+  c76.Begin();
+  double c76T = c76.NowMs();
+
   const HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   int argc = 0;
@@ -516,12 +524,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // C4 contract: the four flags the shell DLLs launch us with are parsed from
   // the SAME constants the registrar renders, so the two halves cannot drift.
   prism::app::LaunchRequest launch = prism::app::ParseLaunch(args);
+  // C76 segment: apartment + command line + verb parse.
+  c76.Add("com_argv", "CoInitializeEx+CommandLineToArgvW+ParseLaunch", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
 
   // ---- persistence + language, BEFORE any user-facing string --------------
   // C14: one load at startup. A corrupt document is backed up by the file layer
   // (never silently overwritten) and the store reports it; a document from a
   // newer build is READ-ONLY, which SaveSettings honours at exit.
+  double c76Sub = c76.NowMs();
   prism::app::SettingsBootstrap settings = prism::app::LoadSettings();
+  c76.Add("  .load_settings", "LoadSettings (JSON + paths)", c76Sub, c76.NowMs() - c76Sub);
   // C16: the logger exists before anything can fail, so the reason is on stderr
   // instead of only in a message box nobody can copy.
   prism::log::Logger logger(prism::log::Level::kInfo, 512);
@@ -540,7 +553,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
   // C19: the tables are loaded from disk, then the language is chosen from
   // settings.language.tag (default "auto" == follow the system locale).
+  c76Sub = c76.NowMs();
   LanguageRuntime language = LoadLanguage(settings.store, &logger);
+  c76.Add("  .load_language", "LoadLanguage (Assets\Lang catalogs)", c76Sub, c76.NowMs() - c76Sub);
   const Tr tr{&language.translator};
 
   // C71: appearance.accentColor / appearance.glassIntensity become the live
@@ -553,7 +568,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // the user's preferences (merge on write, newer documents are read-only),
   // while a session is a snapshot of one run (rewritten every start and exit).
   // One corrupt session must therefore never cost the user their settings.
+  c76Sub = c76.NowMs();
   prism::app::SessionBootstrap session = prism::app::LoadSession();
+  c76.Add("  .load_session", "LoadSession", c76Sub, c76.NowMs() - c76Sub);
   if (!session.detail.empty()) {
     logger.Emit(prism::log::Level::kWarn, "session", "session could not be read",
                 {{"detail", session.detail},
@@ -561,7 +578,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   }
   // C27's persisted view state is loaded here (not at the window call site) so
   // C46 can record the same view mode the session opens with.
+  c76Sub = c76.NowMs();
   const prism::app::WindowState windowState = prism::app::LoadWindowState(settings.store);
+  c76.Add("  .window_state", "LoadWindowState", c76Sub, c76.NowMs() - c76Sub);
   for (const std::string& warning : session.report.warnings) {
     // One warn line per repair/discard. A v99 document from a newer build, a
     // truncated file and a migrated v1 all say what happened on stderr.
@@ -569,6 +588,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 {{"status", prism::session::SessionLoadStatusName(session.report.status)},
                  {"path", prism::win::WideToUtf8(session.file)}});
   }
+
+  // C76 segment: settings document + language tables + session document.
+  c76.Add("settings_language_session", "LoadSettings+LoadLanguage+LoadSession", c76T,
+          c76.NowMs() - c76T);
+  c76T = c76.NowMs();
 
   if (launch.unknownFlag) {
     // C58: stderr + exit 2, NEVER a modal box (a batch caller must not hang).
@@ -626,6 +650,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
+
+  // C76 segment: 7z.dll resolution + LoadLibrary.
+  c76.Add("engine_load", "Resolve7zDll+SevenZipLibrary::Load", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
 
   // C58: --smart-extract-each <archives...>. Each archive is opened, planned and
   // extracted into its OWN folder (the --extract-sub plan), with one handler per
@@ -772,12 +800,22 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
   }
   app->items = app->catalog;
+  // C76 segment: probe handler create + Open + ReadCatalog (the zero-payload scan).
+  c76.Add("archive_open_catalog", "ArchiveReader::Open+ReadCatalog", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
 
   // ---- C46: this process now OWNS the session ------------------------------
-  // Arm the crash guard and publish the document BEFORE the window exists. From
-  // here on a killed process leaves "cleanShutdown": false on disk, which is
-  // what makes the next start restore nothing instead of reopening dead tabs.
-  {
+  // Arm the crash guard and publish the document. From here on a killed process
+  // leaves "cleanShutdown": false on disk, which is what makes the next start
+  // restore nothing instead of reopening dead tabs.
+  //
+  // C76: the ARM is still decided here (RecordOpen needs the same view mode the
+  // window is about to open with), but the WRITE -- one atomic JSON file, 26.1 ms
+  // measured -- happens after the first frame, from the window's own first-frame
+  // boundary. The window between "ready to write" and "written" is the first
+  // frame, which is the one interval in which a crash is already unobservable to
+  // the user; docs/PERF.md records that trade explicitly.
+  auto armSession = [&]() {
     const int known = session.store.IndexOf(prism::win::WideToUtf8(archive));
     const bool viewMode =
         haveRestoredView
@@ -795,7 +833,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     std::fprintf(stderr, "session armed entries=%zu file=%s\n", session.store.entries().size(),
                  prism::win::WideToUtf8(session.file).c_str());
-  }
+  };  // C76: defined here, invoked after the first frame (see SetFirstFrameHandler)
+  c76T = c76.NowMs();
 
   // Two handlers: the solid sweep and the user's extraction are the two
   // operations that can genuinely overlap (large archive + double-click).
@@ -832,6 +871,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     return code;
   }
 
+  // C76 segment: engine handler pool + the extraction plan.
+  c76.Add("ops_plan", "OperationHandles::Create+BuildExtractionPlan", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
+
   prism::win::gallery::GalleryWindow window;
   if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) {
     app->ops->Close();
@@ -843,6 +886,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // language switch re-reads both, and a band that forgot to rebuild is the
   // defect the switch suite can see.
   window.ApplyLanguage(&language.translator);
+  // C76: Create()'s own stages are measured above, so the clock is re-based
+  // here -- a segment that contained another segment would be double-counted.
+  c76T = c76.NowMs();
+
   // ---- C27: restored view state, sidebar port, menu bar -------------------
   // The geometry/mode/sort the user closed with is applied BEFORE the first
   // paint, so the window never flashes a layout it is about to replace.
@@ -875,6 +922,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // THAT archive; a freshly opened one keeps C27's global last-view setting.
   window.SetListMode(haveRestoredView ? restoredView.listMode : windowState.listMode);
 
+  // C76 segment: frame restore + sidebar store + sort/columns/view mode.
+  c76.Add("view_state", "RestoreFrame+AttachSidebarStore+SetListMode", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
+
   // ---- C34: the glass layer (C33) now has a call site ---------------------
   // The window owns the composition host; it is OPT-IN so a test-created window
   // never grows a DirectComposition target. A machine without composition says
@@ -884,6 +935,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     logger.Emit(prism::log::Level::kInfo, "glass",
                 "DirectComposition unavailable, glass layer stays off", {});
   }
+  // C76: re-base after the glass host -- its stages have their own spans.
+  c76T = c76.NowMs();
 
   // C19: the menu bar is the app's, painted by the window. The keys exist in
   // both shipped tables, so a language switch is visible here (the window's
@@ -892,6 +945,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // so the same call can run again when the Settings dialog changes the language.
   const prism::app::MenuLabels startupMenu = prism::app::BuildMenuLabels(tr, language.tag);
   prism::app::ApplyMenuLabels(window, startupMenu);
+  // C76 segment: nine menu labels applied to the bar the window already owns.
+  c76.Add("menu_labels", "BuildMenuLabels+ApplyMenuLabels", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
+
   // Requirement 3: the entries are disabled BEFORE the user confirms something
   // that can only fail, and the reason is C51's own diagnosis (read-only /
   // multi-volume / held exclusively / wrong container).
@@ -909,6 +966,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // "which level did that click hit?") is answered by PrismCore.
   window.SetItems(&app->items);
   window.SetRootLabel(FileNameWide(archive));
+
+  // C76 segment: the catalog goes into the navigator (folder view + layout).
+  c76.Add("set_items", "GalleryWindow::SetItems", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
 
   // ---- C60: the tab strip ------------------------------------------------
   //
@@ -960,6 +1021,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::fprintf(stderr, "tabs opened=%zu skipped=%d active=%s\n", window.Tabs().size(),
                extraTabsSkipped,
                window.Tabs().active() != nullptr ? window.Tabs().active()->path.c_str() : "");
+
+  // C76 segment: tab strip + the tab handler.
+  c76.Add("tabs", "OpenTab+SetTabHandler", c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
 
   // ---- C31/V3 + C53: the Settings... menu item and its modal gate ----------
   //
@@ -1037,6 +1102,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                prism::win::WideToUtf8(archive).c_str(), window.Folder().c_str(),
                prism::session::ViewModeName(window.ListMode()),
                static_cast<int>(haveRestoredView));
+  // C76 segment: the settings menu item + the launcher closure + the restored
+  // folder walk (ActivateRow per segment).
+  c76.Add("settings_menu_session_view", "InstallMenu+SetSettingsLauncher+ApplySessionView",
+          c76T, c76.NowMs() - c76T);
+  c76T = c76.NowMs();
+
   // C12: the sidebar's telemetry pill needs the engine facts the catalog cannot
   // derive. v1 knows the encryption bit from the catalog itself; the method and
   // dictionary names have no accessor in the bridge yet (kept honest, not faked).
@@ -1766,7 +1837,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // THREADING (C25): the sweep gets its OWN handler from the pool -- 7z.dll
   // handlers are not thread-safe, so the sweep and a double-click extraction now
   // run on two leases instead of racing on one (docs/PROGRESS known debt).
-  std::thread worker([app, &window, sweepIndices, sweepSizes]() {
+  //
+  // C76: the thread is STARTED after the first frame (SetFirstFrameHandler
+  // below), not before Run(). It competes for the same file cache and CPU as the
+  // first paint, and its pixels cannot be on screen before the first frame
+  // anyway -- deferring it is both faster to first paint and MORE deterministic
+  // (the first frame never contains a thumbnail that happened to arrive).
+  std::thread worker;
+  auto startSweep = [&]() {
+  // The HWND is read HERE, on the UI thread (this handler runs from WM_PAINT),
+  // and travels by VALUE into the worker: a worker that asked the window for its
+  // handle would be touching UI state off the UI thread (CONTRACTS B9).
+  const HWND sweepTarget = window.Hwnd();
+  worker = std::thread([app, &window, sweepIndices, sweepSizes, sweepTarget]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     // The indices below belong to the archive that was open when this thread
     // started; a switch while we decode makes them meaningless (C34).
@@ -1790,8 +1873,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // A generation bump means the session switched archives while we were
         // decoding: these pixels are indexed against a file nobody is showing.
         if (app->archiveGeneration.load() == generation) {
-          window.SetThumbs(store);
-          PostMessageW(window.Hwnd(), GalleryWindow::kThumbsChanged, 0, 0);
+          // B9: post, never call. The UI thread takes the store in WndProc.
+          window.PostThumbs(store, sweepTarget);
         } else {
           std::fprintf(stderr, "sweep discarded: the session switched archives\n");
         }
@@ -1801,6 +1884,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     CoUninitialize();
   });
+  };  // C76: startSweep (invoked after the first frame)
+
+  // C76: ONE door for "the first frame is on screen". The session's crash-guard
+  // write and the thumbnail sweep both move behind it; neither changes a pixel
+  // of frame 1.
+  window.SetFirstFrameHandler([&]() {
+    armSession();
+    startSweep();
+  });
+
+  // C76 segment: the rest of the wiring (handlers, drag out, quick look,
+  // companion preview).
+  c76.Add("wiring_tail", "handler wiring + companion preview", c76T, c76.NowMs() - c76T);
 
   window.Run();
 
@@ -1824,7 +1920,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // workers talk to it. Joining is what makes the posting contract sound -- a
   // Post* that lands after WM_DESTROY simply fails and frees its payload.
   // Never detach: a detached worker here would outlive "window" and "app".
-  worker.join();
+  if (worker.joinable()) worker.join();  // C76: the sweep may never have started
   if (extractWorker.joinable()) extractWorker.join();
   if (selectedWorker.joinable()) selectedWorker.join();
   if (compressWorker.joinable()) compressWorker.join();

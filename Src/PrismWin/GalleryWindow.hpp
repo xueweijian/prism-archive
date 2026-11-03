@@ -103,7 +103,8 @@
 #include "PaletteOverlay.hpp"               // C53: Ctrl+K paints THIS layer (C31)
 #include "SearchBoxPainter.hpp"              // C62: C15-tokened drawing instructions
 #include "GalleryRenderer.hpp"
-#include "GlassIslandHost.hpp"              // C34: the composition/glass layer (C33)
+#include "GlassIslandHost.hpp"
+#include "StartupTrace.hpp"              // C34: the composition/glass layer (C33)
 #include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
 #include "WindowFrame.hpp"                  // C66: visible frame, work area, clamp
@@ -199,6 +200,10 @@ class GalleryWindow {
   // deletes. A failed PostMessage deletes it at the source.
   static constexpr UINT kHudStart = WM_APP + 3;
   static constexpr UINT kStatusText = WM_APP + 4;
+  // C76: the sweep worker's hand-off. Ownership of the store travels in the
+  // message (a heap shared_ptr WndProc takes), so the worker never calls a
+  // setter on a window it does not own (B9).
+  static constexpr UINT kThumbsReady = WM_APP + 7;  // 5/6 are archive/operation
 
   // The window owns an HWND and a device-dependent renderer; both are released
   // in the destructor, in that order. Main.cpp's `window` is a stack object, so
@@ -213,6 +218,9 @@ class GalleryWindow {
   };
 
   bool Create(const std::wstring& title, HINSTANCE instance) {
+    // C76: Create() is split into the stages that can be moved or removed. The
+    // spans are the only change to the order of operations -- nothing here was
+    // reordered to make a number look better.
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -222,12 +230,24 @@ class GalleryWindow {
     // integer directly (32512) so the call is ASCII/Unicode-proof.
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.lpszClassName = L"PrismGalleryWindow";
-    RegisterClassExW(&wc);
-    EnsureTextMeasurement();  // breadcrumb widths exist before the first layout
+    {
+      PRISM_C76_SPAN("class_register", "GalleryWindow::Create: RegisterClassExW");
+      RegisterClassExW(&wc);
+    }
+    {
+      // C76: this is the process's FIRST DirectWrite text format, so it is also
+      // the first font-collection load. It gets its own span because a lazy-font
+      // change has to show up here or not at all.
+      PRISM_C76_SPAN("dwrite_first_format", "GalleryWindow::Create: EnsureTextMeasurement");
+      EnsureTextMeasurement();  // breadcrumb widths exist before the first layout
+    }
 
-    host_.hwnd = CreateWindowExW(0, wc.lpszClassName, title.c_str(),
-                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                 1280, 800, nullptr, nullptr, instance, this);
+    {
+      PRISM_C76_SPAN("create_window_ex", "GalleryWindow::Create: CreateWindowExW");
+      host_.hwnd = CreateWindowExW(0, wc.lpszClassName, title.c_str(),
+                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                   1280, 800, nullptr, nullptr, instance, this);
+    }
     if (!host_.hwnd) return false;
     // C52: register the window as a drop target. DragAcceptFiles is the cheap
     // half of OLE drag & drop (it sets WS_EX_ACCEPTFILES and turns Explorer's
@@ -244,12 +264,23 @@ class GalleryWindow {
     // returned to GetMessageW, ignored the WM_QUIT that closing the window had
     // posted, and the process hung forever with no window. That was the whole
     // "closing does not exit" bug (card C1, 2026-11-01).
-    rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
+    {
+      PRISM_C76_SPAN("renderer_factories", "GalleryRenderer::Initialize (D2D+DWrite)");
+      rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
+    }
     // The bar exists from the first frame: a window without a menu, later
     // growing one, is a visible flicker AND a different client rect, which would
     // move every tile after the user opened it.
-    RebuildMenu();
-    return rendererInitialized_ && EnsureDeviceResources();
+    {
+      PRISM_C76_SPAN("menu_bar", "GalleryWindow::RebuildMenu");
+      RebuildMenu();
+    }
+    if (!rendererInitialized_) return false;
+    {
+      PRISM_C76_SPAN("d2d_hwnd_target", "GalleryWindow::EnsureDeviceResources");
+      if (!EnsureDeviceResources()) return false;
+    }
+    return true;
   }
 
   // Attach the archive catalog (the app owns the snapshot; it outlives the
@@ -780,7 +811,19 @@ class GalleryWindow {
     // ONE island, sized to the pill it belongs to (C33 finding 1).
     if (!host->AddIsland(kGlassIslandWidth, kGlassIslandHeight)) return false;
     glass_ = std::move(host);
+#if defined(PRISM_C76_MUTANT_GLASS_ON_FIRST_FRAME) || defined(PRISM_C76_BASELINE)
+    // Pre-C76 behaviour (and the negative control): the island is presented
+    // BEFORE the window has painted anything, so the composition submit is part
+    // of the first frame. The mutant build must fail C76's
+    // "no glass before the first frame" predicate.
     PresentGlassFrame();
+#else
+    // C76: the island's FIRST present waits for the SECOND frame. Nothing the
+    // user sees changes -- the island clears to transparent and composites over
+    // the window's own opaque content -- but the first frame no longer pays for
+    // the composition submit (measured cost is in docs/PERF.md).
+    glassPresentPending_ = true;
+#endif
     return true;
   }
   bool GlassLayerReady() const { return glass_ != nullptr; }
@@ -818,6 +861,15 @@ class GalleryWindow {
     if (!glass_) return false;
     glass_->SetVisible(true);
     if (FAILED(glass_->EnsureTransient())) return false;
+    if (glassPresentPending_) {
+      // C76: the FIRST restore arrives from the window's own WM_SIZE during
+      // ShowWindow -- before frame 1 exists. Presenting here would put the
+      // island on screen with the first frame, which is exactly what the
+      // deferral removes (and what the glass_on_first_frame mutant does). The
+      // transient surfaces ARE built; only the submit waits for frame 2.
+      Invalidate();
+      return true;
+    }
     PresentGlassFrame();
     Invalidate();
     return true;
@@ -1120,6 +1172,15 @@ class GalleryWindow {
     if (!host_.hwnd) return;
     PostMessageW(host_.hwnd, kProgressMessage, static_cast<WPARAM>(done),
                  static_cast<LPARAM>(total));
+  }
+  // C76 + B9: the sweep worker hands the decoded store over HERE. It touches no
+  // member (the target HWND was captured on the UI thread), the UI thread takes
+  // ownership in WndProc and calls SetThumbs there -- the same shape as
+  // PostStatus/PostHudStart, which is what the contract asks for.
+  void PostThumbs(std::shared_ptr<prism::gallery::ThumbStore> store, HWND target) {
+    if (!target) return;
+    auto* heap = new std::shared_ptr<prism::gallery::ThumbStore>(std::move(store));
+    if (!PostMessageW(target, kThumbsReady, 0, reinterpret_cast<LPARAM>(heap))) delete heap;
   }
 
   // Progress HUD: the worker drives phases; the UI renders.
@@ -1824,6 +1885,16 @@ class GalleryWindow {
       case kThumbsChanged:
         Invalidate();
         return 0;
+      case kThumbsReady: {
+        // C76: the worker's fresh store, taken by value on the UI thread.
+        std::unique_ptr<std::shared_ptr<prism::gallery::ThumbStore>> payload(
+            reinterpret_cast<std::shared_ptr<prism::gallery::ThumbStore>*>(lparam));
+        if (payload && *payload) {
+          SetThumbs(*payload);
+          Invalidate();
+        }
+        return 0;
+      }
       case kArchiveChanged: {
         // UI thread: the app opens the archive the payload names and rebuilds
         // the view. Ownership of the string came with the message.
@@ -1841,6 +1912,12 @@ class GalleryWindow {
         PAINTSTRUCT ps;
         BeginPaint(host_.hwnd, &ps);
         ++paintMessages_;  // C52: paint evidence for the drop-hint suite
+        if (glassPresentsAtFirstFrame_ < 0) {
+          // C76: "was the island on screen before frame 1?" is asked HERE, at
+          // the frame boundary, before this paint can present anything. Asking
+          // it after the fact would count the deferral's own present.
+          glassPresentsAtFirstFrame_ = glassPresents_;
+        }
         AdvanceScrollSpring();
         Render();
         EndPaint(host_.hwnd, &ps);
@@ -3130,11 +3207,32 @@ class GalleryWindow {
       // it up front; this keeps a future call site from resurrecting the bug.
       if (!rendererInitialized_) rendererInitialized_ = SUCCEEDED(renderer_.Initialize());
       if (!rendererInitialized_) return;
-      rendererReady_ = SUCCEEDED(renderer_.CreateDeviceResources(target_.Get()));
+      {
+        PRISM_C76_SPAN("renderer_device_resources",
+                       "GalleryRenderer::CreateDeviceResources (first frame)");
+        rendererReady_ = SUCCEEDED(renderer_.CreateDeviceResources(target_.Get()));
+      }
       if (!rendererReady_) return;
     }
-    target_->BeginDraw();
-    EnsureSidebar();  // the commands are painted, not computed by the renderer
+    if (!DrawFrame(target_.Get())) return;
+    AfterWindowFrame();
+  }
+
+  // C76: the frame body, independent of WHICH target it paints into. The window
+  // passes its HwndRenderTarget; the first-frame digest test passes an offscreen
+  // one. "The pixels are the same" is therefore a claim about THIS code path,
+  // not about a lookalike the harness re-implements.
+  bool DrawFrame(ID2D1RenderTarget* target) {
+    if (!target) return false;
+    prism::win::startup::Trace& trace = prism::win::startup::Trace::Instance();
+    const double frameStart = trace.NowMs();
+    target->BeginDraw();
+    {
+      // C76: everything between BeginDraw and renderer_.Draw -- the sidebar
+      // command list, the tab view, the HUD snapshot.
+      PRISM_C76_SPAN("scene_build", "GalleryWindow::Render: scene assembly");
+      EnsureSidebar();  // the commands are painted, not computed by the renderer
+    }
     GalleryRenderer::Scene scene;
     scene.items = host_.items;
     scene.viewport = &viewport_;
@@ -3212,8 +3310,14 @@ class GalleryWindow {
     searchScene_ = search_.IsOpen()
                        ? searchPainter_.Build(search_, SearchBounds())
                        : prism::win::searchbox::Scene{};
-    renderer_.Draw(target_.Get(), scene);
-    DrawSearchBox();
+    {
+      PRISM_C76_SPAN("renderer_draw", "GalleryRenderer::Draw (rows+rails+bands)");
+      renderer_.Draw(target, scene);
+    }
+    // The two overlays below write through the WINDOW's target on purpose: they
+    // are transient UI that never appears in a first frame, and an offscreen
+    // digest render must not touch the window's device context.
+    if (target == target_.Get()) DrawSearchBox();
     // C67: one line per client width. "The band showed only seven buttons" is a
     // question a log can answer (buttons vs dropped at the size that was really
     // on screen) instead of a screenshot the next reader has to re-measure.
@@ -3227,10 +3331,84 @@ class GalleryWindow {
     // (the renderer must not grow a fourth "mode" for something that lives for
     // one drag). It is painted over the same target, in the same frame, from
     // C15 tokens -- so it can never drift from the window's palette.
-    DrawDropHint();
-    target_->EndDraw();
+    if (target == target_.Get()) DrawDropHint();
+    target->EndDraw();
+    // C76: the first frame's own render cost, on the same clock as every other
+    // stage. EndDraw is the submit for an HwndRenderTarget.
+    trace.Add("first_frame_render", "BeginDraw+draw+EndDraw", frameStart,
+              trace.NowMs() - frameStart);
+    return true;
   }
 
+  // C76: what the WINDOW does after a frame it painted itself (never for the
+  // offscreen digest path): report the first frame once, and present the glass
+  // island on the SECOND frame when the deferral is on.
+  void AfterWindowFrame() {
+    if (glassPresentPending_ && paintMessages_ >= 2) {
+      glassPresentPending_ = false;
+      PresentGlassFrame();
+    } else if (glassPresentPending_) {
+      // Ask for the frame that carries the glass. Without this the island would
+      // wait for the next unrelated repaint -- "deferred" must mean "next
+      // frame", not "eventually".
+      Invalidate();
+    }
+    if (!firstFrameReported_) {
+      firstFrameReported_ = true;
+      ReportFirstFrame();
+      // C76: work that does not change one pixel of the first frame runs HERE,
+      // after it: the session's crash-guard write and the background thumbnail
+      // sweep. Both measured, both were on the pre-card critical path.
+      if (onFirstFrame_) {
+        auto handler = onFirstFrame_;
+        handler();
+      }
+    }
+  }
+
+ public:
+  // The app's "the first frame is on screen" door. Post-first-frame work is not
+  // a timer guess: it is the exact frame boundary.
+  void SetFirstFrameHandler(std::function<void()> handler) { onFirstFrame_ = std::move(handler); }
+
+ private:
+
+  // One line of evidence + the whole table. PRISM_C76_TRACE gates it; a shipping
+  // run therefore prints nothing and pays one branch.
+  void ReportFirstFrame() {
+    prism::win::startup::Trace& trace = prism::win::startup::Trace::Instance();
+    if (!trace.Enabled()) return;
+    // A COUNT, not a duration: it is the deterministic half of the evidence and
+    // the predicate the "glass on the first frame" mutant has to break.
+    std::fprintf(stderr, "C76_GLASS {\"presents_before_first_frame\":%d}\n", glassPresents_);
+    trace.Finish("app");
+    if (trace.ExitAfterFirstFrame() && host_.hwnd) {
+      // Measurement only: the bench needs a REAL process that ends after the
+      // first frame rather than a WM_CLOSE posted at a guessed moment.
+      PostMessageW(host_.hwnd, WM_CLOSE, 0, 0);
+    }
+  }
+
+ public:
+  // C76 seams. Above they are private because nothing outside the window may
+  // report or present on its behalf; these three are what the digest suite reads.
+  //
+  // The renderer's brushes are DEVICE-DEPENDENT, so they are recreated against
+  // whatever target is being painted and then restored for the window's own. A
+  // brush drawn on a target that did not create it is undefined behaviour, and
+  // the digest would be a picture of the wrong thing.
+  bool RenderSceneInto(ID2D1RenderTarget* target) {
+    if (!target) return false;
+    renderer_.CreateDeviceResources(target);
+    const bool drawn = DrawFrame(target);
+    if (target_) renderer_.CreateDeviceResources(target_.Get());
+    return drawn;
+  }
+  int GlassPresents() const { return glassPresents_; }
+  int GlassPresentsAtFirstFrame() const { return glassPresentsAtFirstFrame_; }
+  bool FirstFrameReported() const { return firstFrameReported_; }
+
+ private:
   bool EnsureDeviceResources() {
     if (target_) return true;
     if (!host_.hwnd) return false;
@@ -3247,11 +3425,16 @@ class GalleryWindow {
         D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
                                      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                                        D2D1_ALPHA_MODE_PREMULTIPLIED));
+    // C76: PRESENT IMMEDIATELY. The default present waits for the vertical
+    // blank, so the FIRST EndDraw can block for up to one refresh interval
+    // (16.7 ms at 60 Hz) on a frame nobody has seen yet. The pixels are the
+    // same; only the wait before returning from Present disappears.
     if (FAILED(factory_->CreateHwndRenderTarget(props,
                                                 D2D1::HwndRenderTargetProperties(
                                                     host_.hwnd,
                                                     D2D1::SizeU(static_cast<UINT32>(rc.right),
-                                                                static_cast<UINT32>(rc.bottom))),
+                                                                static_cast<UINT32>(rc.bottom)),
+                                                    D2D1_PRESENT_OPTIONS_IMMEDIATELY),
                                                 target_.ReleaseAndGetAddressOf()))) {
     // note: CreateHwndRenderTarget takes a bare **out -- IID_PPV_ARGS would
     // expand to two arguments and break the arity.
@@ -3264,6 +3447,14 @@ class GalleryWindow {
   // <exe dir>\Assets\Shaders is the layout "cmake --install" produces; the
   // effects are optional (a missing .hlsl leaves the host flat, still composing).
   static std::wstring DefaultShaderDirectory() {
+    // C76: an explicit override first. The installed layout puts the effects in
+    // <exe>\Assets\Shaders and needs nothing else; a build tree (and the C76
+    // bench, which launches the real exe) can point at the checkout's assets
+    // without a copy step, which is also what makes the shader measurement
+    // describe the shipped bytes instead of a "file not found" fallback.
+    wchar_t overridePath[MAX_PATH]{};
+    const DWORD overrideLength = GetEnvironmentVariableW(L"PRISM_SHADER_DIR", overridePath, MAX_PATH);
+    if (overrideLength > 0 && overrideLength < MAX_PATH) return std::wstring(overridePath);
     wchar_t module[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(nullptr, module, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) return {};
@@ -3280,6 +3471,7 @@ class GalleryWindow {
   // buffer 0. The optics (what WOULD be painted here) belong to the renderer.
   void PresentGlassFrame() {
     if (!glass_) return;
+    ++glassPresents_;
     const prism::glass::IslandRect rect{0, 0, kGlassIslandWidth, kGlassIslandHeight};
     prism::win::glass::GlassConstants constants{};
     glass_->PaintIsland(0, rect, constants, nullptr,
@@ -3919,6 +4111,15 @@ class GalleryWindow {
   int idleReleases_ = 0;                // times the minimise path really ran
   int restoreRebuilds_ = 0;             // Resize callbacks that rebuilt + painted
   bool idleReleased_ = false;           // released and not yet rebuilt/painted
+
+  // ---- card C76: the first frame's evidence ----
+  // glassPresentPending_ is the deferral: the island's first present waits for
+  // the second frame (EnableGlassLayer sets it; AfterWindowFrame clears it).
+  bool glassPresentPending_ = false;
+  bool firstFrameReported_ = false;
+  std::function<void()> onFirstFrame_;  // C76: post-first-frame work (app-owned)
+  int glassPresents_ = 0;               // every PresentGlassFrame call, counted
+  int glassPresentsAtFirstFrame_ = -1;  // the count when the first frame reported
   std::function<void()> onIdle_;   // the app's companion-preview poll
   bool idleTimer_ = false;
 

@@ -396,7 +396,7 @@ pwsh -File tools\verify-package.ps1 -ZipDir dist -Mutate SkipVerbs      # 期望
 | `mutation.c68.drop_shelldll` | 包里少一个 DLL 必须红 | 300s |
 | `mutation.c68.skip_verbs` | 装完动词键消失必须红 | 300s |
 
-`win.c68_verify` 与两个变异依赖 `win.c68_package`（FIXTURES）；打包测试与 C24 共享
+`win.c68_verify` 与两个变异通过 ctest `DEPENDS` 排在 `win.c68_package` 之后；打包测试与 C24 共享
 `RESOURCE_LOCK "prism-release-install"`，因为两者都会对同一个构建树跑 `cmake --install`。
 
 ### 11.5 已知边界

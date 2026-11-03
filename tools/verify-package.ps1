@@ -344,7 +344,10 @@ if ($ZipPath -and $ZipDir) { Stop-Usage '-ZipPath and -ZipDir are mutually exclu
 if ($ZipDir) {
     if (-not (Test-Path -LiteralPath $ZipDir -PathType Container)) { Stop-Usage ('-ZipDir does not exist: ' + $ZipDir) }
     $found = @(Get-ChildItem -LiteralPath $ZipDir -Filter 'PrismArchive-*-win-x64.zip' -File)
-    if ($found.Count -ne 1) {
+    if ($found.Count -eq 0) {
+        Stop-Skip ('no PrismArchive-*-win-x64.zip in ' + $ZipDir + ' -- the packaging step did not produce one (it skips when no 7z.dll is available)')
+    }
+    if ($found.Count -gt 1) {
         Stop-Usage ('expected exactly one PrismArchive-*-win-x64.zip in ' + $ZipDir + ', found ' + $found.Count)
     }
     $ZipPath = $found[0].FullName

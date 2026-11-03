@@ -36,6 +36,9 @@
 # D26: no WILL_FAIL anywhere; each mutant carries its own CAUGHT marker.
 # D28: no test name contains clean / unarmed / control.
 # D29: TIMEOUT values are real budgets (the scripts bound every child process).
+# DEPENDS: verify/mutants run after win.c68_package.  If packaging SKIPs (no
+#     7z.dll on the machine, exit 77), verify-package itself exits 77 with the
+#     reason instead of becoming a hard "Not Run" -- a skip stays a skip.
 # RESOURCE_LOCK: package runs "cmake --install" into the shared build tree
 #     (install_manifest.txt), so it takes C24's lock; verify/mutants do not.
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
@@ -59,7 +62,6 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
         SKIP_RETURN_CODE 77
         PASS_REGULAR_EXPRESSION "PACKAGE: PASS .*idempotent=YES"
         RESOURCE_LOCK "prism-release-install"
-        FIXTURES_SETUP "prism_c68_package"
         LABELS "release;packaging;distribution")
 
     add_test(NAME "win.c68_verify"
@@ -70,7 +72,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
         TIMEOUT 300
         SKIP_RETURN_CODE 77
         PASS_REGULAR_EXPRESSION "PACKAGE VERIFY: PASS"
-        FIXTURES_REQUIRED "prism_c68_package"
+        DEPENDS "win.c68_package"
         LABELS "release;installer;distribution")
 
     foreach(mutant IN ITEMS DropShellDll SkipVerbs)
@@ -84,7 +86,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
           TIMEOUT 300
           SKIP_RETURN_CODE 77
           PASS_REGULAR_EXPRESSION "PACKAGE VERIFY\\(MUTATION ${mutant}\\): CAUGHT"
-          FIXTURES_REQUIRED "prism_c68_package"
+          DEPENDS "win.c68_package"
           LABELS "release;mutation")
     endforeach()
   endif()

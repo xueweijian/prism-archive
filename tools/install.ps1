@@ -53,6 +53,11 @@ param(
     [switch]$DryRun,
     [switch]$Portable,
     [switch]$NoAssociations,
+    # Sandbox verification (verify-install.ps1 -Sandbox) is a scratch-registry
+    # install, but static verbs live on the real HKCU\Software\Classes\* and
+    # cannot be redirected. The harness passes this so a test never edits the
+    # user's menu; the switch is forwarded to Invoke-Install below.
+    [switch]$SkipStaticVerbs,
     [switch]$SelfTest,
     [string]$Mutate = '',
     [switch]$Verify,
@@ -1150,6 +1155,7 @@ try {
         Exts = $exts
         PortableMode = [bool]$Portable
         SkipAssoc = [bool]$NoAssociations
+        SkipStaticVerbs = [bool]$SkipStaticVerbs
     }
     Invoke-Install @installArgs
 

@@ -70,6 +70,9 @@ Source: "..\Assets\Shaders\*.hlsl"; DestDir: "{app}\Assets\Shaders"; Flags: igno
 Source: "..\Assets\Icon\prism.ico"; DestDir: "{app}\Assets\Icon"; Flags: ignoreversion
 Source: "..\tools\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\tools\uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
+; The zip install runs this from its own directory; setup.exe has no PowerShell
+; step of its own, so it is shipped and invoked from [Run] below.
+Source: "..\tools\register-static-verbs.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
@@ -78,6 +81,14 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+; Static right-click verbs. The zip path registers them through install.ps1 ->
+; register-static-verbs.ps1; setup.exe has no PowerShell step of its own, so it
+; asks the SAME script (one authority, no second copy of the Chinese labels).
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register-static-verbs.ps1"" -ExePath ""{app}\{#AppExe}"" -Quiet"; Flags: runhidden; Tasks: associate
+
+[UninstallRun]
+; Remove the two verb keys before [Files] deletes the script that knows them.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register-static-verbs.ps1"" -Unregister -Quiet"; Flags: runhidden; RunOnceId: "PrismStaticVerbs"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\Assets"

@@ -89,6 +89,10 @@ install(TARGETS PrismShellExt PrismShellExtClassic
 # 7z.dll is deliberately absent: LGPL engine, discovered at runtime (blueprint ch.2).
 install(DIRECTORY "${PRISM_ASSETS_DIR}/" DESTINATION Assets
         PATTERN "*.py" EXCLUDE)
+# register-static-verbs.ps1 is not optional chrome: install.ps1 calls it from
+# its own directory to write the two right-click verbs, and the zip must carry
+# it or "unzip, run install.ps1" silently installs without a context menu.
 install(FILES "${PRISM_TOOLS_DIR}/install.ps1"
               "${PRISM_TOOLS_DIR}/uninstall.ps1"
+              "${PRISM_TOOLS_DIR}/register-static-verbs.ps1"
         DESTINATION .)

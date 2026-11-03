@@ -43,6 +43,7 @@ $script:RequiredPayload = @(
     'PrismShellExtClassic.dll',
     'install.ps1',
     'uninstall.ps1',
+    'register-static-verbs.ps1',
     'PORTABLE.md',
     'prism-package.json',
     'SHA256SUMS.txt',

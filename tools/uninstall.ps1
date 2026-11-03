@@ -290,6 +290,21 @@ try {
         Remove-EmptyKeys $extKey $script:ScopeRoot
     }
 
+    # 1b. static right-click verbs. register-static-verbs.ps1 writes them to the
+    #     REAL HKCU\Software\Classes\* (that is the path Explorer reads; it
+    #     cannot be redirected to the scratch scope). A scratch uninstall must
+    #     leave them alone; a real one must remove them, otherwise the menu keeps
+    #     two entries pointing at an exe this script just deleted.
+    if ($script:ScopeRoot -eq 'HKCU:\Software') {
+        foreach ($verb in @('PrismArchiveExtract', 'PrismArchiveOpen')) {
+            $verbKey = $script:ClassesRoot + '\*\shell\' + $verb
+            if (Test-RegKey $verbKey) {
+                Remove-RegTree $verbKey
+            }
+        }
+        Remove-EmptyKeys ($script:ClassesRoot + '\*\shell') $script:ScopeRoot
+    }
+
     # 2. application registration, marker, uninstall entry
     Remove-RegTree ($script:ClassesRoot + '\Applications\PrismArchive.exe')
     Remove-EmptyKeys ($script:ClassesRoot + '\Applications') $script:ScopeRoot

@@ -53,6 +53,11 @@ param(
     [switch]$DryRun,
     [switch]$Portable,
     [switch]$NoAssociations,
+    # Sandbox verification (verify-install.ps1 -Sandbox) is a scratch-registry
+    # install, but static verbs live on the real HKCU\Software\Classes\* and
+    # cannot be redirected. The harness passes this so a test never edits the
+    # user's menu; the switch is forwarded to Invoke-Install below.
+    [switch]$SkipStaticVerbs,
     [switch]$SelfTest,
     [string]$Mutate = '',
     [switch]$Verify,
@@ -392,10 +397,16 @@ function Find-SourceDir {
         if (Test-Path -LiteralPath $exe -PathType Leaf) { return (Resolve-Path -LiteralPath $p).Path }
         throw ('PrismArchive.exe not found in -SourceDir ' + $p)
     }
+    # 1: the SCRIPT'S OWN DIRECTORY. The distributable zip puts PrismArchive.exe
+    #    next to install.ps1 (and the setup.exe layout puts both under {app}), so
+    #    a payload lookup that only knew build directories made "unzip, run the
+    #    script" fail -- or, on a dev box, silently installed a stale build tree
+    #    from a hard-coded E:\build path. PRISM_BUILD_DIR and the repo build
+    #    trees stay as fallbacks for a source checkout.
     $repo = Split-Path -Parent $PSScriptRoot
     $candidates = @(
+        $PSScriptRoot,
         $env:PRISM_BUILD_DIR,
-        'E:\build\wt-c3\Src\PrismWin',
         (Join-Path $repo 'build\Src\PrismWin'),
         (Join-Path $repo 'build'),
         (Join-Path $repo 'out\Src\PrismWin')
@@ -667,7 +678,8 @@ function Invoke-Install {
         [string]$EngineDll,
         [string[]]$Exts,
         [switch]$PortableMode,
-        [switch]$SkipAssoc
+        [switch]$SkipAssoc,
+        [switch]$SkipStaticVerbs
     )
 
     $exe = Join-Path $TargetDir 'PrismArchive.exe'
@@ -710,7 +722,22 @@ function Invoke-Install {
         # not next to us and the exe path is synthetic. A missing menu entry is
         # worth a warning, never a failed install.
         $verbsScript = Join-Path $PSScriptRoot 'register-static-verbs.ps1'
-        if ((Test-Path -LiteralPath $verbsScript) -and (Test-Path -LiteralPath $exe)) {
+        if ($SkipStaticVerbs) {
+            # The self-test installs a SYNTHETIC exe into a throwaway directory.
+            # Static verbs live on HKCU\Software\Classes\* (Explorer reads that
+            # exact path; it cannot be redirected to the scratch scope), so
+            # running the step there would put a temp path into the user's REAL
+            # right-click menu and leave it behind. The real menu is exercised by
+            # an actual install and by the registry read-back below.
+            Say 'static verbs skipped: synthetic self-test install'
+        } elseif ($script:DryRun) {
+            # The verbs script writes HKCU\Software\Classes\* (Explorer has no
+            # scratch equivalent), so calling it here would make -DryRun write
+            # real registry keys -- exactly what "change nothing" promises not to
+            # do. Plan the step instead; the real run performs it below.
+            $script:Planned++
+            Say '[dry-run] would register static verbs (PrismArchiveOpen / PrismArchiveExtract)' 'plan'
+        } elseif ((Test-Path -LiteralPath $verbsScript) -and (Test-Path -LiteralPath $exe)) {
             try {
                 & $verbsScript -ExePath $exe -Quiet
             } catch {
@@ -999,7 +1026,7 @@ function Invoke-SelfTest {
     $script:Wrote = 0
     $script:Planned = 0
     $script:DryRun = $true
-    Invoke-Install -SourceDir $src -TargetDir $dst -EngineDll $fakeEngine -Exts $exts
+    Invoke-Install -SourceDir $src -TargetDir $dst -EngineDll $fakeEngine -Exts $exts -SkipStaticVerbs
     $script:DryRun = $false
     $afterDry = Get-RegTree $root
     Assert-Equal 'dry run wrote no registry value' 0 $script:Wrote
@@ -1008,7 +1035,7 @@ function Invoke-SelfTest {
     Assert-True 'dry run created no install directory' (-not (Test-Path -LiteralPath $dst))
 
     # -- 2. first install ---------------------------------------------------
-    Invoke-Install -SourceDir $src -TargetDir $dst -EngineDll $fakeEngine -Exts $exts
+    Invoke-Install -SourceDir $src -TargetDir $dst -EngineDll $fakeEngine -Exts $exts -SkipStaticVerbs
     $installed = Get-RegTree $root
     Assert-Equal '.7z default ProgID' 'PrismArchive.7z' (Get-RegValue ($script:ClassesRoot + '\.7z') '')
     Assert-Equal '.gz default ProgID' 'PrismArchive.gz' (Get-RegValue ($script:ClassesRoot + '\.gz') '')
@@ -1033,7 +1060,7 @@ function Invoke-SelfTest {
     # -- 3. idempotency: a second install is a no-op ------------------------
     Say '--- second install (idempotency) ---'
     $script:Wrote = 0
-    Invoke-Install -SourceDir $src -TargetDir $dst -EngineDll $fakeEngine -Exts $exts
+    Invoke-Install -SourceDir $src -TargetDir $dst -EngineDll $fakeEngine -Exts $exts -SkipStaticVerbs
     $second = Get-RegTree $root
     Assert-Equal 'second install wrote nothing' 0 $script:Wrote
     Assert-True 'second install left the registry byte-identical' ((($installed -join '|') -eq ($second -join '|')))
@@ -1067,7 +1094,7 @@ function Invoke-SelfTest {
 
     # -- 6. portable writes no registry at all -----------------------------
     $beforePortable = Get-RegTree $root
-    Invoke-Install -SourceDir $src -TargetDir $portableDir -EngineDll $fakeEngine -Exts $exts -PortableMode
+    Invoke-Install -SourceDir $src -TargetDir $portableDir -EngineDll $fakeEngine -Exts $exts -PortableMode -SkipStaticVerbs
     $afterPortable = Get-RegTree $root
     Assert-True 'portable wrote no registry key' ((($beforePortable -join '|') -eq ($afterPortable -join '|')))
     Assert-True 'portable deployed the exe' (Test-Path -LiteralPath (Join-Path $portableDir 'PrismArchive.exe'))
@@ -1128,6 +1155,7 @@ try {
         Exts = $exts
         PortableMode = [bool]$Portable
         SkipAssoc = [bool]$NoAssociations
+        SkipStaticVerbs = [bool]$SkipStaticVerbs
     }
     Invoke-Install @installArgs
 

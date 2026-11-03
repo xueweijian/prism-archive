@@ -160,7 +160,8 @@ Windows PowerShell（解压后）：
 
 有：PrismArchive.exe、PrismShellExt.dll、PrismShellExtClassic.dll、
     Assets/Shaders/*.hlsl（Liquid Glass 着色器）、Assets/Icon/prism.ico、
-    install.ps1、uninstall.ps1、本说明、prism-package.json、SHA256SUMS.txt。
+    install.ps1、uninstall.ps1、register-static-verbs.ps1（右键动词）、本说明、
+    prism-package.json、SHA256SUMS.txt。
 
 没有：7z.dll（LGPL 引擎，运行时发现）；MSIX 稀疏包载荷（Assets/Package/*，
     走 MSIX 分发线）；share/prism-archive/*（与 Assets/Shaders 重复的一份副本）。

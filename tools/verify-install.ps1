@@ -476,6 +476,12 @@ function Invoke-InstallStep {
             ' -SevenZipDll ' + (PsQuote $script:EngineDll) +
             ' -Extensions ' + $extExpr
     if ($script:Mutation -eq 'UnquotedVerb') { $line += ' -Mutate UnquotedVerb' }
+    # A sandbox run must not write the REAL right-click menu: static verbs live
+    # on HKCU\Software\Classes\* and cannot be redirected to the scratch root,
+    # so the installer would point the user's menu at %TEMP% and the sandbox
+    # uninstall (correctly) refuses to touch it. Associations are still written
+    # in the scratch scope and asserted; only the two verb keys are skipped.
+    if ($script:IsSandbox) { $line += ' -SkipStaticVerbs' }
     $body = $line + [Environment]::NewLine + 'exit $LASTEXITCODE' + [Environment]::NewLine
     $wrapper = New-Wrapper ('install-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.ps1') $body
     return Invoke-Wrapper $wrapper $Label

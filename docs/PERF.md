@@ -685,3 +685,272 @@ C49 MUTATION CAUGHT: no_sniff (first failure at Tests/win/bench_current.cpp:1082
 cmake --build E:\build\wt-c49 --target c49_bench_current PrismArchive
 ctest --test-dir E:\build\wt-c49 -R "c49\.bench_current|mutation\.c49" -V
 ```
+
+## 装配后复测（C65，2026-11-03，feat/c65-perf）
+
+C49 的复测停在 2026-11-02：之后标签栏（C59/C60）、搜索框（C62）、编辑 UI（C54）、
+诊断窗口（C57）、保险库（C56）才陆续合入出厂二进制。它们都改变用户实际付出的代价，
+而 **C49 之后没有任何一次复测**。本节是同一台机器上的第二次装配后复测，只改测试与文档，
+产品代码一行未动。
+
+### 0. 方法与采样点（哪条命令、哪个进程、什么时刻）
+
+| 项 | 进程 / 命令 | 采样时刻 |
+|---|---|---|
+| 构建 | . E:\wg\env.ps1 -Card c65 → Enter-BuildLock → cmake --build E:\build\wt-c65 --target PrismArchive c65_bench_current perf_smoke ... --parallel 2 | 持构建锁（本次 slot2），不绕过 |
+| 启动→首帧（进程内） | ctest --test-dir E:\build\wt-c65 -R "^c65\.bench_remeasure$" -V → c65_bench_current --c65 | 每轮 9 个真实 GalleryWindow：Create + EnableGlassLayer + 首次 WM_PAINT（UpdateWindow 同步返回） |
+| 进程启动→主窗口（黑盒） | Start-Process PrismArchive.exe <archive>，MainWindowHandle 每 5 ms 轮询 | 3 次全新进程；数的是 CreateProcess → 顶层窗口句柄出现（**不含**首帧绘制） |
+| 4 GiB 打开 / 首字节 | 同上，MeasureOpen：IoCounters().bytesRead + Open() + ExtractToMemory(0) | 每个夹具 5 次；字节数可复现，毫秒只作参考 |
+| 10k / 100k 行帧 | 同上，真实 GalleryRenderer，1200×800 **软件**目标 | 每格 5 轮 × 60 帧；报每轮中位 / p95，再取 5 轮中位 |
+| 800 张缩略图 | 同上，C45 ThumbnailPipeline，128×128，4 worker | 串行 / 并行各 5 轮 |
+| 常驻内存 | 每状态起一个**全新子进程**；父进程用 GetProcessMemoryInfo 读 **WorkingSetSize** 与 **PagefileUsage**（两次独立测量） | 子进程 settle 后父进程连读 20 次 × 20 ms 取中位；每状态 3 个全新进程，再取 3 个中位。开归档：主窗口出现后 2500 ms；最小化：ShowWindow(SW_MINIMIZE) 后 1500 ms |
+
+内存“两次独立测量”的含义：同一批 20 次读取里同时取两个**不同语义**的计数器——
+Working Set（当前驻留页，可被 Windows 随时 trim）与 Private Bytes（私有提交，trim 不归还）。
+一个状态只有**两个都记录**才算测过；本卡不复用任何单计数器结论。
+
+**机器与负载。** Windows 11 26200，i5-8250U（4 核 8 线程），7-Zip 25.01，VS 2022 17.14
+（MSVC 14.44），Release。机器是共享的（七个兄弟工作树在编译），所以 C65 跑了 **5 轮**：R1/R4 落在高负载窗口（同一轮里 draw 与 flush 同时膨胀），R2/R3 与全量 bench lane 内的 R5 落在低负载窗口。五轮都列出；判定用低负载轮，高负载轮作为敏感性证据。
+另跑 4 次 C49 默认 lane（c49.bench_current）作对照，证明两个 lane 的差异随机器翻转。
+
+### 1. 启动 → 首帧
+
+| 轮次 | 首帧中位 | p95 | Create 中位 | Glass 中位 | 首次绘制中位 |
+|---|---|---|---|---|---|
+| R1（高负载） | 188.4 ms | 264.3 ms | 54.0 ms | 18.6 ms | 116.1 ms |
+| R2 | 180.0 ms | 232.1 ms | 47.6 ms | 16.6 ms | 90.2 ms |
+| R3 | 162.9 ms | 208.4 ms | 46.8 ms | 17.3 ms | 96.4 ms |
+| R4（高负载） | 161.3 ms | 188.9 ms | 47.0 ms | 17.0 ms | 90.7 ms |
+| R5（全量 bench lane） | 164.5 ms | 183.2 ms | 48.9 ms | 16.6 ms | 96.9 ms |
+| **五轮中位** | **164.5 ms** | **208.4 ms** | 47.6 ms | 17.1 ms | 94.2 ms |
+
+黑盒（出厂 PrismArchive.exe，3 次全新进程）：**191.9 / 193.5 / 294.7 ms**，
+中位 **193.5 ms**（CreateProcess → 主窗口句柄）。这是“窗口已建立”，不是“首帧已画完”；
+把进程内的首次绘制（≈93 ms）加上去，端到端首帧约 **287 ms**——这个加法是估值，不是一次采样。
+
+**与旧值的差**：C49 A 轮 **311.0 / 441.1 ms** → 现在五轮中位 **164.5 / 208.4 ms**
+（−47.1 % / −52.8 %）。**这不是产品变快**：用同一个 C49 默认 lane 在本次安静窗口复跑，
+首帧是 **204.1 / 256.0 ms**；负载轮 R1 是 188.4 / 264.3 ms。311 ms 是 C49 当时机器状态的读数
+（同节已记录“兄弟编译下 347.7 ms”），不是 C49 代码的常数。
+**是否达标**：ADR-001 的 **首帧 ≤ 60 ms → 未达标**（仍差 2.7–3.5 倍）。原因与 C49 相同：
+窗口 + D2D/DWrite 设备资源 + 两次 HLSL 编译 + 一整帧 1280×800 列表/侧栏/面包屑
+都在首帧路径上；要达标得靠预热的常驻进程或把设备资源挪出首帧，二者都还没有。
+
+### 2. 4 GiB 归档：读取字节与首字节
+
+| 夹具 | 读取字节（5 次恒定） | Open 中位 | Open → 首载荷字节 中位 | C28 门限 |
+|---|---|---|---|---|
+| sparse4g.zip | **263 688 B**（257.5 KiB，0.0061 %） | 0.24–0.56 ms | **0.27–0.63 ms** | ≤ 2 MiB **达标** |
+| sparse4g.7z | **1 674 B**（0.00004 %） | 0.14–0.36 ms | **0.20–0.50 ms** | ≤ 2 MiB **达标** |
+
+“首字节”是两次调用，不是一个：Open() 只保证目录可读，第一条载荷要 ExtractToMemory(0)。
+夹具里的载荷是 22 B 的 stored item，所以这个返回时刻与首字节的差在微秒级；
+first_payload_read=true 是 5 次都真的读到了，不是推断。旧值（C49）**263 688 B / 1 674 B、
+打开 0.2–0.8 ms**，字节数逐字节一致，**达标**。旧 §3 的 78.5 s 是 C28 之前的整文件扫描，
+已被 C28/C43 的嗅探路径替代，本次没有回归。
+
+### 3. 帧时间：10k 与 100k（同一渲染器）
+
+| 轮次 | 10k 中位 / p95 | 100k 中位 / p95 | 画出行数（10k / 100k） |
+|---|---|---|---|
+| R1（高负载） | 13.103 / 31.917 ms | 16.828 / 32.262 ms | 25 / 25 |
+| R2 | 4.070 / 5.779 ms | 4.181 / 6.277 ms | 25 / 25 |
+| R3 | 4.150 / 6.176 ms | 5.114 / 6.519 ms | 25 / 25 |
+| R4（高负载） | 10.799 / 25.748 ms | 13.334 / 24.309 ms | 25 / 25 |
+| R5（全量 bench lane） | 3.495 / 5.843 ms | 4.238 / 6.177 ms | 25 / 25 |
+| **低负载三轮（R2/R3/R5）** | **3.50–4.15 / 5.78–6.18 ms** | **4.18–5.11 / 6.18–6.52 ms** | 25 / 25 |
+
+**与旧值的差**：旧 100k 是 C7 的 7.9 / p95 15.6 ms，C49 A 轮 4.203 / p95 6.582 ms。
+本次 100k p95 **6.18–6.52 ms**，对 C49 A 是 −1.0 %～−6.2 %；10k 没有旧值，本次首测
+**5.78–6.18 ms**。10k 与 100k 的代价相同、都只画 **25 行**，虚拟化仍然精确。
+**是否达标**：120 FPS 的 8.33 ms 预算——低负载三轮**中位与 p95 都达标**；
+R1/R4 的 p95 24.3–34.5 ms **未达标**。把 R1/R4 当回归会是错的：同一轮里 draw 与 flush
+**同时**膨胀（flush 是 D2D 光栅化，产品 UI 代码根本不碰），且交错跑 C49/C65 时方向会翻转：
+pair 1 里 C65 的 100k p95（12.2）**低于** C49（14.6），pair 2 里反过来（28.4 vs 6.3）。
+所以这一格的结论只能是“安静机器上达标，满载时未达标”，与 C49 的写法一致。
+
+### 4. 800 张缩略图：串行 vs 并行（C45 流水线复跑）
+
+| 轮次 | 串行中位 / p95 | 并行中位 / p95 | 加速比 | 吞吐（并行） |
+|---|---|---|---|---|
+| R1（高负载） | 159.9 / 216.7 ms | 105.7 / 130.2 ms | 1.51× | 7 566 张/s |
+| R2 | 75.9 / 90.4 ms | 53.7 / 59.6 ms | 1.41× | 14 903 张/s |
+| R3 | 77.0 / 86.8 ms | 56.2 / 61.0 ms | 1.37× | 14 244 张/s |
+| R4（高负载） | 165.7 / 250.3 ms | 114.4 / 133.7 ms | 1.45× | 6 992 张/s |
+| R5（全量 bench lane） | 73.9 / 88.1 ms | 54.9 / 57.1 ms | 1.35× | 14 576 张/s |
+
+旧值（C49 A）串行 **80.7 ms**、并行 **60.3 ms**、**1.34×**；本次低负载三轮
+串行 **73.9–77.0 ms**（−4.6 %～−8.4 %）、并行 **53.7–56.2 ms**（−6.8 %～−10.9 %）、
+**1.35–1.41×**。契约四项全部成立：decoded=800、second_pass_hits=800、
+串行/并行的 pixel_digest 都是 **fb62252085a20b13**、常驻 **52 428 800 B = 50 MiB ≤ 64 MiB**。
+这一格没有目标数字，**判定：达标（且比旧值略快）**。
+
+### 5. 常驻内存：Working Set 与 Private Bytes（每状态 3 个全新进程）
+
+| 状态 | Working Set（3 次原始值 → 中位） | Private Bytes（3 次原始值 → 中位） | 旧值（C49，仅 WS） |
+|---|---|---|---|
+| 空窗口（无归档、无玻璃） | 46.11 / 46.13 / 46.18 → **46.13 MB** | 16.54 / 16.65 / 16.80 → **16.65 MB** | 54.8 MB |
+| + 1000 条目 catalog | 47.05 / 47.12 / 47.25 → **47.12 MB** | 17.62 / 17.68 / 17.70 → **17.68 MB** | 61.1 MB |
+| + 玻璃岛活体 | 49.43 / 49.47 / 49.43 → **49.43 MB** | 19.88 / 19.95 / 20.10 → **19.95 MB** | 63.9 MB |
+| **出厂 exe，归档已打开** | 74.77 / 75.66 / 76.58 → **75.66 MB** | 47.93 / 49.20 / 50.08 → **49.20 MB** | 77.5–78.6 MB |
+| **出厂 exe，最小化后** | 71.24 / 71.50 / 71.70 → **71.50 MB** | 45.30 / 45.19 / 45.20 → **45.20 MB** | 73.6–74.0 MB |
+
+五个 C65 轮次的出厂值（WS / PB，MB）：R1 74.77/47.93、R2 75.66/49.20、R3 76.58/50.08、
+R4 75.95/49.52、R5 76.46/49.86；最小化 R1 71.24/45.30、R2 71.50/45.19、R3 71.70/45.20、
+R4 71.29/45.46、R5 71.55/45.23。同一状态五轮离散度：WS ≤ 2.4 %、PB ≤ 4.5 %，比帧时间稳定得多——这正是要把 Private Bytes 一起记的原因。
+
+**与旧值的差**：开归档 WS **−2.4 %**（旧中位 78.0 → 76.1 MB），最小化 WS **−3.0 %**（73.8 → 71.6 MB），
+都在噪声带内，**没有回归**。空窗口旧 54.8 MB → 46.1 MB（−15.8 %）也不是产品瘦身：
+同一个 C49 默认 lane 在本次安静窗口复跑，空窗口同样是 **46.1 MB**、开归档 **75.4 MB**、
+最小化 **69.3 MB**（p95 72.8）。54.8 是旧机器状态下的 WS 读数，WS 本来就会被 trim/负载改变；
+Private Bytes 才是更稳的基线，本次首次建立（空 16.7 / 开归档 49.2 / 最小化 45.2 MB）。
+
+**最小化只还回多少**：开归档 → 最小化，WS 只降 **4.2–4.9 MB**，PB 只降 **4.0–4.9 MB**。
+这与 C34 把玻璃岛缩到导航胶囊（960×48）之后的账一致：能还的是瞬态玻璃，不能还的是
+D2D/DWrite/字体/渲染器/引擎镜像/catalog。**按设计不是泄漏**，但也够不到 ADR-006 的 40 MB。
+
+### 6. 旧值 → 新值 → 判定（逐项）
+
+“新值”取 C65 低负载轮 R2/R3/R5；判定同时给出 ADR-006/ADR-001 的目标对照。
+
+| # | 指标 | 旧值 | 新值（C65） | 变化 | 判定 |
+|---|---|---|---|---|---|
+| 1 | 启动→首帧（进程内，中位/p95） | 311.0 / 441.1 ms（C49 A） | 164.5 / 208.4 ms（五轮中位；低负载 162.9–180.0 / 183.2–232.1） | −47.1 % / −52.8 % | **未达标**（目标 60 ms，仍 2.7×）；相对旧值为**改善** |
+| 2 | 进程启动→主窗口（黑盒） | 800.8 ms（C7，满负载；空闲 497 ms） | 193.5 ms（3 次：191.9/193.5/294.7） | — | 记录；较旧值为改善，**无 60 ms 档** |
+| 3 | 4 GiB zip：读取字节 / 首字节 | 263 688 B / 0.3–0.8 ms | 263 688 B / 0.27–0.63 ms | 0 % / ≈0 | **达标**（C28 2 MiB 门限） |
+| 4 | 4 GiB 7z：读取字节 / 首字节 | 1 674 B / 0.2–0.3 ms | 1 674 B / 0.20–0.50 ms | 0 % / ≈0 | **达标** |
+| 5 | 10k 行帧 p95 | 无旧值 | 5.78–6.18 ms | — | **达标**（8.33 ms） |
+| 6 | 100k 行帧 p95 | 6.582 ms（C49 A）；15.6 ms（C7） | 6.18–6.52 ms | −1.0 %～−6.2 % / −58 %～−60 % | **达标**（低负载） |
+| 7 | 缩略图串行 | 80.7 ms | 73.9–77.0 ms | −4.6 %～−8.4 % | **达标**（无目标；契约全过） |
+| 8 | 缩略图并行 | 60.3 ms | 53.7–56.2 ms | −6.8 %～−10.9 % | **达标** |
+| 9 | 缩略图加速比 | 1.34× | 1.35–1.41× | +0.7 %～+5.2 % | **达标** |
+| 10 | 缩略图常驻 | 50 MiB | 50 MiB（52 428 800 B） | 0 % | **达标**（≤ 64 MiB） |
+| 11 | 开归档 WS | 77.5–78.6 MB | 75.7–76.6 MB | −2.4 % | **达标**（≤ 96 MB） |
+| 12 | 开归档 PB | 无旧值 | 49.2–50.1 MB | 新基线 | **达标**（≤ 96 MB） |
+| 13 | 最小化 WS | 73.6–74.0 MB | 71.5–71.7 MB | −3.0 % | **未达标**（≤ 40 MB，旧值也未达标） |
+| 14 | 最小化 PB | 无旧值 | 45.2 MB | 新基线 | **未达标**（≤ 40 MB） |
+| 15 | 空窗口 WS | 54.8 MB | 46.1 MB | −15.9 % | 记录（非回归；同 build 的 C49 lane 同样 46.1） |
+
+**没有任何一项相对 docs/PERF.md 的旧值回归超过 10 %。** 因此本卡没有改产品代码，
+也没有开回归 issue。超过 10 % 的移动只有两类：空窗口 WS 的 −15.8 %（更低，是机器状态），
+以及 R1/R4 负载轮的帧时间（同一轮 draw 与 flush 同时膨胀，交错跑会翻转方向）。
+
+**对“半个月新增 UI 是否拖垮内存/启动”的回答（带数字）**：没有。
+出厂进程开归档 75.7–76.6 MB WS / 49.2–50.1 MB PB，相对 C49 的 77.5–78.6 MB 反而低 2–3 %；
+最小化 71.5–71.7 MB，低 3 %；首帧 162.9–180.0 ms，不比 C49 的 204.1 ms（同 lane 复跑）慢。
+标签栏/搜索框/编辑 UI/诊断/保险库的状态没有以常驻内存的形式留下来（或至少被
+Private Bytes 的 49.2 MB 上界盖住）。**代价仍然是 ADR-006 早已记录的那一项：最小化 40 MB 够不到。**
+
+### 7. ADR-006 与 ADR-001 门槛逐条对照
+
+| 条目 | 预算 | C65 实测（WS / PB） | 判定 |
+|---|---|---|---|
+| 玻璃全开（出厂进程，归档打开） | ≤ 96 MB | **75.7–76.6 / 49.2–50.1 MB** | **达标**（WS 余量 19.4 MB，PB 余量 45.9 MB） |
+| 最小化 / 无岛可见 | ≤ 40 MB | **71.5–71.7 / 45.2 MB** | **未达标**：WS 超 31.5–31.7 MB、PB 超 5.2 MB；最小化只还 4.2–4.9 MB |
+| 缩略图缓存 | ≤ 64 MiB | **50 MiB**（52 428 800 B） | **达标**（D17 容量契约由 core.test_thumb_budget 守） |
+| 硬上限：预算放宽 ≠ 无界 | 任何 op 后 resident ≤ budget | 800 张满载仍 50 MiB；1000 次随机 op 0 次越界（既有 core.bench_sweep） | **达标** |
+| 首帧（ADR-001，未改） | ≤ 60 ms | **164.5 / 208.4 ms**（五轮中位） | **未达标** |
+| 120 FPS（未改） | ≤ 8.33 ms | 低负载 **3.50–4.15 / 5.78–6.18 ms**；高负载 **10.8–13.1 / 24.3–34.5 ms** | **安静达标，满载未达标**（与 C49 同性质） |
+
+### 8. 每次合并都能跑的 3 秒冒烟（perf_smoke）
+
+新增 ctest perf_smoke（Tests/suites/c65-perf.cmake，源码 Tests/win/bench_current.cpp --smoke）：
+一个真实 GalleryWindow 到首次绘制 + 60 帧 10k 行列表 + 两个内存计数器的可读性检查。
+断言只有形状（painted、画出 25 行、p95 < 5 s 的挂死检测），不门禁秒表（D1/D29）。
+
+   276: BENCH_C65_SMOKE {"elapsed_ms":442.7,"first_frame_ms":128.6,"frame_median_ms":4.000,
+                         "frame_p95_ms":8.177,"rows":10000,"rows_drawn":25,
+                         "ws_mb":33.03,"private_mb":14.36}
+   276: ALL PERF SMOKE CHECKS PASSED
+   276: Passed 0.49 sec
+
+同一二进制在负载窗口也跑过：elapsed_ms=2768.7、ctest 3.36 s——仍在 3 秒量级；
+TIMEOUT 15 是挂死预算，不是期望时长。负向控制 mutation.c65.no_first_paint
+（D3 + D26 + D27，无 WILL_FAIL，marker 即合取）：
+
+   277: C65 MUTANT ACTIVE: no_first_paint
+   277:     FAIL  Tests/win/bench_current.cpp:1044  expected true: first.painted
+   277: C65 MUTATION CAUGHT: no_first_paint (first failure at ...; exiting 0 now so teardown cannot swallow the verdict)
+   277: Passed 0.96 sec
+
+谓词是注入点实际写下的 gNoFirstPaintFired，不是“程序名带 mutant”——因无关原因变红
+不会打印 CAUGHT。
+
+### 9. 待办（未改代码；每项带最小复现）
+
+1. **ADR-006 最小化 ≤ 40 MB 仍未达标**（71.5–71.7 MB WS / 45.2 MB PB，超 31.5 MB / 5.2 MB）。
+   这是 C34 之后的既有缺口，不是本卡回归。最小复现：
+
+       . E:\wg\env.ps1 -Card c65
+       cmake --build E:\build\wt-c65 --target c65_bench_current PrismArchive
+       ctest --test-dir E:\build\wt-c65 -R "^c65\.bench_remeasure$" -V
+       # 看 BENCH_C65_MEMORY 的 app_minimized_mb / app_minimized_private_mb；期望 ≤ 40
+
+   原因假设（仍需下一张卡证伪）：最小化只触发 ReleaseGlassLayer + TrimThumbnails，
+   渲染器的 D2D/DWrite 设备资源、字体缓存与 catalog 不在瞬态路径上；要够到 40 MB，
+   必须让渲染器设备资源也进 ReleaseTransient 并对空闲态做 IDXGIDevice3::Trim。
+
+2. **帧/缩略图数字的负载噪声**：同一二进制在 90 分钟内读到 10k p95 5.78–34.46 ms、
+   串行缩略图 75.9–177.3 ms；交错跑 C49/C65 两次，pair 1 里 C65 更快、pair 2 里更慢。
+   这说明差值主要来自机器而不是 lane，但**没有**排除“C65 先跑 10k 再跑 100k”的顺序效应。
+   最小复现（三次交替，比较同窗口内的 p95）：
+
+       for ($i in 1..3) {
+         ctest --test-dir E:\build\wt-c65 -R "^c49\.bench_current$" -V | Select-String 'BENCH_C49_FRAME'
+         ctest --test-dir E:\build\wt-c65 -R "^c65\.bench_remeasure$" -V | Select-String 'BENCH_C65_FRAME'
+       }
+
+   若同窗口内 C65 的 p95 稳定高出 >10 %，再查 RunFrameRound 的复用/顺序（这是测试代码，不动产品）。
+
+3. **没有 >10 % 回归项**，所以没有“回归 issue”；产品代码、docs/PROGRESS.md、
+   ROADMAP.md、CONTRACTS.md、ci.yml、Tests/CMakeLists.txt 均未改。
+
+### 10. 复现（C65 全套）
+
+    . E:\wg\env.ps1 -Card c65
+    cmake --build E:\build\wt-c65 --target c65_bench_current perf_smoke perf_smoke_mutant_no_first_paint PrismArchive
+    ctest --test-dir E:\build\wt-c65 -R "^c65\.bench_remeasure$" -V        # ~47–58 s，5 条 BENCH_C65_* 行
+    ctest --test-dir E:\build\wt-c65 -R "perf_smoke|mutation\.c65" -V      # ~1.5 s（安静）
+
+C65 的 BENCH 行（每轮一行，C42 report lane 可直接解析）：
+
+    BENCH_C65_STARTUP   {"mode":"C65","first_frame_median_ms":..,"first_frame_p95_ms":..,"samples":9,...}
+    BENCH_C65_MEMORY    {"empty_mb":..,"empty_private_mb":..,"archive_mb":..,"archive_private_mb":..,
+                         "glass_full_mb":..,"glass_full_private_mb":..,"app_archive_mb":..,
+                         "app_archive_private_mb":..,"app_minimized_mb":..,"app_minimized_private_mb":..,
+                         "samples":3,"adr006_glass_budget_mb":96,"adr006_min_budget_mb":40}
+    BENCH_C65_OPEN4G    {"zip_bytes":..,"zip_first_byte_ms":..,"sevenz_bytes":..,"sevenz_first_byte_ms":..,
+                         "first_payload_read":true,"budget_bytes":2097152,"file_bytes":4294967296,...}
+    BENCH_C65_FRAME     {"rows":10000,"median_ms":..,"p95_ms":..,"draw_p95_ms":..,"flush_p95_ms":..,
+                         "rows_drawn":25,...}
+    BENCH_C65_FRAME_100K {"rows":100000,...}
+    BENCH_C65_THUMBS    {"items":800,"serial_ms":..,"parallel_ms":..,"speedup":..,"items_per_sec":..,
+                         "decoded":800,"second_pass_hits":800,"resident_bytes":52428800,"pixel_digest":".."}
+
+### 11. 全量 `ctest -R bench`（12 项）与第 5 轮
+
+`ctest --test-dir E:\build\wt-c65 -R "bench" --output-on-failure -V` 把 bench 家族一次跑完。
+本次跑到宿主的 16 分钟后台作业上限时，**11/12 已通过**（core.bench_sweep、win.bench_solid、
+c45.bench_thumbs、report.extract_bench、c49.bench_current、c65.bench_remeasure、
+win.bench_startup + 其变异、win.bench_memory + 其变异、win.bench_scale）；被截断的是**既有的**
+`mutation.bench_scale.temp_write`（本卡没有改它，也不是 C65 的测量项）。单独重跑：
+
+    283:     4 GB: open 0.2 ms, sweep 259491.0 ms, extract 262591.1 ms, temp entries 0 -> 1
+    283:       temp: staging.7z|4294967418
+    283:     FAIL Tests/win/bench_scale.cpp:539  expected (tempAfter.size()) == (0)
+    283:     FAIL: the pipeline wrote into %TEMP% (1 entries)
+    1/12 Test #283: mutation.bench_scale.temp_write ...   Passed  1228.42 sec
+
+它按预期变红并通过（WILL_FAIL 型负向控制）；20.5 分钟里 sweep 259.5 s、extract 262.6 s，
+是磁盘时间，不是挂死（D29 的 TIMEOUT 是 1800 s）。所以“16 分钟跑完全量 bench”在这台
+共享机器上不成立，但 12 项都被跑到了：11 项在全量 lane 内，1 项单独重跑。
+
+这一跑里的 C65 是第 5 轮（表中 R5）：首帧 **164.5/183.2 ms**、10k **3.50/5.84 ms**、
+100k **4.24/6.18 ms**、串行/并行 **73.9/54.9 ms**、开归档 **76.5/49.9 MB**、
+最小化 **71.6/45.2 MB**，与 R2/R3 同带；C49 默认 lane 也再次通过（72.7 s），说明 C65 的
+测试改动没有破坏 C49 的口径。
+
+**契约落点**：D1（每条 ctest 都钉 PASS_REGULAR_EXPRESSION，静默 SKIP 不算过）、
+D3/D26/D27（mutation.c65.no_first_paint 的 CAUGHT 由运行时谓词决定）、D7（整块替换，无索引手术）、
+D9（在 E:\wg\c65 自己的 clone 工作树）、D29（子进程/轮询全部有上限，TIMEOUT 写成真实预算：
+c65 900 s、perf_smoke 15 s）。

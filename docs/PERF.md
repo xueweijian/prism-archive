@@ -1032,3 +1032,120 @@ win.bench_startup + 其变异、win.bench_memory + 其变异、win.bench_scale�
 D3/D26/D27（mutation.c65.no_first_paint 的 CAUGHT 由运行时谓词决定）、D7（整块替换，无索引手术）、
 D9（在 E:\wg\c65 自己的 clone 工作树）、D29（子进程/轮询全部有上限，TIMEOUT 写成真实预算：
 c65 900 s、perf_smoke 15 s）。
+
+## 启动到首帧分解（C76，2026-11-03，feat/c76-startup）
+
+C65 给出的数字是 **164.5 ms 进程内首帧 / 208.4 ms p95 / 193.5 ms 黑盒进程→主窗口**，
+但那是**一个数**，不是一张表：它说不清 164.5 ms 花在哪一段，所以"要达标该动哪里"只能靠读代码猜。
+本节先把这条路径拆成 29 个 QPC 段（每段给出起点、时长、与上一段之间的**空隙**），
+再按占用从大到小改，最后给出前后对比、达标判定和**没达标的部分是什么**。
+
+### 0. 怎么测的（哪条命令、哪个进程、什么时刻）
+
+| 项 | 做法 |
+|---|---|
+| 埋点 | `Src/PrismWin/StartupTrace.hpp`：QPC 单时钟，`Begin()` 在 `wWinMain` 第一行，每段一个 `PRISM_C76_SPAN`/`Add`；关闭时成本是一次 bool 分支 |
+| 开关 | 环境变量 `PRISM_C76_TRACE=1`（**只在测量时开**，出厂进程不打印）；`PRISM_C76_TRACE_EXIT=1` 让进程在报告完首帧后自己 `WM_CLOSE`，这样 bench 计的是**真进程**而不是猜的时刻 |
+| 被测量的进程 | **出厂的 `PrismArchive.exe`**（不是复刻的探针）：`Start-Process PrismArchive.exe <fixture.7z>`，fixture 是 40 条目 7z |
+| 分段口径 | `start_ms` = 相对 `Begin()`；`ms` = 本段时长；`gap_ms` = 本段起点 − 上一段终点（**没埋点的胶水**，摊在桌面上）；名字以 `.` 开头的是**子段**，不计入合计 |
+| 机器 | Windows 11 26200，i5-8250U（4 核 8 线程），VS 2022 17.14（MSVC 14.44），Release；**共享机器**，所以同一份二进制多跑几轮并列出轮次 |
+| 复现 | `. E:\wg\env.ps1 -Card c76` → `cmake --build E:\build\wt-c76 --target PrismArchive c76_bench_startup` → `ctest --test-dir E:\build\wt-c76 -R "c76|mutation.c76" -V` |
+
+### 1. 分解表（同一台机器、同一个 fixture、同一条命令）
+
+**改之前**（只加了埋点，未做任何优化；`run2`）：
+
+| 段 | ms | 测的是哪个函数前后 |
+|---|---|---|
+| `settings_language_session` | **133.1**（其中 `.load_language` 40.2 / `.load_settings` 0.4） | `LoadSettings`→`LoadLanguage`→`LoadSession` |
+| `hlsl_shaders` | **80.9** | `GlassEffectRuntime::Initialize`：**两次 `D3DCompile`**（Liquid + Kawase） |
+| `d2d_hwnd_target` | **53.4** | `GalleryWindow::EnsureDeviceResources`：D2D HWND 目标（内含 D3D11 设备创建/首次加载 d3d11+dxgi） |
+| `first_frame_render` | **48.2**（draw 21.0 + `EndDraw` ≈27） | `GalleryWindow::Render`：`BeginDraw`→`renderer_.Draw`→`EndDraw`→Present |
+| `session_arm` | **25.0** | `SessionStore::RecordOpen`+`SaveSession`（一次原子写盘） |
+| `wiring_tail` | **17.8** | 处理器接线 + companion 预览 + **缩略图扫描线程启动** |
+| `settings_menu_session_view` | **17.3** | `InstallMenu`+`SetSettingsLauncher`+`ApplySessionView` |
+| `tabs` | **15.4** | `OpenTab`+`SetTabHandler` |
+| `view_state` | **12.5** | `RestoreFrame`+`AttachSidebarStore`+`SetListMode` |
+| `menu_bar` | **9.4** | `GalleryWindow::RebuildMenu` |
+| `d3d11_device` | **8.3** | `D3D11CreateDevice`（玻璃宿主自己的设备） |
+| 其余 | `menu_labels` 4.6 / `create_window_ex` 2.9 / `com_argv` 2.7 / `engine_load` 2.3 / `set_items` 2.0 / `dcomp_target` 1.7 / `dwrite_first_format` 1.4 / `d2d_device_context` 1.0 / `ops_plan` 0.6 / `archive_open_catalog` 0.5 / `class_register` 0.03 | — |
+| **合计** | **387.2 ms**（`process_start_to_winmain` 另计：34.8 ms，粗粒度 15.6 ms 一格） | |
+
+**改之后**（三轮 374.6 / **325.0** / 307.6，取中位那轮）：
+
+| 段 | ms | 变化 |
+|---|---|---|
+| `d2d_hwnd_target` | **75.3** | 未改（见 §3） |
+| `first_frame_render` | **41.1**（draw 15.7） | `D2D1_PRESENT_OPTIONS_IMMEDIATELY`（不再等垂直回扫） |
+| `settings_language_session` | **23.9**（`.load_language` 22.8） | 未改，此段随文件缓存波动 21–114 ms |
+| `menu_bar` | **21.8** | 未改 |
+| `wiring_tail` | **19.1** | 缩略图线程移到首帧之后（剩下的是 companion 预览 + 接线） |
+| `settings_menu_session_view` | **17.4** | 未改 |
+| `view_state` | **14.8** | 未改 |
+| `tabs` | **14.3** | 未改 |
+| `d3d11_device` | **9.3** | 未改（与 `d2d_hwnd_target` 里的设备无法共享，见 §3） |
+| 其余 | `create_window_ex` 8.0 / `menu_labels` 3.7 / `engine_load` 3.0 / `dwrite_first_format` 2.8 / `set_items` 2.2 / `com_argv` 1.9 / `dcomp_target` 1.8 / `hlsl_shaders` **1.4** / `d2d_device_context` 1.1 / `ops_plan` 1.0 / `archive_open_catalog` 0.9 / `class_register` 0.04 | `hlsl_shaders` **80.9 → 1.4** |
+| `session_arm` | **0**（离开首帧路径） | 见 §2 |
+| **合计** | **325.0 ms**（空隙 19.6 ms） | **−62.2 ms（−16.1 %）**；同一段埋点、同一条命令 |
+
+`hlsl_shaders` 与 `session_arm` 是**同一个函数、同一个时钟、改前改后各测一次**，所以那 105 ms 是确定收益；
+其余段的差异是机器负载（`load_language` 在一轮里读 21 ms、在另一轮读 114 ms，代码没动）。
+
+### 2. 改了什么（每条都带数字）
+
+1. **着色器改成预编译字节码（.cso），80.9 → 1.4 ms。**
+   `Src/PrismWin/CMakeLists.txt` 在**构建时**用 Windows SDK 的 `fxc` 把两个 .hlsl 编译成
+   `<build>/Assets/Shaders/*.cso`（同一个入口 / 同一个 `ps_5_0` / 同一个 `/O3`），
+   `GlassEffectRuntime` 先读 .cso、读不到才回退 `D3DCompile`。
+   回退是硬要求：没有 SDK 的检出必须还能渲染（只慢，不坏）；而且 .cso 头 4 字节不是 `DXBC` 就拒绝。
+   计数断言：优化版 `hlsl_precompiled=2`、`hlsl_runtime_compiles=0`（改前 `=2`）。
+2. **首帧不合成玻璃岛**：`EnableGlassLayer` 不再立刻 `PresentGlassFrame`，改为置 `glassPresentPending_`，
+   由**第二帧**的 `AfterWindowFrame` 提交；`RestoreGlassLayer`（`ShowWindow` 的 `WM_SIZE` 会先到）在挂起期间只重建瞬态表面、不提交。
+   岛是**清成透明**再合成到窗口自己的不透明内容上的，所以屏上像素不变——这一点由像素断言守（§4），不是嘴上说。
+3. **会话崩溃卫兵的写盘移到首帧之后**（25.0 ms）：`RecordOpen` 仍在原处决定（视图模式要一致），
+   只有 `SaveSession` 这一次原子写移到窗口自己的首帧边界。代价写在明处：首帧那一小段里崩溃不再被记录。
+4. **缩略图扫描线程移到首帧之后**：它和首帧抢同一个文件缓存与 CPU，而且**它的像素本来就不可能在首帧上屏**；
+   移走后首帧更确定（首帧再也不会出现"刚好赶到的缩略图"），`C76_PIXELS` 的 digest 因此可复现。
+5. **`D2D1_PRESENT_OPTIONS_IMMEDIATELY`**：第一次 `EndDraw` 不再等垂直回扫（60 Hz 下最多 16.7 ms）；
+   像素不变，只是 `Present` 返回前不再睡一觉。
+6. （**没做**）字体延迟创建：首帧本来就要画文字，`CreateDeviceResources` 里那 7 个 `CreateTextFormat` 一帧也用得上，
+   延迟到"第一次画文字"等于原地踏步——数据不支持，所以不动（`dwrite_first_format` 只有 2.8 ms，也证明了这一点）。
+
+### 3. 达标判定：**未达标**，差 5.4 倍，剩下的就是这些
+
+`C76_BENCH {"target_ms":60.0,"cold_first_frame_ms":193.680,"warm_first_frame_ms":200.216,"inproc_first_frame_ms":162.556,...,"met":false}`
+
+- **进程内首帧 325.0 ms**（C65 的 164.5 ms 是**另一种口径**：它只计 Create+Glass+首帧绘制，不含 settings/language/session/接线；
+  同一口径下本卡实测是 `162.6 ms`——和 C65 的 164.5 ms 基本一样，**所以这张卡没有让那个口径变快**，它让**整条路径**变快了）。
+- **端到端**：`process_start_to_winmain` 16.5 ms + 325.0 ms ≈ **341 ms**（黑盒口径另计）。
+- **60 ms 目标没达到**。剩余部分（改后表里最大的五段，合计 **187 ms，占 58 %**）：
+  1. `d2d_hwnd_target` **75.3 ms**：D2D 建 HWND 目标连带 D3D11 设备与 d3d11/dxgi 首次加载。**这是设备创建，不是我们的代码**；
+     要消掉只能让 D2D 与玻璃宿主共享同一个 D3D11 设备（改用 `ID2D1Factory1::CreateDevice`+`CreateBitmap` 的合成交换链路径），那是重写渲染后端，不在本卡。
+  2. `settings_language_session` **23.9 ms**（`.load_language`）：读 `Assets\Lang\*.json`，冷缓存一轮读到 **114 ms**。它的产出（菜单/侧栏/动作带的字）首帧就要上屏，不能推到首帧后；
+     要快只能把目录表预编译成二进制或常驻预热。
+  3. `first_frame_render` **41.1 ms**：D2D 画 25 行 + 侧栏 + 面包屑 + 动作带，`EndDraw` 光栅化到 HWND 目标。
+  4. `menu_bar` **21.8 ms** + `settings_menu_session_view` 17.4 ms：菜单创建与语言/会话视图装配。
+  5. `wiring_tail` **19.1 ms**：companion 预览窗与处理器接线（预览的窗口创建也可以再往后挪，但那是 C30 的地盘）。
+  这五段都**不是"某处回归"**，而是"首帧必须建窗口、建设备、画一整帧"。ADR-001 的 60 ms 在当前架构下只有两条路：
+  **常驻预热进程**（蓝图有、代码里没有）或**把整个渲染后端改成共享设备 + 交换链**。两者都是另一张卡的体量。
+
+### 4. 断言（哪些是门，哪些只是数字）
+
+`Tests/win/bench_c76_startup.cpp` + `Tests/suites/c76-startup.cmake`，4 个 ctest：
+
+| 测试 | 断言 |
+|---|---|
+| `c76.bench_startup` | 首帧像素 **digest == 改前 baseline**（`79a56a1305dd98de`，1264×741 客户区）；`hlsl_runtime_compiles == 0`；`hlsl_precompiled >= 2`；**首帧玻璃呈现次数 == 0**；第二帧 ≥ 1；第一/二帧**差异像素在玻璃岛矩形之外为 0**；首帧 < 1500 ms（防挂死，不是 60 ms 门） |
+| `c76.bench_baseline` | 改前行为（运行时编译 + 首帧上玻璃）的参考数字与参考 digest：`C76_BASELINE {"first_frame_digest":"79a56a1305dd98de",...}` |
+| `mutation.c76.runtime_shaders` | 注掉 .cso 路径 → `runtime_compiles=2` → 同一条 `== 0` 谓词变红，打印 `C76 MUTATION CAUGHT: runtime_shaders`（D27：注入先被运行期观测到，才允许宣告捕获） |
+| `mutation.c76.glass_on_first_frame` | 恢复"首帧上玻璃" → `presents_frame1=2` → `presents_frame1 == 0` 变红，打印 `C76 MUTATION CAUGHT: glass_on_first_frame` |
+
+**为什么 60 ms 不写成断言**：契约 R2（AGENTS.md）——共享机器上的秒表不可复现，同一份二进制在这里读出 274/307/325/375 ms。
+门是**计数与像素**（`hlsl_runtime_compiles==0`、`presents_frame1==0`、digest 相等、差异只在玻璃区），
+毫秒进 `C76_BENCH` 的 `met` 字段，**照实报告未达标**。
+
+**digest 的边界**：布局由客户区宽度驱动，所以像素相等只在 1264×741 下有意义；换尺寸时 bench 打印 `C76 NOTE` 并跳过这条相等断言，
+而不是把"另一个窗口尺寸"谎报成像素回归。
+
+**负向控制的另一面**（R1：注释不是证据）：把 `.cso` 路径注掉后 `hlsl_runtime_compiles` 真的变 2（打印在同一行 `C76_PIXELS` 里），
+把玻璃推迟开关注掉后 `presents_frame1` 真的变 2——两个数都是**运行时观测**，不是宏定义存在与否。

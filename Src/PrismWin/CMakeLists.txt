@@ -96,3 +96,54 @@ install(FILES "${PRISM_TOOLS_DIR}/install.ps1"
               "${PRISM_TOOLS_DIR}/uninstall.ps1"
               "${PRISM_TOOLS_DIR}/register-static-verbs.ps1"
         DESTINATION .)
+# ---------------------------------------------------------------------------
+# C76: pre-compile the Liquid Glass HLSL to .cso bytecode AT BUILD TIME.
+#
+# Measured before this card (docs/PERF.md, C76_BREAKDOWN): the two D3DCompile
+# calls in GlassEffectRuntime::Initialize cost 80.9 ms of the first frame. The
+# shipped bytes are the same shader with the same entry point, profile and
+# optimisation level, so the runtime only has to read them.
+#
+# fxc.exe ships with the Windows SDK. When it is absent nothing is generated
+# and GlassEffectRuntime falls back to D3DCompile (slower, never broken) -- a
+# checkout without the SDK must still render the glass.
+# ---------------------------------------------------------------------------
+set(PRISM_FXC "")
+if(WIN32)
+  file(GLOB PRISM_FXC_CANDIDATES "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/fxc.exe")
+  if(PRISM_FXC_CANDIDATES)
+    list(GET PRISM_FXC_CANDIDATES -1 PRISM_FXC)
+  endif()
+endif()
+set(PRISM_CSO_DIR "${CMAKE_BINARY_DIR}/Assets/Shaders")
+if(PRISM_FXC)
+  set(PRISM_CSO_FILES
+      "${PRISM_CSO_DIR}/LiquidGlassEffect.cso"
+      "${PRISM_CSO_DIR}/KawaseDualBlur.D2DEffect.cso")
+  add_custom_command(
+    OUTPUT ${PRISM_CSO_FILES}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PRISM_CSO_DIR}"
+    COMMAND "${PRISM_FXC}" /nologo /T ps_5_0 /E main /O3
+            "/Fo${PRISM_CSO_DIR}/LiquidGlassEffect.cso"
+            "${PRISM_ASSETS_DIR}/Shaders/LiquidGlassEffect.hlsl"
+    COMMAND "${PRISM_FXC}" /nologo /T ps_5_0 /E main /O3 /DPRISM_D2D_EFFECT=1
+            "/Fo${PRISM_CSO_DIR}/KawaseDualBlur.D2DEffect.cso"
+            "${PRISM_ASSETS_DIR}/Shaders/KawaseDualBlur.hlsl"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PRISM_ASSETS_DIR}/Shaders/LiquidGlassEffect.hlsl"
+            "${PRISM_ASSETS_DIR}/Shaders/KawaseDualBlur.hlsl"
+            "${PRISM_ASSETS_DIR}/Shaders/LiquidGlassMath.hlsl"
+            "${PRISM_ASSETS_DIR}/Shaders/PrismD2DEffectEntry.hlsli"
+            "${PRISM_CSO_DIR}"
+    DEPENDS "${PRISM_ASSETS_DIR}/Shaders/LiquidGlassEffect.hlsl"
+            "${PRISM_ASSETS_DIR}/Shaders/KawaseDualBlur.hlsl"
+            "${PRISM_ASSETS_DIR}/Shaders/LiquidGlassMath.hlsl"
+            "${PRISM_ASSETS_DIR}/Shaders/PrismD2DEffectEntry.hlsli"
+    COMMENT "C76: pre-compiling the glass shaders (.cso)")
+  add_custom_target(prism_glass_shaders DEPENDS ${PRISM_CSO_FILES})
+  add_dependencies(PrismArchive prism_glass_shaders)
+  install(FILES ${PRISM_CSO_FILES} DESTINATION Assets/Shaders OPTIONAL)
+  message(STATUS "C76: glass shaders pre-compiled with ${PRISM_FXC}")
+else()
+  message(STATUS "C76: fxc.exe not found -- glass shaders compile at runtime")
+endif()

@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "../PrismCore/GlassIsland.hpp"
+#include "StartupTrace.hpp"
 
 // The header compiles its own shaders (D3DCompile), so every consumer needs the
 // compiler import library; asking each CMake target to remember it is how a
@@ -350,10 +351,17 @@ class GlassEffectRuntime {
 
     const std::wstring liquidPath = shaderDir + L"\\LiquidGlassEffect.hlsl";
     const std::wstring kawasePath = shaderDir + L"\\KawaseDualBlur.hlsl";
-    HRESULT hr = Compile(liquidPath, nullptr, &registry.liquidCode);
+    // C76: the bytecode FIRST (shipped as .cso beside the .hlsl by the build),
+    // D3DCompile only as the fallback. The two compiles cost 80.9 ms in the
+    // pre-card measurement (docs/PERF.md); reading two 2-4 KB blobs costs the
+    // file open. The fallback is what keeps a checkout without the compiler
+    // assets rendering instead of going flat.
+    HRESULT hr = LoadBytecode(liquidPath, L"LiquidGlassEffect.cso", &registry.liquidCode);
+    if (FAILED(hr)) hr = Compile(liquidPath, nullptr, &registry.liquidCode);
     if (FAILED(hr)) return hr;
     const D3D_SHADER_MACRO kawaseDefines[] = {{"PRISM_D2D_EFFECT", "1"}, {nullptr, nullptr}};
-    hr = Compile(kawasePath, kawaseDefines, &registry.kawaseCode);
+    hr = LoadBytecode(kawasePath, L"KawaseDualBlur.D2DEffect.cso", &registry.kawaseCode);
+    if (FAILED(hr)) hr = Compile(kawasePath, kawaseDefines, &registry.kawaseCode);
     if (FAILED(hr)) return hr;
 
     registry.factory = factory;
@@ -374,6 +382,38 @@ class GlassEffectRuntime {
   bool Ready() const { return detail::Registry().registered; }
 
  private:
+  // C76: a pre-compiled blob is the same shader the compiler would have
+  // produced (same entry point, same profile, same optimisation level -- see
+  // tools/hlsl/compile_hlsl.py and the CMake rule that generates these files).
+  // Anything unreadable or too short to be a DXBC container falls through to
+  // D3DCompile, so a missing asset is slower, never broken.
+  HRESULT LoadBytecode(const std::wstring& hlslPath, const wchar_t* csoName,
+                       std::vector<BYTE>* bytecode) {
+#if defined(PRISM_C76_MUTANT_RUNTIME_SHADERS) || defined(PRISM_C76_BASELINE)
+    // Pre-C76 behaviour and its negative control: the compile always runs.
+    (void)hlslPath;
+    (void)csoName;
+    (void)bytecode;
+    return E_FAIL;
+#else
+    const size_t slash = hlslPath.find_last_of(L"\\/");
+    const std::wstring dir = slash == std::wstring::npos ? std::wstring() : hlslPath.substr(0, slash);
+    std::string bytes;
+    if (!detail::ReadFileBytes(dir + L"\\" + csoName, &bytes)) {
+      return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+    if (bytes.size() < 8 || bytes[0] != 'D' || bytes[1] != 'X' || bytes[2] != 'B' ||
+        bytes[3] != 'C') {
+      // Not a DXBC container: refuse it rather than hand D2D garbage.
+      prism::win::startup::Trace::Instance().Count("hlsl_bad_cso");
+      return E_FAIL;
+    }
+    bytecode->assign(bytes.begin(), bytes.end());
+    prism::win::startup::Trace::Instance().Count("hlsl_precompiled");
+    return S_OK;
+#endif
+  }
+
   HRESULT Compile(const std::wstring& path, const D3D_SHADER_MACRO* defines,
                   std::vector<BYTE>* bytecode) {
     std::string source;
@@ -387,6 +427,10 @@ class GlassEffectRuntime {
                                                                : path.substr(0, slash));
     ComPtr<ID3DBlob> code;
     ComPtr<ID3DBlob> errors;
+    // C76: the number of runtime HLSL compiles is the DETERMINISTIC half of the
+    // shader evidence. The pre-compiled path must make this 0; a mutant that
+    // falls back to D3DCompile makes it 2.
+    prism::win::startup::Trace::Instance().Count("hlsl_runtime_compiles");
     const HRESULT hr = D3DCompile(source.data(), source.size(), "prism_glass.hlsl", defines,
                                   &include, "main", "ps_5_0",
                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.GetAddressOf(),
@@ -602,7 +646,11 @@ class GlassIslandHost {
 
   bool Initialize(HWND hwnd, const std::wstring& shaderDir) {
     hwnd_ = hwnd;
+    // C76: four stages, each its own span -- the device, the D2D device context,
+    // the HLSL, and the composition target. They are separable work: only the
+    // last one is needed before anything is composited.
     // 1. D3D11 device (BGRA support is required for D2D interop).
+    double c76T = prism::win::startup::Trace::Instance().NowMs();
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
                                    D3D11_SDK_VERSION, d3d_.ReleaseAndGetAddressOf(), nullptr,
@@ -614,6 +662,9 @@ class GlassIslandHost {
                              d3d_.ReleaseAndGetAddressOf(), nullptr, nullptr);
       if (FAILED(hr)) return false;
     }
+    prism::win::startup::Trace::Instance().Add("d3d11_device", "D3D11CreateDevice", c76T,
+                                                prism::win::startup::Trace::Instance().NowMs() - c76T);
+    c76T = prism::win::startup::Trace::Instance().NowMs();
     ComPtr<IDXGIDevice> dxgiDevice;
     if (FAILED(d3d_.As(&dxgiDevice))) return false;
 
@@ -628,9 +679,15 @@ class GlassIslandHost {
                                          d2dContext_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return false;
 
+    prism::win::startup::Trace::Instance().Add("d2d_device_context", "D2D1CreateFactory+CreateDevice",
+                                                c76T, prism::win::startup::Trace::Instance().NowMs() - c76T);
+    c76T = prism::win::startup::Trace::Instance().NowMs();
     // 3. Optics (optional: without shaders we still composite, just flat).
     effects_.Initialize(d2dFactory_.Get(), shaderDir);
     opticsReady_ = effects_.Ready();
+    prism::win::startup::Trace::Instance().Add("hlsl_shaders", "GlassEffectRuntime::Initialize", c76T,
+                                                prism::win::startup::Trace::Instance().NowMs() - c76T);
+    c76T = prism::win::startup::Trace::Instance().NowMs();
 
     // 4. DirectComposition. Failure is a supported outcome (remote session,
     //    composition disabled): the caller falls back to direct D2D.
@@ -645,6 +702,8 @@ class GlassIslandHost {
         compositionReady_ = true;
       }
     }
+    prism::win::startup::Trace::Instance().Add("dcomp_target", "DCompositionCreateDevice+CreateTarget",
+                                                c76T, prism::win::startup::Trace::Instance().NowMs() - c76T);
     return true;
   }
 

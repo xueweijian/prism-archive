@@ -509,11 +509,23 @@ using Rect = prism::layout::Rect;
 // What this file owns is the INTERNAL rhythm of the action island (button
 // width, gaps, icon box) and the dropdown panel: things that cannot shadow a
 // band.
-inline constexpr int kButtonGap = 4;  // spacing scale: 4
+// C78: the band has a RHYTHM, not one uniform gap. Inside a Group the buttons
+// sit 4 px apart; between two Groups the gap is 12 px and a 1 px hairline marks
+// the seam. That measured strip is what makes "Archive | Modify | Inspect |
+// Find" legible without drawing a box around each block.
+inline constexpr int kButtonGap = 4;   // spacing scale: 4 (intra-group)
+inline constexpr int kGroupGap = 12;   // spacing scale: 12 (inter-group)
+// C78: the group separator hairline. 8% white is a seam, not a border -- it
+// must be findable at 100% but invisible at a glance. The pixel assertion
+// recovers the alpha from the rendered row and requires 0.06..0.10.
+inline constexpr float kGroupSeparatorAlpha = 0.08f;
+inline constexpr int kGroupSeparatorInset = 14;  // vertical air above/below
 inline constexpr int kIslandPad = 8;
 inline constexpr int kButtonMinWidth = 64;
 inline constexpr int kButtonMaxWidth = 88;
-inline constexpr int kIconBox = 20;
+// C78: 24 px glyph, 11 px label, 6 px above and below the content stack. The
+// old 20 px box read as a 16 px icon after antialiasing inside a 56 px band.
+inline constexpr int kIconBox = 24;
 inline constexpr int kNavGap = 12;  // air between the path pill and the actions
 inline constexpr int kDropdownGap = 4;
 inline constexpr int kDropdownRowHeight = 28;
@@ -536,13 +548,24 @@ inline constexpr int kDropdownMinWidth = 180;
 // The label is kButtonMinWidth wide at its narrowest, which is the width the
 // shortest usable label (64 px) needs; anything longer is ELLIPSIZED (DWrite
 // trimming with U+2026), never clipped mid-glyph.
-inline constexpr int kIconTop = 8;
-inline constexpr int kLabelGap = 4;
-inline constexpr int kLabelHeight = 16;
-inline constexpr int kLabelTop = kIconTop + kIconBox + kLabelGap;  // 32
+inline constexpr int kIconTop = 6;       // 6 px above the glyph
+inline constexpr int kLabelGap = 6;      // 6 px between glyph and word
+inline constexpr int kLabelHeight = 14;  // an 11 px run needs 14 px of box
+inline constexpr int kLabelTop = kIconTop + kIconBox + kLabelGap;  // 36
 // labelCentre.y - iconCentre.y, derived so a change to either box moves it.
 inline constexpr int kIconLabelOffset =
-    (kLabelTop + kLabelHeight / 2) - (kIconTop + kIconBox / 2);  // 22
+    (kLabelTop + kLabelHeight / 2) - (kIconTop + kIconBox / 2);  // 25
+// C78: the dropdown chevron lives BELOW the label, in the 6 px bottom margin:
+// the mnemonic already owns the top-right corner and the label owns the middle.
+// Only the two actions with Spec::hasDropdown ever paint it, and only while
+// hovered / pressed / open (Apple-style restraint: no permanent affordance).
+inline constexpr int kArrowWidth = 8;
+inline Rect ArrowBoxRect(const Rect& button) {
+  const int centre = (button.left + button.right) / 2;
+  // Directly under the label box, inside the button's own 6 px bottom margin.
+  return Rect{centre - kArrowWidth / 2, button.top + kLabelTop + kLabelHeight + 1,
+              centre + kArrowWidth / 2, button.bottom - 1};
+}
 // The narrowest label area that must fit ("解压到…" is ~44 px at 11 px): the
 // button's own floor, so every button in the band satisfies it by construction.
 inline constexpr int kMinLabelWidth = kButtonMinWidth;
@@ -567,10 +590,22 @@ struct Button {
   int group = 0;
 };
 
+// C78: one seam between two Groups. The rect is the 1 px hairline itself (a
+// crisp integer column, so its rendered alpha can be recovered exactly instead
+// of being smeared over two antialiased columns); before/after make the
+// ordering bug ("the separator sits between Inspect and Find but groups say
+// otherwise") impossible to write silently.
+struct GroupSeparator {
+  Rect rect;
+  Group before = Group::Count;
+  Group after = Group::Count;
+};
+
 struct Layout {
   Rect band;                    // == prism::layout::Layout::actionIsland
   Rect island;                  // the floating glass pill the buttons live in
   std::vector<Button> buttons;  // left to right; the "dropped" ones did not fit
+  std::vector<GroupSeparator> separators;  // one per Group boundary, left to right
   int dropped = 0;
   Rect navPill;                 // == prism::layout::NavPillRect (V1's pill)
 
@@ -595,6 +630,24 @@ struct Layout {
 //   * the island never intersects the pill;
 //   * a band that cannot hold all eight buttons DROPS the tail (the alternative
 //     -- squeezing below kButtonMinWidth -- clips the label mid-glyph).
+// The gap BEFORE action i (i >= 1): 12 px across a Group seam, 4 px inside one.
+// The table is sorted by Group, so this is a pure function of the index and a
+// new action inserted in the wrong block also changes the rhythm -- the reason
+// the model suite asserts the order is non-decreasing.
+inline constexpr int GapBefore(int index) {
+  if (index <= 0 || index >= kActionCount) return 0;
+  return kActions[static_cast<std::size_t>(index)].group ==
+                 kActions[static_cast<std::size_t>(index - 1)].group
+             ? kButtonGap
+             : kGroupGap;
+}
+
+inline constexpr int TotalGaps() {
+  int total = 0;
+  for (int i = 1; i < kActionCount; ++i) total += GapBefore(i);
+  return total;
+}
+
 inline Layout Compute(const prism::layout::Layout& window) {
   Layout out;
   out.band = window.actionIsland;
@@ -603,7 +656,7 @@ inline Layout Compute(const prism::layout::Layout& window) {
 
   const int inset = prism::layout::kContentPadding;
   const int limit = out.band.right - inset;
-  const int gaps = (kActionCount - 1) * kButtonGap;
+  const int gaps = TotalGaps();
   // The eight buttons at their floor, plus the island's own padding: what the
   // band MUST leave free if the toolbar is to be complete.
   const int actionFloor = 2 * kIslandPad + kActionCount * kButtonMinWidth + gaps;
@@ -641,7 +694,7 @@ inline Layout Compute(const prism::layout::Layout& window) {
           Button{kActions[static_cast<std::size_t>(i)].id, r,
                  static_cast<int>(kActions[static_cast<std::size_t>(i)].group)});
     }
-    x += buttonWidth + kButtonGap;
+    x += buttonWidth + GapBefore(i + 1);
   }
   // C66: "a dropped button means NO buttons". The tail-drop loop above can, in
   // principle, keep the first N buttons while reporting dropped > 0 -- and that
@@ -651,6 +704,7 @@ inline Layout Compute(const prism::layout::Layout& window) {
   // win.c66_window at 800/1280/1536 px.
   if (out.dropped > 0) {
     out.buttons.clear();
+    out.separators.clear();
     out.island = Rect{};
     return out;
   }
@@ -658,6 +712,20 @@ inline Layout Compute(const prism::layout::Layout& window) {
 
   out.island =
       Rect{left, out.band.top, out.buttons.back().rect.right + kIslandPad, out.band.bottom};
+
+  // The seams: one integer column in the exact middle of each 12 px Group gap.
+  // Positioned from the PAINTED button rects (not from x), so a 1 px rounding
+  // in the width cannot detach a separator from the buttons it divides.
+  for (std::size_t i = 1; i < out.buttons.size(); ++i) {
+    const Group before = static_cast<Group>(out.buttons[i - 1].group);
+    const Group after = static_cast<Group>(out.buttons[i].group);
+    if (before == after) continue;
+    const int seam = out.buttons[i - 1].rect.right + kGroupGap / 2;
+    out.separators.push_back(GroupSeparator{
+        Rect{seam, out.band.top + kGroupSeparatorInset, seam + 1,
+             out.band.bottom - kGroupSeparatorInset},
+        before, after});
+  }
   return out;
 }
 

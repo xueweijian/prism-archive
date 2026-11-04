@@ -734,7 +734,17 @@ class GalleryWindow {
     onMenuCommand_ = std::move(handler);
   }
   // Read-back of what the bar ACTUALLY says (see the note above).
+  //
+  // C83: the bar is OWNER-DRAWN, so the OS stores no string for its items -- the
+  // item data IS the text. The window's own MenuDrawItem is therefore the
+  // authority: it is the exact string WM_DRAWITEM paints, WM_SYSCHAR matches and
+  // the OBJID_MENU tree publishes. GetMenuStringW stays as the fallback for a
+  // bar installed by someone else (SettingsDialog::InstallMenu's no-menu path,
+  // which is a plain MF_STRING bar).
   std::wstring MenuItemText(UINT command) const {
+    for (const std::unique_ptr<MenuDrawItem>& item : menuItems_) {
+      if (item != nullptr && !item->popup && item->command == command) return item->text;
+    }
     HMENU bar = host_.hwnd ? GetMenu(host_.hwnd) : nullptr;
     if (!bar) return {};
     const int count = GetMenuItemCount(bar);
@@ -748,6 +758,9 @@ class GalleryWindow {
     return {};
   }
   std::wstring MenuTitle() const {
+    if (!menuBarItems_.empty() && menuBarItems_.front() != nullptr) {
+      return menuBarItems_.front()->text;
+    }
     HMENU bar = host_.hwnd ? GetMenu(host_.hwnd) : nullptr;
     if (!bar) return {};
     wchar_t text[256] = {};

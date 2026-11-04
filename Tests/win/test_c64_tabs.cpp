@@ -415,12 +415,18 @@ PRISM_TEST("c64 the Settings menu item is the translated label") {
     window.Dispatch(WM_DESTROY, 0, 0);
     return;
   }
-  wchar_t text[128]{};
-  const int length = GetMenuStringW(bar, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
-                                    text, ARRAYSIZE(text), MF_BYCOMMAND);
-  PRISM_CHECK(length > 0);
-  PRISM_CHECK(std::wstring(text) == translated);
-  PRISM_CHECK(std::wstring(text) != L"Settings...");
+  // C83: the bar is owner-drawn, so the OS stores NO string for the item (the
+  // item data IS the text). The assertion is unchanged -- the Settings item is
+  // still the translated label -- but it reads the window's accessor, which
+  // returns exactly the string WM_DRAWITEM paints. The COMMAND must still be on
+  // the real HMENU, so the item is genuinely installed, not just remembered.
+  PRISM_CHECK(GetMenuState(bar, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
+                           MF_BYCOMMAND) != static_cast<UINT>(-1));
+  const std::wstring text =
+      window.MenuItemText(prism::win::settingsui::SettingsDialog::kMenuSettingsId);
+  PRISM_CHECK(!text.empty());
+  PRISM_CHECK(text == translated);
+  PRISM_CHECK(text != L"Settings...");
   window.Dispatch(WM_DESTROY, 0, 0);
 }
 

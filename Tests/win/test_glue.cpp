@@ -601,7 +601,8 @@ PRISM_TEST("glue.language_switch_changes_a_menu_title") {
   PRISM_CHECK(chineseTitle != englishTitle);
 
   // The window is where "translated" has to be TRUE, not just stored: the bar is
-  // rebuilt and read back through GetMenuStringW.
+  // rebuilt and read back through the window (C83: owner-drawn items have no OS
+  // string; MenuItemText returns the text WM_DRAWITEM paints).
   GalleryWindow window;
   if (!PRISM_CHECK(window.Create(L"PrismArchive C27 menu", GetModuleHandleW(nullptr)))) return;
   window.SetMenuLabels(L"File", englishTitle, L"Exit");

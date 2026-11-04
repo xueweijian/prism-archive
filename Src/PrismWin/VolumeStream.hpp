@@ -602,8 +602,8 @@ class VolumeSplitWriter final : public abi::IOutStream {
   }
 
   std::uint64_t VolumeCapacity(size_t index) const {
+    (void)index;  // only the mutant branch reads it; g++ -Werror counts it anyway
 #ifdef PRISM_VOLUME_WRITER_MUTANT_NO_SPLIT
-    (void)index;
     return static_cast<std::uint64_t>(-1);  // mutant: never fill a volume
 #else
     return volumeSize_;  // every volume is capped; the last one grows to the cap

@@ -373,3 +373,25 @@ WARN  language table unavailable: ...\wt-c81\Src\PrismWin\Assets\Lang\en-US.json
 **截图前必须用安装目录（带 Assets）的 exe，或者先把 Assets 同步到构建目录**，否则任何语言相关结论都不可信。
 
 这条副作用暴露了真实缺陷 **A7**（低优先级）：语言包缺失时降级成"中英混杂"，而不是统一降级。已记录待修。
+### 9.10 用户 6-lane 实测驱动的一波修复（C84–C87）
+
+用户报告（`agent-desktop-tests/`）里的问题逐条复测后，修了六类**真实**缺陷。
+每条都有"先在已发布二进制上复现"这一步，并配能变红的负向控制。
+
+| 缺陷 | 根因 | 修法 | 证据 |
+|---|---|---|---|
+| 设置一击假死 / 压缩无响应 / 加密包无密码框（三个 P0） | 三个对话框 `CreateWindowExW` 都不带 `WS_VISIBLE`，且产品路径无一处 `ShowWindow`——模态锁在隐形窗口上 | 修在 `Create()` 里：owner 居中（按 work area 夹取）+ `ShowWindow(SW_SHOW)` + `UpdateWindow`；模态路径补 foreground/focus | `win.c84_dialog_visible` 9 用例 / 48 断言；产品路径断言（`WM_COMMAND 0x4B31` → 可见设置窗；隔离 `%LOCALAPPDATA%` 启动 `enc.7z` → 可见密码框、错密码留错误行、对密码后主窗打开） |
+| Ctrl+Tab / Ctrl+Shift+Tab 无效 | `HandleActionBarKey` 无条件吞 `VK_TAB`（`return true`），`HandleTabKey` 永远收不到 | band 只认领裸 Tab（`TabIsChordForStrip`） | `win_c85_keys` 3 用例 / 26 断言，走真 `WM_KEYDOWN` + 线程键状态 |
+| 错误对话框没有原因（`CreateFileW failed; `） | `InFileStream` 把 `GetLastError()` 与路径一起丢掉了 | 保留 Win32 码 + 路径，`failureReason()/failureHr()`，`OpenFailureText` 让弹窗与 stderr 同文 | `win_c85_errors` 4 用例 / 21 断言（找不到文件 / handler 拒绝 / 缺卷指名） |
+| 日志不落盘 + 时间戳 1970 | 只有 stderr sink；记录默认 0ms | `Logger::SetClock` + `DailyFileSink`（`logs/prism-YYYYMMDD.log`，按天+按大小轮转，宽路径） | `core.test_c85_log`；文件存在、首行年份正确、含 pid |
+| HUD 完成后冻结、UIA 看不见进度 | `ProgressHud` 没有终态转换 | `OnFinish(Success/Failed/Cancelled)` + `Reset`；`Role::ProgressBar` 发布；进度按**未压缩字节**算 | `win.c87_hud_lifecycle`：终态后连续两帧 `residual=0,0 px`（改前 11624 px） |
+| 预览是纯蓝渐变占位 | 卡片只画渐变兜底，没有取解码像素 | 从 `ThumbStore` contain-fit 真渲染，几何抽到 `WindowLayout::QuickLookPreviewRect/FitContain` | 注入 2×2 色卡：方差 3665（阈值 1500）四象限全中；占位时仅 304 |
+| 窗口位置不持久化 | `settings.json` 的 `window` 段只有 width/height | `SavedWindow`（含 x/y、maximized 独立位、hasPosition）+ `PlanWindowRestore` 夹取 | `c86.window` 82 断言；移动→关→开 ≤2px |
+| 最大化后取消最大化尺寸变矮 9px | 最大化分支混用 `rcNormalPosition` 与最大化时刻的 DWM 边框 | 窗口**还是普通框**时记住边框（`RememberNormalBorders`） | CI 日志抓到的 `closed=21,28 982x671` vs `normal=20,20 984x680` 断言 |
+| 状态栏分段对 UIA 不可达 | 只发布了面包屑 | 每个分段按绘制顺序发布，标签只拼一次（`StatusSegmentLabel`） | 树里读出 `未加密/方法未知/字典未知/条目 N/选中 0/压缩率 …` |
+| A4 系统白标题栏/菜单栏 | 未处理 DWM 与菜单自绘 | `DWMWA_USE_IMMERSIVE_DARK_MODE`（20→19 回退）+ `CAPTION_COLOR`/`BORDER_COLOR`；菜单 `MFT_OWNERDRAW` + 回答 `OBJID_MENU`（owner-draw 项没有 OS 文本，否则 UIA 全瞎） | 画布 luma 12.86 / 标题栏 12.08；菜单底众数 `#0B0C10`；文字对比度 16.8–21.0 |
+
+**方法论收获（第三次同型）**：报告的"严重度 1"里两条是旧构建（C82 已修），
+而真正的新 P0（三个对话框不可见）**同一个根因**解释了三个缺陷。
+CI 全绿却漏掉它们，是因为测试用 `GetDlgItem`/`BM_CLICK` 驱动**隐藏**窗口一样能过——
+**测试驱动了同一份代码，却没驱动同一份可见性**。

@@ -479,8 +479,10 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
       EncryptionLabel(status.encryption, labels),
       method + " | " +
           prism::i18n::FormatPattern(labels.dictionary, {{"size", dictionary}}),
-      prism::i18n::FormatPattern(labels.ratio,
-                                 {{"percent", FormatRatio(status.ratioPermille)}}),
+      // C81/A3: {percent} carries the CANONICAL view string -- the same one
+      // the list cell and the status band render (UI-AUDIT A3's three
+      // surfaces used to disagree). FormatRatio stays for the bar fraction.
+      prism::i18n::FormatPattern(labels.ratio, {{"percent", status.ratioView}}),
   };
   const char* icons[3] = {"lock", "bolt", "chart"};
   for (int i = 0; i < 3; ++i) {

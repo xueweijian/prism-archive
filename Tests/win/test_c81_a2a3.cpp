@@ -1,0 +1,454 @@
+// PrismArchive -- card C81: A2 (the list header rendered as a selected row)
+// and A3 (the compression ratio contradicting itself in three places).
+//
+// A2's pixel contract (docs/UI-AUDIT.md A2), measured on RENDERED FRAMES:
+//   1. no accent-dominant ("blue-led") pixel anywhere in the header band;
+//   2. the header's background IS the canvas (flat, no panel, no ghost);
+//   3. a 1 px separator sits on the header's last row (>= 3 levels vs canvas).
+//      The ghost half of A2 is asserted differentially: the band renders
+//      IDENTICALLY with the C77 backdrop layer ON and OFF (the blurred still
+//      can no longer bleed header text under the crisp labels).
+//
+// A3's consistency contract: for the SAME byte pair the three surfaces -- the
+// list cell, the sidebar info card, the status band -- must carry the SAME
+// string from prism::CompressionRatioView. The painters render these strings
+// VERBATIM through DrawText (no re-formatting on the way to pixels), so the
+// primitive read-back below IS the rendered text byte for byte.
+//
+// Negative controls (CONTRACTS D3 + D26 + D27; same source, compile-time arms):
+//   PRISM_C81_MUTANT_HEADER_SELECTED         the header gets the selected-row
+//                                            vocabulary -> A2 assertions red
+//   PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN the band falls back to the
+//                                            hardcoded 未知 -> A3 assertions red
+// Each mutant is registered under PASS_REGULAR_EXPRESSION (never WILL_FAIL,
+// D26); the CAUGHT marker prints at the FIRST failed assertion (D27).
+//
+// /WX- is the project's Windows-test convention: SDK headers are not /W4.
+#include <windows.h>
+
+#include <d2d1.h>
+#include <d2d1helper.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "../mini_test.hpp"
+#include "../../Src/PrismCore/CompressionRatio.hpp"
+#include "../../Src/PrismCore/ListLayout.hpp"
+#include "../../Src/PrismCore/SidebarModel.hpp"
+#include "../../Src/PrismCore/WindowLayout.hpp"
+#include "../../Src/PrismWin/GalleryRenderer.hpp"
+#include "../../Src/PrismWin/SidebarView.hpp"
+
+#if defined(PRISM_C81_MUTANT_HEADER_SELECTED)
+inline constexpr const char* kMutantBanner = "C81 MUTANT ACTIVE: header_selected";
+inline constexpr const char* kMutantMarker = "C81 MUTATION CAUGHT: header_selected";
+#elif defined(PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN)
+inline constexpr const char* kMutantBanner = "C81 MUTANT ACTIVE: status_hardcoded_unknown";
+inline constexpr const char* kMutantMarker = "C81 MUTATION CAUGHT: status_hardcoded_unknown";
+#else
+inline constexpr const char* kMutantBanner = nullptr;
+inline constexpr const char* kMutantMarker = nullptr;
+#endif
+
+namespace {
+
+constexpr UINT32 kWidth = 1280;
+constexpr UINT32 kHeight = 800;
+
+using Microsoft::WRL::ComPtr;
+using prism::list::SortItem;
+
+IWICImagingFactory* gWic = nullptr;
+
+struct Frame {
+  UINT32 width = 0;
+  UINT32 height = 0;
+  std::vector<UINT32> pixels;  // BGRA, row major
+
+  bool In(int x, int y) const {
+    return x >= 0 && y >= 0 && x < static_cast<int>(width) &&
+           y < static_cast<int>(height);
+  }
+  UINT32 At(int x, int y) const {
+    return pixels[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
+  }
+  int Channel(int x, int y, int shift) const {
+    return static_cast<int>((At(x, y) >> shift) & 0xFFu);
+  }
+};
+
+struct Box {
+  int left = 0, top = 0, right = 0, bottom = 0;
+};
+
+// The canvas colour as the render target quantizes kBackdrop to bytes.
+UINT32 CanvasPixel() {
+  const D2D1_COLOR_F c = prism::win::gallery::GalleryRenderer::kBackdrop;
+  const auto q = [](float v) {
+    return static_cast<UINT32>(std::min(255.0f, std::max(0.0f, v * 255.0f + 0.5f)));
+  };
+  return (q(c.a) << 24) | (q(c.r) << 16) | (q(c.g) << 8) | q(c.b);
+}
+
+bool NearColor(UINT32 a, UINT32 b, int tolerance) {
+  for (int shift = 0; shift <= 16; shift += 8) {
+    const int d = static_cast<int>((a >> shift) & 0xFFu) -
+                  static_cast<int>((b >> shift) & 0xFFu);
+    if (d < -tolerance || d > tolerance) return false;
+  }
+  return true;
+}
+
+// "Blue-led": the accent token (#4F8CFF family) dominates the blue channel.
+bool AccentDominant(UINT32 color) {
+  const int r = static_cast<int>((color >> 16) & 0xFFu);
+  const int g = static_cast<int>((color >> 8) & 0xFFu);
+  const int b = static_cast<int>(color & 0xFFu);
+  return b - (std::max)(r, g) > 30;
+}
+
+struct Render {
+  bool ok = false;
+  Frame frame;
+};
+
+SortItem File(const char* name, std::uint64_t size, std::uint64_t packed) {
+  SortItem item;
+  item.name = name;
+  item.size = size;
+  item.packedSize = packed;
+  return item;
+}
+
+prism::win::gallery::GalleryRenderer::Scene ListScene(
+    std::vector<SortItem>* rows, const prism::layout::StatusInfo& status) {
+  prism::win::gallery::GalleryRenderer::Scene scene;
+  scene.listMode = true;
+  scene.listItems = rows;
+  scene.status = status;
+  scene.breadcrumb = L"one.7z";
+  return scene;
+}
+
+bool RenderScene(const prism::win::gallery::GalleryRenderer::Scene& scene, Render* out) {
+  prism::win::gallery::GalleryRenderer renderer;
+  if (FAILED(renderer.Initialize())) return false;
+  ComPtr<IWICBitmap> bitmap;
+  if (FAILED(gWic->CreateBitmap(kWidth, kHeight, GUID_WICPixelFormat32bppPBGRA,
+                                WICBitmapCacheOnDemand,
+                                bitmap.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+      D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+  ComPtr<ID2D1RenderTarget> target;
+  if (FAILED(renderer.Factory()->CreateWicBitmapRenderTarget(bitmap.Get(), props,
+                                                             target.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  if (FAILED(renderer.CreateDeviceResources(target.Get()))) return false;
+  target->BeginDraw();
+  renderer.Draw(target.Get(), scene);
+  if (FAILED(target->EndDraw())) return false;
+
+  WICRect rc{0, 0, static_cast<INT>(kWidth), static_cast<INT>(kHeight)};
+  ComPtr<IWICBitmapLock> lock;
+  if (FAILED(bitmap->Lock(&rc, WICBitmapLockRead, lock.ReleaseAndGetAddressOf()))) {
+    return false;
+  }
+  UINT stride = 0;
+  UINT size = 0;
+  BYTE* data = nullptr;
+  if (FAILED(lock->GetStride(&stride)) || FAILED(lock->GetDataPointer(&size, &data))) {
+    return false;
+  }
+  out->frame.width = kWidth;
+  out->frame.height = kHeight;
+  out->frame.pixels.resize(static_cast<size_t>(kWidth) * kHeight);
+  for (UINT32 y = 0; y < kHeight; ++y) {
+    std::memcpy(out->frame.pixels.data() + static_cast<size_t>(y) * kWidth,
+                data + static_cast<size_t>(y) * stride, static_cast<size_t>(kWidth) * 4);
+  }
+  out->ok = true;
+  return true;
+}
+
+// The layout the renderer itself computes for this scene shape (no rail: the
+// test scenes carry no sidebar), so every rectangle below is THE rectangle.
+prism::layout::Layout TestLayout() {
+  return prism::layout::Compute(static_cast<int>(kWidth), static_cast<int>(kHeight),
+                                /*railColumn=*/false, /*listMode=*/true);
+}
+
+// A2, assertions 1-3, on one frame.
+void AssertHeaderPixels(const Render& painted, const char* tag) {
+  const prism::layout::Layout layout = TestLayout();
+  const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
+  const UINT32 canvas = CanvasPixel();
+
+  // 1. no accent-dominant pixel in the band (no ring, no accent panel).
+  int accentPixels = 0;
+  for (int y = header.top; y < header.bottom; ++y) {
+    for (int x = header.left; x < header.right; ++x) {
+      if (AccentDominant(painted.frame.At(x, y))) ++accentPixels;
+    }
+  }
+  std::printf("  [c81] %s accent-led pixels in header=%d\n", tag, accentPixels);
+  PRISM_CHECK_EQ(accentPixels, 0);
+
+  // 2. the band's background IS the canvas: two glyph-free strips (above the
+  //    labels and between them and the rule) sampled across the full width.
+  int offCanvas = 0;
+  int sampled = 0;
+  const int strips[2] = {header.top + 1, header.top + 2};
+  for (int y : strips) {
+    for (int x = header.left + 1; x < header.right - 1; ++x) {
+      ++sampled;
+      if (!NearColor(painted.frame.At(x, y), canvas, 1)) ++offCanvas;
+    }
+  }
+  std::printf("  [c81] %s off-canvas bg samples=%d/%d\n", tag, offCanvas, sampled);
+  PRISM_CHECK_EQ(offCanvas, 0);
+
+  // 3. the 1 px separator on the header's LAST row: >= 3 levels from the
+  //    canvas on most of the row; the row just above it stays bare canvas.
+  int rulePixels = 0;
+  int ruleRun = 0;
+  const int ruleY = header.bottom - 1;
+  for (int x = header.left; x < header.right; ++x) {
+    UINT32 c = painted.frame.At(x, ruleY);
+    int maxDelta = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+      maxDelta = (std::max)(maxDelta,
+                            std::abs(static_cast<int>((c >> shift) & 0xFFu) -
+                                     static_cast<int>((canvas >> shift) & 0xFFu)));
+    }
+    if (maxDelta >= 3) ++rulePixels;
+  }
+  const int width = header.right - header.left;
+  int aboveRule = 0;
+  for (int x = header.left; x < header.right; ++x) {
+    if (!NearColor(painted.frame.At(x, header.bottom - 2), canvas, 1)) ++aboveRule;
+  }
+  ruleRun = rulePixels;
+  std::printf("  [c81] %s separator run=%d/%d above-rule ink=%d\n", tag, ruleRun, width,
+              aboveRule);
+  PRISM_CHECK(ruleRun >= (width * 4) / 5);
+  PRISM_CHECK_EQ(aboveRule, 0);
+}
+
+// A2's ghost half: backdrop ON must not change a single header pixel.
+void AssertBandIndependentOfBackdrop(const Render& with, const Render& without) {
+  const prism::layout::Layout layout = TestLayout();
+  const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
+  int differing = 0;
+  for (int y = header.top; y < header.bottom; ++y) {
+    for (int x = header.left; x < header.right; ++x) {
+      if (with.frame.At(x, y) != without.frame.At(x, y)) ++differing;
+    }
+  }
+  std::printf("  [c81] header pixels changed by the backdrop layer=%d\n", differing);
+  PRISM_CHECK_EQ(differing, 0);
+}
+
+// The audit's replica: one 15 B file packed into 19 bytes.
+std::vector<SortItem> AuditRows() {
+  return {File("one.txt", 15, 19)};
+}
+
+const std::string kGrowToken = prism::CompressionRatioView(15, 19);  // ">100% (126.7%)"
+
+const prism::layout::StatusInfo GrowStatus() {
+  prism::layout::StatusInfo info;
+  info.crypto = prism::layout::CryptoState::Unknown;
+  info.ratioView = prism::CompressionRatioView(15, 19);
+  return info;
+}
+
+// The sidebar info card's third capsule line, as the view builds it.
+std::string CardRatioLine(prism::sidebar::Model* model) {
+  const prism::win::sidebar::Layout card =
+      prism::win::sidebar::Build(*model, prism::win::sidebar::Metrics{});
+  for (const prism::win::sidebar::Command& command : card.commands) {
+    if (command.kind == prism::win::sidebar::PrimKind::StatusText &&
+        command.text.find("RATIO") != std::string::npos) {
+      return command.text;
+    }
+  }
+  return {};
+}
+
+const prism::layout::StatusSegment* RatioSegment(
+    const std::vector<prism::layout::StatusSegment>& segments) {
+  for (const auto& segment : segments) {
+    if (segment.id == prism::layout::StatusId::Ratio) return &segment;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// A2: the header is flat text + a 1 px rule
+// ---------------------------------------------------------------------------
+PRISM_TEST("c81.a2.header_flat_on_canvas") {
+  std::vector<SortItem> rows = AuditRows();
+  Render plain;
+  if (!PRISM_CHECK(RenderScene(ListScene(&rows, GrowStatus()), &plain))) return;
+  AssertHeaderPixels(plain, "plain");
+}
+
+PRISM_TEST("c81.a2.header_with_glass_backdrop") {
+  std::vector<SortItem> rows = AuditRows();
+  prism::win::gallery::GalleryRenderer::Scene scene = ListScene(&rows, GrowStatus());
+  scene.backdropRefraction = true;
+  scene.glassPanels = true;
+  Render glass;
+  if (!PRISM_CHECK(RenderScene(scene, &glass))) return;
+  AssertHeaderPixels(glass, "glass");
+
+  Render plain;
+  if (!PRISM_CHECK(RenderScene(ListScene(&rows, GrowStatus()), &plain))) return;
+  AssertBandIndependentOfBackdrop(glass, plain);
+}
+
+// ---------------------------------------------------------------------------
+// A3: one string, three surfaces (primitive read-back == rendered text)
+// ---------------------------------------------------------------------------
+PRISM_TEST("c81.a3.growth_consistency") {
+  // 1. the canonical view itself carries the honest direction AND the value.
+  PRISM_CHECK_EQ(kGrowToken, std::string(">100% (126.7%)"));
+  PRISM_CHECK(kGrowToken.find(">100%") != std::string::npos);
+
+  // 2. the list cell.
+  std::vector<SortItem> rows = AuditRows();
+  const std::string cell = prism::list::RatioCellText(rows[0]);
+  PRISM_CHECK_EQ(cell, kGrowToken);
+
+  // 3. the info card (its totals ARE the single file's bytes here).
+  std::vector<prism::ArchiveItem> catalog;
+  {
+    prism::ArchiveItem item;
+    item.path = "one.txt";
+    item.index = 0;
+    item.size = 15;
+    item.packSize = 19;
+    catalog.push_back(item);
+  }
+  prism::sidebar::Model model(&catalog);
+  const prism::sidebar::Status sidebarStatus = model.ComputeStatus();
+  PRISM_CHECK_EQ(sidebarStatus.ratioView, kGrowToken);
+  const std::string cardLine = CardRatioLine(&model);
+  PRISM_CHECK_EQ(cardLine, std::string("RATIO ") + kGrowToken);
+
+  // 4. the status band: label stays 压缩率, the value IS the canonical string.
+  const prism::layout::Layout layout = TestLayout();
+  const prism::layout::StatusInfo info = GrowStatus();
+  const prism::layout::StatusSegment* segment =
+      RatioSegment(prism::layout::StatusSegments(layout, info));
+  PRISM_CHECK(segment != nullptr);
+  if (segment != nullptr) {
+    PRISM_CHECK_EQ(segment->text, std::string_view("压缩率"));  // the mutant arm reds HERE
+    PRISM_CHECK_EQ(segment->valueText, std::string_view(kGrowToken));
+  }
+
+  // 5. byte-identical across the three surfaces (the audit's ①).
+  PRISM_CHECK_EQ(cell, sidebarStatus.ratioView);
+  PRISM_CHECK_EQ(cardLine.substr(6), sidebarStatus.ratioView);
+  if (segment != nullptr) {
+    PRISM_CHECK_EQ(std::string(segment->valueText), sidebarStatus.ratioView);
+  }
+}
+
+PRISM_TEST("c81.a3.zero_bytes_unknown_everywhere") {
+  std::vector<SortItem> rows = {File("empty.txt", 0, 0)};
+  const std::string cell = prism::list::RatioCellText(rows[0]);
+  PRISM_CHECK_EQ(cell, std::string("未知"));
+
+  std::vector<prism::ArchiveItem> catalog;
+  {
+    prism::ArchiveItem item;
+    item.path = "empty.txt";
+    item.index = 0;
+    catalog.push_back(item);
+  }
+  prism::sidebar::Model model(&catalog);
+  const prism::sidebar::Status sidebarStatus = model.ComputeStatus();
+  PRISM_CHECK_EQ(sidebarStatus.ratioView, std::string("未知"));
+  PRISM_CHECK_EQ(CardRatioLine(&model), std::string("RATIO 未知"));
+
+  prism::layout::StatusInfo info;
+  info.ratioView = prism::CompressionRatioView(0, 0);
+  const prism::layout::Layout layout = TestLayout();
+  const prism::layout::StatusSegment* segment =
+      RatioSegment(prism::layout::StatusSegments(layout, info));
+  PRISM_CHECK(segment != nullptr);
+  if (segment != nullptr) {
+    PRISM_CHECK_EQ(std::string(segment->valueText), std::string("未知"));
+    PRISM_CHECK_EQ(segment->text, std::string_view("压缩率"));
+  }
+}
+
+PRISM_TEST("c81.a3.shrink_consistency") {
+  std::vector<SortItem> rows = {File("docs.zip", 10000, 4280)};
+  const std::string token = prism::CompressionRatioView(10000, 4280);
+  PRISM_CHECK_EQ(token, std::string("42.8%"));
+
+  std::vector<prism::ArchiveItem> catalog;
+  {
+    prism::ArchiveItem item;
+    item.path = "docs.zip";
+    item.index = 0;
+    item.size = 10000;
+    item.packSize = 4280;
+    catalog.push_back(item);
+  }
+  prism::sidebar::Model model(&catalog);
+  PRISM_CHECK_EQ(model.ComputeStatus().ratioView, token);
+  PRISM_CHECK_EQ(CardRatioLine(&model), std::string("RATIO ") + token);
+  PRISM_CHECK_EQ(prism::list::RatioCellText(rows[0]), token);
+
+  prism::layout::StatusInfo info;
+  info.ratioView = token;
+  const prism::layout::Layout layout = TestLayout();
+  const prism::layout::StatusSegment* segment =
+      RatioSegment(prism::layout::StatusSegments(layout, info));
+  PRISM_CHECK(segment != nullptr);
+  if (segment != nullptr) {
+    PRISM_CHECK_EQ(segment->text, std::string_view("压缩率"));
+    PRISM_CHECK_EQ(std::string(segment->valueText), token);
+  }
+}
+
+int main(int argc, char** argv) {
+  if (kMutantBanner != nullptr) std::printf("%s\n", kMutantBanner);
+  if (kMutantMarker != nullptr) prism::test::SetMutationVerdict(kMutantMarker);
+
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+    std::puts("FAIL: COM init failed");
+    return 1;
+  }
+  if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_IWICImagingFactory,
+                              reinterpret_cast<void**>(&gWic)))) {
+    std::puts("FAIL: WIC factory");
+    return 1;
+  }
+  const int result = prism::test::RunAll(argc, argv);
+  if (result != 0) {
+    std::puts("C81 A2A3 CHECKS FAILED");
+    return 1;
+  }
+  std::puts("ALL C81 A2A3 CHECKS PASSED");
+  return 0;
+}

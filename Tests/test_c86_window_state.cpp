@@ -52,6 +52,23 @@ constexpr Rect kWork{0, 0, 1536, 816};
 
 bool Inside(const Rect& inner, const Rect& outer) { return outer.Contains(inner); }
 
+// C86 (ASan, CI): build a band from a StatusInfo that does NOT outlive the call
+// -- the exact spelling that cost a stack-use-after-scope in win.c80_a11y and
+// c86.window on the ASan runner:
+//     for (auto& s : StatusSegments(layout, StatusForPublish())) { ... }
+// The range-init temporary dies before the first iteration, so every segment
+// that keeps a VIEW into it is read out of dead stack. The segments own their
+// text now; this function makes the pattern explicit so the ASan lane keeps us
+// honest if a future "optimisation" turns a std::string back into a view.
+std::vector<StatusSegment> SegmentsFromTemporary(const Layout& layout) {
+  StatusInfo info;
+  info.crypto = CryptoState::Unencrypted;
+  info.ratioView = "87.5%";
+  info.itemCount = 2;
+  info.selectedCount = 0;
+  return prism::layout::StatusSegments(layout, info);
+}
+
 #if defined(PRISM_C86_MUTANT_NO_POSITION)
 constexpr const char* kMutation = "no_position";
 constexpr const char* kCaught = "C86 MUTATION CAUGHT: no_position";
@@ -235,6 +252,23 @@ PRISM_TEST("c86 an unknown ratio and empty counts say so instead of inventing nu
   PRISM_CHECK_EQ(labels.back(), std::string("压缩率未知"));
   PRISM_CHECK_EQ(labels.front(), std::string("加密状态未知"));
   PRISM_CHECK_EQ(labels[3], std::string("条目 3"));
+}
+
+PRISM_TEST("c86 a band label owns its text (no view into the caller's StatusInfo)") {
+  const Layout layout = prism::layout::Compute(1600, 800, false, true);
+  const std::vector<StatusSegment> segments = SegmentsFromTemporary(layout);
+  if (!PRISM_CHECK(!segments.empty())) return;
+  // The ratio is the LAST label, and it is the one that used to hold a view into
+  // StatusInfo::ratioView -- a std::string owned by the caller.
+  PRISM_CHECK_EQ(StatusSegmentLabel(segments.back()), std::string("压缩率 87.5%"));
+  // Reading every label here is what the accessibility tree and the painter do;
+  // on the ASan lane a view-based implementation dies at this line.
+  std::string all;
+  for (const StatusSegment& segment : segments) {
+    const std::string label = StatusSegmentLabel(segment);
+    if (!label.empty()) all += label;
+  }
+  PRISM_CHECK(all.find("压缩率 87.5%") != std::string::npos);
 }
 
 PRISM_TEST("c86 a compressing archive shows progress instead of a ratio") {

@@ -592,9 +592,18 @@ struct StatusSegment {
   std::string_view text;
   int value = -1;  // Ratio only: the percentage, or -1 when unknown/compressing
   // C81/A3: the canonical ratio string. When non-empty the painter renders
-  // text + ' ' + valueText (no integer append); it travels as a view into
-  // StatusInfo::ratioView, which the scene owns for the whole frame.
-  std::string_view valueText;
+  // text + ' ' + valueText (no integer append).
+  //
+  // C86 (ASan, CI): this USED to be a std::string_view -- "a view into
+  // StatusInfo::ratioView, which the scene owns for the whole frame". That
+  // contract is invisible at the call site and one ordinary spelling breaks it:
+  //     for (auto& s : StatusSegments(layout, StatusForPublish())) { ... }
+  // The StatusInfo is a TEMPORARY there, destroyed at the end of the range-init,
+  // so every ratio segment kept a view into a dead std::string. It cost a
+  // stack-use-after-scope in win.c80_a11y and in c86.window on the ASan runner.
+  // Owning the bytes is a few characters per frame and makes the vector
+  // self-contained, which is what a caller has every right to assume.
+  std::string valueText;
 };
 
 inline constexpr int kStatusPad = 12;
@@ -650,8 +659,8 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
                                          RatioText(info)};
   const int rightValues[] = {info.itemCount, info.selectedCount,
                              (info.compressing ? -1 : info.ratioPercent)};
-  const std::string_view rightValueTexts[] = {{}, {},
-      (info.compressing ? std::string_view{} : std::string_view{info.ratioView})};
+  const std::string rightValueTexts[] = {{}, {},
+      (info.compressing ? std::string() : info.ratioView)};
   int rx = rightStart;
   for (int i = 0; i < 3; ++i) {
     const int width = (std::max)(kStatusSegmentMinWidth, rightWidths[i]);

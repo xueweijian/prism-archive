@@ -2710,8 +2710,14 @@ class GalleryWindow {
     status.value = WideToUtf8(breadcrumbText_);
     status.bounds = layout_.statusBar;
     if (kPublishStatusSegments) {
-      for (const prism::layout::StatusSegment& segment :
-           prism::layout::StatusSegments(layout_, StatusForPublish())) {
+      // C86 (ASan, CI): the StatusInfo is a NAMED local on purpose. Handing
+      // StatusForPublish() straight to StatusSegments() makes it a temporary
+      // that dies at the end of the range-init, and any segment that views into
+      // it (the ratio's text was one) is then read out of a dead stack frame.
+      const prism::layout::StatusInfo info = StatusForPublish();
+      const std::vector<prism::layout::StatusSegment> segments =
+          prism::layout::StatusSegments(layout_, info);
+      for (const prism::layout::StatusSegment& segment : segments) {
         const std::string label = prism::layout::StatusSegmentLabel(segment);
         if (label.empty()) continue;  // the divider is ink, not a reading
         Node part;

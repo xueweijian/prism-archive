@@ -598,9 +598,10 @@ class RollingFileSink {
     Open();
   }
 
-  // The narrow form stays for the tests and for callers that already hold UTF-8.
-  RollingFileSink(std::string basePath, size_t maxBytes, size_t maxFiles)
-      : RollingFileSink(std::filesystem::path(std::move(basePath)), maxBytes, maxFiles) {}
+  // Exactly ONE constructor: a const char*/std::string literal must not be able to
+  // pick between a path overload and a string overload (MSVC C2668 on
+  // RollingFileSink("", 100, 2)). std::filesystem::path accepts both, so there is
+  // nothing left to disambiguate.
 
   ~RollingFileSink() { Close(); }
 

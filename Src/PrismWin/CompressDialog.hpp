@@ -819,8 +819,13 @@ class CompressDialog {
   DWORD lastError() const { return lastError_; }
   int missingControlId() const { return missingControlId_; }
 
-  bool Create(HINSTANCE instance, const std::wstring& title = L"Create archive") {
+  // C84: same contract as SettingsDialog::Create -- the window shows itself and
+  // centers over its owner. The measured S2-5 defect was exactly the missing
+  // ShowWindow: "Compress" created a perfectly good dialog nobody could see.
+  bool Create(HINSTANCE instance, const std::wstring& title = L"Create archive",
+              HWND owner = nullptr) {
     instance_ = instance;
+    owner_ = owner;
     EnsureCommonControls();
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -844,8 +849,12 @@ class CompressDialog {
     hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, title.c_str(),
                             WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                             windowWidth, windowHeight, nullptr, nullptr, instance, this);
-    if (hwnd_ == nullptr) lastError_ = GetLastError();
-    return hwnd_ != nullptr;
+    if (hwnd_ == nullptr) {
+      lastError_ = GetLastError();
+      return false;
+    }
+    ShowCreated();
+    return true;
   }
 
   void Destroy() {
@@ -1233,6 +1242,8 @@ class CompressDialog {
     }
   }
 
+  void ShowCreated();  // C84: center + ShowWindow + UpdateWindow, one place
+  void CenterOnOwner();
   HWND MakeControl(const wchar_t* klass, const wchar_t* text, DWORD style, int id, int x, int y,
                    int width, int height, DWORD exStyle = 0) {
     // V3: every stock control is an INVISIBLE message/state adapter. The pixels
@@ -1840,6 +1851,7 @@ class CompressDialog {
 
   HWND hwnd_ = nullptr;
   HINSTANCE instance_ = nullptr;
+  HWND owner_ = nullptr;  // C84: center over it; never owned by it (WS_POPUP)
   DWORD lastError_ = 0;
   int missingControlId_ = 0;
   DialogState state_;
@@ -1874,6 +1886,43 @@ class CompressDialog {
   AcceptHandler onAccept_;
   BrowseHandler onBrowse_;
 };
+
+// C84: one place that turns a created window into a visible one. The negative
+// control PRISM_C84_MUTANT_NO_SHOW compiles the ShowWindow calls out, so the
+// "created means visible" assertion in c84-dialog-visible.cmake goes red and
+// the mutant prints C84 MUTATION CAUGHT: no_show (CONTRACTS D26/D27).
+inline void CompressDialog::ShowCreated() {
+  CenterOnOwner();
+#if !defined(PRISM_C84_MUTANT_NO_SHOW)
+  ShowWindow(hwnd_, SW_SHOW);
+  UpdateWindow(hwnd_);
+#endif
+}
+
+// Center over the owner's rectangle and keep the card inside the monitor's work
+// area. No owner -> CW_USEDEFAULT stays as it was (the app's own dialog passes
+// the gallery so the user never has to hunt for it in a screen corner).
+inline void CompressDialog::CenterOnOwner() {
+  if (hwnd_ == nullptr || owner_ == nullptr) return;
+  RECT ownerRect{};
+  RECT selfRect{};
+  if (GetWindowRect(owner_, &ownerRect) == FALSE || GetWindowRect(hwnd_, &selfRect) == FALSE) {
+    return;
+  }
+  const int width = selfRect.right - selfRect.left;
+  const int height = selfRect.bottom - selfRect.top;
+  int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
+  int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
+  MONITORINFO monitor{};
+  monitor.cbSize = sizeof(monitor);
+  if (GetMonitorInfoW(MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE) {
+    if (x + width > monitor.rcWork.right) x = monitor.rcWork.right - width;
+    if (y + height > monitor.rcWork.bottom) y = monitor.rcWork.bottom - height;
+    if (x < monitor.rcWork.left) x = monitor.rcWork.left;
+    if (y < monitor.rcWork.top) y = monitor.rcWork.top;
+  }
+  SetWindowPos(hwnd_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 #endif  // _WIN32
 

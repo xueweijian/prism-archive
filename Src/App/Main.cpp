@@ -478,7 +478,11 @@ std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
   }
 
   prism::win::pwd_ui::PasswordDialog dialog;
+  // C84: Create shows + centers the gate; FocusInput is the modal half (a
+  // visible dialog with no foreground/keyboard still looks hung).
   if (!dialog.Create(instance, L"PrismArchive")) return std::wstring();
+  // C84: Start() is what makes the password field editable (canSubmit), so the
+  // focus call belongs after it -- focusing a disabled edit is a silent no-op.
   dialog.SetConfig(config);
 
   prism::app::PasswordProbeRunner runner;
@@ -515,6 +519,9 @@ std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
     if (remember) prism::app::RememberPassword(vaultPath, password);
   });
   dialog.Start();
+  // C84: the gate's visible half is Create(); its USABLE half is foreground +
+  // keyboard on the field, so the user can type instead of clicking first.
+  dialog.FocusInput();
 
   MSG message{};
   while (dialog.Hwnd() != nullptr) {
@@ -1585,7 +1592,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           });
           return true;  // the dialog closes; the worker reports through the HUD
         });
-    if (!compressDialog->Create(instance, compressHeadline)) {
+    // C84: the owner is what makes Create() center the card over the gallery
+    // instead of leaving it at the screen's default corner.
+    if (!compressDialog->Create(instance, compressHeadline, window.Hwnd())) {
       compressDialog.reset();
       window.SetStatus(compressFailPrefix);
     }

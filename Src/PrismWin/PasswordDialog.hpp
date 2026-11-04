@@ -131,8 +131,14 @@ class PasswordDialog {
   DWORD lastError() const { return lastError_; }
   int missingControlId() const { return missingControlId_; }
 
-  bool Create(HINSTANCE instance, const std::wstring& title = L"Password required") {
+  // C84: the password gate is the worst case of the invisible-dialog defect --
+  // the app looked hung for as long as the dialog was up (measured: process
+  // alive, zero visible windows). Showing and centering are part of Create, so
+  // the product path (RunPasswordGate) and every test get them for free.
+  bool Create(HINSTANCE instance, const std::wstring& title = L"Password required",
+              HWND owner = nullptr) {
     instance_ = instance;
+    owner_ = owner;
     EnsureCommonControls();
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -152,8 +158,21 @@ class PasswordDialog {
                             WS_CAPTION | WS_SYSMENU | WS_OVERLAPPED | WS_CLIPCHILDREN,
                             CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left,
                             frame.bottom - frame.top, nullptr, nullptr, instance, this);
-    if (hwnd_ == nullptr) lastError_ = GetLastError();
-    return hwnd_ != nullptr;
+    if (hwnd_ == nullptr) {
+      lastError_ = GetLastError();
+      return false;
+    }
+    ShowCreated();
+    return true;
+  }
+
+  // C84: the modal gate calls this after Create -- a visible dialog that never
+  // takes the foreground/keyboard still reads as a frozen app. Public so the
+  // product path and the Windows suite run the same code.
+  void FocusInput() {
+    if (hwnd_ == nullptr) return;
+    SetForegroundWindow(hwnd_);
+    SetFocus(passwordEdit_);
   }
 
   void Destroy() {
@@ -610,8 +629,12 @@ class PasswordDialog {
     return line;
   }
 
+  void ShowCreated();  // C84: center + ShowWindow + UpdateWindow, one place
+  void CenterOnOwner();
+
   HWND hwnd_ = nullptr;
   HINSTANCE instance_ = nullptr;
+  HWND owner_ = nullptr;  // C84: center over it when the app has a window
   DWORD lastError_ = 0;
   int missingControlId_ = 0;
   bool syncing_ = false;
@@ -637,6 +660,48 @@ class PasswordDialog {
   OpenedHandler onOpened_;
   CancelHandler onCancel_;
 };
+
+// C84: one place that turns a created window into a visible one. The negative
+// control PRISM_C84_MUTANT_NO_SHOW compiles the ShowWindow calls out, so the
+// visibility assertion in c84-dialog-visible.cmake goes red (D26/D27).
+inline void PasswordDialog::ShowCreated() {
+  CenterOnOwner();
+#if !defined(PRISM_C84_MUTANT_NO_SHOW)
+  ShowWindow(hwnd_, SW_SHOW);
+  UpdateWindow(hwnd_);
+#endif
+}
+
+// Centered over the owner when the app has one, otherwise over the primary
+// work area: the startup gate runs before the gallery exists (measured: the
+// dialog used to open at CW_USEDEFAULT and, with no ShowWindow, not at all).
+inline void PasswordDialog::CenterOnOwner() {
+  if (hwnd_ == nullptr) return;
+  RECT selfRect{};
+  if (GetWindowRect(hwnd_, &selfRect) == FALSE) return;
+  const int width = selfRect.right - selfRect.left;
+  const int height = selfRect.bottom - selfRect.top;
+  RECT area{};
+  if (owner_ != nullptr) {
+    RECT ownerRect{};
+    if (GetWindowRect(owner_, &ownerRect) != FALSE) {
+      area.left = ownerRect.left;
+      area.top = ownerRect.top;
+      area.right = ownerRect.right;
+      area.bottom = ownerRect.bottom;
+    }
+  }
+  if (area.right <= area.left || area.bottom <= area.top) {
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0) == FALSE) return;
+  }
+  int x = area.left + ((area.right - area.left) - width) / 2;
+  int y = area.top + ((area.bottom - area.top) - height) / 2;
+  if (x < area.left) x = area.left;
+  if (y < area.top) y = area.top;
+  if (x + width > area.right) x = area.right - width;
+  if (y + height > area.bottom) y = area.bottom - height;
+  SetWindowPos(hwnd_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 }  // namespace prism::win::pwd_ui
 

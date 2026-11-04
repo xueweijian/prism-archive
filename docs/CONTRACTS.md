@@ -106,6 +106,12 @@ C46 的 `mutation.session_restore` 在满载时跑满 600 秒：它**在等一�
    必须补 password 给 `MemoryExtractCallback`，或者在入口拒绝加密条目。
 3. **`ReplaceFileW` 在 `InFileStream`（`FILE_SHARE_READ`）仍持有原包时必失败**（`ERROR_SHARING_VIOLATION`）。
    任何"替换已打开归档"的路径（编辑、追加、重新压缩）**必须先关 reader**，再替换。
+
+**D30 附注（C82 实测，2026-11-04）**：头加密包（header-encrypted）在 **verify 阶段会再次索要密码**——
+`VerifyIntegrity` 的回调若不答 `ICryptoGetTextPassword`，即使 open 时密码正确，
+verify 仍死于 `entry 4294967295 failed with operation result 1`。
+修复：把密码传给 verify 的回调（同 open）。凡新增"解压/校验"路径都要自问：**密码喂给 open 之后，喂给 verify 了吗？**
+
 ### D31 新测试代码必须在 g++ -Werror 下干净（MSVC 不报的三种错）
 
 CI 的 Linux lane 用 `-Wall -Wextra -Wpedantic -Werror` 编 PrismCore 测试，MSVC 不报的三类错误会在这里翻车：

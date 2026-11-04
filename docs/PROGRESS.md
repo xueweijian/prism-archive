@@ -332,3 +332,23 @@ C75 先做了"谁占着内存"的分解，再动手：
 C75 明确拒绝用 `EmptyWorkingSet` 换一个绿色数字——那会让恢复时重新缺页，破掉"恢复 ≤ 首帧 × 1.2"的契约。
 
 负向控制：`no_trim`（内存停在 66.0 MB）与 `no_restore_rebuild`（空白帧 `non_backdrop=0.0000`）都会红。
+### 9.8 测试驱动收口：agent-desktop 端到端能力 + 两处引擎修复
+
+**能力**：C80 落地后，UIA 元素 9 → 33，`agent-desktop` 可以真正驱动界面——
+`snapshot → 找 ref → click/set-value → 再 snapshot` 的端到端回归从此可用
+（本轮实测：点「搜索」→ 搜索框出现；`set-value "zzz"` → 列表过滤；`clear` → 恢复；
+点 Backup.7z 标签 → 标题切换）。工具驱动的测试 hygiene：多实例时会撞窗口，
+须用 `--window-id` + CommandLine 核对。
+
+**C82 修复（用户夹具实测驱动）**：
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| L4-F1 | `--test enc.7z`（无密码）模态密码框 → CLI 挂死 >20s | CLI 零模态：stderr + exit 2；GUI 保留密码框；`--password/--password-file` 加分项 |
+| L4-F2 | 多卷 `.7z.001` 被 handler 拒绝（真 7-Zip 能开） | `VolumePlan` + 跨卷拼接 IInStream；缺卷按 start header 指名（`missing volume: vols.7z.003`） |
+
+附带：头加密包在 verify 阶段**再次**要密码（第四条引擎事实候选，建议补 D30 系列）；
+`--test broken.7z` 报 ok 经真 7-Zip 交叉验证为**夹具标错**（14 文件同样 Ok），非缺陷。
+
+**测试卫生**：上一 AI 会话（402 中断）留下的 `agent-desktop-tests/01-清单` 与 README 已接管，
+缺失的 `02-问题汇总`/`03-未测项` 按同一条龙复测重写并提交；多实例撞窗口的问题记入 01 的 hygiene 注记。

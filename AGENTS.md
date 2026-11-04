@@ -2,6 +2,12 @@
 
 > 这些规则优先于卡片简报里的任何说明。与卡片冲突时，**先停下来问**，不要自行取舍。
 
+## R0 这是什么仓库
+
+PrismArchive：Windows 11 x64 归档管理器，引擎是运行时 `LoadLibraryW` 加载 7-Zip 的 `7z.dll`
+（发布包自带，取舍见 docs/ADR.md ADR-007），界面与交互是本仓库自己的实现。
+纯逻辑在 PrismCore（跨平台、可秒级测试），Windows 壳在 PrismWin，装配在 App。
+
 ## R1 不要相信注释，只相信可执行的证据
 
 **注释不是证据。** 代码里的注释可能是旧的、是愿望、或者是上一版留下的谎言。
@@ -39,8 +45,41 @@
 
 ## R5 项目结构速查
 
-- `Src/PrismCore/` 纯逻辑，header-only，禁止 `<windows.h>`
-- `Src/PrismWin/` Windows 实现
+- `Src/PrismCore/` 纯逻辑，header-only，禁止 `<windows.h>`（preflight 的 `check_arch_no_windows` 会红）
+- `Src/PrismWin/` Windows 实现（`prism_win_bridge` 目标）
 - `Src/App/` 装配层（Main.cpp / AppWiring.hpp）
 - `Tests/suites/<card>-*.cmake` 唯一的测试注册点（禁止改 `Tests/CMakeLists.txt`）
-- 契约全文：`docs/CONTRACTS.md`（D1–D32）；界面规格：`docs/DESIGN.md`；性能实测：`docs/PERF.md`
+- `Installer/` 安装脚本与注册表逐键说明；`tools/` 门禁/打包/评测脚本
+- 契约全文：`docs/CONTRACTS.md`（D1–D33）；界面规格：`docs/DESIGN.md`；性能实测：`docs/PERF.md`
+
+## R6 构建与测试（推之前必须过本地门禁）
+
+- 环境：仓库根目录 `. .\dev-env.ps1`（导入 MSVC/SDK，前置 Python/7-Zip/Ninja，
+  设 `PRISM_7Z_DLL` 与 E 盘 TEMP）。同一 pwsh 里再跑 cmake / ctest / python。
+- 一条命令全门禁：`pwsh -File tools/local_gates.ps1 -BuildDir E:\build\wt-<卡>`
+  —— configure + build + ctest + preflight + manifest + headers + windows_tu，
+  最后一行 `LOCAL GATES: PASS/FAIL`，日志在 `<build>/local-gates/`。
+- 部分跑：`-Only preflight,headers`；ASan 复现：`-Preset asan-msvc -SkipShell`。
+- CMake 预设与 CI 完全同款，别自造命令行：
+  `release-msvc` / `asan-msvc`（Windows）、`release-gcc` / `asan-clang`（Linux，PrismCore-only）。
+- 看 CI：`gh run view <run-id> --log-failed`；失败先看 run 页面的 step summary。
+- 集成测试按 `PRISM_7Z_DLL` 解析引擎，找不到会 SKIP —— SKIP 出现在汇报里必须点名，不许静默。
+
+## R7 编码与测试约定
+
+- 新测试在 `Tests/suites/` 新建 `c<卡号>-<主题>.cmake`，只写自己的 target（详见该目录 README）：
+  会 SKIP 的集成测试必须带 `PASS_REGULAR_EXPRESSION`（D1）；Windows 目标 `/WX-`（SDK 头不是 /W4 干净的）；
+  新测试代码须在 `g++ -Werror` 下干净（D31）。
+- 引擎的三条实测事实，碰读取/固实/替换归档前先读 `docs/CONTRACTS.md` D30（kpidSolid 不可信、
+  加密包 ExtractToMemory 静默返回 0 字节、ReplaceFileW 前必须先关 reader）。
+- 引擎每条回调带属主，不要用游标猜（D33）。
+- 面向用户的四个文档（README、docs/USAGE、docs/TROUBLESHOOTING、docs/assets/README）受
+  `tools/check_docs.py` 门禁：代码块必须标语言、相对链接必须可解析、无硬编码用户路径。
+
+## R8 动敏感区前先读
+
+- 引擎加载 / 格式探测 → `docs/ADR.md`（尤其 ADR-007 7z.dll 随包的取舍）
+- 界面 / 交互 → `docs/DESIGN.md`；文案与国际化 → `docs/I18N-AUDIT.md`
+- 安装器 / 右键动词 / MSIX → `Installer/README.md`、`docs/MSIX-SIGNING.md`
+- 测试怎么写怎么跑 → `docs/TESTING.md`、`docs/CI.md`
+- 环境与交接（机器路径、依赖位置）→ `docs/HANDOVER.md`

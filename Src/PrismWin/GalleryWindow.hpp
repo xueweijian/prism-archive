@@ -111,6 +111,8 @@
 #include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
 #include "WindowFrame.hpp"                  // C66: visible frame, work area, clamp
+#include "WindowChrome.hpp"                  // C83: DWM dark caption + rim
+#include "../PrismCore/ChromeTheme.hpp"      // C83: the shell palette (tokens only)
 #include "TabBar.hpp"                        // C60: the tab strip (pixels + hits)
 
 // C34: the glass layer is composition, so the window's TU needs the three
@@ -235,6 +237,7 @@ class GalleryWindow {
   ~GalleryWindow() {
     DetachAccessibility();
     DestroyHostWindow();
+    ReleaseMenuResources();  // C83: the owner-drawn bar's font + brushes
   }
 
   struct Host {
@@ -274,6 +277,9 @@ class GalleryWindow {
                                    1280, 800, nullptr, nullptr, instance, this);
     }
     if (!host_.hwnd) return false;
+    // C83: the caption joins the shell BEFORE the first frame. A light caption
+    // that turned dark on the first theme change would be a visible flash.
+    titleBar_ = prism::win::chrome::Apply(host_.hwnd, chromeVariant_);
     // C52: register the window as a drop target. DragAcceptFiles is the cheap
     // half of OLE drag & drop (it sets WS_EX_ACCEPTFILES and turns Explorer's
     // drop into a WM_DROPFILES); IDropTarget would buy us modifier keys and
@@ -592,6 +598,30 @@ class GalleryWindow {
   static constexpr UINT kMenuEditDelete = 0xE003;
   static constexpr UINT kMenuEditRename = 0xE004;
   static constexpr UINT kMenuEditNewFolder = 0xE005;
+
+  // ---------- card C83: the dark shell -------------------------------------
+  //
+  // ONE palette for the whole shell (prism::chrome::PaletteFor): the caption
+  // (DWM), the menu bar plate, the dropdown plate and the selected row. The app
+  // tells the window which Variant the saved appearance document asks for; the
+  // default is Midnight because that is the surface the canvas already paints,
+  // so a fresh install's shell is continuous with the content on day one.
+  void SetChromeVariant(prism::theme::Variant variant) {
+    chromeVariant_ = variant;
+    ApplyChromeTheme();
+  }
+  prism::theme::Variant ChromeVariant() const { return chromeVariant_; }
+  const prism::win::chrome::TitleBarRecord& TitleBar() const { return titleBar_; }
+
+  // The words the owner-drawn bar carries. The OS no longer stores an
+  // owner-drawn item's text (the item data IS the text), so the window is the
+  // only place they can be read back: the language suite and the UIA probe use
+  // this, and it is the SAME string WM_DRAWITEM paints -- not a second copy.
+  int MenuBarItemCount() const { return static_cast<int>(menuBarItems_.size()); }
+  std::wstring MenuBarItemText(int index) const {
+    if (index < 0 || index >= MenuBarItemCount()) return std::wstring();
+    return menuBarItems_[static_cast<std::size_t>(index)]->text;
+  }
 
   void SetMenuLabels(std::wstring fileTitle, std::wstring compressText, std::wstring exitText) {
     fileMenuLabel_ = std::move(fileTitle);
@@ -2018,17 +2048,30 @@ class GalleryWindow {
       // turns that tree into UIA elements (Name/Role/Bounds/Enabled/Invoke).
       // OBJID_WINDOW is deliberately NOT ours -- the frame keeps the OS object.
       case WM_GETOBJECT: {
-        if (static_cast<LONG>(lparam) != OBJID_CLIENT) {
-          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
-        }
+        const LONG objectId = static_cast<LONG>(lparam);
         // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix state in one line.
         if (!prism::win::a11y::kAccessibleBridgeArmed) return 0;
+        // C83: the owner-drawn bar publishes its own names (an owner-drawn item
+        // has no OS string, so the system menu object would say nothing).
+        if (objectId == OBJID_MENU) {
+          return prism::win::a11y::HandleGetObjectFor(menuA11y_, objectId, wparam);
+        }
+        if (objectId != OBJID_CLIENT) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
         return prism::win::a11y::HandleGetObject(a11y_, wparam, lparam);
       }
       // CARD V2: an Alt chord never reaches TranslateMessage as a plain key --
       // it arrives as WM_SYSKEYDOWN. That is the ONLY door an Alt mnemonic can
       // come through, which is why the window-level test dispatches THIS
       // message instead of setting a synthetic Alt state.
+      // C83: the mnemonic of an owner-drawn item. WM_SYSCHAR is where an Alt
+      // chord lands after TranslateMessage; the system cannot match a label it
+      // does not store, so the window matches the painted text itself.
+      case WM_SYSCHAR: {
+        if (OpenMnemonic(static_cast<wchar_t>(wparam))) return 0;
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+      }
       case WM_SYSKEYDOWN: {
         if (!palette_.IsOpen()) {
           const UINT vk = static_cast<UINT>(wparam);
@@ -2156,6 +2199,60 @@ class GalleryWindow {
         std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lparam));
         if (text) SetStatus(*text);
         return 0;
+      }
+      // C83: the other half of the owner-drawn bar. The system asks for a size
+      // and then for pixels; both answers come from the SAME MenuDrawItem the
+      // menu holds, so what is measured is exactly what is painted.
+      case WM_MEASUREITEM: {
+        auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
+        if (measure == nullptr || measure->CtlType != ODT_MENU) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        const MenuDrawItem* item =
+            reinterpret_cast<const MenuDrawItem*>(measure->itemData);
+        if (item == nullptr) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        HDC dc = ::GetDC(host_.hwnd);
+        int textWidth = 0;
+        int textHeight = 0;
+        MeasureMenuText(dc, item->text, &textWidth, &textHeight);
+        if (dc != nullptr) ::ReleaseDC(host_.hwnd, dc);
+        measure->itemWidth = static_cast<UINT>(textWidth + 2 * kMenuTextPaddingX);
+        measure->itemHeight = static_cast<UINT>(textHeight + 2 * kMenuTextPaddingY);
+        return TRUE;
+      }
+      case WM_DRAWITEM: {
+        auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+        if (draw == nullptr || draw->CtlType != ODT_MENU) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        const MenuDrawItem* item = reinterpret_cast<const MenuDrawItem*>(draw->itemData);
+        if (item == nullptr) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        const prism::chrome::Palette palette =
+            prism::chrome::PaletteFor(chromeVariant_);
+        const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+        const bool disabled =
+            item->disabled || (draw->itemState & (ODS_DISABLED | ODS_GRAYED)) != 0;
+        HBRUSH fill = selected ? menuHighlightBrush_ : menuBrush_;
+        if (fill != nullptr) ::FillRect(draw->hDC, &draw->rcItem, fill);
+        RECT textRect = draw->rcItem;
+        textRect.left += kMenuTextPaddingX;
+        ::SetBkMode(draw->hDC, TRANSPARENT);
+        ::SetTextColor(draw->hDC,
+                       prism::win::chrome::ToColorRef(disabled
+                                                          ? palette.textDisabled
+                                                          : (selected ? palette.highlightText
+                                                                      : palette.text)));
+        HGDIOBJ previous = menuFont_ != nullptr ? ::SelectObject(draw->hDC, menuFont_)
+                                                : nullptr;
+        const std::wstring plain = MenuTextPlain(item->text);
+        ::DrawTextW(draw->hDC, plain.c_str(), -1, &textRect,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
+        if (previous != nullptr) ::SelectObject(draw->hDC, previous);
+        return TRUE;
       }
       case WM_COMMAND: {
         // Menu items only (the gallery owns no child controls). C53: the menu
@@ -3277,8 +3374,28 @@ class GalleryWindow {
   }
 
   // The real Windows menu bar, rebuilt from the labels the app supplied.
+  //
+  // C83: every item is MFT_OWNERDRAW. The system still owns the BAR (SetMenu,
+  // the menu loop, the Alt mnemonics, the UIA MenuBar object); the window owns
+  // the PIXELS. A system-painted bar is light on every Windows build, which is
+  // what made the top 64 px look like a different application (UI-AUDIT A4).
+  //
+  // The text is stored in MenuDrawItem, because an owner-drawn item's item data
+  // IS its text as far as the OS is concerned: the pointer must outlive the
+  // menu, so the items live in menuItems_ and are swapped in only AFTER the old
+  // menu is destroyed.
+  //
+  // NEGATIVE CONTROL (CONTRACTS D3): PRISM_C83_MUTANT_NO_OWNERDRAW appends the
+  // items as MF_STRING, i.e. the pre-fix system-painted bar. The suite's
+  // "menu bar background == the dark token" assertion MUST go red.
   void RebuildMenu() {
     if (!host_.hwnd) return;  // Create() installs it once the HWND exists
+    EnsureMenuFont();
+    const prism::chrome::Palette palette = prism::chrome::PaletteFor(chromeVariant_);
+    HBRUSH background =
+        CreateSolidBrush(prism::win::chrome::ToColorRef(palette.background));
+    HBRUSH highlight =
+        CreateSolidBrush(prism::win::chrome::ToColorRef(palette.highlight));
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
     HMENU edit = CreatePopupMenu();
@@ -3286,44 +3403,153 @@ class GalleryWindow {
       if (bar) DestroyMenu(bar);
       if (file) DestroyMenu(file);
       if (edit) DestroyMenu(edit);
+      if (background) DeleteObject(background);
+      if (highlight) DeleteObject(highlight);
       return;
     }
-    AppendMenuW(file, MF_STRING, kMenuCompress, compressMenuLabel_.c_str());
+    std::vector<std::unique_ptr<MenuDrawItem>> items;
+    std::vector<MenuDrawItem*> barItems;
+    // One door for every item: the text is owned here, the HMENU keeps the
+    // pointer, and MF_OWNERDRAW is what makes WM_DRAWITEM ours.
+    const auto addItem = [&items](HMENU menu, UINT flags, UINT_PTR id,
+                                  const std::wstring& text) -> bool {
+      auto item = std::make_unique<MenuDrawItem>();
+      item->text = text;
+      item->popup = (flags & MF_POPUP) != 0;
+      item->command = item->popup ? 0u : static_cast<UINT>(id);
+      MenuDrawItem* raw = item.get();
+      items.push_back(std::move(item));
+#if defined(PRISM_C83_MUTANT_NO_OWNERDRAW)
+      // NEGATIVE CONTROL (CONTRACTS D3): the system paints the item again.
+      return AppendMenuW(menu, flags & ~static_cast<UINT>(MF_OWNERDRAW), id,
+                         reinterpret_cast<LPCWSTR>(raw->text.c_str())) != FALSE;
+#else
+      return AppendMenuW(menu, flags | MF_OWNERDRAW, id,
+                         reinterpret_cast<LPCWSTR>(raw)) != FALSE;
+#endif
+    };
+    addItem(file, MF_STRING, kMenuCompress, compressMenuLabel_);
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, kMenuExit, exitMenuLabel_.c_str());
+    addItem(file, MF_STRING, kMenuExit, exitMenuLabel_);
     // C54's Edit menu. A disabled entry is GREY, and RequestEdit still answers
     // with the readable reason if a chord reaches it anyway.
-    AppendMenuW(edit, MF_STRING, kMenuEditDelete, editDeleteLabel_.c_str());
-    AppendMenuW(edit, MF_STRING, kMenuEditRename, editRenameLabel_.c_str());
-    AppendMenuW(edit, MF_STRING, kMenuEditNewFolder, editNewFolderLabel_.c_str());
+    addItem(edit, MF_STRING, kMenuEditDelete, editDeleteLabel_);
+    addItem(edit, MF_STRING, kMenuEditRename, editRenameLabel_);
+    addItem(edit, MF_STRING, kMenuEditNewFolder, editNewFolderLabel_);
     if (!editEnabled_) {
       EnableMenuItem(edit, kMenuEditDelete, MF_BYCOMMAND | MF_GRAYED);
       EnableMenuItem(edit, kMenuEditRename, MF_BYCOMMAND | MF_GRAYED);
       EnableMenuItem(edit, kMenuEditNewFolder, MF_BYCOMMAND | MF_GRAYED);
     }
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileMenuLabel_.c_str());
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), editMenuLabel_.c_str());
+    addItem(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileMenuLabel_);
+    barItems.push_back(items.back().get());
+    addItem(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), editMenuLabel_);
+    barItems.push_back(items.back().get());
     // C53: C31/V3's Settings item lives on the SAME bar, not on a second menu
     // that would REPLACE this one. (SettingsDialog::InstallMenu builds a whole
     // bar of its own; Main only falls back to it when the window has no menu.)
-    AppendMenuW(bar, MF_STRING, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
-                settingsMenuLabel_.c_str());
+    addItem(bar, MF_STRING, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
+            settingsMenuLabel_);
+    barItems.push_back(items.back().get());
     // C57: Help > About. The label is literal here like "Settings..." above: the
     // item is chrome on this window, and the dialog it opens is where the words
     // that matter (the report) live.
     HMENU help = CreatePopupMenu();
     if (help != nullptr) {
-      AppendMenuW(help, MF_STRING, prism::win::about::AboutDialog::kMenuAboutId,
-                  aboutMenuLabel_.c_str());
-      AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), helpMenuLabel_.c_str());
+      addItem(help, MF_STRING, prism::win::about::AboutDialog::kMenuAboutId,
+              aboutMenuLabel_);
+      addItem(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), helpMenuLabel_);
+      barItems.push_back(items.back().get());
     }
     HMENU previous = GetMenu(host_.hwnd);
     if (!SetMenu(host_.hwnd, bar)) {
       DestroyMenu(bar);
+      if (background) DeleteObject(background);
+      if (highlight) DeleteObject(highlight);
       return;
     }
+    // The old bar is gone before its item data is: DestroyMenu first, THEN the
+    // swap that frees the previous MenuDrawItems.
     if (previous) DestroyMenu(previous);
+    menuItems_ = std::move(items);
+    menuBarItems_ = std::move(barItems);
+    HBRUSH oldBackground = menuBrush_;
+    HBRUSH oldHighlight = menuHighlightBrush_;
+    menuBrush_ = background;
+    menuHighlightBrush_ = highlight;
+    if (oldBackground) DeleteObject(oldBackground);
+    if (oldHighlight) DeleteObject(oldHighlight);
+    // The plate BETWEEN owner-drawn items (padding, separators, the dropdown's
+    // border) is painted by the system with THIS brush; the items paint their
+    // own rectangles in WM_DRAWITEM.
+    MENUINFO info{};
+    info.cbSize = sizeof(info);
+    info.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
+    info.hbrBack = menuBrush_;
+    SetMenuInfo(bar, &info);
     DrawMenuBar(host_.hwnd);
+  }
+
+  // C83: the menu's font. The system's menu font (not a hardcoded face), so the
+  // owner-drawn bar keeps the size the user configured in Windows.
+  void EnsureMenuFont() {
+    if (menuFont_ != nullptr) return;
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
+      menuFont_ = ::CreateFontIndirectW(&metrics.lfMenuFont);
+    }
+    if (menuFont_ == nullptr) {
+      menuFont_ = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+    }
+  }
+
+  // The mnemonic marker is not drawn: "&File" paints as "File", "&&" as "&".
+  static std::wstring MenuTextPlain(const std::wstring& text) {
+    std::wstring plain;
+    plain.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      if (text[i] != L'&') {
+        plain.push_back(text[i]);
+        continue;
+      }
+      if (i + 1 < text.size() && text[i + 1] == L'&') {
+        plain.push_back(L'&');
+        ++i;
+      }
+    }
+    return plain;
+  }
+
+  void MeasureMenuText(HDC dc, const std::wstring& text, int* width, int* height) const {
+    if (width == nullptr || height == nullptr) return;
+    *width = 0;
+    *height = 0;
+    if (dc == nullptr) return;
+    const std::wstring plain = MenuTextPlain(text);
+    HGDIOBJ previous = menuFont_ != nullptr ? ::SelectObject(dc, menuFont_) : nullptr;
+    SIZE size{};
+    if (::GetTextExtentPoint32W(dc, plain.c_str(), static_cast<int>(plain.size()),
+                                &size) != FALSE) {
+      *width = static_cast<int>(size.cx);
+      *height = static_cast<int>(size.cy);
+    }
+    if (previous != nullptr) ::SelectObject(dc, previous);
+  }
+
+  void ReleaseMenuResources() {
+    if (menuFont_ != nullptr) {
+      ::DeleteObject(menuFont_);
+      menuFont_ = nullptr;
+    }
+    if (menuBrush_ != nullptr) {
+      ::DeleteObject(menuBrush_);
+      menuBrush_ = nullptr;
+    }
+    if (menuHighlightBrush_ != nullptr) {
+      ::DeleteObject(menuHighlightBrush_);
+      menuHighlightBrush_ = nullptr;
+    }
   }
 
   void EnsureSidebar() const {
@@ -4438,8 +4664,148 @@ class GalleryWindow {
     std::atomic<GalleryWindow*> window;
   };
 
+  // C83: the MENU BAR as an accessible object.
+  //
+  // An owner-drawn item has no OS string, so the system menu object publishes
+  // four UNNAMED items -- measured with agent-desktop after the first
+  // owner-draw build. That is the regression the card forbids. The window
+  // therefore answers OBJID_MENU with a tree built from the SAME MenuDrawItems
+  // the painter uses, so a screen reader hears the labels the user sees. The
+  // real HMENU keeps the keyboard, the mouse and the menu loop.
+  class MenuA11yHost final : public prism::win::a11y::Host {
+   public:
+    explicit MenuA11yHost(GalleryWindow* window) : window_(window) {}
+    HWND Window() const override {
+      return window_ != nullptr ? window_->host_.hwnd : nullptr;
+    }
+    prism::a11y::Node Tree() override {
+      return window_ != nullptr ? window_->MenuA11yTree() : prism::a11y::Node{};
+    }
+    void InvokeAction(int index) override {
+      if (window_ != nullptr) window_->InvokeMenuA11y(index);
+    }
+    void FocusAction(int) override {}
+    void SelectRow(int) override {}
+    void ActivateRow(int) override {}
+    void ActivateTab(int) override {}
+    void ActivateFolder(const std::string&) override {}
+    void SetSearchValue(const std::string&) override {}
+    void FocusSearchField() override {}
+
+   private:
+    GalleryWindow* window_;
+  };
+
+  // One node per top-level item, in bar order, with the SCREEN rectangle
+  // GetMenuItemRect reports converted to client coordinates (the menu bar sits
+  // above the client, so its y is negative -- that is a real location, not an
+  // empty one).
+  prism::a11y::Node MenuA11yTree() {
+    prism::a11y::Node root;
+    root.role = prism::a11y::Role::MenuBar;
+    root.name = "PrismArchive";
+    HMENU bar = host_.hwnd != nullptr ? ::GetMenu(host_.hwnd) : nullptr;
+    POINT origin{0, 0};
+    if (host_.hwnd != nullptr) ::ClientToScreen(host_.hwnd, &origin);
+    root.children.reserve(menuBarItems_.size());
+    for (std::size_t i = 0; i < menuBarItems_.size(); ++i) {
+      const MenuDrawItem* item = menuBarItems_[i];
+      if (item == nullptr) continue;
+      prism::a11y::Node node;
+      node.role = prism::a11y::Role::MenuItem;
+      node.name = WideToUtf8(MenuTextPlain(item->text));
+      node.index = static_cast<int>(i);
+      node.enabled = !item->disabled;
+      node.expandable = item->popup;
+      node.expanded = false;
+      if (bar != nullptr) {
+        RECT rect{};
+        if (::GetMenuItemRect(host_.hwnd, bar, static_cast<UINT>(i), &rect) != FALSE) {
+          node.bounds = prism::layout::Rect{rect.left - origin.x, rect.top - origin.y,
+                                            rect.right - origin.x, rect.bottom - origin.y};
+        }
+      }
+      root.children.push_back(std::move(node));
+    }
+    return root;
+  }
+
+  // C83: owner-drawn items have no OS text, so DefWindowProc's mnemonic lookup
+  // cannot match Alt+F. The window matches the SAME strings the bar paints; a
+  // popup opens through the system menu loop (arrows, Enter and Esc are still
+  // the OS's), a plain item posts its WM_COMMAND. True means "consumed".
+  bool OpenMnemonic(wchar_t letter) {
+    if (host_.hwnd == nullptr) return false;
+    HMENU bar = ::GetMenu(host_.hwnd);
+    if (bar == nullptr) return false;
+    for (std::size_t i = 0; i < menuBarItems_.size(); ++i) {
+      const MenuDrawItem* item = menuBarItems_[i];
+      if (item == nullptr || !prism::chrome::MnemonicMatches(item->text, letter)) continue;
+      if (!item->popup) {
+        if (item->command != 0) {
+          ::PostMessageW(host_.hwnd, WM_COMMAND, MAKEWPARAM(item->command, 0), 0);
+        }
+        return true;
+      }
+      RECT rect{};
+      if (::GetMenuItemRect(host_.hwnd, bar, static_cast<UINT>(i), &rect) == FALSE) {
+        return true;
+      }
+      HMENU popup = ::GetSubMenu(bar, static_cast<int>(i));
+      if (popup == nullptr) return true;
+      const UINT command = static_cast<UINT>(::TrackPopupMenu(
+          popup, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY, rect.left,
+          rect.bottom, 0, host_.hwnd, nullptr));
+      if (command != 0) {
+        ::PostMessageW(host_.hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // A plain item runs its command through the SAME WM_COMMAND door the mouse
+  // uses; a popup item expands, which is the menu loop's job, not ours.
+  void InvokeMenuA11y(int index) {
+    if (index < 0 || index >= MenuBarItemCount() || host_.hwnd == nullptr) return;
+    const MenuDrawItem* item = menuBarItems_[static_cast<std::size_t>(index)];
+    if (item == nullptr || item->popup || item->command == 0) return;
+    ::PostMessageW(host_.hwnd, WM_COMMAND, MAKEWPARAM(item->command, 0), 0);
+  }
+
   // ---------------------------------------------------------------- state
   static constexpr double kWheelScrollPixels = 120.0 * 3.0;
+
+  // ---- card C83: the shell ----
+  // One item of the owner-drawn bar. The HMENU holds a POINTER to this, so the
+  // object lives in menuItems_ and is only freed after the menu that points at
+  // it was destroyed (see RebuildMenu).
+  struct MenuDrawItem {
+    std::wstring text;
+    bool disabled = false;
+    bool popup = false;   // opens a submenu (the bar's File/Edit/Help)
+    UINT command = 0;     // the WM_COMMAND id a plain item runs
+  };
+  static constexpr int kMenuTextPaddingX = 10;
+  static constexpr int kMenuTextPaddingY = 4;
+  prism::theme::Variant chromeVariant_ = prism::theme::Variant::Midnight;
+  prism::win::chrome::TitleBarRecord titleBar_;
+  // C83: the bar's accessible object. Created with the window like a11y_, and
+  // safe to outlive it (Host::Window() answers null once the HWND is gone).
+  std::shared_ptr<MenuA11yHost> menuA11y_ = std::make_shared<MenuA11yHost>(this);
+  std::vector<std::unique_ptr<MenuDrawItem>> menuItems_;  // every item, alive with the bar
+  std::vector<MenuDrawItem*> menuBarItems_;               // the four top-level items
+  HFONT menuFont_ = nullptr;
+  HBRUSH menuBrush_ = nullptr;
+  HBRUSH menuHighlightBrush_ = nullptr;
+
+  // C83: re-apply the caption and rebuild the bar for the current variant.
+  void ApplyChromeTheme() {
+    if (!host_.hwnd) return;
+    titleBar_ = prism::win::chrome::Apply(host_.hwnd, chromeVariant_);
+    RebuildMenu();
+    Invalidate();
+  }
 
   // C80: created with the window, detached when the HWND dies.
   std::shared_ptr<A11yHost> a11y_ = std::make_shared<A11yHost>(this);

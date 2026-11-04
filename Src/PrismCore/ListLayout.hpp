@@ -106,6 +106,9 @@ inline std::optional<RatioBarResult> RatioBar(const SortItem& item) {
 // stays decorative and is drawn only for a real shrink; an expanded entry
 // (">100% (...)") or an unknown one renders the text across the column.
 inline std::string RatioCellText(const SortItem& item) {
+  // A directory is not a byte stream: like its "--" in the size columns its
+  // ratio cell carries the canonical unknown, never a fabricated number.
+  if (item.isDir) return prism::CompressionRatioView(0, 0);
   return prism::CompressionRatioView(item.size, item.packedSize);
 }
 

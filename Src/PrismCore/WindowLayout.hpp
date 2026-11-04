@@ -623,7 +623,7 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
     const int width = (std::max)(kStatusSegmentMinWidth, leftWidths[i]);
     const Rect rect{x, top, (std::min)(x + width, layout.statusBar.right - kContentPadding), bottom};
     if (rect.Empty()) break;
-    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, leftTexts[i], -1});
+    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, leftTexts[i], -1, {}});
     leftEnd = rect.right;
     x = rect.right + kStatusGap;
   }

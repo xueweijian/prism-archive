@@ -94,7 +94,7 @@ struct Box {
 UINT32 CanvasPixel() {
   const D2D1_COLOR_F c = prism::win::gallery::GalleryRenderer::kBackdrop;
   const auto q = [](float v) {
-    return static_cast<UINT32>(std::min(255.0f, std::max(0.0f, v * 255.0f + 0.5f)));
+    return static_cast<UINT32>((std::min)(255.0f, (std::max)(0.0f, v * 255.0f + 0.5f)));
   };
   return (q(c.a) << 24) | (q(c.r) << 16) | (q(c.g) << 8) | q(c.b);
 }
@@ -190,13 +190,40 @@ prism::layout::Layout TestLayout() {
                                 /*railColumn=*/false, /*listMode=*/true);
 }
 
-// A2, assertions 1-3, on one frame.
-void AssertHeaderPixels(const Render& painted, const char* tag) {
+// The floating breadcrumb pill (C77 glass) hangs ABOVE the band and its drop
+// shadow falls onto the band's first rows: measured on this exact frame the
+// shadow's ink reaches +5 rows and +13 px past the pill (band rows 0..4,
+// x 16..589 against a pill of 16..576). Those pixels are CHROME, not the
+// header surface A2 audits. The ghost half of A2 is asserted differentially
+// between two SAME-CHROME frames (glass panels both, backdrop layer toggled),
+// so this exclusion cannot hide a backdrop regression.
+prism::layout::Rect ChromeShadowBox(const prism::layout::Layout& layout,
+                                    const prism::layout::Rect& header) {
+  const prism::layout::Rect pill = prism::layout::NavPillRect(layout);
+  constexpr int kRowReach = 8;
+  constexpr int kXReach = 20;
+  prism::layout::Rect box;
+  box.left = (std::max)(header.left, pill.left - 2);
+  box.right = (std::min)(header.right, pill.right + kXReach);
+  box.top = header.top;
+  box.bottom = (std::min)(header.bottom, header.top + kRowReach);
+  return box;
+}
+
+bool InChrome(const prism::layout::Rect& box, int x, int y) {
+  return x >= box.left && x < box.right && y >= box.top && y < box.bottom;
+}
+
+// A2, assertions 1-3, on one frame. chrome == nullptr: no floating chrome in
+// the frame, the whole band is audited strictly.
+void AssertHeaderPixels(const Render& painted, const char* tag,
+                        const prism::layout::Rect* chrome) {
   const prism::layout::Layout layout = TestLayout();
   const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
   const UINT32 canvas = CanvasPixel();
 
-  // 1. no accent-dominant pixel in the band (no ring, no accent panel).
+  // 1. no accent-dominant pixel in the band (no ring, no accent panel). The
+  //    chrome shadow is neutral grey, so the full band stays under this one.
   int accentPixels = 0;
   for (int y = header.top; y < header.bottom; ++y) {
     for (int x = header.left; x < header.right; ++x) {
@@ -207,12 +234,14 @@ void AssertHeaderPixels(const Render& painted, const char* tag) {
   PRISM_CHECK_EQ(accentPixels, 0);
 
   // 2. the band's background IS the canvas: two glyph-free strips (above the
-  //    labels and between them and the rule) sampled across the full width.
+  //    labels and between them and the rule), across the full width minus the
+  //    floating chrome's shadow box when one is present.
   int offCanvas = 0;
   int sampled = 0;
   const int strips[2] = {header.top + 1, header.top + 2};
   for (int y : strips) {
     for (int x = header.left + 1; x < header.right - 1; ++x) {
+      if (chrome != nullptr && InChrome(*chrome, x, y)) continue;
       ++sampled;
       if (!NearColor(painted.frame.At(x, y), canvas, 1)) ++offCanvas;
     }
@@ -305,21 +334,30 @@ PRISM_TEST("c81.a2.header_flat_on_canvas") {
   std::vector<SortItem> rows = AuditRows();
   Render plain;
   if (!PRISM_CHECK(RenderScene(ListScene(&rows, GrowStatus()), &plain))) return;
-  AssertHeaderPixels(plain, "plain");
+  AssertHeaderPixels(plain, "plain", nullptr);
 }
 
 PRISM_TEST("c81.a2.header_with_glass_backdrop") {
   std::vector<SortItem> rows = AuditRows();
-  prism::win::gallery::GalleryRenderer::Scene scene = ListScene(&rows, GrowStatus());
-  scene.backdropRefraction = true;
-  scene.glassPanels = true;
-  Render glass;
-  if (!PRISM_CHECK(RenderScene(scene, &glass))) return;
-  AssertHeaderPixels(glass, "glass");
+  // The differential pair holds the CHROME constant (glass panels on in both)
+  // and toggles ONLY the backdrop layer, so any band pixel that changes is the
+  // blurred still bleeding under the header -- the audit's ghost -- and
+  // nothing else.
+  prism::win::gallery::GalleryRenderer::Scene chromeScene = ListScene(&rows, GrowStatus());
+  chromeScene.glassPanels = true;
+  Render chromeOnly;
+  if (!PRISM_CHECK(RenderScene(chromeScene, &chromeOnly))) return;
 
-  Render plain;
-  if (!PRISM_CHECK(RenderScene(ListScene(&rows, GrowStatus()), &plain))) return;
-  AssertBandIndependentOfBackdrop(glass, plain);
+  prism::win::gallery::GalleryRenderer::Scene glassScene = chromeScene;
+  glassScene.backdropRefraction = true;
+  Render glass;
+  if (!PRISM_CHECK(RenderScene(glassScene, &glass))) return;
+
+  const prism::layout::Layout layout = TestLayout();
+  const prism::layout::Rect chromeBox =
+      ChromeShadowBox(layout, prism::layout::ListHeaderRect(layout));
+  AssertHeaderPixels(glass, "glass", &chromeBox);
+  AssertBandIndependentOfBackdrop(glass, chromeOnly);
 }
 
 // ---------------------------------------------------------------------------

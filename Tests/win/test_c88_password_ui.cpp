@@ -194,6 +194,8 @@ struct UiItem {
   bool offscreen = false;
   std::wstring value;         // ValuePattern, when the element has one
   std::wstring automationId;  // "TitleBar"/"Close" are the OS's, not ours
+  RECT bounds{0, 0, 0, 0};    // screen coords; the client-area check excludes the OS caption
+  bool hasBounds = false;
   bool password = false;
 };
 
@@ -202,8 +204,12 @@ struct UiItem {
 // ships ("关闭" on a Chinese Windows, "Close" on an English one). C88's "no
 // English literal" assertion is about the strings the dialog authors, so the
 // scan skips exactly those two system ids and nothing else.
-bool IsSystemChrome(const UiItem& item) {
-  return item.automationId == L"TitleBar" || item.automationId == L"Close";
+bool IsSystemChrome(const UiItem& item, LONG clientTopInScreen) {
+  if (item.automationId == L"TitleBar" || item.automationId == L"Close") return true;
+  // CI (English Windows) reports the caption Close button with an EMPTY
+  // automationId, so the id test alone misses it. The caption is non-client:
+  // every element that ends above the client area is the OS's, never ours.
+  return item.hasBounds && item.bounds.bottom <= clientTopInScreen;
 }
 
 IUIAutomation* Automation() {
@@ -259,6 +265,11 @@ std::vector<UiItem> CollectUi(HWND hwnd) {
       BOOL offscreen = FALSE;
       element->get_CurrentIsOffscreen(&offscreen);
       item.offscreen = offscreen != FALSE;
+      RECT bounds{};
+      if (SUCCEEDED(element->get_CurrentBoundingRectangle(&bounds))) {
+        item.bounds = bounds;
+        item.hasBounds = true;
+      }
       BOOL password = FALSE;
       if (SUCCEEDED(element->get_CurrentIsPassword(&password))) item.password = password != FALSE;
       IUIAutomationValuePattern* value = nullptr;
@@ -406,6 +417,11 @@ PRISM_TEST("c88_zh_dialog_publishes_only_chinese_text") {
     return;
   }
 
+  RECT clientRect{};
+  GetClientRect(dialog.Hwnd(), &clientRect);
+  POINT clientOrigin{0, 0};
+  ClientToScreen(dialog.Hwnd(), &clientOrigin);
+  const LONG clientTopInScreen = clientOrigin.y;
   const std::vector<UiItem> items = CollectUi(dialog.Hwnd());
   PRISM_CHECK(items.size() >= 12);  // the tree was read, not empty
 
@@ -446,7 +462,7 @@ PRISM_TEST("c88_zh_dialog_publishes_only_chinese_text") {
   // (the OS title-bar strings are excluded, see IsSystemChrome).
   int scanned = 0;
   for (const UiItem& item : items) {
-    if (item.name.empty() || item.offscreen || IsSystemChrome(item)) continue;
+    if (item.name.empty() || item.offscreen || IsSystemChrome(item, clientTopInScreen)) continue;
     ++scanned;
     if (HasEnglishWord(item.name)) {
       std::printf("    [i18n] English-looking UIA name: \"%s\" (id=%s)\n",

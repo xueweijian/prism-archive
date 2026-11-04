@@ -114,3 +114,28 @@ WARN  i18n: language table unavailable: ...\Assets\Lang\en-US.json
 **建议**：让 `Labels` 的默认值与菜单的回退同源（都中文），或语言包加载失败时统一走一个
 "fallback language" 常量；断言：catalogs=0 时窗口内不出现两种语言。
 **状态**：记录，未修（低优先级）。
+
+---
+
+## A8 用户 6-lane 实测报告（`agent-desktop-tests/02-问题汇总.md`）复测结论
+
+用户报告基于 `E:\build\adtest-main`（08:06 构建），比 C82 合并早 3 小时。**逐条复测**结果：
+
+| 报告编号 | 结论 | 我的证据 |
+|---|---|---|
+| S1-1 CLI 加密挂死 | **旧构建，已修** | `--test enc.7z` → exit=2 + `encrypted: password required`；`--password` → exit=0, verify ok=1 |
+| S1-1 GUI 密码框不出现 | **真（P0）** | 隔离 profile 启动 enc.7z → 进程活着、`list-windows` 返回空；根因 `PasswordDialog` 不 Show |
+| S1-2 多卷被拒 | **旧构建，已修** | `--smart-extract-each vols.7z.001` → exit=0, 25000 B |
+| S1-3 设置一击僵尸 | **真（P0）** | `WM_COMMAND 0x4B31` → `IsWindowEnabled` True→False，无可见窗口；根因 `CreateWindowExW` 无 `WS_VISIBLE` |
+| S2-2 无确认解压 | **部分真** | 列表行激活确实整档解压（C34 既定设计，落新目录、有状态反馈）；**侧栏树根点击不写盘**（计数 1→1） |
+| S2-4 HUD UIA 不可见 | **真** | 30 MB 解压全程 `progress=0` |
+| S2-5 压缩按钮无响应 | **真** | 同 S1-3 根因（`CompressDialog` 不 Show） |
+| S2-6 A2/A3 仍在 | **旧构建，已修** | 表头已扁平、压缩率三处一致（C81/#103，我跑其 exe 截图确认） |
+| S3-1 日志不落盘/1970 | **真** | LOCALAPPDATA 下无 `.log`；stderr 前缀 `1970-01-01T00:00:00` |
+| S3-2 窗口位置不持久化 | **真** | `settings.json` 的 `window` 段只有 width/height |
+| S3-3 错误文案为空 | **真** | 不存在的路径启动 → 弹窗只有 确定/关闭，无文本 |
+| S3-6 Ctrl+Tab/Ctrl+W 无效 | **真** | 真按键（`SetForegroundWindow`+`keybd_event`）标题不变 ×3；根因 `HandleActionBarKey` 无条件吞 `VK_TAB` |
+| S3-11 状态栏分段 UIA 不可达 | **真** | 树里只有 `status | 共 N 项` |
+
+教训（本会话第三次同型）：**报告与构建必须配对**。用户测的是旧构建，三条"严重度 1"里两条早已修好；
+而真正的新 P0（密码框/设置框不可见）恰好是同一条 `WS_VISIBLE` 根因——**一个根因解释了三个缺陷**。

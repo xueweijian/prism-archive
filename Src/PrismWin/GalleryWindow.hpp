@@ -180,6 +180,22 @@ inline constexpr bool kActionBarLabelsRebuilt = false;
 inline constexpr bool kActionBarLabelsRebuilt = true;
 #endif
 
+// C87 negative controls (CONTRACTS D3/D26/D27; one per requirement).
+//   hud_no_dismiss    : the finish message no longer dismisses the HUD, i.e.
+//                       exactly the "frozen at the last percent" defect.
+//   no_progress_a11y  : the HUD is painted but never published to MSAA/UIA, so
+//                       a screen reader is blind to it again.
+#if defined(PRISM_C87_MUTANT_HUD_NO_DISMISS)
+inline constexpr bool kHudDismissOnFinish = false;
+#else
+inline constexpr bool kHudDismissOnFinish = true;
+#endif
+#if defined(PRISM_C87_MUTANT_NO_PROGRESS_A11Y)
+inline constexpr bool kHudPublishedToA11y = false;
+#else
+inline constexpr bool kHudPublishedToA11y = true;
+#endif
+
 class GalleryWindow {
  public:
   // Monotonic millisecond clock -- public because Main.cpp drives HUD phases
@@ -207,6 +223,9 @@ class GalleryWindow {
   // message (a heap shared_ptr WndProc takes), so the worker never calls a
   // setter on a window it does not own (B9).
   static constexpr UINT kThumbsReady = WM_APP + 7;  // 5/6 are archive/operation
+  // C87: the operation ENDED (success / failure / cancel). Posted, like the
+  // progress samples: the worker owns the engine, the UI thread owns the HUD.
+  static constexpr UINT kHudFinish = WM_APP + 8;
 
   // The window owns an HWND and a device-dependent renderer; both are released
   // in the destructor, in that order. Main.cpp's `window` is a stack object, so
@@ -297,6 +316,9 @@ class GalleryWindow {
   // palette ranker (which searches the whole archive, not just this folder).
   // One catalog, three readers -- never a second copy that could drift.
   void SetItems(std::vector<prism::ArchiveItem>* items) {
+    // C87: a new archive is a new session; a HUD frozen on the previous one must
+    // not survive the switch.
+    ResetHud();
     catalog_ = items;
     archiveOpen_ = true;  // C52: a catalog means an archive is open (see SetArchiveOpen)
     nav_.Attach(items);
@@ -1196,6 +1218,29 @@ class GalleryWindow {
     if (!host_.hwnd) return;
     PostMessageW(host_.hwnd, kProgressMessage, static_cast<WPARAM>(done),
                  static_cast<LPARAM>(total));
+  }
+  // C87: "the operation is over" travels the same way the samples do. Without
+  // this message the HUD had no terminal transition at all, so the capsule kept
+  // painting the last sample forever (the reported freeze at 19% / 67% / 100%).
+  void PostHudFinish(prism::HudOutcome outcome) {
+    if (!host_.hwnd) return;
+    PostMessageW(host_.hwnd, kHudFinish, static_cast<WPARAM>(outcome), 0);
+  }
+  // UI-thread half, also the deterministic seam the C87 suite drives.
+  void FinishHud(prism::HudOutcome outcome) {
+    if (!kHudDismissOnFinish) {
+      // MUTANT (hud_no_dismiss): the operation ends, the capsule stays.
+      Invalidate();
+      return;
+    }
+    hud_.OnFinish(NowMs(), outcome);
+    Invalidate();
+  }
+  // Cross-archive / cross-tab reset: a new session must not inherit a frozen
+  // percent from the previous one.
+  void ResetHud() {
+    hud_.Reset();
+    Invalidate();
   }
   // C76 + B9: the sweep worker hands the decoded store over HERE. It touches no
   // member (the target HWND was captured on the UI thread), the UI thread takes
@@ -2101,6 +2146,12 @@ class GalleryWindow {
         Invalidate();
         return 0;
       }
+      case kHudFinish: {
+        // C87: the terminal transition. Success, failure and cancel all dismiss
+        // the capsule NOW; a leftover HUD after the work is the defect.
+        FinishHud(static_cast<prism::HudOutcome>(wparam));
+        return 0;
+      }
       case kStatusText: {
         std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lparam));
         if (text) SetStatus(*text);
@@ -2215,6 +2266,7 @@ class GalleryWindow {
   // user's folder for no reason).
   void AfterTabsChanged(const std::string& activeBefore) {
     const std::string activeAfter = ActiveTabPath();
+    if (activeAfter != activeBefore) ResetHud();  // C87: no cross-tab carry-over
     RecomputeLayout();
     Invalidate();
     if (activeAfter == activeBefore) return;
@@ -2231,6 +2283,7 @@ class GalleryWindow {
   // the grid, the sidebar and the action band all read "no archive" instead of
   // showing the closed archive's rows.
   void ClearArchiveView() {
+    ResetHud();
     catalog_ = nullptr;
     archiveOpen_ = false;
     nav_.Attach(nullptr);
@@ -2639,6 +2692,28 @@ class GalleryWindow {
     status.value = WideToUtf8(breadcrumbText_);
     status.bounds = layout_.statusBar;
     root.children.push_back(std::move(status));
+
+    // (6) C87: the live progress capsule, published ONLY while it is painted.
+    // The element and the pixels come from the same model (ProgressHud::Render),
+    // so "the HUD is on screen" and "a screen reader can hear it" cannot drift.
+    // name = the human-readable operation, value = the percentage -- exactly
+    // what MSAA's ROLE_SYSTEM_PROGRESSBAR turns into UIA's ProgressBar element
+    // with a ValuePattern.
+    if (kHudPublishedToA11y) {
+      const prism::ProgressHud::View hudView = hud_.Render(NowMs());
+      if (hudView.phase != prism::HudPhase::Hidden) {
+        Node progress;
+        progress.role = Role::ProgressBar;
+        progress.name = hudView.headline.empty() ? "\u8FDB\u5EA6"  // 进度
+                                                  : hudView.headline;
+        progress.value = hudView.percent >= 0
+                             ? std::to_string(hudView.percent) + "%"
+                             : std::string("\u2026");  // …
+        progress.description = "\u6B63\u5728\u8FDB\u884C\u7684\u64CD\u4F5C";  // 正在进行的操作
+        progress.bounds = prism::layout::ProgressCapsuleRect(layout_);
+        root.children.push_back(std::move(progress));
+      }
+    }
 
     return root;
   }
@@ -3612,6 +3687,7 @@ class GalleryWindow {
           quickLook_->state() != prism::gallery::QuickLookSession::State::Closed) {
         const auto& item = folderItems_[static_cast<size_t>(selection_)];
         scene.quickLookOpen = true;
+        scene.quickLookItem = static_cast<int>(item.index);
         scene.quickLookTitle = Utf8ToWide(prism::FileNameOf(item.path));
         wchar_t sz[40];
         swprintf_s(sz, L"%llu bytes", static_cast<unsigned long long>(item.size));
@@ -3726,6 +3802,10 @@ class GalleryWindow {
   int GlassPresents() const { return glassPresents_; }
   int GlassPresentsAtFirstFrame() const { return glassPresentsAtFirstFrame_; }
   bool FirstFrameReported() const { return firstFrameReported_; }
+  // C87: how many Quick Look frames painted DECODED pixels (see the renderer's
+  // counter). The suite asserts this alongside the pixel variance so "the card
+  // is not a stand-in" is proven twice, from two directions.
+  int QuickLookThumbDraws() const { return renderer_.dbgQuickLookThumbDraws; }
 
  private:
   bool EnsureDeviceResources() {

@@ -12,6 +12,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -829,7 +830,15 @@ inline std::wstring ToBackslashes(std::wstring p) {
 // identical to FILE_*).
 class DiskOutStream final : public abi::IOutStream {
  public:
+  // C87: byte-level progress. The stream is the only place that knows how many
+  // UNCOMPRESSED bytes have really landed, so the HUD's percentage is measured
+  // here instead of guessed from "files done / files requested". Optional: every
+  // other caller (writer, editor, virtual tree) leaves it empty.
+  using WriteProgress = std::function<void(uint64_t)>;
+
   explicit DiskOutStream(std::wstring finalPath) : path_(std::move(finalPath)) {}
+
+  void SetWriteProgress(WriteProgress progress) { progress_ = std::move(progress); }
 
   bool Open() {
     // Blueprint ch. 7.2: \\?\ lifts the MAX_PATH ceiling and allows the Linux
@@ -880,6 +889,7 @@ class DiskOutStream final : public abi::IOutStream {
     }
     written_ += done;
     if (processed) *processed = done;
+    if (progress_) progress_(written_);
     return S_OK;
   }
 
@@ -921,6 +931,7 @@ class DiskOutStream final : public abi::IOutStream {
   std::wstring path_;
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   uint64_t written_ = 0;
+  WriteProgress progress_;
   LONG refs_ = 1;
 };
 
@@ -1106,6 +1117,9 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   // method needs kpidMethod from the archive, which only ArchiveReader holds.
   // Called at most once per FAILED item -- never on the success path.
   using MethodNameLookup = std::function<std::string(uint32_t index)>;
+  // C87: measured progress, not a guess. done/total are UNCOMPRESSED bytes, so
+  // the HUD's percent matches what the user asked for ("已解压 12/30 MB").
+  using ProgressFn = std::function<void(uint64_t done, uint64_t total)>;
 
   SmartExtractCallback(const std::vector<ArchiveItem>& catalog, const SmartPlan& plan,
                        const std::string& targetRoot, BombFuse* fuse = nullptr,
@@ -1113,7 +1127,8 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
                        std::vector<uint32_t> requestedIndices = {},
                        prism::overwrite::Mode overwriteMode = prism::overwrite::Mode::Ask,
                        prism::overwrite::PromptFn overwritePrompt = {},
-                       prism::overwrite::ExistsFn exists = {})
+                       prism::overwrite::ExistsFn exists = {},
+                       ProgressFn progress = {})
       : catalog_(catalog),
         plan_(plan),
         guard_(targetRoot),
@@ -1122,7 +1137,22 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
         requestedIndices_(std::move(requestedIndices)),
         overwriteMode_(overwriteMode),
         overwritePrompt_(std::move(overwritePrompt)),
-        exists_(std::move(exists)) {}
+        exists_(std::move(exists)),
+        progress_(std::move(progress)) {
+    // The denominator: every requested file the plan will really write. A skip
+    // decision made later can only make the run finish at 100% sooner, never
+    // make the bar lie about the whole job.
+    for (const ArchiveItem& item : catalog_) {
+      if (item.isDir) continue;
+      if (plan_.ignoredIndices.count(item.index)) continue;
+      if (!requestedIndices_.empty() &&
+          std::find(requestedIndices_.begin(), requestedIndices_.end(), item.index) ==
+              requestedIndices_.end()) {
+        continue;
+      }
+      plannedTotal_ += item.size;
+    }
+  }
 
   const Result& result() const { return result_; }
   void SetFreeDiskBytes(uint64_t freeBytes) { freeDiskBytes_ = freeBytes; }
@@ -1150,6 +1180,12 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   }
 
   STDMETHODIMP SetCompleted(const abi::UInt64* completeValue) override {
+    // C87: the heartbeat. The write callback already reports every chunk; this
+    // also covers items the engine copies without touching our sink (empty
+    // files, skipped entries), so a run can never sit at 0% while it works.
+    if (progress_ && plannedTotal_ > 0) {
+      progress_(completedBytes_ + (currentSink_ ? currentSink_->written() : 0), plannedTotal_);
+    }
     if (completeValue && fuse_) {
       // The fuse is a sliding-window monitor, so it must be fed deltas.
       const uint64_t produced = *completeValue;
@@ -1254,6 +1290,12 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     // AddressSanitizer reported heap-use-after-free on exactly this path.
     sink->AddRef();          // ours
     currentSink_ = sink;
+    // C87: every chunk this item writes is part of the whole job's progress.
+    sink->SetWriteProgress([this](uint64_t itemWritten) {
+      if (progress_ && plannedTotal_ > 0) {
+        progress_(completedBytes_ + itemWritten, plannedTotal_);
+      }
+    });
     *outStream = sink;       // engine's (the one created by operator new)
     return S_OK;
   }
@@ -1284,7 +1326,10 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       if (!currentPath_.empty()) {
         ++result_.filesWritten;
         result_.writtenPaths.push_back(currentPath_);
-        if (currentSink_) result_.bytesWritten += currentSink_->written();
+        if (currentSink_) {
+          result_.bytesWritten += currentSink_->written();
+          completedBytes_ += currentSink_->written();
+        }
       }
     } else {
       RecordFailure(operationResult);
@@ -1407,6 +1452,10 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   prism::overwrite::Mode overwriteMode_ = prism::overwrite::Mode::Ask;
   prism::overwrite::PromptFn overwritePrompt_;
   prism::overwrite::ExistsFn exists_;
+  // C87: measured extraction progress (uncompressed bytes).
+  ProgressFn progress_;
+  uint64_t plannedTotal_ = 0;
+  uint64_t completedBytes_ = 0;
   LONG refs_ = 1;
 };
 
@@ -1995,7 +2044,8 @@ class ArchiveReader {
                        SmartExtractCallback::Result* resultOut,
                        prism::overwrite::Mode overwriteMode = prism::overwrite::Mode::Ask,
                        prism::overwrite::PromptFn overwritePrompt = {},
-                       prism::overwrite::ExistsFn exists = {}) const {
+                       prism::overwrite::ExistsFn exists = {},
+                       SmartExtractCallback::ProgressFn progress = {}) const {
     if (!archive_) return false;
     OperationScope operation(*this);
     if (!operation.Enter()) {
@@ -2029,7 +2079,7 @@ class ArchiveReader {
         catalog, plan, targetRoot, fuse,
         [this](uint32_t index) { return GetString(index, abi::kpidMethod); },
         std::vector<uint32_t>(indices.begin(), indices.end()), overwriteMode,
-        std::move(overwritePrompt), std::move(exists));
+        std::move(overwritePrompt), std::move(exists), std::move(progress));
     const HRESULT hr =
         archive_->Extract(indices.data(), static_cast<abi::UInt32>(indices.size()), 0, callback);
     // C26: SUCCEEDED(hr) is NOT the verdict. The engine reports "this item did

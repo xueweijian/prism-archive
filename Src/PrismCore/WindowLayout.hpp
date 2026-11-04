@@ -741,6 +741,34 @@ inline Rect QuickLookCardRect(const Layout& layout) {
   return Rect{right - width, top, right, top + height};
 }
 
+// The area inside the Quick Look card that holds the decoded image (C87). ONE
+// definition, read by the painter AND by the suite: the card's inset and the
+// title/meta strip are geometry, and a test that re-derived them could agree
+// with a bug.
+inline constexpr int kQuickLookInset = 14;
+inline constexpr int kQuickLookFooterHeight = 110;
+
+inline Rect QuickLookPreviewRect(const Layout& layout) {
+  const Rect card = QuickLookCardRect(layout);
+  return Rect{card.left + kQuickLookInset, card.top + kQuickLookInset,
+              card.right - kQuickLookInset, card.top + card.Height() - kQuickLookFooterHeight};
+}
+
+// Contain-fit of a w x h image inside 'area', centred. The C87 suite samples the
+// SAME rectangle the renderer draws into, so "the preview has the source's
+// pixels" is measured where the pixels are.
+inline Rect FitContain(const Rect& area, int contentW, int contentH) {
+  if (area.Empty() || contentW <= 0 || contentH <= 0) return Rect{};
+  const double sx = static_cast<double>(area.Width()) / static_cast<double>(contentW);
+  const double sy = static_cast<double>(area.Height()) / static_cast<double>(contentH);
+  const double scale = sx < sy ? sx : sy;
+  const int width = (std::max)(1, static_cast<int>(contentW * scale + 0.5));
+  const int height = (std::max)(1, static_cast<int>(contentH * scale + 0.5));
+  const int left = area.left + (area.Width() - width) / 2;
+  const int top = area.top + (area.Height() - height) / 2;
+  return Rect{left, top, left + width, top + height};
+}
+
 // Progress capsule: bottom-centre of the CONTENT (it used to cross into the
 // status bar, which is the same class of bug as the overlapping cards).
 inline Rect ProgressCapsuleRect(const Layout& layout) {

@@ -55,6 +55,10 @@ enum class Role : std::uint8_t {
   StatusBar,   // ROLE_SYSTEM_STATUSBAR   -- the status line
   Text,        // ROLE_SYSTEM_TEXT        -- the search field's visible text
   Group,       // ROLE_SYSTEM_GROUPING    -- a named container
+  // C87: the live progress capsule. A screen reader must hear the operation and
+  // its percent WHILE it runs; the element exists only while the HUD is on
+  // screen, so "finished" and "no element" are the same fact.
+  ProgressBar, // ROLE_SYSTEM_PROGRESSBAR -- the HUD capsule
 };
 
 // Stable machine spelling (stderr, test output, the snapshot script). Same
@@ -72,6 +76,7 @@ inline const char* RoleName(Role role) {
     case Role::StatusBar: return "statusbar";
     case Role::Text: return "text";
     case Role::Group: return "group";
+    case Role::ProgressBar: return "progressbar";
   }
   return "?";
 }

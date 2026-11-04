@@ -139,3 +139,20 @@ WARN  i18n: language table unavailable: ...\Assets\Lang\en-US.json
 
 教训（本会话第三次同型）：**报告与构建必须配对**。用户测的是旧构建，三条"严重度 1"里两条早已修好；
 而真正的新 P0（密码框/设置框不可见）恰好是同一条 `WS_VISIBLE` 根因——**一个根因解释了三个缺陷**。
+---
+
+## A9 密码对话框：Win32 原味浅灰 + 全英文（C84 修好可见性后暴露）
+
+**证据**：`E:\Temp\uicheck\pwd-dialog.png`（C84 构建，打开 enc.7z）。
+现在对话框**可见了**（C84 修好 `PasswordDialog` 不 Show 的 P0），但内容一眼不对：
+
+- **语言**：`This archive needs a password.` / `Password` / `Show password` / `Remember in vault` /
+  `This time only` / `Ring (masked)` / `Stored passwords (masked)` / `Use selected` / `Open` / `Cancel`
+  ——全是英文，而窗口标题、菜单、状态栏都是中文。
+- **视觉**：浅灰系统背景条、系统 group 框、系统按钮——与应用主体的深色玻璃完全不是一套语言。
+  这是 A4（系统白与深色画布割裂）在对话框上的同一类问题，而且更严重：整块是系统控件。
+
+**影响**：加密归档的用户第一步看到的就是这个框，它决定"这软件做得认真吗"。
+**要求**：①所有字串走 i18n 表（`password.*` 键，中英双语）；②按 `DESIGN.md` 的玻璃卡样式重绘
+（圆角 14、`GlassPanel` 三原语、深色背景、主按钮强调色）；③键盘与 UIA 不退化（现有 textfield/按钮可达）。
+**状态**：待修（记入队列）。

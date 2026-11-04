@@ -996,16 +996,33 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // island off screen again. The stderr line is the observable the process-level
   // suite reads: it names the saved, the work area and the applied rectangles.
   if (windowState.width > 0 && windowState.height > 0) {
-    const prism::win::frame::Restore restored = window.RestoreFrame(windowState.width,
-                                                                   windowState.height);
+    // C86 (S3-2): the saved document now carries the ORIGIN and the maximized
+    // bit as well as the size. A pre-C86 document has hasPosition == false, so
+    // the window keeps the position it was created with and only the size is
+    // applied -- the C66 behaviour, which is why an upgrade cannot drag the
+    // window to the top-left corner.
+    prism::layout::SavedWindow saved;
+    saved.visible = prism::layout::Rect{windowState.x, windowState.y,
+                                        windowState.x + windowState.width,
+                                        windowState.y + windowState.height};
+    saved.hasPosition = windowState.hasPosition;
+    saved.maximized = windowState.maximized;
+    const prism::win::frame::Restore restored = window.RestoreFrame(saved);
+    // The observable the process-level suite reads: the saved (and clamped)
+    // rectangles, the position included, and whether the mode was re-applied.
     std::fprintf(stderr,
-                 "window restore saved=%dx%d work=%dx%d requested=%dx%d"
-                 " window=%dx%d visible=%dx%d ok=%d\n",
-                 restored.saved.Width(), restored.saved.Height(), restored.work.Width(),
-                 restored.work.Height(), restored.requested.Width(),
-                 restored.requested.Height(), restored.applied.Width(),
-                 restored.applied.Height(), restored.visible.Width(),
-                 restored.visible.Height(), static_cast<int>(restored.ok));
+                 "window restore saved=%d,%d %dx%d savedpos=%d work=%dx%d"
+                 " requested=%d,%d %dx%d window=%d,%d %dx%d visible=%d,%d %dx%d"
+                 " max=%d appmax=%d ok=%d\n",
+                 restored.saved.left, restored.saved.top, restored.saved.Width(),
+                 restored.saved.Height(), static_cast<int>(saved.hasPosition),
+                 restored.work.Width(), restored.work.Height(), restored.requested.left,
+                 restored.requested.top, restored.requested.Width(),
+                 restored.requested.Height(), restored.applied.left, restored.applied.top,
+                 restored.applied.Width(), restored.applied.Height(), restored.visible.left,
+                 restored.visible.top, restored.visible.Width(), restored.visible.Height(),
+                 static_cast<int>(saved.maximized), static_cast<int>(restored.maximized),
+                 static_cast<int>(restored.ok));
   }
   // C12 + C14: the sidebar model gets the settings-backed store, so favourites,
   // recent archives and collapsed folders are restored here and written back at
@@ -1157,7 +1174,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       liveTr.translator = &liveLanguage.translator;
       prism::app::ApplyMenuLabels(
           window, prism::app::BuildMenuLabels(liveTr, prism::win::Utf8ToWide(tag)));
-      window.SetStatus(prism::app::ItemsCountStatus(liveTr, app->items.size()));
+      // C86 (S3-4): the item count is no longer pushed from here. The window
+      // derives it from the folder it is showing, so it cannot go stale on
+      // navigation -- and it carries the archive total in parentheses.
       // C74: the action band and the sidebar's info card read the same table as
       // the menu, so the language picked in the dialog reaches every one of them
       // before the user presses Save.
@@ -1798,7 +1817,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       const std::wstring title = L"PrismArchive -- " + FileNameWide(app->archivePath);
       SetWindowTextW(window.Hwnd(), title.c_str());
     }
-    window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
+    // C86 (S3-4): the count follows the folder, published by the window itself
+    // (this line used to write the ARCHIVE's total into the breadcrumb).
     // C46: a switch is an OPEN -- the new archive becomes the session's active
     // entry, so the next launch offers the file the user actually ended up on.
     session.store.RecordOpen(prism::win::WideToUtf8(app->archivePath), std::string(),
@@ -1892,7 +1912,9 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   });
 #endif
 
-  window.SetStatus(prism::app::ItemsCountStatus(tr, app->items.size()));
+  // C86 (S3-4): the breadcrumb's count segment belongs to the window now (the
+  // folder's own count, with the archive total in parentheses), so the app does
+  // not write a second, file-wide number next to a folder name.
 
   // ---- C34: the inline-preview companion (C30) is hosted HERE --------------
   //
@@ -2032,12 +2054,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // Read the state the user ACTUALLY left: the frame size captured in WM_CLOSE
   // (the HWND is gone now), the view mode, the sort key and the column
   // geometry. Then the sidebar blob, then one atomic write of the document.
-  int frameWidth = 0;
-  int frameHeight = 0;
   prism::app::WindowState finalState;
-  if (window.ClosedFrameSize(&frameWidth, &frameHeight)) {
-    finalState.width = frameWidth;
-    finalState.height = frameHeight;
+  // C86: the WHOLE closed frame -- origin, size and the maximized bit. Only the
+  // size used to travel, which is why settings.json never held an x or a y.
+  const prism::layout::SavedWindow closed = window.ClosedWindow();
+  if (closed.visible.Width() > 0 && closed.visible.Height() > 0) {
+    finalState.width = closed.visible.Width();
+    finalState.height = closed.visible.Height();
+    finalState.x = closed.visible.left;
+    finalState.y = closed.visible.top;
+    finalState.hasPosition = closed.hasPosition;
+    finalState.maximized = closed.maximized;
   }
   finalState.listMode = window.ListMode();
   finalState.sort = window.SortSpec();

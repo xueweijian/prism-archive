@@ -209,6 +209,7 @@ inline Rect FrameToPersist(HWND hwnd) {
 struct Restore {
   bool ok = false;
   bool moved = false;      // the position had to change to stay on screen
+  bool maximized = false;  // C86: the window was left maximized and now is
   Rect saved;              // the persisted VISIBLE frame
   Rect work;               // the work area it was clamped into
   Rect requested;          // the clamped VISIBLE frame
@@ -234,8 +235,13 @@ inline Restore RestoreVisibleFrame(HWND hwnd, const Rect& saved,
   if (out.work.Empty()) out.work = WorkAreaOfWindow(hwnd);
   if (out.work.Empty()) return out;
 
-  // (2a) the user's frame, clamped.
-  out.requested = prism::layout::ClampFrameToWorkArea(saved, out.work, minWidth, minHeight);
+  // (2a) the user's frame, clamped. C86: this goes through the ONE plan the
+  // pure suite asserts (position included -- C66 only ever carried a size).
+  prism::layout::SavedWindow requested;
+  requested.visible = saved;
+  out.requested = prism::layout::PlanWindowRestore(requested, out.work, minWidth,
+                                                   minHeight)
+                      .frame;
   // (2b) the window rectangle that produces that visible frame, clamped again so
   // GetWindowRect itself stays on screen (the card's assertion, and the only
   // way the right-hand buttons can never be cut off).
@@ -254,6 +260,45 @@ inline Restore RestoreVisibleFrame(HWND hwnd, const Rect& saved,
   out.ok = true;
   out.applied = ReadWindowRect(hwnd);
   out.visible = Measure(hwnd).visible;
+  return out;
+}
+
+// ------------------------------------------------------------- C86: the pair
+// What the app must WRITE for this window: the visible frame (C66's rule, the
+// normal rectangle when the window is maximized) PLUS the bits the origin needs
+// -- where it was, and whether it was maximized when it closed. The rectangle a
+// maximized window reports is the work area, and handing that back as the normal
+// frame is the 1552x832 trap; the mode travels beside the rectangle, never
+// inside it.
+inline prism::layout::SavedWindow SavedFrameToPersist(HWND hwnd) {
+  if (hwnd == nullptr) return prism::layout::SavedWindow{};
+  const bool zoomed = ::IsZoomed(hwnd) != FALSE;
+  // D3 control (C86): a maximized window is written as if it were a normal one.
+  // The frame is then the work area -- the user's 1552x832 -- and the maximized
+  // bit is lost, which is the exact pair of defects the card is about.
+  if (!prism::layout::kMaximizedIsASeparateBit && zoomed) {
+    return prism::layout::SavedWindowFor(ReadWindowRect(hwnd), false);
+  }
+  // C86 D3 control: SavedWindowFor() drops the origin when the rule is disarmed,
+  // which is byte-for-byte what the pre-fix document held (a size, no position).
+  return prism::layout::SavedWindowFor(FrameToPersist(hwnd), zoomed);
+}
+
+// Restore a SAVED window: the normal frame first (position + size, clamped into
+// the work area of the monitor the frame names), then the maximized mode. The
+// order is the fix, not a detail: maximizing first would make the normal
+// rectangle the work area, and un-maximizing would then have nowhere to go.
+inline Restore RestoreSavedFrame(HWND hwnd, const prism::layout::SavedWindow& saved) {
+  Restore out = RestoreVisibleFrame(hwnd, saved.visible);
+  out.saved = saved.visible;
+  if (!out.ok) return out;
+  out.maximized = saved.maximized;
+  if (saved.maximized) {
+    ::ShowWindow(hwnd, SW_MAXIMIZE);
+    ::UpdateWindow(hwnd);
+    out.applied = ReadWindowRect(hwnd);
+    out.visible = Measure(hwnd).visible;
+  }
   return out;
 }
 

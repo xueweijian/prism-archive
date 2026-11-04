@@ -131,6 +131,29 @@
 
 namespace prism::win::gallery {
 
+// ------------------------------------------------------- C86 negative controls
+// CONTRACTS D3: each switch turns EXACTLY ONE published rule off, so the same
+// suite source proves the rule instead of a copy of it.
+//   PRISM_C86_MUTANT_NO_STATUS_SEGMENTS -> the status band is ONE element again
+//        (the pre-fix tree: a single node whose name is the transient status),
+//        so the "each segment is reachable" assertions go red.
+//   PRISM_C86_MUTANT_MAXIMIZED_AS_NORMAL -> a maximized window's rectangle is
+//        persisted as the normal frame, which is the 1552x832 trap C66 closed
+//        and this card must not re-open.
+#if defined(PRISM_C86_MUTANT_NO_STATUS_SEGMENTS)
+inline constexpr bool kPublishStatusSegments = false;
+#else
+inline constexpr bool kPublishStatusSegments = true;
+#endif
+
+inline constexpr std::string_view ActiveGalleryMutation() {
+  if (!prism::layout::kPersistWindowPosition) return "no_position";
+  if (!kPublishStatusSegments) return "no_status_segments";
+  if (!prism::layout::kMaximizedIsASeparateBit) return "maximized_as_normal";
+  if (!prism::layout::kBreadcrumbCountsFolder) return "archive_count";
+  return {};
+}
+
 using Microsoft::WRL::ComPtr;
 
 // C53: the four surfaces that can own the user's attention at the same time --
@@ -523,6 +546,18 @@ class GalleryWindow {
     Invalidate();
   }
   const prism::layout::StatusInfo& ArchiveStatus() const { return archiveStatus_; }
+
+  // C86 (S3-11): the facts the band PUBLISHES. The counts are filled in here,
+  // from the folder the user is actually looking at, because the band and the
+  // accessibility tree must not each invent a number: before this, the renderer
+  // derived 条目/选中 from the scene while the tree read archiveStatus_ and
+  // answered "条目 --". Both now call THIS, so paint and UIA cannot disagree.
+  prism::layout::StatusInfo StatusForPublish() const {
+    prism::layout::StatusInfo info = archiveStatus_;
+    if (info.itemCount < 0) info.itemCount = ItemCount();
+    if (info.selectedCount < 0) info.selectedCount = SelectionCount();
+    return info;
+  }
   // Engine facts the catalog cannot derive (method / dictionary / cipher).
   void SetArchiveInfo(const prism::sidebar::ArchiveInfo& info) {
     sidebar_.SetArchiveInfo(info);
@@ -728,10 +763,16 @@ class GalleryWindow {
   // (the HWND is gone by then; this is captured in WM_CLOSE, before the
   // DestroyWindow that ends the message loop).
   bool ClosedFrameSize(int* width, int* height) const {
-    if (width) *width = closedWidth_;
-    if (height) *height = closedHeight_;
-    return closedWidth_ > 0 && closedHeight_ > 0;
+    if (width) *width = closedWindow_.visible.Width();
+    if (height) *height = closedWindow_.visible.Height();
+    return closedWindow_.visible.Width() > 0 && closedWindow_.visible.Height() > 0;
   }
+
+  // C86: the WHOLE frame the user closed -- origin, size AND the maximized bit
+  // (the C66 accessor above carried a size only, which is why the position never
+  // reached settings.json). Read after Run() returns, captured in WM_CLOSE.
+  const prism::layout::SavedWindow& ClosedWindow() const { return closedWindow_; }
+  bool ClosedMaximized() const { return closedWindow_.maximized; }
 
   // C66: apply a persisted frame through the ONE policy (visible frame + work
   // area clamp). Main.cpp calls this instead of a bare SetWindowPos, because a
@@ -742,14 +783,29 @@ class GalleryWindow {
   // created at is kept when it fits, and the clamp moves it on screen when it
   // does not (a stale position from an unplugged monitor, negative coordinates).
   prism::win::frame::Restore RestoreFrame(int width, int height) {
-    if (host_.hwnd == nullptr || width <= 0 || height <= 0) {
+    prism::layout::SavedWindow saved;
+    saved.visible = prism::layout::Rect{0, 0, width, height};
+    saved.hasPosition = false;  // C66's contract: a size, and the window keeps its origin
+    return RestoreFrame(saved);
+  }
+
+  // C86: the same door, with the ORIGIN and the maximized bit. A document that
+  // predates C86 has hasPosition == false, so the window keeps the origin it was
+  // created with and only the size is applied -- exactly the C66 behaviour, now
+  // written down instead of implied.
+  prism::win::frame::Restore RestoreFrame(prism::layout::SavedWindow saved) {
+    if (host_.hwnd == nullptr || saved.visible.Width() <= 0 || saved.visible.Height() <= 0) {
       return prism::win::frame::Restore{};
     }
-    const prism::layout::Rect current = prism::win::frame::ReadWindowRect(host_.hwnd);
-    const prism::layout::Rect saved{current.left, current.top, current.left + width,
-                                    current.top + height};
+    if (!saved.hasPosition) {
+      const prism::layout::Rect current = prism::win::frame::ReadWindowRect(host_.hwnd);
+      const int width = saved.visible.Width();
+      const int height = saved.visible.Height();
+      saved.visible = prism::layout::Rect{current.left, current.top, current.left + width,
+                                          current.top + height};
+    }
     prism::win::frame::Restore restored =
-        prism::win::frame::RestoreVisibleFrame(host_.hwnd, saved);
+        prism::win::frame::RestoreSavedFrame(host_.hwnd, saved);
     RecomputeLayout();
     Invalidate();
     return restored;
@@ -2155,9 +2211,9 @@ class GalleryWindow {
           // (and the normal rectangle when the window is maximized -- a
           // maximized GetWindowRect is the work area plus the border, which no
           // screen can ever hold again).
-          const prism::layout::Rect frame = prism::win::frame::FrameToPersist(host_.hwnd);
-          closedWidth_ = frame.Width();
-          closedHeight_ = frame.Height();
+          // C86: the frame AND the maximized bit. The C66 code read the same
+          // rectangle and threw the origin away, which is the whole S3-2 defect.
+          closedWindow_ = prism::win::frame::SavedFrameToPersist(host_.hwnd);
           DestroyWindow(host_.hwnd);
         }
         return 0;
@@ -2631,13 +2687,32 @@ class GalleryWindow {
     }
     root.children.push_back(std::move(outline));
 
-    // (5) the status line: one element, its text as both name and value, so both
-    // "read the status bar" and UIA's Name property answer the same sentence.
+    // (5) the status line. C80 published ONE element whose name was the
+    // transient status line -- measured through UIA as "status | 共 3 项" -- so
+    // 未加密 / 方法未知 / 字典未知 / 条目 / 选中 / 压缩率 were painted and
+    // unreachable. C86 (S3-11) publishes one child per PAINTED segment, in the
+    // band's own order, with the painter's own label: the rectangles come from
+    // StatusSegments(), the words from StatusSegmentLabel(), so the tree is the
+    // band rather than a second opinion about it.
     Node status;
     status.role = Role::StatusBar;
     status.name = WideToUtf8(status_);
     status.value = WideToUtf8(breadcrumbText_);
     status.bounds = layout_.statusBar;
+    if (kPublishStatusSegments) {
+      for (const prism::layout::StatusSegment& segment :
+           prism::layout::StatusSegments(layout_, StatusForPublish())) {
+        const std::string label = prism::layout::StatusSegmentLabel(segment);
+        if (label.empty()) continue;  // the divider is ink, not a reading
+        Node part;
+        part.role = Role::Text;
+        part.name = label;
+        part.value = label;
+        part.index = static_cast<int>(segment.id);
+        part.bounds = segment.rect;
+        status.children.push_back(std::move(part));
+      }
+    }
     root.children.push_back(std::move(status));
 
     return root;
@@ -3409,6 +3484,21 @@ class GalleryWindow {
   // click lands on the text the user sees.
   void RebuildBreadcrumbText() {
     crumbSegments_ = nav_.Segments(WideToUtf8(rootLabel_));
+    // C86 (S3-4): the crumb's trailing count belongs to the CURRENT folder. It
+    // used to be whatever the app had last written into status_ -- "共 16 项",
+    // the archive total, set once at open -- so a two-entry subfolder read
+    // "… › docs › 共 16 项" while the status band said 条目 2. The window owns
+    // the number now, because the window is what knows which folder is on
+    // screen; the total survives in parentheses.
+    if (archiveOpen_ && catalog_ != nullptr) {
+      const std::string count = prism::layout::BreadcrumbCountText(
+          ItemCount(), static_cast<int>(catalog_->size()), nav_.Folder().empty());
+      if (!count.empty()) {
+        crumbSegments_.push_back({std::string(prism::tree::kBreadcrumbSeparator),
+                                  prism::tree::kNoLevel});
+        crumbSegments_.push_back({count, prism::tree::kNoLevel});
+      }
+    }
     if (!status_.empty()) {
       crumbSegments_.push_back({std::string(prism::tree::kBreadcrumbSeparator),
                                 prism::tree::kNoLevel});
@@ -3584,7 +3674,8 @@ class GalleryWindow {
     // V4: the status band's four segments read the archive properties the
     // engine reported (encryption from SetArchiveInfo, the rest from
     // SetArchiveStatus). Unknown is a state, not an empty strip.
-    scene.status = archiveStatus_;
+    // C86: the SAME facts the accessibility tree publishes (counts filled in).
+    scene.status = StatusForPublish();
     // C-V2: the band. The model is the SAME object the click path hit-tests, so
     // a button can never be painted somewhere it cannot be pressed.
     scene.actions = &actionBar_;
@@ -4408,8 +4499,8 @@ class GalleryWindow {
   prism::list::ColumnLayout listColumns_;
   bool hasListColumns_ = false;
   // Captured in WM_CLOSE (the only moment the real frame still exists).
-  int closedWidth_ = 0;
-  int closedHeight_ = 0;
+  // C86: origin + size + maximized, in one value -- the app persists all three.
+  prism::layout::SavedWindow closedWindow_;
   prism::sidebar::FocusTarget lastSidebarHit_;
   // C29: the rail really paints now, and the grid reflow landed (list inset +
   // hit-test guard), so the rail is ON by default in list mode.

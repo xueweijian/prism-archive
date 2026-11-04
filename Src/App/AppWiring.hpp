@@ -231,6 +231,13 @@ struct LaunchRequest {
   // refused here, never guessed.)
   bool unknownFlag = false;
   std::wstring unknownText;
+  // C82: credentials a COMMAND LINE can hand to a verb that meets an encrypted
+  // archive. The rule (C58/C71/C82): a headless verb never opens a modal ask --
+  // without one of these, the verb refuses on stderr and exits 2. The password
+  // file is read once at launch (its PATH is stored here, not its content).
+  // The gallery ignores both: the interactive open keeps its dialog.
+  std::wstring password;
+  std::wstring passwordFile;
 };
 
 inline bool StartsWithFlag(const std::wstring& text) {
@@ -242,8 +249,32 @@ inline bool StartsWithFlag(const std::wstring& text) {
 // the flag, which is exactly the ordering a hand-typed command line uses.
 inline LaunchRequest ParseLaunch(const std::vector<std::wstring>& argv) {
   LaunchRequest request;
-  for (const std::wstring& arg : argv) {
+  // C82: --password / --password-file consume the NEXT argument as their value.
+  // A consumed value is a credential, not an archive path: the second pass must
+  // not treat it as one (an accidentally "opened" password would also join the
+  // session list).
+  std::vector<bool> consumed(argv.size(), false);
+  constexpr wchar_t kPasswordFlag[] = L"--password";
+  constexpr wchar_t kPasswordFileFlag[] = L"--password-file";
+  for (size_t i = 0; i < argv.size(); ++i) {
+    const std::wstring& arg = argv[i];
     if (!StartsWithFlag(arg)) continue;
+    if (arg == kPasswordFlag || arg == kPasswordFileFlag) {
+      if (i + 1 < argv.size()) {
+        if (arg == kPasswordFlag) {
+          request.password = argv[i + 1];
+        } else {
+          request.passwordFile = argv[i + 1];
+        }
+        consumed[i + 1] = true;
+        ++i;  // the value is swallowed, not re-parsed
+      } else {
+        // A credential flag with no value is a caller bug: refuse, don't guess.
+        request.unknownFlag = true;
+        request.unknownText = arg + L" (missing value)";
+      }
+      continue;
+    }
     if (arg == prism::win::shell_launch::kSmartExtract) {
       request.mode = LaunchMode::kSmartExtract;
       request.flag = arg;
@@ -276,8 +307,9 @@ inline LaunchRequest ParseLaunch(const std::vector<std::wstring>& argv) {
       request.unknownText = arg;
     }
   }
-  for (const std::wstring& arg : argv) {
-    if (StartsWithFlag(arg)) continue;
+  for (size_t i = 0; i < argv.size(); ++i) {
+    if (StartsWithFlag(argv[i]) || consumed[i]) continue;
+    const std::wstring& arg = argv[i];
     // Compress modes (the shell's 7z/zip verbs included) read the arguments as
     // SOURCES to pack; every other verb reads them as archives/paths.
     if (Compresses(request.mode)) request.inputs.push_back(arg);
@@ -541,6 +573,10 @@ class OperationHandles {
     prism::win::ReaderPool::Lease lease;              // empty under the mutant
     bool sharedHandler = false;                       // diagnostics
   };
+
+  // C82: the password this pool was created with -- the verify callback needs
+  // it again at extract time (the open callback's answer does not carry over).
+  const std::wstring& password() const { return config_.password; }
 
   static std::shared_ptr<OperationHandles> Create(prism::win::SevenZipLibrary& library,
                                                   const Config& config,
@@ -1159,13 +1195,22 @@ struct ExtractEachOutcome {
   size_t archives = 0;
   size_t succeeded = 0;
   size_t failed = 0;
+  // C82: members refused because they are encrypted and the verb was given no
+  // password. They count as failed AND move the exit code to 2 -- the same
+  // verdict a single-archive verb gives on the same input.
+  size_t passwordRefused = 0;
   std::vector<std::string> lines;  // stderr lines, in order
 };
+
+// Defined in the C40 section below; declared here because --smart-extract-each
+// (this section) is the headless path that must consult it.
+inline bool OpenNeedsPassword(const std::string& openTrace);
 
 inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archives,
                                          prism::win::SevenZipLibrary& library,
                                          bool scanExecutables = true,
-                                         const ExtractionOptions& options = {}) {
+                                         const ExtractionOptions& options = {},
+                                         const std::wstring& password = {}) {
   ExtractEachOutcome out;
   if (archives.empty()) {
     out.lines.push_back("smart-extract-each failed: no archives");
@@ -1175,10 +1220,22 @@ inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archiv
     ++out.archives;
     const std::string name = prism::win::WideToUtf8(archive);
     prism::win::ArchiveReader reader(library);
-    if (!reader.Open(archive)) {
+    if (!reader.Open(archive, password)) {
       ++out.failed;
-      out.lines.push_back("smart-extract-each archive=" + name + " ok=0 files=0 bytes=0 target= error=open: " +
-                          reader.openTrace());
+      if (OpenNeedsPassword(reader.openTrace())) {
+        // C82: the batch rule, one line per member -- NEVER an interactive ask.
+        ++out.passwordRefused;
+        out.lines.push_back("smart-extract-each archive=" + name +
+                            " ok=0 files=0 bytes=0 target= "
+                            "error=encrypted: password required");
+        continue;
+      }
+      // A named failure (missing volume, unsupported format) rides the trace and
+      // the reader's explicit verdict, so the stderr line says WHY.
+      std::string line = "smart-extract-each archive=" + name +
+                         " ok=0 files=0 bytes=0 target= error=open: " + reader.openTrace();
+      if (!reader.failureReason().empty()) line += " verdict=" + reader.failureReason();
+      out.lines.push_back(std::move(line));
       continue;
     }
     const std::vector<ArchiveItem> catalog = reader.ReadCatalog();
@@ -1187,6 +1244,7 @@ inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archiv
     config.archivePath = archive;
     config.handlerSlots = 2;
     config.backlog = 4;
+    config.password = password;  // C82: the pool's handlers must decrypt too
     std::string why;
     std::shared_ptr<OperationHandles> handles =
         OperationHandles::Create(library, config, &why);
@@ -1216,7 +1274,9 @@ inline ExtractEachOutcome RunExtractEach(const std::vector<std::wstring>& archiv
         " target=" + plan.plan.baseTargetDir +
         " error=" + (ok ? std::string() : result.error));
   }
-  out.exitCode = (out.failed == 0 && out.succeeded > 0) ? 0 : 1;
+  out.exitCode = (out.failed == 0 && out.succeeded > 0)
+                     ? 0
+                     : (out.passwordRefused > 0 ? 2 : 1);
   return out;
 }
 
@@ -1263,9 +1323,19 @@ class NullSink final : public prism::win::abi::ISequentialOutStream {
   LONG refs_ = 1;
 };
 
-class VerifyCallback final : public prism::win::abi::IArchiveExtractCallback {
+class VerifyCallback final : public prism::win::abi::IArchiveExtractCallback,
+                             public prism::win::abi::ICryptoGetTextPassword {
  public:
-  VerifyCallback() : sink_(new NullSink()) { sink_->AddRef(); }
+  // C82: a header-encrypted archive asks for the password AGAIN at extract
+  // time (the open callback's answer does not carry over). Without this
+  // interface the handler fails the item before GetStream -- measured:
+  // "entry 4294967295 failed with operation result 1" on a perfectly good
+  // archive whose password the verb HAD. No password -> E_ABORT, the same
+  // signal the open callback gives.
+  explicit VerifyCallback(std::wstring password = {})
+      : password_(std::move(password)), sink_(new NullSink()) {
+    sink_->AddRef();
+  }
   ~VerifyCallback() {
     if (sink_) sink_->Release();
   }
@@ -1274,6 +1344,11 @@ class VerifyCallback final : public prism::win::abi::IArchiveExtractCallback {
     if (!out) return E_POINTER;
     if (iid == IID_IUnknown || iid == prism::win::abi::IID_IArchiveExtractCallback) {
       *out = static_cast<prism::win::abi::IArchiveExtractCallback*>(this);
+      AddRef();
+      return S_OK;
+    }
+    if (iid == prism::win::abi::IID_ICryptoGetTextPassword) {
+      *out = static_cast<prism::win::abi::ICryptoGetTextPassword*>(this);
       AddRef();
       return S_OK;
     }
@@ -1313,12 +1388,22 @@ class VerifyCallback final : public prism::win::abi::IArchiveExtractCallback {
     return S_OK;
   }
 
+  // ICryptoGetTextPassword -- queried by the handler when the item (or the
+  // header) is encrypted. Mirrors OpenCallback's rule: no password -> E_ABORT.
+  STDMETHODIMP CryptoGetTextPassword(BSTR* password) override {
+    if (!password) return E_POINTER;
+    if (password_.empty()) return E_ABORT;
+    *password = SysAllocString(password_.c_str());
+    return *password ? S_OK : E_OUTOFMEMORY;
+  }
+
   uint64_t items() const { return items_; }
   uint64_t bytes() const { return sink_ ? sink_->total() : 0; }
   int32_t failedIndex() const { return failedIndex_; }
   const std::string& error() const { return error_; }
 
  private:
+  std::wstring password_;
   NullSink* sink_ = nullptr;
   prism::win::abi::UInt32 pending_ = 0xFFFFFFFFu;
   uint64_t items_ = 0;
@@ -1346,7 +1431,7 @@ inline VerifyOutcome VerifyIntegrity(OperationHandles& handles,
   for (const ArchiveItem& item : catalog) {
     if (!item.isDir) indices.push_back(item.index);
   }
-  auto* callback = new detail::VerifyCallback();
+  auto* callback = new detail::VerifyCallback(handles.password());
   const bool callOk = task->reader->ExtractBatch(indices, callback);
   outcome.items = callback->items();
   outcome.bytes = callback->bytes();

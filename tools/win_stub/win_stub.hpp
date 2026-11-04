@@ -78,6 +78,26 @@ using SSIZE_T = long long;
 #define HRESULT_FROM_WIN32(x) \
   ((HRESULT)(x) <= 0 ? ((HRESULT)(x)) : ((HRESULT)(((x) & 0x0000FFFF) | (7 << 16) | 0x80000000)))
 #define INVALID_HANDLE_VALUE (reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-1)))
+// winerror.h: ERROR_OPEN_FAILED = 123L -- volume streams return it when a
+// volume cannot be opened (card C82). Shapes/values only, like everything here.
+#define ERROR_OPEN_FAILED 123L
+
+// Volume enumeration vocabulary (card C82). Shapes only, following the
+// CreateFileW precedent above: the stub NEVER enumerates, so a syntax-only
+// TU cannot accidentally depend on real directory state. The struct sits
+// BEFORE the functions that take it -- a forward reference would be a
+// syntax error under -fsyntax-only (measured with cl /Zs, g++ -fsyntax-only).
+struct WIN32_FIND_DATAW {
+    DWORD dwFileAttributes;
+    wchar_t cFileName[MAX_PATH];
+};
+// FILE_ATTRIBUTE_DIRECTORY is already provided by the attribute enum below
+// (line ~295); a #define here would rewrite that enum member into a literal.
+inline HANDLE FindFirstFileW(const wchar_t*, WIN32_FIND_DATAW*) {
+    return INVALID_HANDLE_VALUE;
+}
+inline int FindNextFileW(HANDLE, WIN32_FIND_DATAW*) { return 0; }
+inline int FindClose(HANDLE) { return 1; }
 #define IID_PPV_ARGS(ppType) GUID{}, static_cast<void**>(ppType)
 #define TEXT(x) L##x
 #define _T(x) L##x
@@ -189,6 +209,7 @@ struct FILETIME {
   DWORD dwLowDateTime;
   DWORD dwHighDateTime;
 };
+
 struct LARGE_INTEGER {
   union {
     struct {
@@ -271,7 +292,7 @@ enum {
 enum { VARIANT_FALSE = 0, VARIANT_TRUE = -1 };
 enum { FILE_BEGIN = 0, FILE_CURRENT = 1, FILE_END = 2 };
 enum { GENERIC_READ = static_cast<int>(0x80000000), GENERIC_WRITE = 0x40000000 };
-enum { FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2 };
+enum { FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2, FILE_SHARE_DELETE = 0x4 };
 enum { OPEN_EXISTING = 3, CREATE_ALWAYS = 2, CREATE_NEW = 1, OPEN_ALWAYS = 4 };
 enum {
   FILE_ATTRIBUTE_NORMAL = 0x80,

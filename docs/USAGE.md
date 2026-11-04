@@ -105,7 +105,7 @@ verify ok=1 items=42 bytes=1048576 failedIndex=-1
 
 **安全后处理**：解压成功后，归档的 `:Zone.Identifier`（「来自 Internet」标记）会继承到
 写出的文件上；可执行/脚本类载荷会先过一遍 AMSI。被拦下或无法扫描时会弹一个警告框
-（不是静默成功）。
+（窗口里）或在命令行动词下向 stderr 打印 `security: ...`（不是静默成功）。
 
 ## 6. Quick Look
 
@@ -247,6 +247,19 @@ compress ok=1 items=2 bytes=20480 verified=2 ms=37 target=D:\work\report.7z erro
 | `--compress-zip <文件或目录>...` | 压缩成 .zip | 同上 |
 | `--compress-here <文件或目录>...` | 同 `--compress-7z` | 同上 |
 | `--smart-extract-each "<归档>"...` | 每个归档各自解压到独立文件夹 | 0 / 1 / 2 |
+| `--password <pw>`（跟在动词后） | 给命令行动词提供加密归档的密码 | — |
+| `--password-file <文件>` | 从一个 UTF-8 文本文件读密码（一行，忽略 BOM/换行） | — |
+
+**加密归档**：命令行动词遇到加密包而没给密码时，不弹框（批量调用方最怕无人点 OK 的模态框），
+向 stderr 打印一行并退出 2：
+
+```text
+encrypted: password required (supply via --password or --password-file)
+```
+
+窗口里双击加密包仍然弹密码对话框（那是正确的交互）。分卷 7z（`*.7z.001/.002/...`）
+整组按一个流打开；缺卷时拒绝打开并在 stderr 指名缺的是哪个卷（如 `vols.7z.003`），
+不会静默截断。
 
 不认识的参数不会弹框卡住调用方（Explorer 可能一次调一百个），而是向 stderr 说明并退出 2：
 

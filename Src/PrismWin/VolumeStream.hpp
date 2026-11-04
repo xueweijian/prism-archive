@@ -90,6 +90,37 @@ inline std::wstring ToWin32VolumePath(const std::wstring& raw) {
   return path;
 }
 
+// The directory holding a requested volume path. '/' is normalized to '\'
+// first so both separators work (PrismCore speaks '/', Win32 wants '\').
+inline std::wstring DirectoryOfVolumePath(const std::wstring& path) {
+  std::wstring normalized = path;
+  for (wchar_t& c : normalized) {
+    if (c == L'/') c = L'\\';
+  }
+  const size_t slash = normalized.find_last_of(L'\\');
+  return slash == std::wstring::npos ? std::wstring(L".")
+                                     : normalized.substr(0, slash);
+}
+
+// The basenames present beside a requested volume, as MakeVolumePlan expects
+// them (plain names, no directory). Directories are skipped: a volume set is
+// files. A failed listing returns an empty vector, which MakeVolumePlan turns
+// into "no volumes found beside ..." -- never into a guessed set.
+inline std::vector<std::string> ListVolumeSiblings(const std::wstring& directory) {
+  std::vector<std::string> out;
+  WIN32_FIND_DATAW data{};
+  const std::wstring pattern =
+      ToWin32VolumePath(directory.empty() ? std::wstring(L".") : directory) + L"\\*";
+  HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+  if (find == INVALID_HANDLE_VALUE) return out;
+  do {
+    if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+    out.push_back(WideToUtf8Volume(data.cFileName));
+  } while (FindNextFileW(find, &data));
+  FindClose(find);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // One physical volume file, opened for reading (IInStream + IStreamGetSize)
 // ---------------------------------------------------------------------------

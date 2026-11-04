@@ -30,6 +30,7 @@
 #include "../PrismCore/PrismCore.hpp"
 #include "FormatSniffer.hpp"
 #include "SevenZipAbi.hpp"
+#include "VolumeStream.hpp"  // C82: numeric-split sets open through ONE concatenated stream
 
 namespace prism::win {
 
@@ -507,6 +508,12 @@ struct OpenIoCounters {
   std::atomic<uint64_t> sniffBytes{0};     // the part spent identifying the file
   std::atomic<uint64_t> mutantProbeAll{0}; // injection counter (CONTRACTS D3)
   std::atomic<uint64_t> mutantIsoSniffOff{0};  // C43: iso rule deleted (D3)
+  // C82 negative control (D3): the volume concat skipped, the .001 handed to the
+  // handler as a lone file -- the pre-C82 defect. The counter rises ONLY when the
+  // skip actually fires, so a red verdict can claim CAUGHT honestly (D27).
+  std::atomic<uint64_t> mutantVolumeConcatOff{0};
+  // C82: sets opened through the concatenated stream (observation, not a gate).
+  std::atomic<uint64_t> volumeConcatOpens{0};
 };
 
 inline OpenIoCounters& IoCounters() {
@@ -619,7 +626,76 @@ constexpr std::size_t kSniffTailBytes = 1024;
 constexpr abi::UInt64 kSniffSector16Offset = 0x8000;
 constexpr std::size_t kSniffSector16Bytes = 8;
 
-inline bool ReadSniffWindow(InFileStream& stream, sniff::Window* window,
+inline bool AllDigitsAscii(std::string_view text) {
+  if (text.empty()) return false;
+  for (const char c : text) {
+    if (c < '0' || c > '9') return false;
+  }
+  return true;
+}
+
+// C82: does the concatenated set carry the WHOLE 7z archive? The signature and
+// start header sit in volume .001 (the first 32 bytes of the concatenation);
+// StartHeaderCRC(4) + NextHeaderOffset(8) + NextHeaderSize(8) + NextHeaderCRC(4)
+// put the full size at 32 + offset + size. A shorter set means the tail volume
+// is missing -- the error NAMES it (first absent ordinal after the contiguous
+// run), so the user hears "missing vols.7z.003", not a handler's opaque
+// decline. Returns true when the check does not apply (not a 7z) or the set is
+// complete; the failure sentence lands in *reason.
+inline bool VolumeSetComplete(const VolumeStream& stream, const prism::VolumePlan& plan,
+                              std::string* reason) {
+  static constexpr uint8_t kSevenZipSignature[6] = {0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C};
+  uint8_t head[32] = {};
+  abi::UInt64 pos = 0;
+  if (FAILED(const_cast<VolumeStream&>(stream).Seek(0, /*STREAM_SEEK_SET=*/0, &pos))) {
+    return true;  // cannot re-read: let the handler decide, no invented verdict
+  }
+  abi::UInt32 got = 0;
+  if (FAILED(const_cast<VolumeStream&>(stream).Read(head, sizeof(head), &got)) ||
+      got < sizeof(head)) {
+    return true;
+  }
+  if (std::memcmp(head, kSevenZipSignature, sizeof(kSevenZipSignature)) != 0) {
+    return true;  // not a 7z set: no start-header arithmetic to apply
+  }
+  auto le64 = [&head](size_t at) {
+    uint64_t value = 0;
+    for (int i = 7; i >= 0; --i) {
+      value = (value << 8) | head[at + static_cast<size_t>(i)];
+    }
+    return value;
+  };
+  const uint64_t nextHeaderOffset = le64(12);
+  const uint64_t nextHeaderSize = le64(20);
+  const uint64_t expected =
+      32 + nextHeaderOffset + nextHeaderSize;  // start header + packed area + next header
+  const uint64_t present = stream.size();
+  if (present >= expected) return true;
+  // Name the first absent volume: the contiguous run present is 1..N, so N+1
+  // must exist in the true set. Width = the widest ordinal among siblings, so
+  // a ".001" set never spells "vols.7z.3".
+  size_t width = 3;
+  for (const prism::VolumeEntry& entry : plan.volumes) {
+    const std::string lower = prism::volume_detail::Lower(entry.name);
+    const size_t lastDot = lower.rfind('.');
+    if (lastDot == std::string::npos) continue;
+    const std::string tail = lower.substr(lastDot + 1);
+    if (!AllDigitsAscii(tail)) continue;
+    width = (std::max)(width, tail.size());
+  }
+  const uint64_t nextOrdinal = plan.volumes.empty() ? 1 : plan.volumes.back().ordinal + 1;
+  std::string missing = prism::volume_detail::MissingName(plan.family, plan.stem, nextOrdinal,
+                                                          width);
+  if (reason != nullptr) {
+    *reason = "missing volume: " + missing + " (the 7z start header expects " +
+              std::to_string(expected) + " bytes; the volumes provide " +
+              std::to_string(present) + ")";
+  }
+  return false;
+}
+
+inline bool ReadSniffWindow(abi::IInStream& stream, abi::IStreamGetSize& streamSize,
+                            sniff::Window* window,
                             std::vector<uint8_t>* head, std::vector<uint8_t>* tail,
                             std::vector<uint8_t>* sector16) {
   if (!window || !head || !tail || !sector16) return false;
@@ -636,7 +712,11 @@ inline bool ReadSniffWindow(InFileStream& stream, sniff::Window* window,
   // Sector 16 (ISO9660/UDF volume recognition area). Skipped for a file that
   // cannot hold it -- never a short read, never a guess.
   sector16->clear();
-  const uint64_t size = stream.size();
+  // Both stream shapes (single file, volume set) answer IStreamGetSize, so the
+  // same window logic works for either.
+  abi::UInt64 sizeRaw = 0;
+  streamSize.GetSize(&sizeRaw);
+  const uint64_t size = static_cast<uint64_t>(sizeRaw);
   if (size >= kSniffSector16Offset + kSniffSector16Bytes) {
     pos = 0;
     if (FAILED(stream.Seek(static_cast<abi::Int64>(kSniffSector16Offset),
@@ -1460,6 +1540,7 @@ class ArchiveReader {
       archive_->Release();
     }
     if (stream_) stream_->Release();
+    if (volumeStream_) volumeStream_->Release();
   }
 
   bool Open(const std::wstring& archivePath, const std::wstring& password = {}) {
@@ -1470,10 +1551,79 @@ class ArchiveReader {
       openTrace_ += buf;
       return code;
     };
-    stream_ = new InFileStream(archivePath);
-    if (!stream_->valid()) {
-      openTrace_ = "CreateFileW failed; ";
-      return false;
+    // C82: a numeric-split set (*.7z.001, or *.001 with increasing siblings)
+    // must reach the handler as ONE seekable stream across its volumes. The
+    // pre-C82 shape handed the bare .001 over; the 7z handler then failed
+    // addressing past the first volume and the open died as
+    // "declined=7z reason=handler-rejected" even though real 7-Zip accepts the
+    // same set (it concatenates by the .7z.001 naming convention).
+    //
+    // The plan is built BEFORE any stream exists: a set with a hole refuses
+    // HERE, by name, instead of surfacing later as a corrupt-file verdict.
+    prism::VolumePlan volumePlan;
+    bool concatVolumes = false;
+    wchar_t concatMutant[64]{};
+    const bool mutantConcatOff = GetEnvironmentVariableW(L"PRISM_C82_MUTANT_NO_VOLUME_CONCAT",
+                                                         concatMutant, ARRAYSIZE(concatMutant)) > 0;
+    if (!mutantConcatOff) {
+      volumePlan = prism::MakeVolumePlan(WideToUtf8(archivePath),
+                                         ListVolumeSiblings(DirectoryOfVolumePath(archivePath)));
+      if (volumePlan.family == VolumeFamily::NumericSplit) {
+        if (!volumePlan.ok()) {
+          // A real set with a gap, a wrong start ordinal or a bad order: refuse
+          // with the plan's own sentence (it NAMES the missing volume). A silent
+          // truncation here would open a shifted stream and misread every byte.
+          failureReason_ = volumePlan.error;
+          openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                        " reason=missing-volume; ";
+          return false;
+        }
+        // Engage the concatenation for the documented shapes only: the 7-Zip
+        // split convention (*.7z.001 -- even a lone .001 is the set's head), and
+        // any *.001 that has at least one further sibling (a bare data.001 that
+        // is somebody's single file keeps the plain-file path).
+        const std::string baseLower = LowerAscii(WideToUtf8(archivePath));
+        const size_t dot = baseLower.rfind(".7z.");
+        const bool isSevenZipSplit =
+            dot != std::string::npos && AllDigitsAscii(baseLower.substr(dot + 4));
+        concatVolumes = isSevenZipSplit || volumePlan.volumes.size() >= 2;
+      }
+    } else {
+      IoCounters().mutantVolumeConcatOff.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (concatVolumes) {
+      volumeStream_ = new VolumeStream();
+      std::string volumeError;
+      if (!volumeStream_->Open(DirectoryOfVolumePath(archivePath), volumePlan, &volumeError)) {
+        failureReason_ = volumeError.empty() ? "cannot open the volume set" : volumeError;
+        openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                      " reason=volume-open-failed; ";
+        volumeStream_->Release();
+        volumeStream_ = nullptr;
+        return false;
+      }
+      openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                    " reason=concat; ";
+      IoCounters().volumeConcatOpens.fetch_add(1, std::memory_order_relaxed);
+      // Completeness by the archive's own start header: a 7z start header (bytes
+      // 12..31 of the set) carries NextHeaderOffset+NextHeaderSize, so the FULL
+      // set must measure 32 + both. Short of that, the tail volume is gone --
+      // refuse by name instead of letting the handler decline with an opaque
+      // "handler-rejected" (or worse, accept a truncated header region).
+      if (!VolumeSetComplete(*volumeStream_, volumePlan, &failureReason_)) {
+        openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                      " reason=missing-volume; ";
+        volumeStream_->Release();
+        volumeStream_ = nullptr;
+        return false;
+      }
+    }
+    if (!volumeStream_) {
+      stream_ = new InFileStream(archivePath);
+      if (!stream_->valid()) {
+        openTrace_ = "CreateFileW failed; ";
+        return false;
+      }
     }
 
     // C26: route by extension first. The extension decides WHICH handlers are
@@ -1525,7 +1675,14 @@ class ArchiveReader {
     std::vector<uint8_t> sniffTail;
     std::vector<uint8_t> sniffSector16;
     sniff::Finding finding;
-    if (ReadSniffWindow(*stream_, &sniffWindow, &sniffHead, &sniffTail, &sniffSector16)) {
+    abi::IInStream* probeStream =
+        volumeStream_ != nullptr ? static_cast<abi::IInStream*>(volumeStream_)
+                                 : static_cast<abi::IInStream*>(stream_);
+    abi::IStreamGetSize* probeSize =
+        volumeStream_ != nullptr ? static_cast<abi::IStreamGetSize*>(volumeStream_)
+                                 : static_cast<abi::IStreamGetSize*>(stream_);
+    if (ReadSniffWindow(*probeStream, *probeSize, &sniffWindow,
+                        &sniffHead, &sniffTail, &sniffSector16)) {
       sniffWindow.extensionHint = WideToUtf8(extension.substr(1));
       finding = sniff::Sniff(sniffWindow);
     }
@@ -1615,9 +1772,12 @@ class ArchiveReader {
       // A failed Open may leave the stream mid-file (the Zip handler reads
       // the header before rejecting): rewind so the next candidate sees the
       // real magic bytes, not the leftovers.
+      abi::IInStream* openStream =
+          volumeStream_ != nullptr ? static_cast<abi::IInStream*>(volumeStream_)
+                                   : static_cast<abi::IInStream*>(stream_);
       abi::UInt64 newPos = 0;
-      stream_->Seek(0, /*STREAM_SEEK_SET=*/0, &newPos);
-      const HRESULT result = candidate->Open(stream_, nullptr, callback);
+      openStream->Seek(0, /*STREAM_SEEK_SET=*/0, &newPos);
+      const HRESULT result = candidate->Open(openStream, nullptr, callback);
       callback->Release();
       std::string tag = std::string(name) + ".Open";
       // 7-Zip convention: S_OK = mine, S_FALSE = "not my format, try next".
@@ -1667,6 +1827,10 @@ class ArchiveReader {
     if (stream_) {
       stream_->Release();
       stream_ = nullptr;
+    }
+    if (volumeStream_) {
+      volumeStream_->Release();
+      volumeStream_ = nullptr;
     }
     openTrace_.clear();
     propTrace_.clear();
@@ -2338,6 +2502,10 @@ class ArchiveReader {
   SevenZipLibrary& library_;
   ITranscoder* transcoder_ = nullptr;
   InFileStream* stream_ = nullptr;
+  // C82: set when a numeric-split set is opened through VolumeStream. Exactly
+  // one of stream_/volumeStream_ exists; both are handed to the handler as the
+  // input stream, so both share the lifetime rule (released with the reader).
+  VolumeStream* volumeStream_ = nullptr;
   abi::IInArchive* archive_ = nullptr;
   // C43: the explicit verdict when the bytes prove a format this build cannot
   // open. 'unsupportedFormat_' is set only when NO handler exists at all;

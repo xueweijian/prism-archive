@@ -336,9 +336,38 @@ void Telemetry(const char* what, const prism::app::ExtractionOutcome& outcome) {
                static_cast<unsigned long long>(outcome.security.amsiBlocked));
 }
 
+// C82: --password-file. One small UTF-8 file holds ONE password: a BOM and a
+// trailing newline may ride along, nothing else. Returns false when the file
+// cannot be read; the caller then refuses the launch on stderr (a credential
+// that cannot be delivered is a caller bug, never an interactive prompt).
+bool ReadPasswordFileUtf8(const std::wstring& path, std::wstring* password) {
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  std::string bytes;
+  char buffer[512];
+  DWORD got = 0;
+  while (ReadFile(file, buffer, sizeof(buffer), &got, nullptr) && got > 0) {
+    bytes.append(buffer, got);
+    if (bytes.size() > 4096) break;  // one credential, not a novel
+  }
+  CloseHandle(file);
+  if (bytes.size() >= 3 && (bytes[0] & 0xFF) == 0xEF && (bytes[1] & 0xFF) == 0xBB &&
+      (bytes[2] & 0xFF) == 0xBF) {
+    bytes.erase(0, 3);  // UTF-8 BOM
+  }
+  while (!bytes.empty() && (bytes.back() == '\n' || bytes.back() == '\r' ||
+                            bytes.back() == ' ' || bytes.back() == '\t')) {
+    bytes.pop_back();
+  }
+  *password = prism::win::Utf8ToWide(bytes);
+  return !password->empty();
+}
+
 // Headless path for the three extracting verbs and for --test. Returns the
-// process exit code: 0 on success, 1 on a diagnosable failure (with a message
-// box), 2 when the verb needs an archive it was not given.
+// process exit code: 0 on success, 1 on a diagnosable failure (with the reason
+// on stderr -- C82 removed this path's last modals), 2 when the verb needs an
+// archive it was not given.
 int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const Tr& tr) {
   if (request.mode == prism::app::LaunchMode::kTest) {
     const prism::app::VerifyOutcome outcome =
@@ -349,10 +378,9 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
                  static_cast<unsigned long long>(outcome.bytes),
                  static_cast<int>(outcome.failedIndex), outcome.error.c_str());
     if (!outcome.ok) {
-      const std::wstring text =
-          tr.Or("error.verify.failed", L"\u6821\u9A8C\u5931\u8D25\uFF1A") + L"\n" +
-          prism::win::Utf8ToWide(outcome.error);
-      MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONERROR);
+      // C82: a headless verb reports on stderr -- a modal here hangs the batch
+      // caller (the exact defect this card removes for the password gate).
+      std::fprintf(stderr, "verify failed: %s\n", outcome.error.c_str());
       return 1;
     }
     return 0;
@@ -369,18 +397,18 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
       prism::win::amsi::InitMode::LoadAmsi, options);
   Telemetry("extract", outcome);
   if (!outcome.ok) {
-    std::wstring text = tr.Or("progress.failed", L"\u89E3\u538B\u5931\u8D25") + L"\n\n";
-    text += outcome.error.empty()
-                ? tr.Or("error.engine.noReason",
-                        L"(\u5F15\u64CE\u672A\u62A5\u544A\u539F\u56E0)")
-                : prism::win::Utf8ToWide(outcome.error);
-    MessageBoxW(nullptr, text.c_str(), L"PrismArchive", MB_ICONERROR);
+    // C82: headless failure = stderr + exit code. The box is gone: a verb run
+    // by Explorer or a script has nobody to click OK, and the caller hangs.
+    std::fprintf(stderr, "extract failed: %s\n",
+                 outcome.error.empty() ? "(engine reported no reason)"
+                                       : outcome.error.c_str());
     return 1;
   }
   // A security finding is not a silent success: the user gets told that some
   // payload could not be scanned or was flagged (C5's Unavailable contract).
   if (outcome.security.amsiBlocked > 0 || outcome.security.amsiCouldNotScan > 0) {
-    MessageBoxW(nullptr, outcome.status.c_str(), L"PrismArchive", MB_ICONWARNING);
+    std::fprintf(stderr, "security: %s\n",
+                 prism::win::WideToUtf8(outcome.status).c_str());
   }
   return 0;
 }
@@ -528,6 +556,30 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   c76.Add("com_argv", "CoInitializeEx+CommandLineToArgvW+ParseLaunch", c76T, c76.NowMs() - c76T);
   c76T = c76.NowMs();
 
+  // C82: fold --password-file into the resolved password BEFORE any verb runs.
+  // ParseLaunch consumed the flag's value, so the file's PATH can never leak
+  // into the archive list; the file's CONTENT is the credential. An unreadable
+  // file is a launch refusal on stderr -- one line, exit 2, no dialog.
+  if (!launch.passwordFile.empty()) {
+    std::wstring fromFile;
+    if (!ReadPasswordFileUtf8(launch.passwordFile, &fromFile)) {
+      std::fprintf(stderr, "password-file: cannot read \"%s\" (expected one UTF-8 line)\n",
+                   prism::win::WideToUtf8(launch.passwordFile).c_str());
+      if (SUCCEEDED(coInit)) CoUninitialize();
+      return 2;
+    }
+    if (launch.password.empty()) launch.password = fromFile;
+  }
+  // C82 negative control (CONTRACTS D3/D27): the PRE-C82 defect, injected at
+  // runtime. With the variable set, a CLI verb is treated like the gallery, so
+  // "--test enc.7z" brings up the modal password gate and the process hangs --
+  // exactly the hang this card removes. The mutant test demands that hang: the
+  // process must be killed at the bound and the case must go red.
+  wchar_t cliModalMutant[64]{};
+  const bool mutantCliModal = GetEnvironmentVariableW(L"PRISM_C82_MUTANT_CLI_MODAL",
+                                                      cliModalMutant,
+                                                      ARRAYSIZE(cliModalMutant)) > 0;
+
   // ---- persistence + language, BEFORE any user-facing string --------------
   // C14: one load at startup. A corrupt document is backed up by the file layer
   // (never silently overwritten) and the store reports it; a document from a
@@ -618,11 +670,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (archive.empty()) {
     // A verb without a path is a caller bug, not "open the picker".
     if (launch.mode != prism::app::LaunchMode::kGallery) {
-      MessageBoxW(nullptr,
-                  tr.Or("error.missingPath",
-                        L"\u547D\u4EE4\u7F3A\u5C11\u5F52\u6863\u8DEF\u5F84\u3002")
-                      .c_str(),
-                  L"PrismArchive", MB_ICONERROR);
+      // C82: stderr, not a box -- the verb is headless by design.
+      std::fprintf(stderr, "verb refused: missing archive path\n");
       if (SUCCEEDED(coInit)) CoUninitialize();
       return 2;
     }
@@ -631,6 +680,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const prism::win::SevenZipDllLookup lookup = prism::win::Resolve7zDll();
   if (lookup.path.empty()) {
     const std::wstring message = DescribeMissing7zDll(lookup, tr);
+    if (launch.mode != prism::app::LaunchMode::kGallery) {
+      // C82: the headless verb says why on stderr and leaves.
+      std::fprintf(stderr, "7z.dll: %s\n", prism::win::WideToUtf8(message).c_str());
+      if (SUCCEEDED(coInit)) CoUninitialize();
+      return 1;
+    }
     MessageBoxW(nullptr, message.c_str(), L"PrismArchive", MB_ICONERROR);
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
@@ -663,7 +718,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (launch.mode == prism::app::LaunchMode::kSmartExtractEach) {
     const prism::app::ExtractEachOutcome outcome = prism::app::RunExtractEach(
         launch.archives, app->library, /*scanExecutables=*/true,
-        prism::app::ExtractionOptionsFromSettings(settings.store));
+        prism::app::ExtractionOptionsFromSettings(settings.store), launch.password);
     for (const std::string& line : outcome.lines) std::fprintf(stderr, "%s\n", line.c_str());
     if (SUCCEEDED(coInit)) CoUninitialize();
     return outcome.exitCode;
@@ -760,14 +815,24 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // pool (C34/C35) opens every extraction handler with it, so an archive that
   // opened with a password can also be extracted.
   std::wstring archivePassword;
+  // C82: the gallery is the ONLY mode allowed to ask. Every other verb runs
+  // headless by design (Explorer / batch scripts), and a modal there hangs the
+  // caller (C58 measured it: still alive after 12 s). mutantCliModal (D3) puts
+  // the pre-C82 shape back: CLI treated as gallery, gate up, hang -- the mutant
+  // test must catch that.
+  const bool interactiveOpen =
+      (launch.mode == prism::app::LaunchMode::kGallery) && !mutantCliModal;
   {
     std::string trace;  // the engine trace is narrow; only the message is wide
     bool opened = false;
     {
       prism::win::ArchiveReader probe(app->library);
-      opened = probe.Open(archive);
+      opened = probe.Open(archive, launch.password);
       if (opened) {
         app->catalog = probe.ReadCatalog();
+        // C82: the command line's password PROVED itself; the handler pool
+        // below must decrypt with the same secret (the C40 join).
+        archivePassword = launch.password;
       } else {
         trace = probe.openTrace();
       }
@@ -776,7 +841,23 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // callback answer E_ABORT (C5's measured truth table), which is the one
     // signal that says "ask the user" rather than "the file is broken".
     if (!opened && prism::app::OpenNeedsPassword(trace)) {
-      archivePassword = RunPasswordGate(instance, archive, app->library);
+      if (!interactiveOpen && !mutantCliModal) {
+        // C82: headless verbs never open a modal. A password on the command
+        // line (--password / --password-file) is tried ONCE below; anything
+        // else is a one-line refusal and the exit code is the verdict.
+        if (launch.password.empty()) {
+          std::fprintf(stderr,
+                       "encrypted: password required (supply via --password or "
+                       "--password-file)\n");
+          if (SUCCEEDED(coInit)) CoUninitialize();
+          return 2;
+        }
+        archivePassword = launch.password;
+      } else {
+        // The gallery (or, under the D3 injection, the poor CLI verb again):
+        // the modal gate is the RIGHT interface for an interactive open.
+        archivePassword = RunPasswordGate(instance, archive, app->library);
+      }
       if (!archivePassword.empty()) {
         // A fresh reader: the failed one already holds a stream and a partial
         // archive object, and re-Open()ing it would leak both.
@@ -790,6 +871,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       }
     }
     if (!opened) {
+      if (!interactiveOpen) {
+        // C82: same rule for a plain failed open -- the reason goes to stderr,
+        // the exit code carries the verdict, and no box waits for a click that
+        // a batch caller will never make.
+        std::fprintf(stderr, "open failed: %s\n%s\n",
+                     prism::win::WideToUtf8(FileNameWide(archive)).c_str(), trace.c_str());
+        if (SUCCEEDED(coInit)) CoUninitialize();
+        return 1;
+      }
       MessageBoxW(nullptr,
                   (prism::app::OpenFailedStatus(tr, FileNameWide(archive)) + L"\n\n" +
                    prism::win::Utf8ToWide(trace))

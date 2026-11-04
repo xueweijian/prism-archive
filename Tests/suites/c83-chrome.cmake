@@ -34,7 +34,11 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   target_link_libraries(win_c83_chrome_test PRIVATE ${PRISM_C83_WINDOW_LIBS})
   target_compile_options(win_c83_chrome_test PRIVATE /WX-)
   add_test(NAME "win.c83_chrome" COMMAND win_c83_chrome_test)
+  # RESOURCE_LOCK: the assertion reads REAL SCREEN pixels, so two of these must
+  # never run at once (a parallel ctest run put another test's window in front
+  # of the capture and the mutant skipped instead of going red).
   set_tests_properties(win.c83_chrome PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+      RESOURCE_LOCK "c83_screen"
       PASS_REGULAR_EXPRESSION "ALL DARK-SHELL CHECKS PASSED")
 
   # D3 control 1: no DWM call at all -- the caption keeps the system's light
@@ -47,6 +51,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "c83.mutation.chrome.no_dwm" COMMAND win_c83_chrome_mutant_no_dwm)
   set_tests_properties(c83.mutation.chrome.no_dwm PROPERTIES TIMEOUT 120
       SKIP_RETURN_CODE 77
+      RESOURCE_LOCK "c83_screen"
       PASS_REGULAR_EXPRESSION "C83 MUTATION CAUGHT: no_dwm")
 
   # D3 control 2: the bar goes back to system-painted MF_STRING items. The menu
@@ -60,6 +65,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
            COMMAND win_c83_chrome_mutant_no_owner_draw)
   set_tests_properties(c83.mutation.chrome.no_owner_draw PROPERTIES TIMEOUT 120
       SKIP_RETURN_CODE 77
+      RESOURCE_LOCK "c83_screen"
       PASS_REGULAR_EXPRESSION "C83 MUTATION CAUGHT: no_owner_draw")
 endif()
 

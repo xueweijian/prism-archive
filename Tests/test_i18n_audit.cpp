@@ -227,6 +227,11 @@ Scan ScanSource() {
       std::regex(R"re(\btr\s*\.\s*(?:Or|Count|Sub)\s*\(\s*"([^"]*)")re"),
       std::regex(R"re(\btr\s*\(\s*"([^"]*)")re"),
       std::regex(R"re(\b(?:Translate|TranslateCount)\s*\(\s*"([^"]*)")re"),
+      // C88: the password dialog's table accessor is Text("password.*"). It is a
+      // key-shaped literal reaching a translator through the same Has/Translate
+      // pair, so the audit must see it; otherwise its 27 keys would be reported
+      // as "defined but never asked for" while the dialog asks for every one.
+      std::regex(R"re(\bText\s*\(\s*"([^"]*)")re"),
   };
   Scan scan;
   for (const std::filesystem::path& path : SourceFiles()) {

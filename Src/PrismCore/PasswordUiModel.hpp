@@ -106,6 +106,47 @@ inline std::ostream& operator<<(std::ostream& os, UiState state) {
   return os << UiStateName(state);
 }
 
+// C88: a machine-readable code for the message the dialog is showing. The
+// English sentence in UiView::message stays the fallback (the headless suite and
+// the no-translator path read it), but a renderer with a language table must not
+// have to parse English prose to translate it -- it switches on this code and
+// fills the same numbers from the view. Ids here are ABI-ish: append, never
+// renumber, so a stale table cannot silently map to a different sentence.
+enum class UiMessage : uint8_t {
+  None = 0,
+  StartNoCandidates,   // "This archive is password protected. No candidate ..."
+  CandidatesMissed,    // "tried N/M candidates, none matched ..."
+  WrongPassword,       // "wrong password (attempt n), k tries left."
+  BudgetExhausted,     // "wrong password (attempt n). retry budget exhausted ..."
+  EnterPassword,       // "enter a password."
+  ProbeRunning,        // "a probe is already running."
+  NotStarted,          // "the password flow has not started."
+  Cancelled,           // "cancelled; no more attempts."
+  AlreadyMatched,      // "the password already matched."
+  RetryBudgetExhausted // "retry budget exhausted; no more attempts."
+};
+
+inline const char* UiMessageName(UiMessage code) {
+  switch (code) {
+    case UiMessage::None: return "None";
+    case UiMessage::StartNoCandidates: return "StartNoCandidates";
+    case UiMessage::CandidatesMissed: return "CandidatesMissed";
+    case UiMessage::WrongPassword: return "WrongPassword";
+    case UiMessage::BudgetExhausted: return "BudgetExhausted";
+    case UiMessage::EnterPassword: return "EnterPassword";
+    case UiMessage::ProbeRunning: return "ProbeRunning";
+    case UiMessage::NotStarted: return "NotStarted";
+    case UiMessage::Cancelled: return "Cancelled";
+    case UiMessage::AlreadyMatched: return "AlreadyMatched";
+    case UiMessage::RetryBudgetExhausted: return "RetryBudgetExhausted";
+  }
+  return "?";
+}
+
+inline std::ostream& operator<<(std::ostream& os, UiMessage code) {
+  return os << UiMessageName(code);
+}
+
 // "Remember" vs "this time only". Default is Once: a password manager that
 // remembers by default is a password manager that leaks by default.
 enum class RememberChoice : uint8_t { Once = 0, Remember = 1 };
@@ -239,6 +280,8 @@ struct UiView {
   int total = 0;
   std::string progressLabel;  // "matching 3/12"
   std::string message;        // already redacted; counts and labels only
+  UiMessage messageCode = UiMessage::None;  // C88: what message says, machine-readably
+  std::string detail;         // C88: redacted engine diagnostics (may be empty)
   std::string masked;         // current attempt/success, last two chars only
   std::string sourceLabel;    // fixed source tier, never the text
   int wrongCount = 0;
@@ -308,6 +351,8 @@ class PasswordUiModel {
     shouldPersist_ = false;
     vaultPasswordTaken_ = false;
     message_.clear();
+    messageCode_ = UiMessage::None;
+    diagnostics_.clear();
     ScrubPending();
     Publish();
   }
@@ -349,12 +394,14 @@ class PasswordUiModel {
       message_ =
           "This archive is password protected. No candidate password is "
           "available; type the password.";
+      messageCode_ = UiMessage::StartNoCandidates;
     } else {
       state_ = UiState::Probing;
       mode_ = ProbeMode::Candidates;
       done_ = 0;
       total_ = static_cast<int>(ranked_.size());
       message_.clear();
+      messageCode_ = UiMessage::None;
     }
     Publish();
     return view_;
@@ -399,6 +446,7 @@ class PasswordUiModel {
       state_ = UiState::Opened;
       message_ = "password matched (attempt " + std::to_string(attemptsUsed_) +
                  "), source: " + openedSourceLabel_ + ".";
+      messageCode_ = UiMessage::AlreadyMatched;
       Publish();
       return view_;
     }
@@ -407,6 +455,7 @@ class PasswordUiModel {
       ScrubPending();
       state_ = UiState::Cancelled;
       message_ = "cancelled: remaining candidates were not tried.";
+      messageCode_ = UiMessage::Cancelled;
       Publish();
       return view_;
     }
@@ -430,6 +479,8 @@ class PasswordUiModel {
       state_ = UiState::NeedPassword;
       message_ = "tried " + std::to_string(tried) + "/" + std::to_string(total) +
                  " candidates, none matched. Type the password.";
+      messageCode_ = UiMessage::CandidatesMissed;
+      diagnostics_ = safeDiagnostics;
       if (!safeDiagnostics.empty()) message_ += " " + safeDiagnostics;
       Publish();
       return view_;
@@ -443,12 +494,15 @@ class PasswordUiModel {
       state_ = UiState::Wrong;
       message_ = "wrong password (attempt " + std::to_string(wrongCount_) + "), " +
                  std::to_string(attemptsLeft()) + " tries left.";
+      messageCode_ = UiMessage::WrongPassword;
     } else {
       state_ = UiState::Exhausted;
       message_ = "wrong password (attempt " + std::to_string(wrongCount_) +
                  "). retry budget exhausted (" + std::to_string(budget_) + "/" +
                  std::to_string(budget_) + "); no more attempts.";
+      messageCode_ = UiMessage::BudgetExhausted;
     }
+    diagnostics_ = safeDiagnostics;
     if (!safeDiagnostics.empty()) message_ += " " + safeDiagnostics;
     Publish();
     return view_;
@@ -465,6 +519,7 @@ class PasswordUiModel {
     }
     if (typed.empty()) {
       message_ = "enter a password.";
+      messageCode_ = UiMessage::EnterPassword;
       Publish();
       return view_;
     }
@@ -499,6 +554,8 @@ class PasswordUiModel {
     state_ = UiState::Cancelled;
     mode_ = ProbeMode::None;
     message_ = "cancelled.";
+    messageCode_ = UiMessage::Cancelled;
+    diagnostics_.clear();
     Publish();
     return view_;
   }
@@ -532,22 +589,28 @@ class PasswordUiModel {
     switch (state_) {
       case UiState::Exhausted:
         message_ = "retry budget exhausted; no more attempts.";
+        messageCode_ = UiMessage::RetryBudgetExhausted;
         break;
       case UiState::Probing:
         message_ = "a probe is already running.";
+        messageCode_ = UiMessage::ProbeRunning;
         break;
       case UiState::Idle:
         message_ = "the password flow has not started.";
+        messageCode_ = UiMessage::NotStarted;
         break;
       case UiState::Cancelled:
         message_ = "cancelled; no more attempts.";
+        messageCode_ = UiMessage::Cancelled;
         break;
       case UiState::Opened:
         message_ = "the password already matched.";
+        messageCode_ = UiMessage::AlreadyMatched;
         break;
       case UiState::NeedPassword:
       case UiState::Wrong:
         message_ = "retry budget exhausted; no more attempts.";
+        messageCode_ = UiMessage::RetryBudgetExhausted;
         break;
     }
   }
@@ -564,6 +627,8 @@ class PasswordUiModel {
     shouldPersist_ = false;
     vaultPasswordTaken_ = false;
     message_.clear();
+    messageCode_ = UiMessage::None;
+    diagnostics_.clear();
   }
 
   void ScrubPending() {
@@ -608,6 +673,8 @@ class PasswordUiModel {
     view_.canRemember = canRemember_;
     view_.remember = rememberChoice_;
     view_.showPassword = showPassword_;
+    view_.messageCode = messageCode_;
+    view_.detail = diagnostics_;
 
     if (state_ == UiState::Probing) {
       view_.progressLabel = "matching " + PasswordRing::ProgressLabel(
@@ -648,6 +715,8 @@ class PasswordUiModel {
   std::string openedSecret_;
   std::string openedSourceLabel_;
   std::string message_;
+  UiMessage messageCode_ = UiMessage::None;
+  std::string diagnostics_;
   UiView view_;
 };
 

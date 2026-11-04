@@ -276,8 +276,11 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // C74: +29. Eight actionbar.* keys (the band's labels were compiled-in
   // Chinese in ActionBarModel), five settings.summary.* (the dialog's summary
   // line) and sixteen settings.issue.* (the in-place hints, which were English
-  // diagnostics). The census is 102 and a table that drops one fails here.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{102});
+  // diagnostics). The census was 102.
+  // C88: +27 for the password gate (prompt, six labels, two memo radios, the two
+  // list captions, three buttons, progress, the two-part error line and nine
+  // status sentences). The census is 129 and a table that drops one fails here.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{129});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

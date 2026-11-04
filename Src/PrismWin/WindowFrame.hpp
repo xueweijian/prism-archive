@@ -177,7 +177,17 @@ inline Rect PersistFrame(HWND hwnd, const Rect& visible) {
 // minimized) window answers with its NORMAL rectangle: persisting the maximized
 // window rect is rule (1) above, and it is what produced 1552x832. Either way
 // the answer goes through PersistFrame, so it fits the work area.
-inline Rect FrameToPersist(HWND hwnd) {
+//
+// C86: 'normalBorders' is the shadow border of a NORMAL frame, remembered by the
+// caller while the window still was normal. It matters for the maximized branch
+// and only there: rcNormalPosition is a WINDOW rectangle, and the borders that
+// turn a window rect into the visible frame are a property of the window STYLE,
+// not of its zoom state. Measured on the CI runner (1024x720 work area): the
+// maximized window's own extended-frame border is {1,8,1,1} while a normal
+// window's is {0,0,0,0} -- converting the normal rect with the maximized numbers
+// wrote a 982x671 frame for a 984x680 window, so un-maximizing drifted by 9 px.
+// nullptr keeps the pre-C86 reading (this window's current borders).
+inline Rect FrameToPersist(HWND hwnd, const FrameBorders* normalBorders = nullptr) {
   if (hwnd == nullptr) return Rect{};
 #if defined(PRISM_C66_MUTANT_NO_DWM)
   // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix rule in one line -- persist
@@ -186,6 +196,7 @@ inline Rect FrameToPersist(HWND hwnd) {
   // 1552x832 on a 1536x816 screen). Deliberately NOT clamped: the pre-fix code
   // did not clamp either, and the suite's "what gets persisted fits the work
   // area" assertion is what has to catch it.
+  (void)normalBorders;
   return ReadWindowRect(hwnd);
 #else
   WINDOWPLACEMENT placement{};
@@ -196,8 +207,9 @@ inline Rect FrameToPersist(HWND hwnd) {
   if (placed && (zoomed || ::IsIconic(hwnd) != FALSE)) {
     const RECT& normal = placement.rcNormalPosition;
     const Rect normalWindow{normal.left, normal.top, normal.right, normal.bottom};
+    const FrameBorders borders = normalBorders != nullptr ? *normalBorders : m.borders;
     return PersistFrame(hwnd,
-                        prism::layout::VisibleFrameForWindowRect(normalWindow, m.borders));
+                        prism::layout::VisibleFrameForWindowRect(normalWindow, borders));
   }
   return PersistFrame(hwnd, m.visible);
 #endif
@@ -270,7 +282,8 @@ inline Restore RestoreVisibleFrame(HWND hwnd, const Rect& saved,
 // maximized window reports is the work area, and handing that back as the normal
 // frame is the 1552x832 trap; the mode travels beside the rectangle, never
 // inside it.
-inline prism::layout::SavedWindow SavedFrameToPersist(HWND hwnd) {
+inline prism::layout::SavedWindow SavedFrameToPersist(
+    HWND hwnd, const FrameBorders* normalBorders = nullptr) {
   if (hwnd == nullptr) return prism::layout::SavedWindow{};
   const bool zoomed = ::IsZoomed(hwnd) != FALSE;
   // D3 control (C86): a maximized window is written as if it were a normal one.
@@ -281,7 +294,7 @@ inline prism::layout::SavedWindow SavedFrameToPersist(HWND hwnd) {
   }
   // C86 D3 control: SavedWindowFor() drops the origin when the rule is disarmed,
   // which is byte-for-byte what the pre-fix document held (a size, no position).
-  return prism::layout::SavedWindowFor(FrameToPersist(hwnd), zoomed);
+  return prism::layout::SavedWindowFor(FrameToPersist(hwnd, normalBorders), zoomed);
 }
 
 // Restore a SAVED window: the normal frame first (position + size, clamped into

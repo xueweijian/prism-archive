@@ -228,6 +228,19 @@ Rect FitFrame(const Rect& work, int wantWidth, int wantHeight) {
 
 int Distance(int a, int b) { return a > b ? a - b : b - a; }
 
+// D29: a bounded wait for a state the system changes on its own (a shown window
+// becoming zoomed). 20 ms steps and a hard deadline -- never a fixed Sleep, and
+// the caller still asserts on the result.
+template <class Predicate>
+bool WaitUntil(Predicate done, int timeoutMs = 2000) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  for (;;) {
+    if (done()) return true;
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -355,13 +368,20 @@ PRISM_TEST("c86 a moved window closes and reopens where the user left it (<= 2 p
     window.Dispatch(WM_DESTROY, 0, 0);
     return;
   }
-  std::printf("  [moved] target=%d,%d %dx%d visible=%d,%d %dx%d\n", target.left,
-              target.top, target.Width(), target.Height(), first.visible.left,
+  // The frame the policy PREDICTS for this saved window on THIS desktop, clamp
+  // included. The assertion is relative to that plan, never to a pixel that only
+  // exists on a 1536x816 screen (D21): a 1024x720 CI runner and this desktop must
+  // both be able to say "the origin was honoured".
+  const Rect expected = prism::layout::PlanWindowRestore(placed, work).frame;
+  std::printf("  [moved] target=%d,%d %dx%d expected=%d,%d %dx%d visible=%d,%d %dx%d\n",
+              target.left, target.top, target.Width(), target.Height(), expected.left,
+              expected.top, expected.Width(), expected.Height(), first.visible.left,
               first.visible.top, first.visible.Width(), first.visible.Height());
-  // The window really is where the test put it (otherwise the round trip below
-  // would prove nothing).
-  PRISM_CHECK(Distance(first.visible.left, target.left) <= 2);
-  PRISM_CHECK(Distance(first.visible.top, target.top) <= 2);
+  // The window really is where the policy says (otherwise the round trip below
+  // would prove nothing about the origin).
+  PRISM_CHECK(Distance(first.visible.left, expected.left) <= 2);
+  PRISM_CHECK(Distance(first.visible.top, expected.top) <= 2);
+  PRISM_CHECK(Distance(first.visible.Width(), expected.Width()) <= 2);
 
   // CLOSE: the only moment the frame still exists.
   window.Dispatch(WM_CLOSE, 0, 0);
@@ -419,7 +439,10 @@ PRISM_TEST("c86 a maximized window saves its normal frame plus a mode, not the w
   const Rect normalVisible = first.visible;
   ::ShowWindow(window.Hwnd(), SW_MAXIMIZE);
   ::UpdateWindow(window.Hwnd());
-  if (!PRISM_CHECK(::IsZoomed(window.Hwnd()) != FALSE)) {
+  // D29: maximizing is the system's message to deliver; poll for the state with
+  // a hard deadline instead of assuming one turn of the queue is enough.
+  if (!PRISM_CHECK(WaitUntil([&] { return ::IsZoomed(window.Hwnd()) != FALSE; }))) {
+    std::printf("  [max] the window never became zoomed (IsZoomed=0 after 2 s)\n");
     window.Dispatch(WM_DESTROY, 0, 0);
     return;
   }
@@ -453,9 +476,11 @@ PRISM_TEST("c86 a maximized window saves its normal frame plus a mode, not the w
     return;
   }
   PRISM_CHECK(again.maximized);
-  PRISM_CHECK(::IsZoomed(reopened.Hwnd()) != FALSE);
+  PRISM_CHECK(WaitUntil([&] { return ::IsZoomed(reopened.Hwnd()) != FALSE; }));
   ::ShowWindow(reopened.Hwnd(), SW_RESTORE);
   ::UpdateWindow(reopened.Hwnd());
+  // D29: wait (bounded) for the restore to settle rather than sampling one frame.
+  WaitUntil([&] { return ::IsZoomed(reopened.Hwnd()) == FALSE; }, 1000);
   const Rect restoredFrame = prism::win::frame::Measure(reopened.Hwnd()).visible;
   std::printf("  [unmax] %d,%d %dx%d\n", restoredFrame.left, restoredFrame.top,
               restoredFrame.Width(), restoredFrame.Height());

@@ -807,6 +807,9 @@ class GalleryWindow {
     prism::win::frame::Restore restored =
         prism::win::frame::RestoreSavedFrame(host_.hwnd, saved);
     RecomputeLayout();
+    // C86: a restore that landed on a normal frame is the cheapest place to
+    // re-measure the borders the close path will need.
+    RememberNormalBorders();
     Invalidate();
     return restored;
   }
@@ -1845,6 +1848,12 @@ class GalleryWindow {
         // body and the breadcrumb pill together -- the components no longer
         // carry their own absolute rectangles.
         RecomputeLayout();
+        // C86: remember the shadow border of a NORMAL frame while the window
+        // still is one. The close path needs it to turn GetWindowPlacement's
+        // normal rectangle into the visible frame -- a maximized window's own
+        // extended bounds are a different number (measured on the CI runner:
+        // {1,8,1,1} vs {0,0,0,0}) and mixing them moved the saved frame by 9 px.
+        RememberNormalBorders();
         barKnown_ = false;  // the island is a fraction of the client width
         sidebarDirty_ = true;  // the sidebar's status pill is bottom-anchored
         UpdateBreadcrumbLayout();
@@ -2213,7 +2222,8 @@ class GalleryWindow {
           // screen can ever hold again).
           // C86: the frame AND the maximized bit. The C66 code read the same
           // rectangle and threw the origin away, which is the whole S3-2 defect.
-          closedWindow_ = prism::win::frame::SavedFrameToPersist(host_.hwnd);
+          closedWindow_ = prism::win::frame::SavedFrameToPersist(
+              host_.hwnd, normalBordersKnown_ ? &normalBorders_ : nullptr);
           DestroyWindow(host_.hwnd);
         }
         return 0;
@@ -2716,6 +2726,18 @@ class GalleryWindow {
     root.children.push_back(std::move(status));
 
     return root;
+  }
+
+  // C86: remember the border of a NORMAL frame. Called from WM_SIZE and from a
+  // restore that left the window restored; a zoomed or minimized window answers
+  // nothing, because its own frame is the work area, not the frame a normal
+  // window would have.
+  void RememberNormalBorders() {
+    if (host_.hwnd == nullptr || ::IsZoomed(host_.hwnd) || ::IsIconic(host_.hwnd)) return;
+    const prism::win::frame::Measurement m = prism::win::frame::Measure(host_.hwnd);
+    if (!m.dwm) return;  // nothing measured: keep whatever was known
+    normalBorders_ = m.borders;
+    normalBordersKnown_ = true;
   }
 
   // A row's leaf name: catalog paths are archive-relative ("dir/file.txt"), and
@@ -4501,6 +4523,10 @@ class GalleryWindow {
   // Captured in WM_CLOSE (the only moment the real frame still exists).
   // C86: origin + size + maximized, in one value -- the app persists all three.
   prism::layout::SavedWindow closedWindow_;
+  // C86: the shadow border measured while the window was NORMAL. A maximized
+  // window's own extended bounds are not the normal frame's (see the close path).
+  prism::layout::FrameBorders normalBorders_{};
+  bool normalBordersKnown_ = false;
   prism::sidebar::FocusTarget lastSidebarHit_;
   // C29: the rail really paints now, and the grid reflow landed (list inset +
   // hit-test guard), so the rail is ON by default in list mode.

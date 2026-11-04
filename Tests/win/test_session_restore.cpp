@@ -228,12 +228,15 @@ void ReportChild(const char* what, const Child& child, const fs::path& stderrPat
   // which is exactly what one Windows-lane red cost us (2026-11-05). Print the
   // whole log when it is small, else the head (the stack) AND the tail.
   const std::string log = ReadText(stderrPath);
-  if (log.size() <= 16384) {
+  if (log.size() <= 65536) {
+    // An ASan report is 20-30 KB and its "This frame has N object(s)" list is
+    // what names the dead variable -- the middle of that list is exactly what a
+    // head+tail split loses.
     std::printf("    child stderr (full, %zu bytes):\n%s\n", log.size(), log.c_str());
     return;
   }
-  std::printf("    child stderr (head, %zu bytes total):\n%.6000s\n", log.size(), log.c_str());
-  std::printf("    child stderr (tail):\n%s\n", Tail(log, 2000).c_str());
+  std::printf("    child stderr (head, %zu bytes total):\n%.32000s\n", log.size(), log.c_str());
+  std::printf("    child stderr (tail):\n%s\n", Tail(log, 4000).c_str());
 }
 
 struct LineWait {

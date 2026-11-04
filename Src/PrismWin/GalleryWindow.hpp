@@ -4893,6 +4893,12 @@ class GalleryWindow {
     void SelectRow(int) override {}
     void ActivateRow(int) override {}
     void ActivateTab(int) override {}
+    // C85: the menu bar's tree publishes MENU items, never a tab's x -- but the
+    // verb still forwards to the window's ONE close door, so a client that
+    // reaches a CloseButton through this host cannot silently do nothing.
+    void CloseTab(int index) override {
+      if (window_ != nullptr) window_->A11yCloseTab(index);
+    }
     void ActivateFolder(const std::string&) override {}
     void SetSearchValue(const std::string&) override {}
     void FocusSearchField() override {}

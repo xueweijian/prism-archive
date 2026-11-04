@@ -78,7 +78,16 @@ using SSIZE_T = long long;
 #define HRESULT_FROM_WIN32(x) \
   ((HRESULT)(x) <= 0 ? ((HRESULT)(x)) : ((HRESULT)(((x) & 0x0000FFFF) | (7 << 16) | 0x80000000)))
 #define INVALID_HANDLE_VALUE (reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-1)))
-#define IID_PPV_ARGS(ppType) GUID{}, static_cast<void**>(ppType)
+
+// Volume enumeration vocabulary (card C82). Shapes only, following the
+// CreateFileW precedent above: the stub NEVER enumerates, so a syntax-only
+// TU cannot accidentally depend on real directory state.
+#define FILE_ATTRIBUTE_DIRECTORY 0x00000010
+inline HANDLE FindFirstFileW(const wchar_t*, WIN32_FIND_DATAW*) {
+    return INVALID_HANDLE_VALUE;
+}
+inline int FindNextFileW(HANDLE, WIN32_FIND_DATAW*) { return 0; }
+inline int FindClose(HANDLE) { return 1; }#define IID_PPV_ARGS(ppType) GUID{}, static_cast<void**>(ppType)
 #define TEXT(x) L##x
 #define _T(x) L##x
 
@@ -189,6 +198,13 @@ struct FILETIME {
   DWORD dwLowDateTime;
   DWORD dwHighDateTime;
 };
+// Volume enumeration shape (card C82): only the members the volume scanner
+// actually consumes. Shapes only -- the stub never enumerates.
+struct WIN32_FIND_DATAW {
+    DWORD dwFileAttributes;
+    wchar_t cFileName[MAX_PATH];
+};
+
 struct LARGE_INTEGER {
   union {
     struct {

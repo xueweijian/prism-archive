@@ -568,17 +568,33 @@ PRISM_TEST("c85 the session-restore path survives the new logger") {
     return;
   }
   // The sandbox a previous CLEAN run would have left behind: one archive that is
-  // gone, one that is not an archive at all, and one that is fine. The app is
-  // launched with NO arguments, so it restores this document.
+  // gone, one that is not an archive at all, and one that is fine AND has a
+  // folder inside, restored into that folder in LIST mode -- the exact shape
+  // C46's "skips missing and damaged" case seeds, reproduced here because a
+  // restore that only ever lands on a root grid is not the same code path.
   const fs::path sandbox = world.dir.path() / L"restore-lapp";
   std::error_code ec;
   fs::create_directories(sandbox, ec);
+  const fs::path stage = world.dir.path() / L"foldered_src";
+  fs::create_directories(stage / L"docs", ec);
+  if (!PRISM_CHECK(WriteBytes(stage / L"docs" / L"notes.txt", "restore me") &&
+                   WriteBytes(stage / L"payload.bin", "restore me too"))) {
+    return;
+  }
+  // 7z.exe packs the DIRECTORY name, so the archive root holds "foldered_src/"
+  // and the restored folder is "foldered_src/docs" -- a NON-root folder.
+  const fs::path foldered = world.dir.path() / L"foldered.7z";
+  if (!PRISM_CHECK(Run7z(world.sevenZip, L"a -t7z -ms=off \"foldered.7z\" foldered_src",
+                         world.dir.wstr()))) {
+    return;
+  }
+  const std::string folderedFolder = "foldered_src/docs";
   prism::app::SessionBootstrap bootstrap = prism::app::LoadSessionUnder(sandbox.wstring());
   if (!PRISM_CHECK(!bootstrap.file.empty())) return;
   std::vector<prism::session::SessionEntry> entries;
   entries.push_back({Utf8(world.missing), "", false});
   entries.push_back({Utf8(world.garbage), "", false});
-  entries.push_back({Utf8(world.goodArchive), "", false});
+  entries.push_back({Utf8(foldered.wstring()), folderedFolder, true});
   bootstrap.store.Replace(entries, 0);
   bootstrap.store.MarkCleanShutdown(true);
   std::string why;
@@ -596,25 +612,45 @@ PRISM_TEST("c85 the session-restore path survives the new logger") {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kExitTimeoutMs);
   std::string text;
   bool found = false;
+  // The FULL line C46 waits for: the counts are part of the claim, and a
+  // restore that decides differently must not look like a timeout.
+  const char* kRestoreLine = "session restore entries=3 tried=3 skipped=2 restored=1";
   for (;;) {
     text = ReadText(outPath);
-    if (Contains(text, "session restore entries=3")) {
+    if (Contains(text, kRestoreLine)) {
       found = true;
       break;
     }
     if (!ChildAlive(child) || std::chrono::steady_clock::now() >= deadline) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
-  if (!found) {
+  // Let the window come up (the app prints "session opened" once the restored
+  // archive reached the view), then re-read: a crash ANYWHERE in that window --
+  // including AFTER the restore decision -- leaves an ASan report behind, and
+  // that report is the only thing that names the frame.
+  const auto openedDeadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(10'000);
+  while (std::chrono::steady_clock::now() < openedDeadline) {
+    text = ReadText(outPath);
+    if (Contains(text, "session opened") || !ChildAlive(child)) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  text = ReadText(outPath);
+  if (found) PRISM_CHECK(Contains(text, std::string("folder=") + folderedFolder));
+  const bool skipped = Contains(text, "skipped=2");
+  const bool restored = Contains(text, "restored=1");
+  const bool aborted = Contains(text, "AddressSanitizer") || Contains(text, "==ABORTING==");
+  if (!found || aborted) {
     // EVERYTHING, not a tail: this is the diagnostic that names the frame.
     std::printf("    child stderr (FULL, %zu bytes):\n%s\n", text.size(), text.c_str());
   }
-  const bool skipped = Contains(text, "skipped=2");
-  const bool restored = Contains(text, "restored=1");
   child.Stop();
   PRISM_CHECK(found);
   PRISM_CHECK(skipped);
   PRISM_CHECK(restored);
+  // The child must still be a normal app: an ASan abort here is the C46 red we
+  // are chasing, caught with its stack instead of a tail of shadow bytes.
+  PRISM_CHECK(!aborted);
 }
 
 int main(int argc, char** argv) {

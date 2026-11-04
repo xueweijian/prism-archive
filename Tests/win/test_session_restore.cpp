@@ -223,7 +223,17 @@ void ReportChild(const char* what, const Child& child, const fs::path& stderrPat
                 static_cast<unsigned long>(child.info.dwProcessId),
                 static_cast<unsigned long>(ChildExitCode(child)));
   }
-  std::printf("    child stderr (tail):\n%s\n", Tail(ReadText(stderrPath), 2000).c_str());
+  // C85 (diagnostic only): an ASan report puts the STACK at the TOP and the
+  // shadow bytes at the bottom -- a 2 KB tail of shadow bytes names no frame,
+  // which is exactly what one Windows-lane red cost us (2026-11-05). Print the
+  // whole log when it is small, else the head (the stack) AND the tail.
+  const std::string log = ReadText(stderrPath);
+  if (log.size() <= 16384) {
+    std::printf("    child stderr (full, %zu bytes):\n%s\n", log.size(), log.c_str());
+    return;
+  }
+  std::printf("    child stderr (head, %zu bytes total):\n%.6000s\n", log.size(), log.c_str());
+  std::printf("    child stderr (tail):\n%s\n", Tail(log, 2000).c_str());
 }
 
 struct LineWait {

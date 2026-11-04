@@ -200,3 +200,26 @@ cmake -S <tmp> -B <build> && cmake --build <build> --target PrismArchive
    本仓库现在有不止一个 `a11y::Host` 实现，这一点尤其重要。
 3. 长期解：CI 应跑 **merge queue**（`merge_group` 触发），而不是只跑 push。
    在它落地之前，第 1 条就是人工的 merge queue。
+
+### D36 先确认构建目录绑的是哪个源码树，再相信它的产物
+
+**实测事故（2026-11-05，本会话）**：`E:\build\prism` 曾被某张卡的 `cmake -S <worktree> -B E:\build\prism`
+重绑到 `E:\wg\c81`。之后我多次"从 main 重建 + 安装 + 验证"，`cmake --build` 都报 `ninja: no work to do`，
+而**实际产物一直是 C81 分支的源码**。由此我得出了一个错误的 P0 结论（"密码框不可见"），
+并向用户汇报、向卡片 agent 派单——**全部建立在错误的产物上**。
+
+**根因是共享构建目录 + 相对静默的重绑**：CMake 的 source root 存在 cache 里，换源码树时
+它要么报 mismatch（好），要么在 cache 被清掉后**静默接受新的源码树**（坏）。
+
+**规则**：
+
+1. 每个"要相信的产物"必须有**自己的构建目录**，不要复用共享路径；卡片用 `E:\build\wt-<卡>`，
+   主干验证用 `E:\build\final` 之类固定的专用目录。
+2. 构建前**核对源码根**（这一步只要一行）：
+   ```text
+   Select-String -Path <build>\build.ninja -Pattern "Main\.cpp\.obj:" | Select-Object -First 1
+   ```
+   输出里的源路径必须是你以为的那棵树。**`ninja: no work to do` 是最危险的信号**——
+   它可能意味着"已经构建好"，也可能意味着"我在构建别人的树"。
+3. 打包/安装前同样核对：`package.ps1 -BuildDir` 指向的目录必须通过第 2 条。
+4. 从这种错误产物得出的**任何行为结论都必须撤回**并重测；尤其不要据此向别人派单。

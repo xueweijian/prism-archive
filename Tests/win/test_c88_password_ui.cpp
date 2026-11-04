@@ -192,9 +192,19 @@ struct UiItem {
   std::wstring name;
   CONTROLTYPEID type = 0;
   bool offscreen = false;
-  std::wstring value;  // ValuePattern, when the element has one
+  std::wstring value;         // ValuePattern, when the element has one
+  std::wstring automationId;  // "TitleBar"/"Close" are the OS's, not ours
   bool password = false;
 };
+
+// The window's title bar and its Close button are drawn by the OS: their
+// accessible names come from the SYSTEM language, not from a table this build
+// ships ("关闭" on a Chinese Windows, "Close" on an English one). C88's "no
+// English literal" assertion is about the strings the dialog authors, so the
+// scan skips exactly those two system ids and nothing else.
+bool IsSystemChrome(const UiItem& item) {
+  return item.automationId == L"TitleBar" || item.automationId == L"Close";
+}
 
 IUIAutomation* Automation() {
   static IUIAutomation* automation = nullptr;
@@ -240,6 +250,11 @@ std::vector<UiItem> CollectUi(HWND hwnd) {
         item.name = name;
       }
       SysFreeString(name);
+      BSTR automationId = nullptr;
+      if (SUCCEEDED(element->get_CurrentAutomationId(&automationId)) && automationId != nullptr) {
+        item.automationId = automationId;
+      }
+      SysFreeString(automationId);
       element->get_CurrentControlType(&item.type);
       BOOL offscreen = FALSE;
       element->get_CurrentIsOffscreen(&offscreen);
@@ -427,14 +442,20 @@ PRISM_TEST("c88_zh_dialog_publishes_only_chinese_text") {
     }
   }
 
-  // The load-bearing assertion: not one English word anywhere in the tree.
-  for (const std::wstring& name : names) {
-    if (HasEnglishWord(name)) {
-      std::printf("    [i18n] English-looking UIA name: \"%s\"\n",
-                  ui::Utf8FromWide(name).c_str());
+  // The load-bearing assertion: not one English word anywhere the DIALOG writes
+  // (the OS title-bar strings are excluded, see IsSystemChrome).
+  int scanned = 0;
+  for (const UiItem& item : items) {
+    if (item.name.empty() || item.offscreen || IsSystemChrome(item)) continue;
+    ++scanned;
+    if (HasEnglishWord(item.name)) {
+      std::printf("    [i18n] English-looking UIA name: \"%s\" (id=%s)\n",
+                  ui::Utf8FromWide(item.name).c_str(),
+                  ui::Utf8FromWide(item.automationId).c_str());
       PRISM_CHECK(false);
     }
   }
+  PRISM_CHECK(scanned >= 12);
   PRISM_CHECK(true);
 }
 
@@ -508,7 +529,14 @@ PRISM_TEST("c88_pixels_come_from_theme_tokens") {
   const th::Rgba canvas = ui::CanvasPixel();
   const th::Rgba glass = th::EffectiveGlassSurface(th::Variant::Midnight);
   const th::Rgba expectedCard = th::CompositeOver(glass, canvas);
-  const COLORREF cardPixel = CapturePixel(dialog.Hwnd(), 40, 430);
+  // Relative to the card, never a hardcoded screen coordinate: the sampling
+  // point is 30 px inside the card's bottom-left corner (inside the padding,
+  // away from every control) at any DPI.
+  RECT cardRect{};
+  GetClientRect(dialog.Hwnd(), &cardRect);
+  const int cardX = cardRect.left + (ui::layout::kCardInset + 30);
+  const int cardY = cardRect.bottom - (ui::layout::kCardInset + 30);
+  const COLORREF cardPixel = CapturePixel(dialog.Hwnd(), cardX, cardY);
   PRISM_CHECK(NearColor(cardPixel, ui::ToColorRef(expectedCard), 2, "card background"));
   PRISM_CHECK(NearColor(cardPixel, ui::ToColorRef(card), 2, "card token"));
   (void)canvas;

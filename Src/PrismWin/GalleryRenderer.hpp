@@ -128,6 +128,10 @@ class GalleryRenderer {
     bool quickLookOpen = false;
     std::wstring quickLookTitle;
     std::wstring quickLookMeta;
+    // C87: WHICH catalog entry the card previews. The renderer looks its decoded
+    // pixels up in 'thumbs' -- the card is not allowed to be a colour stand-in
+    // when the archive already holds the image.
+    int quickLookItem = -1;
     std::wstring breadcrumb;
 
     // Batch 3: real thumbnails from the solid sweep (nullptr -> gradient
@@ -1786,14 +1790,47 @@ class GalleryRenderer {
       target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.2f);
     }
 
-    // Preview area: gradient stand-in for the decoded texture.
+    // Preview area: the REAL decoded pixels when the sweep has them (C87).
+    // The gradient is the honest "no pixels yet" state, never a stand-in for an
+    // image the archive already holds -- that was the reported "pure blue card".
     thumbs_[1]->SetStartPoint(D2D1::Point2F(card.left, card.top));
     thumbs_[1]->SetEndPoint(D2D1::Point2F(card.left, card.top + height - 110.0f));
-    D2D1_ROUNDED_RECT preview = D2D1::RoundedRect(
-        D2D1::RectF(card.left + 14.0f, card.top + 14.0f, card.right - 14.0f,
-                    card.top + height - 110.0f),
-        16.0f, 16.0f);
+    const prism::layout::Rect previewRect = prism::layout::QuickLookPreviewRect(layout);
+    const D2D1_ROUNDED_RECT preview = D2D1::RoundedRect(ToRectF(previewRect), 16.0f, 16.0f);
     target->FillRoundedRectangle(preview, thumbs_[1].Get());
+#if defined(PRISM_C87_MUTANT_PREVIEW_PLACEHOLDER)
+    // MUTANT (preview_placeholder): the card keeps the gradient even though the
+    // decoded pixels are in the store -- exactly the reported defect.
+    const prism::gallery::DecodedThumb* previewThumb = nullptr;
+#else
+    const prism::gallery::DecodedThumb* previewThumb =
+        (scene.thumbs != nullptr && scene.quickLookItem >= 0)
+            ? scene.thumbs->Lookup(static_cast<uint32_t>(scene.quickLookItem))
+            : nullptr;
+#endif
+    if (previewThumb != nullptr && previewThumb->width > 0 && previewThumb->height > 0) {
+      const uint32_t itemIndex = static_cast<uint32_t>(scene.quickLookItem);
+      SyncThumbBitmap(target, itemIndex, *previewThumb, scene.thumbs->Version());
+      const auto bitmap = thumbBitmaps_.find(itemIndex);
+      if (bitmap != thumbBitmaps_.end() && bitmap->second) {
+        ++dbgQuickLookThumbDraws;
+        const prism::layout::Rect fitRect =
+            prism::layout::FitContain(previewRect, static_cast<int>(previewThumb->width),
+                                      static_cast<int>(previewThumb->height));
+        const D2D1_RECT_F fit = ToRectF(fitRect);
+        target->FillRoundedRectangle(preview, tile_.Get());
+        ComPtr<ID2D1PathGeometry> clip;
+        if (SUCCEEDED(CreateSquircleGeometry(target, preview.rect, 16.0f,
+                                             clip.ReleaseAndGetAddressOf()))) {
+          D2D1_LAYER_PARAMETERS layer = D2D1::LayerParameters(
+              preview.rect, clip.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+          target->PushLayer(layer, nullptr);
+        }
+        target->DrawBitmap(bitmap->second.Get(), fit, 1.0f,
+                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        if (clip) target->PopLayer();
+      }
+    }
 
     DrawLabel(target, title_.Get(), scene.quickLookTitle,
               D2D1::RectF(card.left + 18.0f, card.top + height - 98.0f, card.right - 18.0f,
@@ -1935,6 +1972,10 @@ class GalleryRenderer {
   int dbgTileCells = 0;
   int dbgRowCells = 0;
   int dbgSkeletonCells = 0;
+  // C87: proof that the Quick Look card painted DECODED pixels (not the
+  // gradient). The suite's preview assertion keys on this counter, so a card
+  // that silently fell back to the stand-in cannot pass on luck.
+  int dbgQuickLookThumbDraws = 0;
   // C27: proof that the sidebar command list reached pixels. dbgSidebarCommands
   // counts every non-hit command considered, dbgSidebarPrimitives the ones
   // actually painted, dbgSidebarLabels the text runs, dbgSidebarPanels the

@@ -1251,10 +1251,23 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         app->extractReader.store(task->reader);
         // Published BEFORE the flag check: see the shutdown contract above.
         if (app->shuttingDown.load()) task->reader->RequestBatchAbort();
+        // C87: the HUD's percent is MEASURED. The engine's write stream reports
+        // uncompressed bytes as they land; the worker only posts when the
+        // integer percent moves, so a 30 MB run is ~100 messages, not one per
+        // 64 KiB chunk. Without this the capsule sat indeterminate (or at the
+        // final "files written / catalog size" ratio) for the whole extraction.
+        int lastPostedPercent = -1;
+        auto reportProgress = [&window, &lastPostedPercent](uint64_t done, uint64_t total) {
+          if (total == 0) return;
+          const int percent = static_cast<int>((done * 100ull) / total);
+          if (percent == lastPostedPercent) return;
+          lastPostedPercent = percent;
+          window.PostProgress(done, total);
+        };
         bool ok = task->reader->ExtractWithPlan(
             app->catalog, app->plan.plan, app->plan.plan.baseTargetDir, nullptr, &result,
             app->extractOptions.overwrite, app->extractOptions.prompt,
-            app->extractOptions.exists);
+            app->extractOptions.exists, reportProgress);
         app->extractReader.store(nullptr);
         app->ops->Finish(*task, ok);
         outcome.ok = ok;
@@ -1298,6 +1311,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       // Posted, not called: hud_ / status_ belong to the UI thread.
       window.PostProgress(outcome.filesWritten, app->catalog.size());
       window.PostStatus(status);
+      // C87: and the HUD is TOLD the operation ended. This message is the whole
+      // "frozen at 100%" fix: before it, nothing ever left the HUD's live state.
+      window.PostHudFinish(outcome.ok ? prism::HudOutcome::Success
+                                      : prism::HudOutcome::Failed);
       Telemetry("extract", outcome);
       std::fprintf(stderr, "extract wall=%llums\n",
                    static_cast<unsigned long long>(GalleryWindow::NowMs() - t0));
@@ -1345,6 +1362,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           /*scanExecutables=*/true, app->extractOptions);
       window.PostProgress(outcome.filesWritten, outcome.filesWritten);
       window.PostStatus(outcome.status);
+      window.PostHudFinish(outcome.ok ? prism::HudOutcome::Success
+                                      : prism::HudOutcome::Failed);
       Telemetry("extract-selection", outcome);
       std::fprintf(stderr, "extract-selection requested=%zu files=%llu ok=%d\n", selection.size(),
                    static_cast<unsigned long long>(outcome.filesWritten),
@@ -1577,6 +1596,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
               status += prism::app::CompressFailureDetail(compressNoReason, outcome.error);
             }
             window.PostStatus(status);
+            window.PostHudFinish(outcome.ok ? prism::HudOutcome::Success
+                                            : prism::HudOutcome::Failed);
             // The re-pack wrote a NEW file: the UI thread switches the session
             // to it (C34). Passing the path is what makes that possible without a
             // second member a worker would have to touch.
@@ -1730,6 +1751,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             // result is the status line the user ends up reading.
             window.PostArchiveChanged(app->archivePath);
             window.PostOperationFinished(status);
+            window.PostHudFinish(outcome.ok ? prism::HudOutcome::Success
+                                            : prism::HudOutcome::Failed);
             CoUninitialize();
           });
         });

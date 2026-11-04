@@ -17,6 +17,13 @@ namespace prism {
 
 enum class HudPhase { Hidden, Compact, Expanded, Done };
 
+// How an operation ENDED (card C87). Success/Failed/Cancelled all dismiss the
+// HUD at once: the capsule is a live indicator, not a notification centre, and
+// a capsule left on screen after the work finished is the "frozen at N%" defect
+// the card closes. The 1 s Done phase stays available for surfaces that WANT a
+// completion beat (OnDone); the window's operation lifecycle uses OnFinish.
+enum class HudOutcome { Success, Failed, Cancelled };
+
 inline std::ostream& operator<<(std::ostream& os, HudPhase phase) {
   switch (phase) {
     case HudPhase::Hidden: return os << "Hidden";
@@ -35,12 +42,48 @@ class ProgressHud {
     started_ = true;
     headline_ = std::move(headline);
     startMs_ = nowMs;
+    lastSampleMs_ = nowMs;
     doneMs_ = 0;
     doneBytes_ = 0;
     totalBytes_ = 0;
     lastPercent_ = 0;
     finished_ = false;
+    dismissed_ = false;
+    outcome_ = HudOutcome::Success;
   }
+
+  // The operation ENDED (success, failure or cancel). The HUD is gone on the
+  // NEXT Render -- no frozen percent, no lingering Done capsule. OnDone below
+  // keeps the 1 s completion beat for callers that ask for it explicitly.
+  void OnFinish(uint64_t nowMs, HudOutcome outcome) {
+    started_ = true;
+    finished_ = true;
+    dismissed_ = true;
+    outcome_ = outcome;
+    doneMs_ = nowMs;
+    if (outcome == HudOutcome::Success) doneBytes_ = totalBytes_;
+  }
+
+  // Forget everything: a new archive/tab must not inherit the last operation's
+  // frozen percent (C87 requirement 4).
+  void Reset() {
+    headline_.clear();
+    startMs_ = 0;
+    lastSampleMs_ = 0;
+    doneMs_ = 0;
+    doneBytes_ = 0;
+    totalBytes_ = 0;
+    lastPercent_ = 0;
+    started_ = false;
+    finished_ = false;
+    dismissed_ = false;
+    outcome_ = HudOutcome::Success;
+  }
+
+  bool started() const { return started_; }
+  bool finished() const { return finished_; }
+  bool dismissed() const { return dismissed_; }
+  HudOutcome outcome() const { return outcome_; }
 
   void OnProgress(uint64_t nowMs, uint64_t doneBytes, uint64_t totalBytes) {
     if (finished_) return;
@@ -67,6 +110,8 @@ class ProgressHud {
 
   View Render(uint64_t nowMs) const {
     if (finished_) {
+      // OnFinish: dismissed at once. OnDone: the legacy 1 s beat.
+      if (dismissed_) return {HudPhase::Hidden, 0, "", 0.0};
       if (nowMs - doneMs_ <= kDoneShowMs) return {HudPhase::Done, 100, headline_, 0.0};
       return {HudPhase::Hidden, 0, "", 0.0};
     }
@@ -113,6 +158,8 @@ class ProgressHud {
   mutable int lastPercent_ = 0;
   bool started_ = false;
   bool finished_ = false;
+  bool dismissed_ = false;  // OnFinish: no Done beat, Hidden immediately
+  HudOutcome outcome_ = HudOutcome::Success;
 };
 
 }  // namespace prism

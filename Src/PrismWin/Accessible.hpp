@@ -133,6 +133,7 @@ inline long RoleToMsaa(prism::a11y::Role role) {
     case prism::a11y::Role::StatusBar: return ROLE_SYSTEM_STATUSBAR;
     case prism::a11y::Role::Text: return ROLE_SYSTEM_TEXT;
     case prism::a11y::Role::Group: return ROLE_SYSTEM_GROUPING;
+    case prism::a11y::Role::ProgressBar: return ROLE_SYSTEM_PROGRESSBAR;
   }
   return ROLE_SYSTEM_CLIENT;
 }
@@ -431,6 +432,7 @@ class Accessible final : public IAccessible {
       case prism::a11y::Role::Outline:
       case prism::a11y::Role::StatusBar:
       case prism::a11y::Role::Group:
+      case prism::a11y::Role::ProgressBar:
         return S_FALSE;
     }
     return S_FALSE;
@@ -552,6 +554,7 @@ class Accessible final : public IAccessible {
       case prism::a11y::Role::Outline:
       case prism::a11y::Role::StatusBar:
       case prism::a11y::Role::Group:
+      case prism::a11y::Role::ProgressBar:
         return DISP_E_MEMBERNOTFOUND;
     }
     return DISP_E_MEMBERNOTFOUND;

@@ -822,8 +822,15 @@ class SettingsDialog {
   DWORD lastError() const { return lastError_; }
   int missingControlId() const { return missingControlId_; }
 
-  bool Create(HINSTANCE instance, const std::wstring& title = L"Settings") {
+  // C84: the owner is part of Create, not of a call site, because both things a
+  // dialog owes its opener -- centered over it, and (in OpenModal) in front of
+  // it -- are properties of the window itself. ShowWindow is here for the same
+  // reason: a caller that forgets it leaves the app disabled behind a modal
+  // loop that paints nothing (the measured S1-3 hang).
+  bool Create(HINSTANCE instance, const std::wstring& title = L"Settings",
+              HWND owner = nullptr) {
     instance_ = instance;
+    owner_ = owner;
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -843,9 +850,17 @@ class SettingsDialog {
     hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, title.c_str(),
                             WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                             windowWidth, windowHeight, nullptr, nullptr, instance, this);
-    if (hwnd_ == nullptr) lastError_ = GetLastError();
-    return hwnd_ != nullptr;
+    if (hwnd_ == nullptr) {
+      lastError_ = GetLastError();
+      return false;
+    }
+    ShowCreated();
+    return true;
   }
+
+  // C84: the keyboard goes to the first control in tab order. Public so the
+  // test can name the expectation instead of hardcoding a control id.
+  HWND FirstInputControl() const { return languageBox_; }
 
   void Destroy() {
     if (hwnd_ != nullptr && IsWindow(hwnd_) != FALSE) DestroyWindow(hwnd_);
@@ -1007,9 +1022,21 @@ class SettingsDialog {
   // Modal driver. The dialog owns its own message loop so the caller is one
   // line, and the owner window is disabled for the duration exactly once.
   bool OpenModal(HINSTANCE instance, HWND owner) {
-    if (!Create(instance, L"PrismArchive settings")) return false;
-    owner_ = owner;
+    // C84: Create shows the window (and centers it over the owner). Before this
+    // card the modal loop ran on a window that had never been shown, so the
+    // owner was disabled and the user saw an application frozen for as long as
+    // the dialog lived.
+    if (!Create(instance, L"PrismArchive settings", owner)) return false;
     if (owner_ != nullptr) EnableWindow(owner_, FALSE);
+    // C84: a modal gate must also own the foreground and the keyboard; a
+    // visible-but-unfocused dialog still looks dead. SetFocus is scoped to this
+    // thread, so it works even when the process cannot take the foreground.
+    // The stock controls are V3's INVISIBLE adapters (DialogChrome paints the
+    // pixels), and a child without WS_VISIBLE cannot take focus -- so the
+    // dialog window owns the keyboard and routes it to the first input row
+    // (focus_ == 0 == the language combo, set in WM_CREATE).
+    SetForegroundWindow(hwnd_);
+    SetFocus(hwnd_);
     MSG msg{};
     while (hwnd_ != nullptr && IsWindow(hwnd_) != FALSE) {
       const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
@@ -1249,6 +1276,8 @@ class SettingsDialog {
 
   LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
   bool CreateChildren();
+  void ShowCreated();    // C84: center + ShowWindow + UpdateWindow, one place
+  void CenterOnOwner();
   HWND MakeControl(const wchar_t* klass, const wchar_t* text, DWORD style, int id, int x, int y,
                    int width, int height);
   void OnCommand(int id, int code, HWND control);
@@ -1700,6 +1729,43 @@ inline HWND SettingsDialog::MakeControl(const wchar_t* klass, const wchar_t* tex
   SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
                TRUE);
   return control;
+}
+
+// C84: one place that turns a created window into a visible one. The negative
+// control PRISM_C84_MUTANT_NO_SHOW compiles the ShowWindow calls out, so the
+// "created means visible" assertions in c84-dialog-visible.cmake go red and the
+// mutant prints C84 MUTATION CAUGHT: no_show (CONTRACTS D26/D27).
+inline void SettingsDialog::ShowCreated() {
+  CenterOnOwner();
+#if !defined(PRISM_C84_MUTANT_NO_SHOW)
+  ShowWindow(hwnd_, SW_SHOW);
+  UpdateWindow(hwnd_);
+#endif
+}
+
+// Center over the owner's rectangle, then keep the card inside the monitor's
+// work area (a dialog centered on a window at the screen edge used to hang off
+// the desktop). No owner -> leave CW_USEDEFAULT alone.
+inline void SettingsDialog::CenterOnOwner() {
+  if (hwnd_ == nullptr || owner_ == nullptr) return;
+  RECT ownerRect{};
+  RECT selfRect{};
+  if (GetWindowRect(owner_, &ownerRect) == FALSE || GetWindowRect(hwnd_, &selfRect) == FALSE) {
+    return;
+  }
+  const int width = selfRect.right - selfRect.left;
+  const int height = selfRect.bottom - selfRect.top;
+  int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
+  int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
+  MONITORINFO monitor{};
+  monitor.cbSize = sizeof(monitor);
+  if (GetMonitorInfoW(MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE) {
+    if (x + width > monitor.rcWork.right) x = monitor.rcWork.right - width;
+    if (y + height > monitor.rcWork.bottom) y = monitor.rcWork.bottom - height;
+    if (x < monitor.rcWork.left) x = monitor.rcWork.left;
+    if (y < monitor.rcWork.top) y = monitor.rcWork.top;
+  }
+  SetWindowPos(hwnd_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 inline bool SettingsDialog::CreateChildren() {

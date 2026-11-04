@@ -131,8 +131,14 @@ class PasswordDialog {
   DWORD lastError() const { return lastError_; }
   int missingControlId() const { return missingControlId_; }
 
-  bool Create(HINSTANCE instance, const std::wstring& title = L"Password required") {
+  // C84: the password gate is the worst case of the invisible-dialog defect --
+  // the app looked hung for as long as the dialog was up (measured: process
+  // alive, zero visible windows). Showing and centering are part of Create, so
+  // the product path (RunPasswordGate) and every test get them for free.
+  bool Create(HINSTANCE instance, const std::wstring& title = L"Password required",
+              HWND owner = nullptr) {
     instance_ = instance;
+    owner_ = owner;
     EnsureCommonControls();
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -152,8 +158,21 @@ class PasswordDialog {
                             WS_CAPTION | WS_SYSMENU | WS_OVERLAPPED | WS_CLIPCHILDREN,
                             CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left,
                             frame.bottom - frame.top, nullptr, nullptr, instance, this);
-    if (hwnd_ == nullptr) lastError_ = GetLastError();
-    return hwnd_ != nullptr;
+    if (hwnd_ == nullptr) {
+      lastError_ = GetLastError();
+      return false;
+    }
+    ShowCreated();
+    return true;
+  }
+
+  // C84: the modal gate calls this after Create -- a visible dialog that never
+  // takes the foreground/keyboard still reads as a frozen app. Public so the
+  // product path and the Windows suite run the same code.
+  void FocusInput() {
+    if (hwnd_ == nullptr) return;
+    SetForegroundWindow(hwnd_);
+    SetFocus(passwordEdit_);
   }
 
   void Destroy() {
@@ -610,8 +629,12 @@ class PasswordDialog {
     return line;
   }
 
+  void ShowCreated();  // C84: center + ShowWindow + UpdateWindow, one place
+  void CenterOnOwner();
+
   HWND hwnd_ = nullptr;
   HINSTANCE instance_ = nullptr;
+  HWND owner_ = nullptr;  // C84: center over it when the app has a window
   DWORD lastError_ = 0;
   int missingControlId_ = 0;
   bool syncing_ = false;
@@ -637,6 +660,50 @@ class PasswordDialog {
   OpenedHandler onOpened_;
   CancelHandler onCancel_;
 };
+
+// C84: one place that turns a created window into a visible one. The negative
+// control PRISM_C84_MUTANT_NO_SHOW compiles the ShowWindow calls out, so the
+// visibility assertion in c84-dialog-visible.cmake goes red (D26/D27).
+inline void PasswordDialog::ShowCreated() {
+  CenterOnOwner();
+#if !defined(PRISM_C84_MUTANT_NO_SHOW)
+  ShowWindow(hwnd_, SW_SHOW);
+  UpdateWindow(hwnd_);
+#endif
+}
+
+// Centered over the owner when the app has one, otherwise over the primary
+// work area: the startup gate runs before the gallery exists (measured: the
+// dialog used to open at CW_USEDEFAULT and, with no ShowWindow, not at all).
+inline void PasswordDialog::CenterOnOwner() {
+  if (hwnd_ == nullptr) return;
+  RECT selfRect{};
+  if (GetWindowRect(hwnd_, &selfRect) == FALSE) return;
+  const int width = selfRect.right - selfRect.left;
+  const int height = selfRect.bottom - selfRect.top;
+  // The CENTER comes from the owner when there is one; the CLAMP always comes
+  // from the monitor work area. Mixing the two (clamping to the owner rectangle)
+  // puts the card off-screen when the owner itself overlaps the taskbar -- the
+  // CI runner's 1024x768 desktop caught exactly that, locally the owner was
+  // small enough that both rules agreed.
+  RECT base{};
+  if (owner_ != nullptr && GetWindowRect(owner_, &base) != FALSE && base.right > base.left) {
+    // centered over the owner
+  } else if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &base, 0) == FALSE) {
+    return;
+  }
+  int x = base.left + ((base.right - base.left) - width) / 2;
+  int y = base.top + ((base.bottom - base.top) - height) / 2;
+  MONITORINFO monitor{};
+  monitor.cbSize = sizeof(monitor);
+  if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE) {
+    if (x + width > monitor.rcWork.right) x = monitor.rcWork.right - width;
+    if (y + height > monitor.rcWork.bottom) y = monitor.rcWork.bottom - height;
+    if (x < monitor.rcWork.left) x = monitor.rcWork.left;
+    if (y < monitor.rcWork.top) y = monitor.rcWork.top;
+  }
+  SetWindowPos(hwnd_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+}
 
 }  // namespace prism::win::pwd_ui
 

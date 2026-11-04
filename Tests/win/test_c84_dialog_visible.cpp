@@ -200,6 +200,8 @@ HWND MakeOwner(int x, int y, int width, int height) {
 // SettingsDialog::OpenModal / VaultDialog::OpenModal, which is the only place
 // where GetFocus() and IsWindowEnabled(owner) can be read while the gate runs.
 // ---------------------------------------------------------------------------
+HWND FindTopLevelOf(DWORD pid, const wchar_t* className, bool requireVisible);
+
 struct ModalProbe {
   const wchar_t* className = nullptr;
   HWND owner = nullptr;
@@ -227,10 +229,12 @@ LRESULT CALLBACK ProbeProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
   if (message != WM_TIMER) return DefWindowProcW(hwnd, message, wparam, lparam);
   auto* probe = reinterpret_cast<ModalProbe*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (probe == nullptr || probe->done) return 0;
-  HWND dialog = FindWindowW(probe->className, nullptr);
-  DWORD pid = 0;
-  if (dialog != nullptr) GetWindowThreadProcessId(dialog, &pid);
-  if (dialog != nullptr && pid == GetCurrentProcessId()) {
+  // NOT FindWindow(): under "ctest -j8" another suite can own a window of the
+  // same class, and FindWindow would keep returning THAT one, so the probe
+  // would never see its own dialog (this is exactly how the CI lane failed).
+  // The class + THIS process is the honest lookup.
+  HWND dialog = FindTopLevelOf(GetCurrentProcessId(), probe->className, false);
+  if (dialog != nullptr) {
     probe->seen = true;
     probe->dialog = dialog;
     probe->visible = IsWindowVisible(dialog) != FALSE;
@@ -635,7 +639,10 @@ PRISM_TEST("c84_product_settings_menu_opens_visible_dialog_and_restores_owner") 
   PRISM_CHECK_EQ(probe.focusedWidgetId, su::ids::kLanguage);
   // After WM_CLOSE the app must be usable again (the measured S1-3 freeze).
   PRISM_CHECK(IsWindowEnabled(window.Hwnd()) != FALSE);
-  PRISM_CHECK(FindWindowW(su::SettingsDialog::kClassName, nullptr) == nullptr);
+  // Scoped to THIS process for the same reason: a parallel suite may hold a
+  // settings dialog of its own, and that is not our leak.
+  PRISM_CHECK(FindTopLevelOf(GetCurrentProcessId(), su::SettingsDialog::kClassName, false) ==
+              nullptr);
 }
 
 // ===========================================================================

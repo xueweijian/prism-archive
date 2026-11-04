@@ -681,25 +681,27 @@ inline void PasswordDialog::CenterOnOwner() {
   if (GetWindowRect(hwnd_, &selfRect) == FALSE) return;
   const int width = selfRect.right - selfRect.left;
   const int height = selfRect.bottom - selfRect.top;
-  RECT area{};
-  if (owner_ != nullptr) {
-    RECT ownerRect{};
-    if (GetWindowRect(owner_, &ownerRect) != FALSE) {
-      area.left = ownerRect.left;
-      area.top = ownerRect.top;
-      area.right = ownerRect.right;
-      area.bottom = ownerRect.bottom;
-    }
+  // The CENTER comes from the owner when there is one; the CLAMP always comes
+  // from the monitor work area. Mixing the two (clamping to the owner rectangle)
+  // puts the card off-screen when the owner itself overlaps the taskbar -- the
+  // CI runner's 1024x768 desktop caught exactly that, locally the owner was
+  // small enough that both rules agreed.
+  RECT base{};
+  if (owner_ != nullptr && GetWindowRect(owner_, &base) != FALSE && base.right > base.left) {
+    // centered over the owner
+  } else if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &base, 0) == FALSE) {
+    return;
   }
-  if (area.right <= area.left || area.bottom <= area.top) {
-    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0) == FALSE) return;
+  int x = base.left + ((base.right - base.left) - width) / 2;
+  int y = base.top + ((base.bottom - base.top) - height) / 2;
+  MONITORINFO monitor{};
+  monitor.cbSize = sizeof(monitor);
+  if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE) {
+    if (x + width > monitor.rcWork.right) x = monitor.rcWork.right - width;
+    if (y + height > monitor.rcWork.bottom) y = monitor.rcWork.bottom - height;
+    if (x < monitor.rcWork.left) x = monitor.rcWork.left;
+    if (y < monitor.rcWork.top) y = monitor.rcWork.top;
   }
-  int x = area.left + ((area.right - area.left) - width) / 2;
-  int y = area.top + ((area.bottom - area.top) - height) / 2;
-  if (x < area.left) x = area.left;
-  if (y < area.top) y = area.top;
-  if (x + width > area.right) x = area.right - width;
-  if (y + height > area.bottom) y = area.bottom - height;
   SetWindowPos(hwnd_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
 }
 

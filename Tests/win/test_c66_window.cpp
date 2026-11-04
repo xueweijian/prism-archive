@@ -441,16 +441,15 @@ PRISM_TEST("c66 Help > About is a menu item and WM_COMMAND opens the dialog") {
   for (int i = 0; i < count && !found; ++i) {
     HMENU popup = ::GetSubMenu(bar, i);
     if (popup == nullptr) continue;
-    wchar_t text[128]{};
-    if (::GetMenuStringW(bar, static_cast<UINT>(i), text, ARRAYSIZE(text), MF_BYPOSITION) == 0) {
-      continue;
-    }
+    // C83: the bar is owner-drawn, so GetMenuStringW answers 0 for the top-level
+    // item; the ITEM is found by the About command it contains (unchanged) and
+    // its title comes from the window, which is the text WM_DRAWITEM paints.
     const int items = ::GetMenuItemCount(popup);
     for (int j = 0; j < items; ++j) {
       if (::GetMenuItemID(popup, j) ==
           static_cast<UINT>(prism::win::about::AboutDialog::kMenuAboutId)) {
         found = true;
-        helpTitle = text;
+        helpTitle = window.MenuBarItemText(i);
         break;
       }
     }

@@ -99,6 +99,7 @@
 #include <vector>
 
 #include "AppWiring.hpp"
+#include "../PrismCore/ChromeTheme.hpp"   // C83: the shell palette (Day/Night/HC)
 #include "../PrismCore/I18n.hpp"           // C19: resource tables + language choice
 #include "../PrismCore/Log.hpp"            // C16: the one warn line a missing key gets
 #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
@@ -978,6 +979,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
+  // C83: the shell follows the saved appearance BEFORE the first frame. The
+  // mapping is pure (prism::chrome::ShellVariantFor): "dark" and the schema's
+  // "system" default paint the Midnight shell the canvas already uses, "light"
+  // paints the daylight one, and appearance.highContrast wins over both. The
+  // title bar and the owner-drawn menu bar both come from that one variant.
+  window.SetChromeVariant(prism::chrome::ShellVariantFor(
+      settings.store.GetString(prism::win::settingsui::kThemeKey, "system"),
+      settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false)));
   // C40 + C74: the sidebar's headings and the action band's eight words come
   // from the same tables as every other sentence. ONE door (ApplyLanguage) so a
   // language switch re-reads both, and a band that forgot to rebuild is the
@@ -1197,6 +1206,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       // saved overwrite/verify policy on the next extraction. Both are re-read
       // from the document the dialog just wrote (never from the draft).
       prism::appearance::Apply(settings.store);
+      // C83: a Day/Night/HighContrast choice repaints the SHELL on the next
+      // frame: the caption (DWM) and the owner-drawn menu bar are re-applied
+      // from the document the dialog just wrote.
+      window.SetChromeVariant(prism::chrome::ShellVariantFor(
+          settings.store.GetString(prism::win::settingsui::kThemeKey, "system"),
+          settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false)));
       app->extractOptions = LiveExtractionOptions(settings.store);
       InvalidateRect(window.Hwnd(), nullptr, FALSE);
       window.SetStatus(L"\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");

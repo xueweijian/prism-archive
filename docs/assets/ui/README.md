@@ -82,3 +82,38 @@ ctest --test-dir E:\build\wt-c79 -R "win.gallery_snapshot|c60.tab_bar|win.sideba
 
 The `before/` set was produced from the same test scene with the five production
 headers stashed back to `origin/main`, so the two sets differ only by this card.
+
+# C83 shell evidence -- dark title bar + dark menu bar
+
+These two PNGs are window screenshots taken with `agent-desktop screenshot` against
+the SHIPPED exe staged with the repo's `Assets/Lang` catalogs and `7z.dll` (the
+build-dir exe has no catalogs, which is the A7 mixed-language trap, not a shell
+regression). Same machine, same fixture (`simple.7z`), same 1920x600 window.
+
+| file | what it shows |
+| --- | --- |
+| `c83-shell-before.png` | origin/main: white system caption + light Win32 menu bar over the #0B0E13 canvas (UI-AUDIT A4) |
+| `c83-shell-after.png` | C83: caption, menu bar and canvas are one surface; the four items are still 文件 / 编辑 / 设置(S)... / Help |
+
+## Pixel assertions (measured, not eyeballed)
+
+- **Caption vs canvas**: canvas luma `12.86`, caption luma `12.08` (delta `-0.78`,
+  rule is `< canvas + 12`). DWM record: `attribute=20, caption=1, border=1`.
+- **Menu plate**: modal colour `#0B0C10` == `--surface-backdrop-reference`
+  (Midnight), each channel within 3.
+- **Dropdown row**: `WM_DRAWITEM` driven with the menu's own item data paints
+  `#0B1F36` == `--selection-tint` over the plate.
+- **Contrast**: item text `16.83 / 17.95 / 21.00` (Day / Night / High contrast),
+  selected row `14.03 / 15.24 / 14.45` -- all `>= 4.5:1`.
+- **Negative controls**: no DWM call -> caption luma `243.30` (red);
+  `MF_STRING` bar -> plate `#FFFFFF` (red); system-light palette -> white on
+  white (red).
+
+## Reproduce
+
+```pwsh
+. E:\wg\env.ps1 -Card c83
+cmake --build E:\build\wt-c83 --parallel 2 --target win_c83_chrome_test test_chrome_theme
+ctest --test-dir E:\build\wt-c83 -R "c83" --output-on-failure
+```
+

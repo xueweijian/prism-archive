@@ -59,6 +59,13 @@ enum class Role : std::uint8_t {
   // its percent WHILE it runs; the element exists only while the HUD is on
   // screen, so "finished" and "no element" are the same fact.
   ProgressBar, // ROLE_SYSTEM_PROGRESSBAR -- the HUD capsule
+  // C83: the menu bar is owner-drawn now, and an owner-drawn item has no OS
+  // string -- so the window publishes the bar itself (see GalleryWindow's
+  // OBJID_MENU answer). Without these two roles the four items would reach a
+  // screen reader as unnamed menu items, which is the regression the card
+  // forbids.
+  MenuBar,     // ROLE_SYSTEM_MENUBAR
+  MenuItem,    // ROLE_SYSTEM_MENUITEM
 };
 
 // Stable machine spelling (stderr, test output, the snapshot script). Same
@@ -77,6 +84,8 @@ inline const char* RoleName(Role role) {
     case Role::Text: return "text";
     case Role::Group: return "group";
     case Role::ProgressBar: return "progressbar";
+    case Role::MenuBar: return "menubar";
+    case Role::MenuItem: return "menuitem";
   }
   return "?";
 }

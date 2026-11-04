@@ -134,6 +134,8 @@ inline long RoleToMsaa(prism::a11y::Role role) {
     case prism::a11y::Role::Text: return ROLE_SYSTEM_TEXT;
     case prism::a11y::Role::Group: return ROLE_SYSTEM_GROUPING;
     case prism::a11y::Role::ProgressBar: return ROLE_SYSTEM_PROGRESSBAR;
+    case prism::a11y::Role::MenuBar: return ROLE_SYSTEM_MENUBAR;
+    case prism::a11y::Role::MenuItem: return ROLE_SYSTEM_MENUITEM;
   }
   return ROLE_SYSTEM_CLIENT;
 }
@@ -168,6 +170,12 @@ inline long StateOf(const prism::a11y::Node& node) {
   if (node.selected) state |= STATE_SYSTEM_SELECTED;
   if (node.expandable) {
     state |= node.expanded ? STATE_SYSTEM_EXPANDED : STATE_SYSTEM_COLLAPSED;
+  }
+  // C83: a menu item is keyboard reachable, and one that opens a popup says so
+  // (HASPOPUP is what makes UIA expose ExpandCollapse on it).
+  if (node.role == prism::a11y::Role::MenuItem) {
+    state |= STATE_SYSTEM_FOCUSABLE;
+    if (node.expandable) state |= STATE_SYSTEM_HASPOPUP;
   }
   return state;
 }
@@ -643,24 +651,34 @@ class Accessible final : public IAccessible {
   mutable prism::a11y::Node node_;
 };
 
-// The window's WM_GETOBJECT answer. OBJID_CLIENT only: OBJID_WINDOW (the frame)
-// stays with the OS's own accessible object, and OBJID_NATIVEOM belongs to
-// applications that publish a native object model (we do not).
+// The window's WM_GETOBJECT answer: OBJID_CLIENT (the painted client area) and,
+// since C83, OBJID_MENU (the owner-drawn bar -- see HandleGetObjectFor).
+// OBJID_WINDOW (the frame) stays with the OS's own accessible object, and
+// OBJID_NATIVEOM belongs to applications that publish a native object model (we
+// do not).
 //
 // Returns 0 when the message is not ours or the object cannot be created; an
 // LRESULT of 0 is exactly what DefWindowProc answers, so a failure degrades to
 // the pre-fix behaviour instead of crashing the client.
-inline LRESULT HandleGetObject(const std::shared_ptr<Host>& host, WPARAM wparam,
-                               LPARAM lparam) {
+// C83: the same door for a SECOND object -- the menu bar. An owner-drawn item
+// has no OS text, so the system menu object would publish four unnamed items;
+// the window answers OBJID_MENU with its own tree instead (names + roles), while
+// the real HMENU keeps the keyboard, the mouse and the menu loop.
+inline LRESULT HandleGetObjectFor(const std::shared_ptr<Host>& host, LONG objectId,
+                                  WPARAM wparam) {
   if (!host) return 0;
-  const LONG objectId = static_cast<LONG>(lparam);
-  if (objectId != OBJID_CLIENT) return 0;
+  if (objectId != OBJID_CLIENT && objectId != OBJID_MENU) return 0;
   Accessible* acc = Accessible::Create(host, {});
   if (acc == nullptr) return 0;
   const LRESULT result =
       ::LresultFromObject(__uuidof(IAccessible), wparam, static_cast<IAccessible*>(acc));
   acc->Release();  // LresultFromObject took its own reference
   return result;
+}
+
+inline LRESULT HandleGetObject(const std::shared_ptr<Host>& host, WPARAM wparam,
+                               LPARAM lparam) {
+  return HandleGetObjectFor(host, static_cast<LONG>(lparam), wparam);
 }
 
 }  // namespace prism::win::a11y

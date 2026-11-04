@@ -592,9 +592,18 @@ struct StatusSegment {
   std::string_view text;
   int value = -1;  // Ratio only: the percentage, or -1 when unknown/compressing
   // C81/A3: the canonical ratio string. When non-empty the painter renders
-  // text + ' ' + valueText (no integer append); it travels as a view into
-  // StatusInfo::ratioView, which the scene owns for the whole frame.
-  std::string_view valueText;
+  // text + ' ' + valueText (no integer append).
+  //
+  // C86 (ASan, CI): this USED to be a std::string_view -- "a view into
+  // StatusInfo::ratioView, which the scene owns for the whole frame". That
+  // contract is invisible at the call site and one ordinary spelling breaks it:
+  //     for (auto& s : StatusSegments(layout, StatusForPublish())) { ... }
+  // The StatusInfo is a TEMPORARY there, destroyed at the end of the range-init,
+  // so every ratio segment kept a view into a dead std::string. It cost a
+  // stack-use-after-scope in win.c80_a11y and in c86.window on the ASan runner.
+  // Owning the bytes is a few characters per frame and makes the vector
+  // self-contained, which is what a caller has every right to assume.
+  std::string valueText;
 };
 
 inline constexpr int kStatusPad = 12;
@@ -650,8 +659,8 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
                                          RatioText(info)};
   const int rightValues[] = {info.itemCount, info.selectedCount,
                              (info.compressing ? -1 : info.ratioPercent)};
-  const std::string_view rightValueTexts[] = {{}, {},
-      (info.compressing ? std::string_view{} : std::string_view{info.ratioView})};
+  const std::string rightValueTexts[] = {{}, {},
+      (info.compressing ? std::string() : info.ratioView)};
   int rx = rightStart;
   for (int i = 0; i < 3; ++i) {
     const int width = (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
@@ -902,6 +911,179 @@ inline bool FrameFitsWorkArea(const Rect& frame, const Rect& work) {
 // is assertable without a window station; the Win32 measurement feeds it.
 inline Rect FrameToPersist(const Rect& windowRect, const FrameBorders& borders) {
   return VisibleFrameForWindowRect(windowRect, borders);
+}
+
+
+// ==================================================== C86: the SAVED window
+// THE DEFECT (measured with the shipped exe, 2026-11-05): the settings document
+// held
+//     "window": { "width": 1536, "height": 480, "listMode": true, "sort": {...} }
+// and NOTHING about where the window was. A user who dragged it to (300,150)
+// got the CW_USEDEFAULT cascade position (98,80) back on the next start. C66
+// fixed WHAT size is written (the visible frame, clamped into the work area)
+// but only ever carried width/height across the restart: the origin was dropped
+// on the way out -- GalleryWindow captured a SIZE, and the app's WindowState had
+// no field for x/y -- so there was nothing to restore on the way in.
+//
+// THE POLICY, and why it is a struct rather than two more integers:
+//   * a saved window is an ORIGIN and a SIZE, and both are the VISIBLE frame
+//     C66 defines (DWMWA_EXTENDED_FRAME_BOUNDS, never GetWindowRect -- see the
+//     C66 note above: GetWindowRect includes the DWM shadow border);
+//   * `maximized` is a SEPARATE bit. The rectangle of a maximized window is the
+//     work area, so persisting it as the normal frame is exactly the historical
+//     trap (a 1552x832 normal frame on a 1536x816 screen). Restore the NORMAL
+//     rectangle, THEN maximize; that is also what makes un-maximizing put the
+//     window where the user left it;
+//   * `hasPosition` is false for a document a pre-C86 build wrote. There is no
+//     origin to honour there, so the window keeps the one it was created with
+//     and only the size is applied (C66's behaviour, preserved);
+//   * every restore is clamped into the work area (ClampFrameToWorkArea), so a
+//     frame saved on a monitor that has since been unplugged -- or on a screen
+//     that has since been made smaller -- lands on screen instead of at
+//     x = -1920.
+//
+// NEGATIVE CONTROL (CONTRACTS D3): PRISM_C86_MUTANT_NO_POSITION makes
+// SavedWindowFor() drop the origin, which is the pre-fix document byte for byte
+// (a size and nothing else). The suite's "the window comes back where the user
+// left it" assertions MUST go red in that build.
+
+#if defined(PRISM_C86_MUTANT_NO_POSITION)
+inline constexpr bool kPersistWindowPosition = false;
+#else
+inline constexpr bool kPersistWindowPosition = true;
+#endif
+
+// The runtime proof the arm is REALLY armed (D3): a stale macro would leave the
+// mutant green while its entry stayed red forever.
+// A maximized window's rectangle is a MODE, not a frame: it is the work area, and
+// writing it as the normal rectangle is the 1552x832 defect. This switch is the
+// D3 control for that rule (the saved frame becomes the maximized rectangle).
+#if defined(PRISM_C86_MUTANT_MAXIMIZED_AS_NORMAL)
+inline constexpr bool kMaximizedIsASeparateBit = false;
+#else
+inline constexpr bool kMaximizedIsASeparateBit = true;
+#endif
+
+// The breadcrumb's count follows the folder (S3-4). The control restores the
+// app-written archive total, which is the number the user reported seeing next
+// to a two-entry folder name.
+#if defined(PRISM_C86_MUTANT_ARCHIVE_COUNT)
+inline constexpr bool kBreadcrumbCountsFolder = false;
+#else
+inline constexpr bool kBreadcrumbCountsFolder = true;
+#endif
+
+inline constexpr std::string_view ActiveWindowMutation() {
+  if (!kPersistWindowPosition) return "no_position";
+  if (!kMaximizedIsASeparateBit) return "maximized_as_normal";
+  if (!kBreadcrumbCountsFolder) return "archive_count";
+  return {};
+}
+
+struct SavedWindow {
+  Rect visible{};
+  bool maximized = false;
+  // false == the document predates C86 and holds only a size.
+  bool hasPosition = true;
+
+  bool operator==(const SavedWindow&) const = default;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const SavedWindow& saved) {
+  return os << "[" << saved.visible.left << "," << saved.visible.top << " "
+            << saved.visible.Width() << "x" << saved.visible.Height()
+            << (saved.maximized ? " max" : "") << (saved.hasPosition ? "" : " size-only") << "]";
+}
+
+// What the app may write for a closing window. The origin survives only when the
+// rule is armed; the maximized bit always does, because it is a MODE and not a
+// rectangle.
+inline SavedWindow SavedWindowFor(const Rect& visible, bool maximized) {
+  SavedWindow saved;
+  saved.visible = kPersistWindowPosition
+                      ? visible
+                      : Rect{0, 0, visible.Width(), visible.Height()};
+  saved.maximized = maximized;
+  saved.hasPosition = kPersistWindowPosition;
+  return saved;
+}
+
+// The frame a restore may apply. The clamp is the C66 rule applied to the WHOLE
+// rectangle: the SIZE is capped by the work area and the ORIGIN is pulled back
+// inside it, so a saved (300,150) on a work area that shrank to 0..800 x 0..600
+// lands at (300,150) still fully visible, and a saved frame from an unplugged
+// second monitor lands on the monitor the user still has.
+struct WindowRestore {
+  Rect frame{};        // the VISIBLE normal frame to apply
+  bool maximized = false;
+  bool moved = false;  // the clamp had to move the saved origin
+
+  bool operator==(const WindowRestore&) const = default;
+};
+
+inline WindowRestore PlanWindowRestore(const SavedWindow& saved, const Rect& work,
+                                       int minWidth = kMinWindowWidth,
+                                       int minHeight = kMinWindowHeight) {
+  WindowRestore plan;
+  plan.frame = ClampFrameToWorkArea(saved.visible, work, minWidth, minHeight);
+  plan.maximized = saved.maximized;
+  plan.moved = plan.frame.left != saved.visible.left || plan.frame.top != saved.visible.top;
+  return plan;
+}
+
+// ======================================== C86: the status band's segment text
+// THE DEFECT (measured through UIA against the shipped window): the status band
+// published ONE element named "共 3 项" (the breadcrumb's transient status line).
+// 未加密 / 方法未知 / 字典未知 / 条目 / 选中 / 压缩率 were painted and reachable by
+// nobody: they are D2D text, not child HWNDs, and the C80 tree never split the
+// band into its segments.
+//
+// The fix is that the SEGMENT LIST becomes the accessible tree's children, in
+// the order the band paints them. This function is the ONE spelling of a
+// segment's text -- the painter, the accessibility tree and the suite all call
+// it, so a label can never read one way on screen and another way in the tree.
+inline std::string StatusSegmentLabel(const StatusSegment& segment) {
+  if (segment.id == StatusId::Divider) return {};
+  std::string text(segment.text);
+  // C81/A3: the canonical ratio string travels verbatim (it IS what the info
+  // card and the list cell render); the integer path stays for scenes that only
+  // set value. C86: this is the ONE place a band label is spelled, so the paint
+  // and the accessibility tree cannot disagree.
+  if (!segment.valueText.empty()) {
+    text.push_back(' ');
+    text.append(segment.valueText);
+    return text;
+  }
+  if (segment.value >= 0) {
+    text.push_back(' ');
+    text += std::to_string(segment.value);
+    if (segment.id == StatusId::Ratio) text.push_back('%');
+  }
+  return text;
+}
+
+// ====================================== C86: the breadcrumb's COUNT segment
+// THE DEFECT (reported, then measured): after drilling into a subfolder the
+// breadcrumb still read "共 16 项" -- the archive's TOTAL, which the app wrote
+// into the transient status line once, at open -- while the status band said
+// 条目 2, the number of rows actually on screen. Two numbers, one window, and
+// the wrong one sat next to the folder name.
+//
+// The count now describes the CURRENT FOLDER, and when the archive holds more
+// entries than that folder (nested ones), the total is given in parentheses so
+// the information is not lost either.
+inline std::string BreadcrumbCountText(int folderCount, int archiveTotal, bool atRoot) {
+  // D3 control: the count is the ARCHIVE's total again, which is what the app
+  // wrote once at open -- the number the user reported seeing inside a folder.
+  if (!kBreadcrumbCountsFolder) {
+    return archiveTotal > 0 ? "共 " + std::to_string(archiveTotal) + " 项" : std::string();
+  }
+  if (folderCount < 0) return {};
+  const std::string here = std::to_string(folderCount);
+  if (archiveTotal <= folderCount) return "共 " + here + " 项";
+  const std::string total = std::to_string(archiveTotal);
+  return atRoot ? "共 " + here + " 项（全档 " + total + " 项）"
+                : "本目录 " + here + " 项（共 " + total + " 项）";
 }
 
 }  // namespace prism::layout

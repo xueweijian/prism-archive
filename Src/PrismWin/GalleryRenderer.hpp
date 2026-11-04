@@ -676,18 +676,11 @@ class GalleryRenderer {
         island_->SetColor(islandColor_);
         textLeft = rect.left + 12.0f;
       }
-      std::wstring text = Utf8(segment.text);
-      // C81/A3: the canonical ratio string travels verbatim (it IS what the
-      // list cell and the info card render); the legacy integer path stays
-      // for scenes/tests that only set ratioPercent.
-      if (!segment.valueText.empty()) {
-        text += L" ";
-        text += Utf8(segment.valueText);
-      } else if (segment.value >= 0) {
-        text += L" " + std::to_wstring(segment.value);
-        if (segment.id == prism::layout::StatusId::Ratio) text += L"%";
-      }
-      if (text.empty()) continue;
+      // C86: the label is spelled ONCE (prism::layout::StatusSegmentLabel), so
+      // the band and the accessibility tree cannot read differently.
+      const std::string label = prism::layout::StatusSegmentLabel(segment);
+      if (label.empty()) continue;
+      const std::wstring text = Utf8(label);
       // C79: secondary role at 12 px (the format is 12 px now), so the band is
       // a readout rather than a second heading row.
       target->DrawText(text.c_str(), static_cast<UINT32>(text.size()), statusFormat_.Get(),

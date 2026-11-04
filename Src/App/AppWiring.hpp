@@ -99,6 +99,7 @@
 #include "../PrismCore/Log.hpp"              // C16 logger (the one warn a key miss gets)
 #include "../PrismCore/ExtractScheduler.hpp"
 #include "../PrismCore/ListSortModel.hpp"     // persisted sort key (C13 view state)
+#include "../PrismCore/WindowLayout.hpp"       // C86: the ONE saved-window policy
 #include "../PrismCore/OpenFlow.hpp"          // C40: the measured E_ABORT password signal
 #include "../PrismCore/SecurityGuard.hpp"
 #include "../PrismCore/SessionStore.hpp"      // C46 session document (schema + crash guard)
@@ -2102,6 +2103,13 @@ class SettingsSidebarStore final : public prism::sidebar::SidebarStore {
 struct WindowState {
   int width = 0;  // 0 = "no opinion" (the window keeps its own default)
   int height = 0;
+  // C86: the ORIGIN and the maximized bit. 'hasPosition' is false for a document
+  // a pre-C86 build wrote (it held a size and nothing else), which is why the
+  // window then keeps the position it was created with -- C66's behaviour.
+  int x = 0;
+  int y = 0;
+  bool hasPosition = false;
+  bool maximized = false;
   bool listMode = false;
   prism::list::MultiSortSpec sort;
   bool hasSort = false;
@@ -2138,6 +2146,15 @@ inline WindowState LoadWindowState(const prism::settings::SettingsStore& store) 
   WindowState state;
   state.width = store.GetInt("window.width", 0);
   state.height = store.GetInt("window.height", 0);
+  // A position is only usable when BOTH halves are present: half a point is not
+  // a place, and defaulting the missing one to 0 would drag the window to the
+  // top-left corner on the first run after an upgrade.
+  if (store.Has("window.x") && store.Has("window.y")) {
+    state.x = store.GetInt("window.x", 0);
+    state.y = store.GetInt("window.y", 0);
+    state.hasPosition = true;
+  }
+  state.maximized = store.GetBool("window.maximized", false);
   state.listMode = store.GetBool("window.listMode", false);
   const std::string sortName = store.GetString("window.sort.key", "");
   prism::list::SortKey key = prism::list::SortKey::kName;
@@ -2168,6 +2185,15 @@ inline WindowState LoadWindowState(const prism::settings::SettingsStore& store) 
 inline void SaveWindowState(prism::settings::SettingsStore& store, const WindowState& state) {
   if (state.width > 0) store.SetInt("window.width", state.width);
   if (state.height > 0) store.SetInt("window.height", state.height);
+  // C86: the origin, written only while the rule is armed. This is the line the
+  // card's negative control comments out (PRISM_C86_MUTANT_NO_POSITION): the
+  // document then holds width/height and nothing else -- byte for byte the file
+  // the user's report starts with.
+  if (prism::layout::kPersistWindowPosition && state.hasPosition) {
+    store.SetInt("window.x", state.x);
+    store.SetInt("window.y", state.y);
+  }
+  store.SetBool("window.maximized", state.maximized);
   store.SetBool("window.listMode", state.listMode);
   if (!state.sort.keys.empty()) {
     store.SetString("window.sort.key", SortKeyNameOf(state.sort.keys.front().key));

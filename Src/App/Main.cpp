@@ -467,7 +467,9 @@ int RunCompressLaunch(const prism::app::LaunchRequest& request) {
 // fail -- the next card that touches the extract callback owns that.
 // ---------------------------------------------------------------------------
 std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
-                             prism::win::SevenZipLibrary& library) {
+                             prism::win::SevenZipLibrary& library,
+                             const prism::i18n::Translator* translator,
+                             const std::wstring& title) {
   prism::pwd::PasswordUiConfig config;
   config.archiveName = prism::win::WideToUtf8(FileNameWide(archive));
   const std::wstring vaultPath = prism::app::DefaultVaultPath();
@@ -479,9 +481,13 @@ std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
   }
 
   prism::win::pwd_ui::PasswordDialog dialog;
+  // C88: the gate reads the same tables as the rest of the window. The
+  // translator must be installed BEFORE Create -- the labels are created from
+  // it (SetTranslator refreshes an already-open dialog too, for completeness).
+  dialog.SetTranslator(translator);
   // C84: Create shows + centers the gate; FocusInput is the modal half (a
   // visible dialog with no foreground/keyboard still looks hung).
-  if (!dialog.Create(instance, L"PrismArchive")) return std::wstring();
+  if (!dialog.Create(instance, title.empty() ? L"PrismArchive" : title)) return std::wstring();
   // C84: Start() is what makes the password field editable (canSubmit), so the
   // focus call belongs after it -- focusing a disabled edit is a silent no-op.
   dialog.SetConfig(config);
@@ -864,7 +870,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       } else {
         // The gallery (or, under the D3 injection, the poor CLI verb again):
         // the modal gate is the RIGHT interface for an interactive open.
-        archivePassword = RunPasswordGate(instance, archive, app->library);
+        archivePassword = RunPasswordGate(instance, archive, app->library,
+                                          &language.translator, tr("password.title"));
       }
       if (!archivePassword.empty()) {
         // A fresh reader: the failed one already holds a stream and a partial

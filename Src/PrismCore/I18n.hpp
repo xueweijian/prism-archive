@@ -781,6 +781,37 @@ inline const std::vector<std::string>& RequiredKeys() {
       "settings.issue.readOnly",
       "settings.issue.storeRefused",
       "settings.issue.storeRepair",
+      // C88: the password gate's visible surface. Until this card the dialog was
+      // built from English literals, so the one screen every encrypted archive
+      // shows was English in a Chinese build. Required here so a table that
+      // drops one fails the catalogue suite instead of shipping English.
+      "password.title",
+      "password.prompt",
+      "password.label",
+      "password.show",
+      "password.current",
+      "password.none",
+      "password.remember",
+      "password.once",
+      "password.ring",
+      "password.vault",
+      "password.useSelected",
+      "password.open",
+      "password.cancel",
+      "password.progress",
+      "password.error.wrong",
+      "password.error.left",
+      "password.error.exhausted",
+      "password.status.start",
+      "password.status.missed",
+      "password.status.wrong",
+      "password.status.exhausted",
+      "password.status.enter",
+      "password.status.probing",
+      "password.status.idle",
+      "password.status.cancelled",
+      "password.status.opened",
+      "password.status.budget",
   };
   return keys;
 }

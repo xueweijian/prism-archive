@@ -194,4 +194,36 @@ WARN  i18n: language table unavailable: ...\Assets\Lang\en-US.json
 **影响**：加密归档的用户第一步看到的就是这个框，它决定"这软件做得认真吗"。
 **要求**：①所有字串走 i18n 表（`password.*` 键，中英双语）；②按 `DESIGN.md` 的玻璃卡样式重绘
 （圆角 14、`GlassPanel` 三原语、深色背景、主按钮强调色）；③键盘与 UIA 不退化（现有 textfield/按钮可达）。
-**状态**：字串与配色已修（C88/#109：27 个 `password.*` 键、全中文、深色卡、强调色主按钮、焦点环）；**控件仍是 Win32 原生**（单选圆圈/复选方块），自绘控件属另一张卡。
+**状态**：✅ 已修（C88）——27 个 `password.*` 键进两表并进 `RequiredKeys()`（census 102→129）；
+对话框改成 Midnight 玻璃卡（`GlassPanel` 的 shadow/fill/rim、radius 14、全部 `ThemeTokens`），
+按钮/复选/单选自绘但保留 `BS_AUTO*` 的可访问角色，密码框聚焦环用强调色。
+
+前后对比（同一台机器、同一个 enc.7z、装好的 exe，702×627@125%）：
+
+- 前：`assets/ui/c88-password-before.png`（C84 构建：全英文 + 系统浅灰）
+- 后：`assets/ui/c88-password-after.png`（中文 + 深色玻璃卡）、
+  `assets/ui/c88-password-after-enabled.png`（主按钮强调色）、
+  `assets/ui/c88-password-after-typed.png`（错误行中文、对话框不关）
+
+断言：`win.c88_password_ui`（zh-CN 下 UIA 树里没有 3 个以上连续 ASCII 字母；每个固定标签逐字等于表值；
+卡片像素 = CompositeOver(glass, canvas) ±2/通道；主按钮 = CompositeOver(accent, card) ±2；正文对比度 ≥4.5:1；
+聚焦环在/不在焦点时像素可区分；错误行仍是中文且窗口存活；单选互斥；无选中时"使用所选"禁用；
+UIA 的 textfield 可写、按钮可 Invoke）。负向控制 `mutation.c88.system_grey` 与
+`mutation.c88.hardcoded_english` 各自在第一次断言失败处打印 CAUGHT；C35 的 `win.password_dialog`
+与 C84 的 `win.c84_dialog_visible` 仍绿。
+
+---
+
+## A10 中英标点混用（C88 密码框错误行，打磨级）
+
+**证据**：`docs/assets/ui/c88-password-after-typed.png`。同一块错误提示里：
+
+```
+错误尝试: 1/3 (剩余 2 次)        ← 半角冒号 + 半角括号
+密码错误（第 1 次），还剩 2 次。   ← 全角括号 + 全角逗号句号
+```
+
+中文界面里两种标点并排出现，一眼能看出"这句是拼出来的"。
+**要求**：zh-CN 表里的句子统一用全角标点（`：``（``）``，``。`），数字与斜杠保持半角；
+en-US 表保持半角。断言：zh-CN 的可见文本里不出现 `: ` / ` (` 这类半角组合（数字范围除外）。
+**状态**：记录，待修（打磨级，不影响功能）。

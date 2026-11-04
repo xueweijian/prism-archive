@@ -158,6 +158,18 @@ inline constexpr std::string_view ActiveGalleryMutation() {
 
 using Microsoft::WRL::ComPtr;
 
+// C85 (CONTRACTS D3): the tab strip publishes a CLOSE element per tab. The
+// shipped tree had none -- a UIA walk stopped at "tab | Photos.7z" and the only
+// close on the whole window was the title bar's. The injection removes the node
+// so the suite's "two tabs -> two close elements" assertion MUST go red.
+#if defined(PRISM_C85_MUTANT_NO_CLOSE_NODE)
+inline constexpr bool kA11yTabCloseNode = false;
+inline constexpr std::string_view ActiveTabCloseMutation() { return "no_close_node"; }
+#else
+inline constexpr bool kA11yTabCloseNode = true;
+inline constexpr std::string_view ActiveTabCloseMutation() { return {}; }
+#endif
+
 // C53: the four surfaces that can own the user's attention at the same time --
 // the drop hint (C52), the command palette (C31/C8), Quick Look and the settings
 // dialog (C31/V3). Exactly ONE may be active. The enum is the single vocabulary
@@ -1694,6 +1706,9 @@ class GalleryWindow {
   prism::tabs::TabSet& Tabs() { return tabs_; }
   const prism::tabs::TabSet& Tabs() const { return tabs_; }
   bool TabBarVisible() const { return !tabs_.empty(); }
+  // C85 / D3: the band's Tab rule, exposed so a mutant build can PROVE its
+  // injection fired instead of claiming CAUGHT from an unrelated red.
+  static bool BandYieldsTabToStripForTest() { return !TabIsChordForStrip(); }
   prism::layout::Rect TabBarRect() const { return layout_.tabBar; }
   // What the current frame paints (hover / drag state included), so a suite
   // asserts the same view the renderer was handed.
@@ -2772,11 +2787,33 @@ class GalleryWindow {
       node.action = "\u9009\u62E9";  // 选择
       node.description = tab->dirty ? "\u5DF2\u4FEE\u6539\uFF0C\u53EF\u5173\u95ED"
                                     : "\u53EF\u5173\u95ED";
+      const prism::win::tabbar::TabGeometry* geometryOfTab = nullptr;
       for (const prism::win::tabbar::TabGeometry& geometry : tabRects) {
         if (geometry.index == i) {
           node.bounds = geometry.rect;
+          geometryOfTab = &geometry;
           break;
         }
+      }
+      // C85: the x, as its OWN element. Measured before this: walking the UIA
+      // tree stopped at "tab | Photos.7z" and the window's only "close" was the
+      // title bar's button, so an assistive-technology user could open a second
+      // tab and never close it. A child button of the tab (the painted x sits
+      // inside the plate, so the geometry already exists) with the same verb
+      // Ctrl+W runs: RequestCloseTab.
+      if (kA11yTabCloseNode && geometryOfTab != nullptr) {
+        Node close;
+        close.role = Role::CloseButton;
+        close.name = "关闭 " + tab->displayName;  // 关闭 <name>
+        close.index = i;
+        close.action = "关闭";  // 关闭
+        close.description = "关闭这个标签";  // 关闭这个标签
+        close.shortcut = "Ctrl+W";  // the chord, on the ACTIVE tab
+        // Every tab can be closed; a DIRTY one asks first (C59), which is the
+        // dialog verb, not a different enabled state.
+        close.enabled = true;
+        close.bounds = geometryOfTab->close;
+        node.children.push_back(std::move(close));
       }
       root.children.push_back(std::move(node));
     }
@@ -3009,6 +3046,14 @@ class GalleryWindow {
 
   void A11yActivateRow(int row) { (void)ActivateRow(row); }
   void A11yActivateTab(int index) { (void)ActivateTab(index); }
+  // C85: the accessibility door to "close this tab". It is RequestCloseTab, the
+  // SAME call Ctrl+W and a click on the painted x make -- including C59's dirty
+  // confirmation, so an assistive-technology user is never asked less than a
+  // mouse user and never loses work a mouse user would have kept.
+  void A11yCloseTab(int index) {
+    if (index < 0 || index >= static_cast<int>(tabs_.size())) return;
+    (void)RequestCloseTab(index);
+  }
 
   void A11yActivateFolder(const std::string& path) {
     if (!path.empty()) (void)GoToFolder(path);
@@ -3021,12 +3066,35 @@ class GalleryWindow {
     if (a11y_) a11y_->Detach();
   }
 
+  // C85: is this Tab a CHORD that belongs to the tab strip rather than to the
+  // band's focus ring?
+  //
+  // Ctrl+Tab and Ctrl+Shift+Tab are the strip's (HandleTabKey), and Alt+Tab
+  // never reaches a window at all. The band owns the BARE Tab only. Named as a
+  // predicate rather than inlined because the D3 negative control has to be
+  // able to invert exactly this rule and nothing else.
+  static bool TabIsChordForStrip() {
+#if defined(PRISM_C85_MUTANT_BAND_EATS_CTRL_TAB)
+    // MUTANT: the shipped defect -- the band claims every Tab, so the chord
+    // never reaches HandleTabKey.
+    return false;
+#else
+    return (GetKeyState(VK_CONTROL) & 0x8000) != 0 || (GetKeyState(VK_MENU) & 0x8000) != 0;
+#endif
+  }
+
   // Tab / Enter / arrows / Esc -- but only for the keys the band actually owns:
   // a declined key returns false and the gallery table keeps its meaning.
   bool HandleActionBarKey(UINT vk) {
     using prism::actionbar::Effect;
     switch (vk) {
       case VK_TAB:
+        // C85: a Tab with Ctrl or Alt held is a CHORD, not a traversal. This
+        // branch used to return true unconditionally, so Ctrl+Tab and
+        // Ctrl+Shift+Tab never reached HandleTabKey (below in HandleKey) and
+        // both were dead in the shipped window -- measured with real keys:
+        // the title stayed on the first archive through two presses.
+        if (TabIsChordForStrip()) return false;
         ApplyActionEffect(actionBar_.PressTab((GetKeyState(VK_SHIFT) & 0x8000) == 0));
         return true;  // the ring always moves: that IS the traversal
       case VK_RETURN:
@@ -4777,6 +4845,10 @@ class GalleryWindow {
     void ActivateTab(int index) override {
       GalleryWindow* owner = window.load(std::memory_order_acquire);
       if (owner != nullptr) owner->A11yActivateTab(index);
+    }
+    void CloseTab(int index) override {
+      GalleryWindow* owner = window.load(std::memory_order_acquire);
+      if (owner != nullptr) owner->A11yCloseTab(index);
     }
     void ActivateFolder(const std::string& path) override {
       GalleryWindow* owner = window.load(std::memory_order_acquire);

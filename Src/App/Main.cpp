@@ -108,6 +108,7 @@
 #include "../PrismWin/DragOutToShell.hpp"   // C67: CF_HDROP drag out (lazy extract)
 #include "../PrismWin/EditConfirmDialog.hpp"  // C54: the edit confirmation (programmatic)
 #include "../PrismWin/GalleryWindow.hpp"
+#include "../PrismWin/LogFile.hpp"           // C85: the daily file sink + the wall clock
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
 #include "../PrismWin/SettingsDialog.hpp"   // C53: Settings... menu + dialog (C31/V3)
@@ -597,8 +598,35 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   c76.Add("  .load_settings", "LoadSettings (JSON + paths)", c76Sub, c76.NowMs() - c76Sub);
   // C16: the logger exists before anything can fail, so the reason is on stderr
   // instead of only in a message box nobody can copy.
+  //
+  // C85: and it now has a CLOCK and a FILE. The shipped window wrote only to
+  // stderr, from a GUI process with no console (so nobody saw it) and with no
+  // timestamp (so every line read 1970-01-01T00:00:00.000Z). A user reporting a
+  // failure had nothing to attach; %LOCALAPPDATA%\PrismArchive\logs held no
+  // file at all.
   prism::log::Logger logger(prism::log::Level::kInfo, 512);
-  logger.SetSink([](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); });
+  logger.SetClock(prism::win::logfile::SystemNowMillis);
+  // The file half. Declared static so it is still open while the logger's last
+  // record is written (the logger outlives this scope's locals by declaration
+  // order, and a sink that closed first would drop that line).
+  static prism::win::logfile::DailyFileSink logFile(
+      prism::win::logfile::LogDirectory(), prism::win::logfile::Policy{},
+      prism::win::logfile::SystemNowMillis);
+  logger.SetSink([](const std::string& line) {
+    // ONE line, two destinations: the file is what a user can attach to a bug
+    // report, stderr is what a developer sees from a console run. Neither is
+    // allowed to throw the other away.
+    logFile.Write(line);
+    std::fprintf(stderr, "%s\n", line.c_str());
+  });
+  // C85: ONE record that says "this build really ran". A log file that exists
+  // but carries no line from the run being reported is as useless as no file.
+  logger.Emit(prism::log::Level::kInfo, "startup", "app started",
+              {{"pid", std::to_string(GetCurrentProcessId())},
+               {"mode", prism::app::LaunchModeName(launch.mode)},
+               {"archives", std::to_string(launch.archives.size())},
+               {"log_dir", prism::win::logfile::NarrowPath(
+                               std::filesystem::path(prism::win::logfile::LogDirectory()))}});
   if (!settings.loaded) {
     logger.Emit(prism::log::Level::kWarn, "settings", "settings could not be read",
                 {{"detail", settings.report.detail},
@@ -832,6 +860,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       (launch.mode == prism::app::LaunchMode::kGallery) && !mutantCliModal;
   {
     std::string trace;  // the engine trace is narrow; only the message is wide
+    // C85: the machine REASON and its HRESULT travel with the trace. Without
+    // them the dialog could only say "CreateFileW failed; " -- the semicolon the
+    // user reported, with nothing after it.
+    std::string openReason;
+    unsigned long openFailureHr = 0;
     bool opened = false;
     {
       prism::win::ArchiveReader probe(app->library);
@@ -843,6 +876,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         archivePassword = launch.password;
       } else {
         trace = probe.openTrace();
+        openReason = probe.failureReason();
+        openFailureHr = probe.failureHr();
       }
     }
     // C40: the password gate. A header-encrypted archive makes our own open
@@ -875,24 +910,31 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           app->catalog = retry.ReadCatalog();
         } else {
           trace = retry.openTrace();
+          openReason = retry.failureReason();
+          openFailureHr = retry.failureHr();
         }
       }
     }
     if (!opened) {
+      // C85: ONE sentence builder for both surfaces (dialog and stderr), so the
+      // reason a script reads is the reason a user sees.
+      const std::wstring failureText = prism::app::OpenFailureText(
+          tr, FileNameWide(archive), openReason, openFailureHr, trace);
+      logger.Emit(prism::log::Level::kError, "open", "archive could not be opened",
+                  {{"path", prism::win::WideToUtf8(archive)},
+                   {"reason", openReason.empty() ? std::string("(none)") : openReason},
+                   {"hr", prism::win::HresultText(openFailureHr)},
+                   {"trace", trace}});
       if (!interactiveOpen) {
         // C82: same rule for a plain failed open -- the reason goes to stderr,
         // the exit code carries the verdict, and no box waits for a click that
         // a batch caller will never make.
-        std::fprintf(stderr, "open failed: %s\n%s\n",
-                     prism::win::WideToUtf8(FileNameWide(archive)).c_str(), trace.c_str());
+        std::fprintf(stderr, "open failed: %s\n",
+                     prism::win::WideToUtf8(failureText).c_str());
         if (SUCCEEDED(coInit)) CoUninitialize();
         return 1;
       }
-      MessageBoxW(nullptr,
-                  (prism::app::OpenFailedStatus(tr, FileNameWide(archive)) + L"\n\n" +
-                   prism::win::Utf8ToWide(trace))
-                      .c_str(),
-                  L"PrismArchive", MB_ICONERROR);
+      MessageBoxW(nullptr, failureText.c_str(), L"PrismArchive", MB_ICONERROR);
       if (SUCCEEDED(coInit)) CoUninitialize();
       return 1;
     }

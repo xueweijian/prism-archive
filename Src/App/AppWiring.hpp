@@ -1910,6 +1910,47 @@ inline std::wstring EngineNoReasonText(const Tr& tr) {
                              L"\u539F\u56E0\uFF09"));
 }
 
+// C85: THE FAILURE SURFACE. One function builds the text the dialog shows and
+// the text a headless run prints, so the two can never disagree -- and so the
+// suite can assert the exact sentence instead of a message box's pixels.
+//
+//   打开失败 Photos.7z
+//   (0x80070002): 找不到文件: E:\x\Photos.7z (Win32 0x00000002 系统找不到指定的文件。)
+//   CreateFileW failed path=... reason=win32-0x00000002;
+//
+// The shipped dialog showed line 1 and then "CreateFileW failed; " -- a machine
+// token with nothing after the semicolon, i.e. no reason at all.
+inline constexpr bool kOpenFailureCarriesReason =
+#if defined(PRISM_C85_MUTANT_EMPTY_REASON)
+    false;  // MUTANT: the pre-C85 surface -- a title with no reason under it
+#else
+    true;
+#endif
+
+// D3: the arm name, so a suite can tell which injection (if any) this build
+// carries. The exe under test is where this is evaluated.
+inline std::string_view ActiveOpenReasonMutation() {
+  return kOpenFailureCarriesReason ? std::string_view() : std::string_view("empty_reason");
+}
+
+inline std::wstring OpenFailureText(const Tr& tr, const std::wstring& archiveName,
+                                    const std::string& reason, unsigned long hr,
+                                    const std::string& trace) {
+  std::wstring text = OpenFailedStatus(tr, archiveName);
+  const std::string detail = kOpenFailureCarriesReason ? reason : std::string();
+  text += L"\n\n";
+  if (kOpenFailureCarriesReason && hr != 0) {
+    text += L"(" + prism::win::Utf8ToWide(prism::win::HresultText(hr)) + L"): ";
+  }
+  // A reason that is empty is still answered -- "(the engine reported no
+  // reason)" is honest, and it is never the blank line the user saw.
+  text += detail.empty() ? EngineNoReasonText(tr) : prism::win::Utf8ToWide(detail);
+  // The mutant drops the trace too: the measured defect was a dialog whose only
+  // second line was "CreateFileW failed; " -- a token with no reason in it.
+  if (kOpenFailureCarriesReason && !trace.empty()) text += L"\n" + prism::win::Utf8ToWide(trace);
+  return text;
+}
+
 // The second line of a failed compression: the engine's reason, or `noReason`
 // when it gave none. Pure string work, safe on any thread.
 inline std::wstring CompressFailureDetail(const std::wstring& noReason,

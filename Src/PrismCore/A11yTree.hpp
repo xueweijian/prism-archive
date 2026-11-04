@@ -66,6 +66,11 @@ enum class Role : std::uint8_t {
   // forbids.
   MenuBar,     // ROLE_SYSTEM_MENUBAR
   MenuItem,    // ROLE_SYSTEM_MENUITEM
+  // C85: the x on a tab. It is a BUTTON to the client (ROLE_SYSTEM_PUSHBUTTON,
+  // so UIA exposes InvokePattern), but it is NOT one of the eight band actions:
+  // its index names a TAB, and its default action closes that tab. Folding it
+  // into PushButton would make accDoDefaultAction press the wrong thing.
+  CloseButton,
 };
 
 // Stable machine spelling (stderr, test output, the snapshot script). Same
@@ -86,6 +91,7 @@ inline const char* RoleName(Role role) {
     case Role::ProgressBar: return "progressbar";
     case Role::MenuBar: return "menubar";
     case Role::MenuItem: return "menuitem";
+    case Role::CloseButton: return "closebutton";
   }
   return "?";
 }
@@ -110,6 +116,7 @@ struct Node {
   // Which thing this element stands for, per role:
   //   PushButton  -> index into prism::actionbar::kActions
   //   PageTab     -> tab index;  ListItem -> folder row; OutlineItem -> row
+  //   CloseButton -> tab index (its default action closes that tab, C85)
   int index = -1;
 
   bool enabled = true;

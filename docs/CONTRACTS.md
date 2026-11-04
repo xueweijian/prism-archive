@@ -176,3 +176,27 @@ CI 的 Linux lane 用 `-Wall -Wextra -Wpedantic -Werror` 编 PrismCore 测试，
 
 **为什么写进契约**：这类 bug 在 Release 下**完全不可见**，而 CI 的 Windows lane 是 ASan 构建——
 它是唯一能抓住它们的门。改这类代码时，先问"这个指针/视图指向的对象活多久"。
+
+### D35 并行卡片共享接口时，单卡 CI 证明不了"合并后能编译"
+
+**实测事故（2026-11-05，C83 + C85）**：
+
+- C83（深色外壳）在 `GalleryWindow` 里加了**第二个** `a11y::Host` 实现 `MenuA11yHost`（自绘菜单栏的无障碍宿主）；
+- C85（标签关闭钮）在 `a11y::Host` 上加了一个**纯虚**函数 `CloseTab`；
+- 两张卡各自的 CI 都是**绿的**——GitHub Actions 的 `push` 事件跑的是**分支本身**，不是"这个分支合进 main 之后"的结果；
+- 合并后：`error C2259: MenuA11yHost: cannot instantiate abstract class`。**main 会编译不过，而两条 lane 都显示通过。**
+
+**规则**：
+
+1. 一个界面（纯虚基类、`Role` 枚举、全局 `Labels` 结构、主题令牌表）被两张以上卡同时改动时，
+   **合并前必须构建合并结果**，不能靠各自的 CI：
+```text
+git worktree add <tmp> -b integrate/<wave> origin/main
+git merge <branch A> <branch B> ...
+cmake -S <tmp> -B <build> && cmake --build <build> --target PrismArchive
+```
+   这一步只要几分钟，却能抓住 CI 结构上看不到的那类错误。
+2. 加纯虚函数是**破坏性变更**：要么同时改所有实现（并且全部编译过），要么给默认实现。
+   本仓库现在有不止一个 `a11y::Host` 实现，这一点尤其重要。
+3. 长期解：CI 应跑 **merge queue**（`merge_group` 触发），而不是只跑 push。
+   在它落地之前，第 1 条就是人工的 merge queue。

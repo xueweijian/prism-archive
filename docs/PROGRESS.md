@@ -395,3 +395,19 @@ WARN  language table unavailable: ...\wt-c81\Src\PrismWin\Assets\Lang\en-US.json
 而真正的新 P0（三个对话框不可见）**同一个根因**解释了三个缺陷。
 CI 全绿却漏掉它们，是因为测试用 `GetDlgItem`/`BM_CLICK` 驱动**隐藏**窗口一样能过——
 **测试驱动了同一份代码，却没驱动同一份可见性**。
+### 9.11 合并期的"跨卡测试耦合"——三次同型，三种正确姿势
+
+同一晚出现了三次"A 卡的修复让 B 卡的断言变红"。**都不是谁写错了**，而是测试把当时的现实写死了。
+
+| 现象 | 错误的第一反应 | 实际根因 | 正确的修法 |
+|---|---|---|---|
+| C86 加状态栏分段 → `c80.a11y` 红 | "新增元素打破了计数断言" | **ASan `stack-use-after-scope`**：`StatusForPublish()` 按值返回，`string_view` 指向死对象 | 把 `valueText` 改成 `std::string`（自带所有权）+ 一条"用临时在返回时死亡来构造"的用例（契约 D34） |
+| C83 owner-draw 菜单 → `win.glue`/`c64_tabs`/`c66_window`/`c69_settings` 红 | "菜单坏了" | owner-draw 项的 **OS 文本为空**，四条都在用 `GetMenuStringW` 读 | `MenuItemText`/`MenuTitle` 返回**真正画出来的文本**（与 `WM_DRAWITEM`/`OBJID_MENU` 同源），OS 只作兜底；断言一个没删，还**新增**了 `GetMenuState(kMenuSettingsId) != -1` |
+| C84 让对话框可见 → `c69_settings` 窗口枚举变化 | "对话框改坏了" | 以前对话框**不可见**，现在 `EnumWindows` 能看到它了 | 断言从"窗口数量"改成"按 pid/class 找到目标窗口且 `IsWindowVisible`" |
+
+**共同规律**：断言写成**常量**（"元素 24 个"、"客户区 750"、"窗口 3 个"）就会随别的卡变化而红；
+写成**关系式**（"客户区 = 窗口高 − 菜单条 − 状态栏"、"目标窗口按 pid 找到且可见"、"包含 X/Y/Z 且数量 ≥ N"）才稳。
+
+**一个反例值得记住**：C79 与我曾把 C81 的 CI 红判为"渲染噪声"，实际是**测试里的 heap-use-after-free**
+（`RatioSegment(StatusSegments(...))` 取临时 vector 的指针）——Release 下 freed 字节恰好没变所以"全绿"，
+ASan 下进程在打印前就 abort，于是 CI 日志里连 stdout 都没有。**"没有 stdout 的失败"是崩溃的信号，不是断言的信号。**

@@ -45,45 +45,7 @@
 
 **证据**：截图顶部 64px 是系统标准白色标题栏与菜单栏，下面直接接深色画布。
 **影响**：这是"不像同一个应用"的最大来源；Liquid Glass 要求窗口外壳与内容**连续**。
-**状态**：✅ 已修（C83）。对比图：`docs/assets/ui/c83-shell-before.png` / `c83-shell-after.png`
-（同一份 `Assets/Lang` + 同一台机器，before 是修复前的 exe，after 是修复后的 exe）。
-
-**修法**
-- **标题栏**（`Src/PrismWin/WindowChrome.hpp`）：`DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`，
-  属性号先试 **20**（Win10 20H1+/Win11）再退 **19**（Win10 1809–1909）；失败是返回值，不是崩溃。
-  只开深色不够——Win11 的深色标题栏是 #202020，仍比画布亮 ~20 级——所以同时用
-  `DWMWA_CAPTION_COLOR` 把标题栏画成 **`--surface-backdrop-reference`**（Win11 22000+；Win10 拒绝时
-  记录 `captionApplied=false`，测试改用暗色标题栏的 40 级上限 + 绝对 <64），并用
-  `DWMWA_BORDER_COLOR` 画 1px `--border-specular-rim`。
-- **菜单栏**（`GalleryWindow::RebuildMenu` + `WM_MEASUREITEM`/`WM_DRAWITEM`）：`MFT_OWNERDRAW`，
-  保留 HMENU、菜单循环与键盘；底色/文字/选中行/分隔线全部来自
-  `prism::chrome::PaletteFor(variant)`（`Src/PrismCore/ChromeTheme.hpp`），
-  `SetMenuInfo(MIM_BACKGROUND|MIM_APPLYTOSUBMENUS)` 让下拉面板的空隙也是深色。
-- **无障碍（实测发现的坑）**：owner-draw 菜单项**没有 OS 文本**，系统菜单对象会把四项报成
-  **无名**菜单项（agent-desktop 实测：`MENU-ITEMS:  |  |  |`）。窗口因此自己回答
-  `OBJID_MENU`，用**同一批** `MenuDrawItem` 构造 `MenuBar/MenuItem` 树
-  （`A11yTree::Role::MenuBar/MenuItem`）；修复后 snapshot 为
-  `文件/menuitem | 编辑/menuitem | 设置(S).../menuitem | Help/menuitem`。
-- **助记符**：同上，系统无法匹配不存在的文本，窗口在 `WM_SYSCHAR` 用**画出来的同一串字**匹配
-  （`prism::chrome::MnemonicMatches`），命中后弹 TrackPopupMenu（方向键/Enter/Esc 仍是系统的）。
-- **主题**：`appearance.theme`（light/dark/system）+ `appearance.highContrast` 经
-  `prism::chrome::ShellVariantFor` 映射到唯一 Variant；启动时与保存设置后都重画外壳（`Main.cpp`）。
-
-**断言（可复现）**
-- `win.c83_chrome`（真实窗口 + 屏幕像素）：DWM 记录 `dark=1 attribute=20 caption=1 border=1`；
-  画布 luma **12.86**、标题栏 **12.08**（差 −0.78 < 12）；菜单栏众数色 **#0B0C10** ==
-  `--surface-backdrop-reference`（Midnight）；下拉行 `WM_DRAWITEM` 像素 **#0B1F36** ==
-  `--selection-tint` over 菜单底；四个顶级项与 `kMenuSettingsId` 仍在 HMENU 上。
-- `core.chrome_theme`（Linux lane）：三主题下文字对比度 **16.83 / 17.95 / 21.00**
-  （选中行 14.03 / 15.24 / 14.45，均 ≥ 4.5）；菜单底逐通道等于令牌；暗色外壳 luma 12.08 vs 画布 13.74；
-  助记符匹配（`&File`、`设置(&S)...`、`&&` 字面量、无 & 不匹配）。
-- **负向控制**：`PRISM_C83_MUTANT_NO_DWM` → 标题栏 luma **243.30**，**像素断言**红
-  （`C83 MUTATION CAUGHT: no_dwm`）；`PRISM_C83_MUTANT_NO_OWNERDRAW` → 菜单栏 **#FFFFFF**，背景断言红
-  （`no_owner_draw`）；`PRISM_C83_MUTANT_MENU_SYSTEM_LIGHT` → 白底白字，对比度断言红
-  （`menu_system_light`）。
-
-**已知边界**：画布本身仍是 `GalleryRenderer::kBackdrop` 的固定 #0B0E13（Day/Night 的画布切换是另一张卡）；
-`system` 因此映射到 Midnight —— 在"白菜单盖黑画布"修好之前跟随浅色系统桌面只会重现 A4。
+**状态**：待评估（可做 DWM 深色标题栏 + 自绘菜单栏，工作量中等）。
 
 ---
 
@@ -166,6 +128,7 @@ WARN  i18n: language table unavailable: ...\Assets\Lang\en-US.json
 | S1-2 多卷被拒 | **旧构建，已修** | `--smart-extract-each vols.7z.001` → exit=0, 25000 B |
 | S1-3 设置一击僵尸 | **真（P0）** | `WM_COMMAND 0x4B31` → `IsWindowEnabled` True→False，无可见窗口；根因 `CreateWindowExW` 无 `WS_VISIBLE` |
 | S2-2 无确认解压 | **部分真** | 列表行激活确实整档解压（C34 既定设计，落新目录、有状态反馈）；**侧栏树根点击不写盘**（计数 1→1） |
+| S2-1 无声退出 | **未复现** | 连续启动 10 次，10/10 都出现可见窗口；最可能的解释是那批不可见对话框（#105 已修）——以前启动若撞上密码/错误框，屏幕上什么都看不到 |
 | S2-4 HUD UIA 不可见 | **真** | 30 MB 解压全程 `progress=0` |
 | S2-5 压缩按钮无响应 | **真** | 同 S1-3 根因（`CompressDialog` 不 Show） |
 | S2-6 A2/A3 仍在 | **旧构建，已修** | 表头已扁平、压缩率三处一致（C81/#103，我跑其 exe 截图确认） |
@@ -193,4 +156,4 @@ WARN  i18n: language table unavailable: ...\Assets\Lang\en-US.json
 **影响**：加密归档的用户第一步看到的就是这个框，它决定"这软件做得认真吗"。
 **要求**：①所有字串走 i18n 表（`password.*` 键，中英双语）；②按 `DESIGN.md` 的玻璃卡样式重绘
 （圆角 14、`GlassPanel` 三原语、深色背景、主按钮强调色）；③键盘与 UIA 不退化（现有 textfield/按钮可达）。
-**状态**：待修（记入队列）。
+**状态**：字串与配色已修（C88/#109：27 个 `password.*` 键、全中文、深色卡、强调色主按钮、焦点环）；**控件仍是 Win32 原生**（单选圆圈/复选方块），自绘控件属另一张卡。

@@ -74,7 +74,10 @@ constexpr const char* kMutationBanner = nullptr;
 // D3: the injection must PROVE it fired, by reading the same constant the
 // product branches on (a stale macro leaves the mutant target RED, never green).
 [[maybe_unused]] bool BandMutationFired() {
-  return !prism::win::gallery::GalleryWindow::BandYieldsTabToStripForTest();
+  // TRUE only when the band claims a Ctrl+Tab (the shipped defect). Read from
+  // the SAME predicate the product branches on, so a stale macro stays RED
+  // instead of letting the mutant claim CAUGHT from an unrelated failure.
+  return !prism::win::gallery::GalleryWindow::TabIsChordForStripForTest();
 }
 [[maybe_unused]] bool CloseNodeMutationFired() {
   return prism::win::gallery::ActiveTabCloseMutation() == "no_close_node";

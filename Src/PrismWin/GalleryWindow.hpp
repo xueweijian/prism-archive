@@ -1706,9 +1706,10 @@ class GalleryWindow {
   prism::tabs::TabSet& Tabs() { return tabs_; }
   const prism::tabs::TabSet& Tabs() const { return tabs_; }
   bool TabBarVisible() const { return !tabs_.empty(); }
-  // C85 / D3: the band's Tab rule, exposed so a mutant build can PROVE its
-  // injection fired instead of claiming CAUGHT from an unrelated red.
-  static bool BandYieldsTabToStripForTest() { return !TabIsChordForStrip(); }
+  // C85 / D3: the SAME predicate the band branches on, readable by a mutant
+  // build so its arm can PROVE the injection fired (a stale macro must stay
+  // RED, never green). TRUE means "this Tab is a chord, the band gives it up".
+  static bool TabIsChordForStripForTest() { return TabIsChordForStrip(); }
   prism::layout::Rect TabBarRect() const { return layout_.tabBar; }
   // What the current frame paints (hover / drag state included), so a suite
   // asserts the same view the renderer was handed.

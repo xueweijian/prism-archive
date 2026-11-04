@@ -368,6 +368,21 @@ std::wstring ReadDialogText(HWND box) {
   return out.text;
 }
 
+// A MessageBox is created BEFORE its static child is filled in, so a client that
+// enumerates the window the instant EnumWindows finds it can read an empty
+// control (measured here: one run in three). Bounded poll, never a Sleep(n) and
+// hope: the dialog's text is the assertion, so waiting for it is the point.
+std::wstring ReadDialogTextWhenReady(HWND box, DWORD budgetMs) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+  std::wstring text;
+  for (;;) {
+    text = ReadDialogText(box);
+    if (!text.empty()) return text;
+    if (std::chrono::steady_clock::now() >= deadline) return text;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+}
+
 // Close the box the way a user's Enter would, then let the process exit.
 void DismissMessageBox(HWND box) {
   if (box == nullptr) return;
@@ -396,7 +411,7 @@ bool RunDialogCase(const std::wstring& archive, std::wstring* text, std::string*
     child.Stop();
     return false;
   }
-  *text = ReadDialogText(box);
+  *text = ReadDialogTextWhenReady(box, 5'000);
   DismissMessageBox(box);
   DWORD code = 0;
   if (!WaitForExit(&child, kExitTimeoutMs, &code)) {
@@ -538,6 +553,68 @@ PRISM_TEST("c85 one launch leaves a dated log file with real timestamps") {
   // photographed).
   PRISM_CHECK(stderrText.rfind("1970", 0) != 0);
   PRISM_CHECK(Contains(stderrText, currentYear + "-"));
+}
+
+// ---------------------------------------------------------------------------
+// 5. The SESSION-RESTORE path still works with the new logger and the new error
+//    surface -- and if it ever dies, this case prints the WHOLE child stderr
+//    (an ASan report's STACK is at the top of that file; a tail of shadow bytes
+//    names no frames, which is exactly what a truncated report cost us once).
+// ---------------------------------------------------------------------------
+PRISM_TEST("c85 the session-restore path survives the new logger") {
+  World& world = Fixture();
+  if (!Setup()) {
+    g_noFixture = true;
+    return;
+  }
+  // The sandbox a previous CLEAN run would have left behind: one archive that is
+  // gone, one that is not an archive at all, and one that is fine. The app is
+  // launched with NO arguments, so it restores this document.
+  const fs::path sandbox = world.dir.path() / L"restore-lapp";
+  std::error_code ec;
+  fs::create_directories(sandbox, ec);
+  prism::app::SessionBootstrap bootstrap = prism::app::LoadSessionUnder(sandbox.wstring());
+  if (!PRISM_CHECK(!bootstrap.file.empty())) return;
+  std::vector<prism::session::SessionEntry> entries;
+  entries.push_back({Utf8(world.missing), "", false});
+  entries.push_back({Utf8(world.garbage), "", false});
+  entries.push_back({Utf8(world.goodArchive), "", false});
+  bootstrap.store.Replace(entries, 0);
+  bootstrap.store.MarkCleanShutdown(true);
+  std::string why;
+  if (!PRISM_CHECK(prism::app::SaveSession(&bootstrap, &why))) {
+    std::printf("    %s\n", why.c_str());
+    return;
+  }
+
+  const fs::path outPath = world.dir.path() / L"restore.txt";
+  Child child;
+  if (!PRISM_CHECK(StartChild({}, sandbox, outPath, &child, &why))) {
+    std::printf("    %s\n", why.c_str());
+    return;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kExitTimeoutMs);
+  std::string text;
+  bool found = false;
+  for (;;) {
+    text = ReadText(outPath);
+    if (Contains(text, "session restore entries=3")) {
+      found = true;
+      break;
+    }
+    if (!ChildAlive(child) || std::chrono::steady_clock::now() >= deadline) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  if (!found) {
+    // EVERYTHING, not a tail: this is the diagnostic that names the frame.
+    std::printf("    child stderr (FULL, %zu bytes):\n%s\n", text.size(), text.c_str());
+  }
+  const bool skipped = Contains(text, "skipped=2");
+  const bool restored = Contains(text, "restored=1");
+  child.Stop();
+  PRISM_CHECK(found);
+  PRISM_CHECK(skipped);
+  PRISM_CHECK(restored);
 }
 
 int main(int argc, char** argv) {

@@ -1603,12 +1603,13 @@ inline std::wstring PathExtensionLower(std::wstring_view path) {
   return extension;
 }
 
-// Takes the ALREADY-lowered extension (".7z"), not a path: every caller has it,
-// and recomputing it here created a second std::wstring temporary whose lifetime
-// the optimizer is free to shorten -- which is what ASan's "stack-use-after-
-// scope" in Open's frame was pointing at (2026-11-05, MSVC 14.51 + /fsanitize=
-// address). One caller, one extension, one object.
-inline const FormatRoute* FindFormatRoute(std::wstring_view extension) {
+// The table, looked up by an ALREADY-lowered extension (".7z"). Split out of
+// FindFormatRoute because Open() already holds that string: recomputing it there
+// created a second std::wstring temporary whose lifetime the optimizer is free
+// to shorten -- which is what ASan's "stack-use-after-scope" in Open's frame was
+// pointing at (2026-11-05, MSVC 14.51 + /fsanitize=address). One caller, one
+// extension, one object.
+inline const FormatRoute* FindRouteForExtension(std::wstring_view extension) {
   static const FormatRoute kRoutes[] = {
       {L".7z", "7z", &abi::CLSID_CFormat7z},
       {L".zip", "zip", &abi::CLSID_CFormatZip},
@@ -1650,6 +1651,13 @@ inline const FormatRoute* FindFormatRoute(std::wstring_view extension) {
     if (extension == route.extension) return &route;
   }
   return nullptr;
+}
+
+// The path-taking door stays: suites assert the routing table by PATH
+// ("C:\x.y\pack.tar" must route to tar even though the directory has a dot),
+// and that contract must not depend on who calls it.
+inline const FormatRoute* FindFormatRoute(std::wstring_view path) {
+  return FindRouteForExtension(PathExtensionLower(path));
 }
 
 // ---------------------------------------------------------------------------
@@ -1782,7 +1790,7 @@ class ArchiveReader {
     // kNone keep the full route + probe list, so a mislabeled or prefix-wrapped
     // file still opens.
     const std::wstring extension = PathExtensionLower(archivePath);
-    const FormatRoute* route = FindFormatRoute(extension);
+    const FormatRoute* route = FindRouteForExtension(extension);
     openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
     // The C26 trace token stays verbatim ("route=<handler>" / "route=probe"):
     // win.extract_failure asserts on it, and a diagnostic format is a contract
@@ -1863,7 +1871,7 @@ class ArchiveReader {
       for (const GUID& clsid : fromEngine) addCandidate(clsid, handler);
       if (fromEngine.empty() && formatExt) {
         const std::wstring sniffExtension = std::wstring(1, L'.') + Utf8ToWide(formatExt);
-        const FormatRoute* sniffRoute = FindFormatRoute(sniffExtension);
+        const FormatRoute* sniffRoute = FindRouteForExtension(sniffExtension);
         if (sniffRoute && sniffRoute->pinnedClsid) addCandidate(*sniffRoute->pinnedClsid, handler);
       }
       if (candidates.empty()) {

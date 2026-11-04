@@ -510,7 +510,7 @@ class GalleryRenderer {
     const int savedRows = dbgRowCells;
     const int savedThumbDraws = dbgThumbDraws;
     if (scene.listMode) {
-      DrawListMode(content.Get(), scene, layout);
+      DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
     } else if (scene.items != nullptr) {
       DrawGrid(content.Get(), scene, layout);
     }
@@ -673,7 +673,13 @@ class GalleryRenderer {
         textLeft = rect.left + 12.0f;
       }
       std::wstring text = Utf8(segment.text);
-      if (segment.value >= 0) {
+      // C81/A3: the canonical ratio string travels verbatim (it IS what the
+      // list cell and the info card render); the legacy integer path stays
+      // for scenes/tests that only set ratioPercent.
+      if (!segment.valueText.empty()) {
+        text += L" ";
+        text += Utf8(segment.valueText);
+      } else if (segment.value >= 0) {
         text += L" " + std::to_wstring(segment.value);
         if (segment.id == prism::layout::StatusId::Ratio) text += L"%";
       }
@@ -1469,7 +1475,8 @@ class GalleryRenderer {
   // bars, folders first. Every rectangle is anchored to the layout's list body,
   // which is already inset by the rail (C29's column, V1's geometry).
   void DrawListMode(ID2D1RenderTarget* target, const Scene& scene,
-                    const prism::layout::Layout& layout) {
+                    const prism::layout::Layout& layout,
+                    bool backdropPass = false) {
     if (!scene.listItems) return;
     const auto& rows = *scene.listItems;
     // The app persists the user's column geometry (C27); absent means the module
@@ -1487,17 +1494,54 @@ class GalleryRenderer {
     const float ratioX = right - cols.ratioW + 6.0f;
     const float textTop = static_cast<float>(header.top) + 4.0f;
 
-    // Header
-    DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^",
-              D2D1::RectF(static_cast<float>(header.left) + prism::layout::kListIndent,
-                          textTop, nameRight, textTop + 24.0f),
-              textSecondary_.Get());
-    DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", sizeX, textTop, cols.sizeW - 18,
-                      textSecondary_.Get());
-    DrawTrailingLabel(target, L"\x538B\x7F29\x540E", packedX, textTop, cols.packedW - 18,
-                      textSecondary_.Get());
-    DrawTrailingLabel(target, L"\x538B\x7F29\x7387", ratioX, textTop, cols.ratioW - 18,
-                      textSecondary_.Get());
+    // Header -- C81/A2: FLAT text on the canvas + a 1 px rule under it. No
+    // panel, no ring. The band is repainted canvas-flat first: the C77
+    // backdrop is a blurred still of the CONTENT, and its bleed into the
+    // header strip (plus the crisp labels drawn over it) is exactly the
+    // "灰底面板 + 原始大小重影" of audit A2. The backdrop PASS never draws the
+    // header at all, so the blurred still cannot contain header text either.
+    if (!backdropPass) {
+      island_->SetColor(kBackdrop);
+      target->FillRectangle(ToRectF(header), island_.Get());
+      DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^",
+                D2D1::RectF(static_cast<float>(header.left) + prism::layout::kListIndent,
+                            textTop, nameRight, textTop + 24.0f),
+                textSecondary_.Get());
+      DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", sizeX, textTop, cols.sizeW - 18,
+                        textSecondary_.Get());
+      DrawTrailingLabel(target, L"\x538B\x7F29\x540E", packedX, textTop, cols.packedW - 18,
+                        textSecondary_.Get());
+      DrawTrailingLabel(target, L"\x538B\x7F29\x7387", ratioX, textTop, cols.ratioW - 18,
+                        textSecondary_.Get());
+      // The one 1 px separator (DESIGN: flat text + a rule, nothing else).
+      island_->SetColor(ToD2d(prism::theme::Lookup(prism::theme::TokenId::DividerSubtle,
+                                                   scene.actionTheme)
+                                  .color));
+      target->FillRectangle(D2D1::RectF(static_cast<float>(header.left),
+                                        static_cast<float>(header.bottom) - 1.0f,
+                                        static_cast<float>(header.right),
+                                        static_cast<float>(header.bottom)),
+                            island_.Get());
+#if defined(PRISM_C81_MUTANT_HEADER_SELECTED)
+      // C81 MUTANT ACTIVE: header_selected -- the audit's original sin: the
+      // header band gets the SELECTED-ROW vocabulary on top (rounded accent
+      // panel + 2 px accent ring). Drawn LAST so the flat fill cannot hide
+      // it; the pixel assertions MUST go red.
+      const D2D1_ROUNDED_RECT mutantPanel = D2D1::RoundedRect(
+          D2D1::RectF(static_cast<float>(header.left) + 8.0f,
+                      static_cast<float>(header.top) + 2.0f,
+                      static_cast<float>(header.right) - 8.0f,
+                      static_cast<float>(header.bottom) - 2.0f),
+          10.0f, 10.0f);
+      D2D1_COLOR_F mutantFill = accentColor_;
+      mutantFill.a = 0.26f;
+      accent_->SetColor(mutantFill);
+      target->FillRoundedRectangle(mutantPanel, accent_.Get());
+      accent_->SetColor(accentColor_);
+      target->DrawRoundedRectangle(mutantPanel, accent_.Get(), 2.0f);
+#endif
+      island_->SetColor(islandColor_);
+    }
 
     const prism::layout::RowRange window = prism::layout::VisibleListRows(
         layout, static_cast<int>(rows.size()), scroll);
@@ -1547,8 +1591,13 @@ class GalleryRenderer {
                           top + 6.0f, cols.packedW - 18, textPrimary_.Get());
       }
 
-      // Semantic micro-capsule ratio bar (blueprint ch. 3.2.3).
-      if (const auto bar = prism::list::RatioBar(row)) {
+      // 压缩率 cell -- C81/A3: THE canonical view string, shared with the
+      // info card and the status band. The micro-capsule bar (blueprint ch.
+      // 3.2.3) stays decorative and only shows for a real shrink; an expanded
+      // (">100% (...)") or unknown row renders the text across the column so
+      // the longer honest string fits.
+      if (prism::list::RatioBarVisible(row)) {
+        const auto bar = prism::list::RatioBar(row);
         const float trackX = right - cols.ratioW + 8.0f;
         const float trackW = cols.ratioW - 64.0f;
         const float cy = top + prism::layout::kListRowHeight / 2.0f;
@@ -1563,10 +1612,13 @@ class GalleryRenderer {
         tileBorder_->SetColor(BarColorOf(bar->color));
         target->FillRoundedRectangle(fill, tileBorder_.Get());
         tileBorder_->SetColor(kTileBorder);
-        wchar_t pct[8];
-        swprintf_s(pct, L"%d%%", bar->percent);
+        const std::wstring pct = Utf8(prism::list::RatioCellText(row));
         DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + trackW + 6.0f,
                           top + 6.0f, 40, textSecondary_.Get());
+      } else {
+        DrawTrailingLabel(target, Utf8(prism::list::RatioCellText(row)),
+                          right - cols.ratioW + 8.0f, top + 6.0f, cols.ratioW - 16,
+                          textSecondary_.Get());
       }
     }
   }

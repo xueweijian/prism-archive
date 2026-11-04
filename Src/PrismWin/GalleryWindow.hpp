@@ -308,6 +308,24 @@ class GalleryWindow {
     if (catalog_) palette_.SetCatalog(*catalog_);
     history_.Clear();
     history_.Visit(nav_.Folder());  // the root is a real level (de-duped to no-op)
+    // C81/A3: the status band's 压缩率 comes from the SAME catalog snapshot,
+    // through the SAME canonical view the list cell and the info card render
+    // ("one catalog, three readers" -- and now one string, never three
+    // formulas; UI-AUDIT A3: the row said 100%, the card 126.7%, the band
+    // 未知 because nothing ever fed it). Crypto keeps whatever SetArchiveInfo
+    // derived; only the ratio is (re)computed here, so a tab switch that
+    // re-attaches the catalog cannot leave a stale number behind.
+    if (catalog_ != nullptr) {
+      std::uint64_t originalBytes = 0;
+      std::uint64_t compressedBytes = 0;
+      for (const prism::ArchiveItem& item : *catalog_) {
+        originalBytes += item.size;
+        compressedBytes += item.packSize;
+      }
+      archiveStatus_.ratioView = prism::CompressionRatioView(originalBytes, compressedBytes);
+    } else {
+      archiveStatus_.ratioView.clear();
+    }
     RebuildFolderView();
     SyncActionContext();  // a newly attached catalog makes the band legal
   }

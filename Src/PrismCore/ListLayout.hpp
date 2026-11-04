@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "CompressionRatio.hpp"
 #include "Preview.hpp"
 
 namespace prism::list {
@@ -98,6 +99,22 @@ inline std::optional<RatioBarResult> RatioBar(const SortItem& item) {
     r.color = BarColor::Green;
   }
   return r;
+}
+
+// C81/A3: the text in the 压缩率 cell is THE canonical view string
+// (prism::CompressionRatioView) -- never a second formatter. The capsule bar
+// stays decorative and is drawn only for a real shrink; an expanded entry
+// (">100% (...)") or an unknown one renders the text across the column.
+inline std::string RatioCellText(const SortItem& item) {
+  // A directory is not a byte stream: like its "--" in the size columns its
+  // ratio cell carries the canonical unknown, never a fabricated number.
+  if (item.isDir) return prism::CompressionRatioView(0, 0);
+  return prism::CompressionRatioView(item.size, item.packedSize);
+}
+
+inline bool RatioBarVisible(const SortItem& item) {
+  return !item.isDir && item.size > 0 && item.packedSize > 0 &&
+         item.packedSize <= item.size;
 }
 
 // tnum-friendly fixed-scale byte strings (OpenType tnum keeps digits equal

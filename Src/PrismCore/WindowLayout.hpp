@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <ostream>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -503,6 +504,10 @@ struct StatusInfo {
   std::string_view method;              // empty -> "方法未知"
   std::string_view dictionary;          // empty -> "字典未知"
   int ratioPercent = -1;                // < 0 -> unknown
+  // C81/A3: the canonical ratio view (prism::CompressionRatioView of the
+  // archive totals). EMPTY means unknown; non-empty it is the exact string
+  // the list cell and the info card render -- one source, one string.
+  std::string ratioView;
   bool compressing = false;             // wins over the ratio
   // C79: the RIGHT cluster's two counts. -1 means "not reported", which paints
   // the label with an explicit "--" rather than a fabricated 0.
@@ -560,7 +565,15 @@ inline std::string_view DictionaryText(const StatusInfo& info) {
 // painter can format "压缩率 87%" without this header owning a buffer.
 inline std::string_view RatioText(const StatusInfo& info) {
   if (info.compressing) return "压缩中…";
-  return info.ratioPercent >= 0 ? "压缩率" : "压缩率未知";
+  // C81/A3: known now means "the canonical view string is present". The
+  // PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN arm (Tests/suites/c81-a2a3.cmake)
+  // injects the OLD lie -- the band claiming 未知 while the row and the card
+  // show the real value -- and the consistency suite MUST go red.
+#if defined(PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN)
+  return "压缩率未知";
+#else
+  return (!info.ratioView.empty() || info.ratioPercent >= 0) ? "压缩率" : "压缩率未知";
+#endif
 }
 
 // C79: the right cluster's labels. The NUMBER travels in StatusSegment::value,
@@ -578,6 +591,10 @@ struct StatusSegment {
   Rect rect;
   std::string_view text;
   int value = -1;  // Ratio only: the percentage, or -1 when unknown/compressing
+  // C81/A3: the canonical ratio string. When non-empty the painter renders
+  // text + ' ' + valueText (no integer append); it travels as a view into
+  // StatusInfo::ratioView, which the scene owns for the whole frame.
+  std::string_view valueText;
 };
 
 inline constexpr int kStatusPad = 12;
@@ -606,7 +623,7 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
     const int width = (std::max)(kStatusSegmentMinWidth, leftWidths[i]);
     const Rect rect{x, top, (std::min)(x + width, layout.statusBar.right - kContentPadding), bottom};
     if (rect.Empty()) break;
-    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, leftTexts[i], -1});
+    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, leftTexts[i], -1, {}});
     leftEnd = rect.right;
     x = rect.right + kStatusGap;
   }
@@ -627,12 +644,14 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
   if (gap >= 2 * kStatusGap) {
     const int dividerX = leftEnd + gap / 2;
     out.push_back(StatusSegment{StatusId::Divider,
-                                Rect{dividerX, top, dividerX + 1, bottom}, {}, -1});
+                                Rect{dividerX, top, dividerX + 1, bottom}, {}, -1, {}});
   }
   const std::string_view rightTexts[] = {ItemCountText(info), SelectedCountText(info),
                                          RatioText(info)};
   const int rightValues[] = {info.itemCount, info.selectedCount,
                              (info.compressing ? -1 : info.ratioPercent)};
+  const std::string_view rightValueTexts[] = {{}, {},
+      (info.compressing ? std::string_view{} : std::string_view{info.ratioView})};
   int rx = rightStart;
   for (int i = 0; i < 3; ++i) {
     const int width = (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
@@ -640,7 +659,7 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
                     bottom};
     if (rect.Empty()) break;
     out.push_back(StatusSegment{static_cast<StatusId>(4 + i), rect, rightTexts[i],
-                                rightValues[i]});
+                                rightValues[i], rightValueTexts[i]});
     rx = rect.right + kStatusGap;
   }
   return out;

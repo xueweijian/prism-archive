@@ -51,6 +51,7 @@
 #include <vector>
 
 #include "ArchiveCatalog.hpp"
+#include "CompressionRatio.hpp"
 #include "ArchiveTreeView.hpp"
 #include "PathSafety.hpp"
 
@@ -176,6 +177,9 @@ struct Status {
   std::uint64_t totalUncompressed = 0;
   std::uint64_t totalPacked = 0;
   std::uint32_t ratioPermille = 0;  // packed/unpacked * 1000 (blueprint 42.8% -> 428)
+  // C81/A3: the canonical ratio view (prism::CompressionRatioView of the
+  // totals) -- the exact string the list cell and the status band render.
+  std::string ratioView;
   std::size_t fileCount = 0;
   std::size_t folderCount = 0;
 };
@@ -360,6 +364,9 @@ class Model {
                                 static_cast<long double>(status.totalUncompressed);
       status.ratioPermille = static_cast<std::uint32_t>(std::llround(ratio));
     }
+    // C81/A3: the capsule line renders THIS string, never a second formatter.
+    status.ratioView = prism::CompressionRatioView(status.totalUncompressed,
+                                                   status.totalPacked);
     return status;
   }
 

@@ -151,3 +151,28 @@ CI 的 Linux lane 用 `-Wall -Wextra -Wpedantic -Werror` 编 PrismCore 测试，
 2. 判据必须可判定且可复现：这里是"引擎为该索引报过非零码"。
 3. 不要把错误码改写成成功：码仍留在它真正的属主名下，顶层成功与否仍由引擎 HRESULT 决定。
 4. 无法复现的间歇性失败，先补**判别信息**（属主索引 / 码 / askMode / 是否有流），再谈修。
+
+### D34 临时对象不得活过它所在的表达式（StatusSegments / StatusInfo 专项）
+
+**两次实测事故（都被 Release 掩盖，只有 ASan 才红）**：
+
+1. **C81**：`const StatusSegment* s = RatioSegment(StatusSegments(layout, info));` ——
+   `StatusSegments` 返回 `std::vector` 临时对象，语句结束即析构，指针悬垂。
+   ASan：`heap-use-after-free`；Release 下 freed 字节恰好没变，测试"全绿"。
+2. **C86**：`for (const auto& seg : StatusSegments(layout, StatusForPublish()))` ——
+   `StatusForPublish()` 按值返回 `StatusInfo`，range-init 全表达式结束后临时析构；
+   `StatusSegment::valueText` 当时是 `std::string_view`（指向 `StatusInfo::ratioView`），
+   于是每个 ratio 分段握着指向死对象的视图。
+   ASan：`stack-use-after-scope (READ of size 6, __asan_memcpy)`。
+
+**规则**：
+
+1. 凡是返回 `std::vector` / `std::string` / `std::string_view` 的布局函数，**调用方必须把返回值落到具名局部变量**，
+   再取指针/视图；不许在 range-for 的 range-init 里直接调用返回临时对象的函数并保存视图。
+2. 结构体字段**不允许**用 `string_view` 指向"按值返回的临时对象的成员"。
+   要么字段用 `std::string`（自带所有权），要么让调用方保证被指向对象的生命周期覆盖使用期。
+3. 每条这样的"所有权"修复都要配一条**能读到死对象的用例**：先用"临时在返回时死亡"的构造器造出分段
+   （C86 的 `SegmentsFromTemporary()`），再读每个 label。以后谁把 owned `std::string` 改回 view，ASan lane 立刻红。
+
+**为什么写进契约**：这类 bug 在 Release 下**完全不可见**，而 CI 的 Windows lane 是 ASan 构建——
+它是唯一能抓住它们的门。改这类代码时，先问"这个指针/视图指向的对象活多久"。

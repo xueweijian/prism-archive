@@ -165,6 +165,16 @@ inline Palette PaletteFor(Variant variant) {
   return palette;
 }
 
+// C106: THE ONE COLOUR THE SHELL PAINTS, for both halves of it.
+//
+// The caption is composited by DWM from a COLORREF and the menu plate is a GDI
+// brush; they are different APIs, and before this card they were two separate
+// PaletteFor(variant).background lookups in two files. Same value, yes -- but
+// "the two are equal" was a coincidence of two call sites, not a property the
+// code could be read as holding. Both halves now ask THIS function, so the
+// equality the pixel gate measures is the equality the source expresses.
+inline Rgba ShellSurface(Variant variant) { return PaletteFor(variant).background; }
+
 // Perceptual luma on the 0..255 scale the pixel test samples. sRGB weights, not
 // the WCAG linearised luminance: this is the number a screenshot reports.
 inline double Luma255(const Rgba& color) {

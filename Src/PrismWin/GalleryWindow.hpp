@@ -115,6 +115,7 @@
 #include "WindowFrame.hpp"                  // C66: visible frame, work area, clamp
 #include "WindowChrome.hpp"                  // C83: DWM dark caption + rim
 #include "../PrismCore/ChromeTheme.hpp"      // C83: the shell palette (tokens only)
+#include "../PrismCore/ChromeMenuBar.hpp"    // C106: bar visibility + the 2-level gate
 #include "TabBar.hpp"                        // C60: the tab strip (pixels + hits)
 
 // C34: the glass layer is composition, so the window's TU needs the three
@@ -802,6 +803,99 @@ class GalleryWindow {
     return menuBarItems_[static_cast<std::size_t>(index)]->text;
   }
 
+  // ---------- card C106: the menu bar's visibility -------------------------
+  //
+  // THE OBSERVABLE. A Win32 menu bar is NOT a window: there is no HWND, so
+  // IsWindowVisible has no meaning for it and a suite that waited for one would
+  // wait forever. The OS's own observables are (a) GetMenu() -- null when no bar
+  // is installed, which is exactly "the bar is not on screen" -- and (b) the
+  // CLIENT AREA's origin, which moves up by SM_CYMENU the moment the bar stops
+  // reserving non-client space. Both are what win.c106_chrome asserts; the second
+  // is the card's ">= 20 px".
+  int MenuBarHeight() const { return ::GetSystemMetrics(SM_CYMENU); }
+  bool MenuBarVisible() const { return menuBarVisible_; }
+  bool MenuAutoHide() const { return menuAutoHide_; }
+  // The bar Alt brings back while the menu bar is down (null when it is up).
+  HMENU ParkedMenu() const { return parkedMenu_; }
+  // The live state, as the pure model describes it (PrismCore/ChromeMenuBar.hpp).
+  prism::chrome::MenuBarState MenuBarStateNow() const {
+    prism::chrome::MenuBarState state;
+    state.visible = menuBarVisible_;
+    state.autoHide = menuAutoHide_;
+    return state;
+  }
+  // The pixels the content gains at the top while the bar is hidden.
+  int MenuBarHiddenShift() const {
+    return prism::chrome::HiddenShift(MenuBarStateNow(), MenuBarHeight());
+  }
+  // True in the PRISM_C106_MUTANT_WHITE_BAR build. A constexpr predicate, so the
+  // suite can tell "the injection is in this binary" from "the gate happened to
+  // fail"; CONTRACTS D3 requires the CAUGHT verdict to be armed on evidence, not
+  // on a red.
+  static constexpr bool MenuWhiteBarMutant() {
+#if defined(PRISM_C106_MUTANT_WHITE_BAR)
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  // The SETTING ("auto-hide the menu bar"). Applied once, before the first
+  // ShowWindow, so the bar never flashes on screen for a user who turned it off.
+  void SetMenuAutoHide(bool autoHide) {
+    menuAutoHide_ = autoHide;
+    if (autoHide) SetMenuBarVisible(false);
+  }
+
+  // Install or withdraw the bar. Withdrawing PARKS the HMENU instead of
+  // destroying it (see RebuildMenu): same bar, same item data, same UIA object.
+  void SetMenuBarVisible(bool visible) {
+    if (!host_.hwnd) {
+      menuBarVisible_ = visible;
+      return;
+    }
+    if (visible == menuBarVisible_) return;
+    const bool wasVisible = menuBarVisible_;
+    menuBarVisible_ = visible;
+    if (visible) {
+      if (parkedMenu_ != nullptr && ::SetMenu(host_.hwnd, parkedMenu_) != FALSE) {
+        parkedMenu_ = nullptr;
+      } else {
+        RebuildMenu();  // no parked bar (or the OS refused it): build one
+      }
+    } else {
+      HMENU bar = ::GetMenu(host_.hwnd);
+      if (bar != nullptr && ::SetMenu(host_.hwnd, nullptr) != FALSE) {
+        parkedMenu_ = bar;
+      } else {
+        // The OS kept the bar: report the state the window is really in, not the
+        // one it asked for.
+        menuBarVisible_ = wasVisible;
+        return;
+      }
+    }
+    ::DrawMenuBar(host_.hwnd);
+    // SetMenu already ran WM_NCCALCSIZE, but the frame's cached rectangles only
+    // refresh on SWP_FRAMECHANGED, and the renderer needs the new client size
+    // before the next frame (that is what "the content moves up" means here).
+    ::SetWindowPos(host_.hwnd, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                       SWP_FRAMECHANGED);
+    Invalidate();
+  }
+  // The flip is PrismCore's (prism::chrome::Toggle), not a second "!" here: the
+  // suite and the window must be flipping the same rule.
+  void ToggleMenuBar() {
+    SetMenuBarVisible(prism::chrome::Toggle(MenuBarStateNow()).visible);
+  }
+
+  // Ctrl+O. The window does not know what "open an archive" means -- the app owns
+  // the picker and the switch path -- so the chord only asks. The card's point is
+  // that this route does not depend on the menu bar being on screen.
+  void SetOpenArchiveHandler(std::function<void()> handler) {
+    onOpenArchive_ = std::move(handler);
+  }
+
   void SetMenuLabels(std::wstring fileTitle, std::wstring compressText, std::wstring exitText) {
     fileMenuLabel_ = std::move(fileTitle);
     compressMenuLabel_ = std::move(compressText);
@@ -847,7 +941,11 @@ class GalleryWindow {
   bool EditEnabled() const { return editEnabled_; }
   const std::wstring& EditDisabledReason() const { return editDisabledReason_; }
   bool MenuItemEnabled(UINT command) const {
+    // C106: a hidden bar is PARKED, and its items are still commands the app can
+    // run (UIA, Ctrl chords, the action island). Answering "disabled" for a bar
+    // that is merely off screen would make the model disagree with the pixels.
     HMENU bar = host_.hwnd ? GetMenu(host_.hwnd) : nullptr;
+    if (!bar) bar = parkedMenu_;
     if (!bar) return false;
     const int count = GetMenuItemCount(bar);
     for (int i = 0; i < count; ++i) {
@@ -2391,12 +2489,39 @@ class GalleryWindow {
         if (OpenMnemonic(static_cast<wchar_t>(wparam))) return 0;
         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
+      // CARD C106: the Alt release. A BARE Alt (no key pressed while it was
+      // down) flips the bar; a chord keeps its meaning and is left alone. The
+      // return is 0 in both arms because DefWindowProc's WM_SYSKEYUP(VK_MENU)
+      // is what enters the system menu loop -- with the bar toggling under it,
+      // that loop would be the old modal menu over a bar that just vanished.
+      case WM_SYSKEYUP: {
+        if (wparam == VK_MENU) {
+          const bool bare = prism::chrome::ShouldToggleOnAltRelease(altTracker_);
+          altTracker_ = prism::chrome::AltTracker{};
+          if (bare) ToggleMenuBar();
+          return 0;
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+      }
       case WM_SYSKEYDOWN: {
         // C92: a bare F10 lands here; with Shift held the frame usually sends
         // WM_KEYDOWN, but a host that sends WM_SYSKEYDOWN must get the menu too.
         if (wparam == VK_F10 && (::GetKeyState(VK_SHIFT) & 0x8000) != 0) {
           OpenContextMenu(-1, -1, true);
           return 0;
+        }
+        // CARD C106: the Alt press itself. It is NOT the toggle -- Windows sends
+        // this very message for the Alt half of Alt+F / Alt+S / Alt+H, so
+        // toggling here would swallow every mnemonic the bar owns. The press only
+        // arms the "bare Alt" tracker; WM_SYSKEYUP decides.
+        if (wparam == VK_MENU) {
+          altTracker_ = prism::chrome::AltTracker{};
+          return 0;
+        }
+        // Any OTHER sys key while Alt is down means this was a chord, not a bare
+        // Alt (F10 with Shift is handled above and is not an Alt chord).
+        if ((::GetKeyState(VK_MENU) & 0x8000) != 0) {
+          prism::chrome::NoteAltChordKey(&altTracker_);
         }
         if (!palette_.IsOpen()) {
           const UINT vk = static_cast<UINT>(wparam);
@@ -3526,6 +3651,13 @@ class GalleryWindow {
       case prism::keys::Command::OpenSearch:
         OpenSearch();
         return;
+      // CARD C106: Ctrl+O. The chord asks the APP for an archive (the picker and
+      // the switch path are the app's); it is deliberately NOT routed through the
+      // menu bar, so it works while the bar is hidden -- which is the assertion
+      // win.c106_chrome makes.
+      case prism::keys::Command::OpenArchive:
+        if (onOpenArchive_) onOpenArchive_();
+        return;
       case prism::keys::Command::ClosePalette:
         // C53: one close closes both halves (Esc reaching the shell directly is
         // still one surface going away, never a dead card left painted).
@@ -4126,8 +4258,20 @@ class GalleryWindow {
     if (!host_.hwnd) return;  // Create() installs it once the HWND exists
     EnsureMenuFont();
     const prism::chrome::Palette palette = prism::chrome::PaletteFor(chromeVariant_);
-    HBRUSH background =
-        CreateSolidBrush(prism::win::chrome::ToColorRef(palette.background));
+    // C106: the plate is the SAME colour the caption was given, through the same
+    // function (prism::chrome::ShellSurface -- see WindowChrome::Apply). It used
+    // to be a second PaletteFor(variant).background lookup in a second file: the
+    // two values agreed, but nothing made them agree.
+    //
+    // NEGATIVE CONTROL (CONTRACTS D3): PRISM_C106_MUTANT_WHITE_BAR pins the plate
+    // to white -- the plan's "突兀白条" -- while the caption keeps the theme's
+    // colour. The three-theme menu==title pixel gate MUST go red; the mutation
+    // verdict is armed on the OBSERVABLE proof that the injection ran (a white
+    // plate in a theme whose ShellSurface is not white).
+    const prism::chrome::Rgba plate = MenuWhiteBarMutant()
+                                          ? prism::chrome::Rgba(1.0f, 1.0f, 1.0f, 1.0f)
+                                          : prism::chrome::ShellSurface(chromeVariant_);
+    HBRUSH background = CreateSolidBrush(prism::win::chrome::ToColorRef(plate));
     HBRUSH highlight =
         CreateSolidBrush(prism::win::chrome::ToColorRef(palette.highlight));
     HMENU bar = CreateMenu();
@@ -4196,15 +4340,27 @@ class GalleryWindow {
       barItems.push_back(items.back().get());
     }
     HMENU previous = GetMenu(host_.hwnd);
-    if (!SetMenu(host_.hwnd, bar)) {
-      DestroyMenu(bar);
-      if (background) DeleteObject(background);
-      if (highlight) DeleteObject(highlight);
-      return;
+    // C106: a HIDDEN bar is parked, not destroyed. Its items are owner-drawn and
+    // their text lives in menuItems_, so the HMENU (and the UIA object built from
+    // it) must survive the hide: Alt has to bring back the SAME bar, with the
+    // same item order, not a rebuilt lookalike.
+    HMENU parked = parkedMenu_;
+    if (menuBarVisible_) {
+      if (!SetMenu(host_.hwnd, bar)) {
+        DestroyMenu(bar);
+        if (background) DeleteObject(background);
+        if (highlight) DeleteObject(highlight);
+        return;
+      }
+      parkedMenu_ = nullptr;
+    } else {
+      // No SetMenu: the bar does not reserve non-client space while it is down.
+      parkedMenu_ = bar;
     }
-    // The old bar is gone before its item data is: DestroyMenu first, THEN the
-    // swap that frees the previous MenuDrawItems.
+    // The old bars are gone before their item data is: DestroyMenu first, THEN
+    // the swap that frees the previous MenuDrawItems.
     if (previous) DestroyMenu(previous);
+    if (parked) DestroyMenu(parked);
     menuItems_ = std::move(items);
     menuBarItems_ = std::move(barItems);
     HBRUSH oldBackground = menuBrush_;
@@ -4221,7 +4377,9 @@ class GalleryWindow {
     info.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
     info.hbrBack = menuBrush_;
     SetMenuInfo(bar, &info);
-    DrawMenuBar(host_.hwnd);
+    // A parked bar has no window to draw on: DrawMenuBar on a bar the window does
+    // not own is a no-op at best and a stale non-client repaint at worst.
+    if (menuBarVisible_) DrawMenuBar(host_.hwnd);
   }
 
   // C83: the menu's font. The system's menu font (not a hardcoded face), so the
@@ -5578,6 +5736,15 @@ class GalleryWindow {
   HFONT menuFont_ = nullptr;
   HBRUSH menuBrush_ = nullptr;
   HBRUSH menuHighlightBrush_ = nullptr;
+  // ---- card C106: the bar's visibility ----
+  // menuBarVisible_ is the LIVE state; menuAutoHide_ is the preference it was
+  // seeded from. Keeping them apart is what lets Alt show the bar "temporarily"
+  // without rewriting what the user asked for.
+  bool menuBarVisible_ = true;
+  bool menuAutoHide_ = false;
+  HMENU parkedMenu_ = nullptr;  // the bar while it is down (alive, not installed)
+  prism::chrome::AltTracker altTracker_;  // bare Alt vs Alt+F
+  std::function<void()> onOpenArchive_;   // Ctrl+O, wired by the app
 
   // C83: re-apply the caption and rebuild the bar for the current variant.
   void ApplyChromeTheme() {

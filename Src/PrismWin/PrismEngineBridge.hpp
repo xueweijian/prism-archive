@@ -1829,6 +1829,11 @@ class ArchiveReader {
                                  : static_cast<abi::IStreamGetSize*>(stream_);
     if (ReadSniffWindow(*probeStream, *probeSize, &sniffWindow,
                         &sniffHead, &sniffTail, &sniffSector16)) {
+      // C85: the hint OWNS its bytes (sniff::Window::extensionHint is a
+      // std::string). It used to be a std::string_view, and this assignment
+      // handed it a temporary that died at the end of the statement -- Sniff()
+      // then compared the dead buffer ("br" tie-break) and ASan called it a
+      // stack-use-after-scope in Open's frame.
       sniffWindow.extensionHint = WideToUtf8(extension.substr(1));
       finding = sniff::Sniff(sniffWindow);
     }

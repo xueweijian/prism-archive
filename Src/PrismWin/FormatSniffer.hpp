@@ -75,7 +75,18 @@ struct Window {
   // always beats the name (a file called .zip that really is a 7z must route to
   // 7z -- that is the exact case the pre-C28 probe got wrong, in the expensive
   // direction).
-  std::string_view extensionHint;
+  //
+  // OWNS its bytes on purpose (C85, 2026-11-05). It used to be a
+  // std::string_view, and Open() fills it with a TEMPORARY:
+  //     sniffWindow.extensionHint = WideToUtf8(extension.substr(1));
+  // The temporary dies at the end of that full-expression, so the view dangled
+  // before Sniff() ever ran -- and Sniff() reads it in the "br" tie-break
+  // (below). That is a real stack-use-after-scope: MSVC 14.51's ASan caught it
+  // as "READ of size 2 in memcmp ... in sniff::Sniff ... frame
+  // ArchiveReader::Open"; 14.44 happened not to poison the slot, so the whole
+  // local lane was green. A view into a temporary is the bug; owning the string
+  // makes the lifetime impossible to get wrong.
+  std::string extensionHint;
 };
 
 struct Finding {

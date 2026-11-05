@@ -47,6 +47,7 @@
 #include <iterator>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "../mini_test.hpp"
@@ -55,6 +56,15 @@
 #include "../../Src/PrismCore/Log.hpp"
 #include "../../Src/PrismWin/LogFile.hpp"
 #include "../../Src/PrismWin/PrismEngineBridge.hpp"
+
+// C85: the sniff hint must OWN its bytes. Open() assigns it from a temporary
+// (WideToUtf8(...)), so a view member dangles before Sniff() ever reads it --
+// that was a real stack-use-after-scope, caught by ASan on the Windows lane and
+// by nothing at all on a build whose layout happened to keep the slot
+// addressable. A type change is the only guard that cannot be re-broken by
+// accident.
+static_assert(std::is_same_v<decltype(prism::win::sniff::Window::extensionHint), std::string>,
+              "sniff::Window::extensionHint must OWN its bytes: Open() assigns a temporary");
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")

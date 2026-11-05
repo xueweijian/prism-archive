@@ -1102,6 +1102,17 @@ class GalleryWindow {
     if (!host->Initialize(host_.hwnd, shaders) || !host->UsesComposition()) return false;
     // ONE island, sized to the pill it belongs to (C33 finding 1).
     if (!host->AddIsland(kGlassIslandWidth, kGlassIslandHeight)) return false;
+    // C107: THE OPTICS. Until this call the two shaders had never run in the
+    // product: InitializeOptics existed with zero call sites, so every "glass"
+    // panel was a translucent fill with a 1 px rim. The Kawase radius comes
+    // from appearance.glassIntensity (default 0.72); a failure is recorded on
+    // the host (ShaderError()) and logged here instead of silently leaving a
+    // grey pill behind.
+    const double glassIntensity = prism::theme::live::Current().glassIntensity;
+    if (FAILED(host->InitializeOpticsForIntensity(glassIntensity))) {
+      std::fprintf(stderr, "c107: EnableGlassLayer: optics chain failed: %s\n",
+                   host->ShaderError().c_str());
+    }
     glass_ = std::move(host);
 #if defined(PRISM_C76_MUTANT_GLASS_ON_FIRST_FRAME) || defined(PRISM_C76_BASELINE)
     // Pre-C76 behaviour (and the negative control): the island is presented
@@ -1122,6 +1133,36 @@ class GalleryWindow {
   bool GlassLayerVisible() const { return glass_ != nullptr && glass_->Visible(); }
   size_t GlassTransientBytes() const { return glass_ ? glass_->TransientBytes() : 0; }
   bool GlassTransientLive() const { return glass_ ? glass_->TransientLive() : false; }
+
+  // ---- card C107: the optics chain, as the window sees it -------------------
+  // "The layer is ready" and "the optics are ready" are two different facts and
+  // the suite asserts both: a composition host with unregistered shaders
+  // composites a flat pill, which is exactly the pre-C107 look.
+  bool GlassOpticsReady() const { return glass_ && glass_->OpticsLive(); }
+  const std::string& GlassOpticsError() const {
+    static const std::string kNoLayer = "no glass layer";
+    return glass_ ? glass_->ShaderError() : kNoLayer;
+  }
+  int GlassOpticsInitializations() const { return glass_ ? glass_->OpticsInitializations() : 0; }
+  // The panel the island covers, straight from the LAYOUT (the same rect the
+  // breadcrumb pill is painted and hit-tested with) -- never a fixed 960x48.
+  prism::glass::IslandRect GlassPanelRect() const {
+    const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
+    if (pill.Empty()) return prism::glass::IslandRect{};
+    return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
+                                    static_cast<uint32_t>(pill.top),
+                                    static_cast<uint32_t>(pill.Width()),
+                                    static_cast<uint32_t>(pill.Height())};
+  }
+  // What the last composed island was fed with: the capture ran, the backdrop
+  // is a bitmap on the host's device, and the frame count proves the paint path
+  // (not just EnableGlassLayer) reached the chain.
+  bool GlassBackdropLive() const { return glass_ && glass_->Backdrop() != nullptr; }
+  size_t GlassBackdropBytes() const { return glass_ ? glass_->BackdropBytes() : 0; }
+  int GlassBackdropCaptures() const { return glass_ ? glass_->BackdropCaptures() : 0; }
+  int GlassComposedFrames() const { return glassComposedFrames_; }
+  int GlassDroppedBackdrops() const { return glass_ ? glass_->DroppedBackdrops() : 0; }
+  bool GlassLastFrameOptical() const { return glassLastFrameOptical_; }
   // The bytes the last release ACTUALLY returned (C33's accounting, derived
   // from live COM pointers): 0 while nothing was held, 0 again on a second
   // release -- which is how the negative control proves the call really ran.
@@ -4867,12 +4908,76 @@ class GalleryWindow {
   void PresentGlassFrame() {
     if (!glass_) return;
     ++glassPresents_;
-    const prism::glass::IslandRect rect{0, 0, kGlassIslandWidth, kGlassIslandHeight};
+    // C107: the island is the panel the LAYOUT gives us (the breadcrumb pill),
+    // not a 960x48 rectangle at (0,0) that covered nothing in particular.
+    const prism::glass::IslandRect rect = GlassPanelRect();
+    if (rect.w == 0 || rect.h == 0) return;
+    if (!glass_->ResizeIsland(0, rect.w, rect.h)) return;
+
+    // 1. THE BACKDROP. The window has just painted this frame, so the pixels
+    // under the panel are on screen (and on the window's own surface). Captured
+    // every frame, handed to the chain -- never nullptr, which is what kept the
+    // two shaders from ever executing.
+    const bool captured = glass_->GrabBackdrop(host_.hwnd, rect);
+    // 2. THE CONSTANTS. The same GlassIslandScene::WriteCbuffer the shader's
+    // cbuffer is bit-asserted against, at the panel's own size, so the
+    // refraction band and the blur agree about where the edge is.
     prism::win::glass::GlassConstants constants{};
-    glass_->PaintIsland(0, rect, constants, nullptr,
-                        [](ID2D1DeviceContext* dc, float, float) {
-                          dc->Clear(D2D1::ColorF(0, 0.0f));
-                        });
+    BuildGlassConstants(rect, &constants);
+    // 3. THE COMPOSITION: backdrop -> Kawase -> Kawase -> LiquidGlass -> panel
+    //    chrome, into the island's premultiplied swapchain.
+    glassLastFrameOptical_ = captured && glass_->OpticsLive();
+    const prism::theme::Variant variant = chromeVariant_;
+    const bool composed = glass_->PaintIsland(
+        0, rect, constants, captured ? glass_->Backdrop() : nullptr,
+        [this, variant](ID2D1DeviceContext* dc, float width, float height) {
+          PaintGlassPanelChrome(dc, width, height, variant);
+        });
+    if (composed) ++glassComposedFrames_;
+  }
+
+  // C107: the island's own chrome -- the specular rim and the hairline border,
+  // from the SAME panel language the window paints (GlassPanel). The fill and
+  // the shadow are deliberately NOT painted again: they are part of what the
+  // glass refracts, and a second fill here would double the material.
+  void PaintGlassPanelChrome(ID2D1DeviceContext* dc, float width, float height,
+                             prism::theme::Variant variant) {
+    if (!dc || width <= 0.0f || height <= 0.0f) return;
+    if (!glassRimBrush_) {
+      if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
+                                           glassRimBrush_.ReleaseAndGetAddressOf()))) {
+        return;
+      }
+    }
+    prism::win::glass::PanelPainter painter;
+    painter.Bind(dc, glassRimBrush_.Get());
+    prism::win::glass::Parts parts;
+    parts.shadow = false;
+    parts.fill = false;
+    parts.rim = true;
+    parts.border = true;
+    painter.PaintRim(dc, D2D1::RectF(0.0f, 0.0f, width, height), variant, parts, nullptr);
+    painter.Unbind();
+  }
+
+  // The shader's 20 floats, from the model that owns them.
+  void BuildGlassConstants(const prism::glass::IslandRect& rect,
+                           prism::win::glass::GlassConstants* constants) {
+    if (!constants) return;
+    glassScene_.Layout(rect.w, rect.h);
+    glassScene_.SetTheme(chromeVariant_ == prism::theme::Variant::Daylight
+                             ? prism::glass::Theme::Daylight
+                             : prism::glass::Theme::Midnight);
+    glassScene_.SetPointer(static_cast<float>(rect.w) * 0.5f, static_cast<float>(rect.h) * 0.5f);
+    glassScene_.WriteCbuffer(prism::glass::IslandId::Nav, rect.w, rect.h, constants->v);
+    // The model's Nav rect is its own idea of where the island is; the LAYOUT's
+    // panel is the authority here, so the center/half-size are overwritten with
+    // the surface's own geometry (the bitmap's origin is the panel's corner).
+    constants->v[0] = static_cast<float>(rect.w) * 0.5f;
+    constants->v[1] = static_cast<float>(rect.h) * 0.5f;
+    constants->v[2] = static_cast<float>(rect.w) * 0.5f;
+    constants->v[3] = static_cast<float>(rect.h) * 0.5f;
+    constants->v[8] = static_cast<float>(rect.h) * 0.5f;
   }
 
   void EnsureIdleTimer() {
@@ -5765,6 +5870,11 @@ class GalleryWindow {
   // The host is OPT-IN (EnableGlassLayer): a window that nobody asked for glass
   // never allocates a device stack.
   std::unique_ptr<prism::win::glass::GlassIslandHost> glass_;
+  // ---- card C107: the optics chain's per-frame state ----
+  prism::glass::GlassIslandScene glassScene_;        // the cbuffer's owner
+  ComPtr<ID2D1SolidColorBrush> glassRimBrush_;       // the island's specular rim
+  int glassComposedFrames_ = 0;                      // islands the chain composed
+  bool glassLastFrameOptical_ = false;               // last frame had a backdrop
   size_t glassReleasedBytes_ = 0;  // C33's accounting, last release
   size_t lastThumbTrimBytes_ = 0;  // bytes the idle Trim returned
   // ---- card C75: idle/release accounting ----

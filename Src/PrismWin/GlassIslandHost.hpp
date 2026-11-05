@@ -41,8 +41,10 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../PrismCore/GlassIsland.hpp"
@@ -83,6 +85,32 @@ struct KawaseConstants {
   float reserved0 = 0.0f;
   float reserved1 = 0.0f;
 };
+
+// C107: the two Kawase passes' tap radius, derived from the ONE setting that
+// says how much glass the user asked for (appearance.glassIntensity, default
+// 0.72). The reference intensity maps to the same 8 px band the glass shader
+// uses for its own refraction (GlassIslandScene::WriteCbuffer out[9]), so the
+// blur and the refraction can never disagree about how thick the material is.
+inline constexpr float kKawaseReferenceRadiusPx = 8.0f;
+
+inline float KawaseRadiusForIntensity(double glassIntensity) {
+  const double reference = prism::theme::live::kReferenceGlassIntensity;
+  double scale = reference > 0.0 ? glassIntensity / reference : 1.0;
+  if (!(scale > 0.0)) scale = 0.0;
+  // The setting is 0..1, but a hand-edited settings.json must not be able to
+  // ask for a 400 px blur: 2x the reference is the cap.
+  if (scale > 2.0) scale = 2.0;
+  return kKawaseReferenceRadiusPx * static_cast<float>(scale);
+}
+
+// passScale 1.0 for the first (full-resolution) pass, 0.5 for the second --
+// the dual-Kawase shape the shader documents.
+inline KawaseConstants KawasePassConstants(double glassIntensity, float passScale) {
+  KawaseConstants constants;
+  constants.radiusPx = KawaseRadiusForIntensity(glassIntensity);
+  constants.passScale = passScale;
+  return constants;
+}
 
 namespace detail {
 
@@ -636,6 +664,11 @@ class GlassChain {
 // ---------------------------------------------------------------------------
 class GlassIslandHost {
  public:
+  GlassIslandHost() = default;
+  GlassIslandHost(const GlassIslandHost&) = delete;
+  GlassIslandHost& operator=(const GlassIslandHost&) = delete;
+  ~GlassIslandHost() { ReleaseBackdrop(); }
+
   struct IslandSurface {
     ComPtr<IDXGISwapChain1> swapchain;
     ComPtr<ID2D1Bitmap1> d2dBitmap;  // the D2D target bound to the surface
@@ -762,6 +795,10 @@ class GlassIslandHost {
     bytes += graph > 0 ? graph : (chain_.Live() && maxPixels > 0
                                       ? static_cast<size_t>(maxPixels) * 4u * 3u
                                       : 0);
+    // C107: the captured backdrop is a real allocation on this device too. A
+    // frame loop that re-created it instead of reusing it would leak here, and
+    // the C33/C107 accounting has to be able to see that.
+    bytes += BackdropBytes();
     return bytes;
   }
 
@@ -787,6 +824,7 @@ class GlassIslandHost {
     const size_t before = TransientBytes();
     if (d2dContext_) d2dContext_->SetTarget(nullptr);
     chain_.ReleaseInstances();
+    ReleaseBackdrop();
     for (IslandSurface& surface : surfaces_) {
       if (surface.visual) surface.visual->SetContent(nullptr);
       surface.d2dBitmap.Reset();
@@ -824,6 +862,35 @@ class GlassIslandHost {
   // CONTENT (labels, track, glyphs) into the surface; backdrop is the content
   // underneath the island -- that is what the glass refracts (never the
   // desktop, ADR-001).
+  // C107: the composition ITSELF, independent of which target it paints into.
+  // The product binds an island's composition surface; the C107 suite binds an
+  // offscreen bitmap on the same device, so "the island refracts the backdrop"
+  // is asserted on the code the user's frames run -- not on a lookalike.
+  template <typename Paint>
+  bool PaintIslandInto(ID2D1Bitmap1* target, const prism::glass::IslandRect& rect,
+                       ID2D1Bitmap* backdrop, const GlassConstants& constants, Paint&& paint) {
+    if (!target || !d2dContext_) return false;
+    if (rect.w == 0 || rect.h == 0) return false;
+#if defined(PRISM_C107_MUTANT_NO_BACKDROP)
+    // NEGATIVE CONTROL (CONTRACTS D3/D27): the island is composed without the
+    // content underneath it -- exactly the pre-C107 call site. The suite's
+    // "the panel follows the backdrop" assertion MUST go red, and
+    // DroppedBackdrops() is the runtime sign that the injection really ran.
+    if (backdrop != nullptr) {
+      backdrop = nullptr;
+      ++droppedBackdrops_;
+    }
+#endif
+    d2dContext_->SetTarget(target);
+    d2dContext_->BeginDraw();
+    d2dContext_->Clear(D2D1::ColorF(0, 0.0f));
+    if (opticsReady_ && backdrop && chain_.Ready()) {
+      chain_.Draw(backdrop, constants);
+    }
+    paint(d2dContext_.Get(), static_cast<float>(rect.w), static_cast<float>(rect.h));
+    return SUCCEEDED(d2dContext_->EndDraw());
+  }
+
   template <typename Paint>
   bool PaintIsland(size_t islandIndex, const prism::glass::IslandRect& rect,
                    const GlassConstants& constants,
@@ -837,30 +904,156 @@ class GlassIslandHost {
       return false;
     }
     if (surface.width != rect.w || surface.height != rect.h) return false;  // caller resizes
-
-    d2dContext_->SetTarget(surface.d2dBitmap.Get());
-    d2dContext_->BeginDraw();
-    d2dContext_->Clear(D2D1::ColorF(0, 0.0f));
-    if (opticsReady_ && backdrop && chain_.Ready()) {
-      chain_.Draw(backdrop, constants);
+    if (!PaintIslandInto(surface.d2dBitmap.Get(), rect, backdrop, constants,
+                         std::forward<Paint>(paint))) {
+      return false;
     }
-    paint(d2dContext_.Get(), static_cast<float>(rect.w), static_cast<float>(rect.h));
-    const HRESULT hr = d2dContext_->EndDraw();
-    if (FAILED(hr)) return false;
     if (FAILED(surface.swapchain->Present(1, 0))) return false;
     return SUCCEEDED(dcomp_->Commit());
   }
 
+  // C107: the island covers the panel the LAYOUT says it covers. The pre-C107
+  // host was created once at a fixed 960x48 and could never follow the
+  // breadcrumb pill through a resize; the surface is rebuilt at the new size
+  // and the next paint is identical to one that had always been that size.
+  bool ResizeIsland(size_t islandIndex, UINT width, UINT height) {
+    if (islandIndex >= surfaces_.size() || width == 0 || height == 0) return false;
+    IslandSurface& surface = surfaces_[islandIndex];
+    if (surface.width == width && surface.height == height) return true;
+    if (surface.visual) surface.visual->SetContent(nullptr);
+    surface.d2dBitmap.Reset();
+    surface.swapchain.Reset();
+    surface.width = width;
+    surface.height = height;
+    return SUCCEEDED(EnsureTransient());
+  }
+
+  // C107: THE BACKDROP. The pixels the island refracts are the window content
+  // UNDER it, captured from the frame the window just painted -- never the
+  // desktop, never another process (ADR-001).
+  //
+  // Why GDI: the window's content lives on the HwndRenderTarget's own D2D
+  // device, and D2D refuses to sample a bitmap across devices
+  // (D2DERR_WRONG_RESOURCE_DOMAIN, 0x88990012, measured by the C107 probe).
+  // GetDC(hwnd) reads the window's OWN surface (not the screen), so an
+  // occluding window cannot change what the glass sees, and the pixels come
+  // back through the DIB section into a bitmap that lives on THIS device --
+  // the only kind the effect graph can sample.
+  bool GrabBackdrop(HWND hwnd, const prism::glass::IslandRect& rect) {
+    if (!hwnd || !d2dContext_ || rect.w == 0 || rect.h == 0) return false;
+    if (!EnsureCaptureSurface(rect.w, rect.h)) return false;
+    HDC windowDc = GetDC(hwnd);
+    if (!windowDc) return false;
+    const BOOL blitted =
+        BitBlt(captureDc_, 0, 0, static_cast<int>(rect.w), static_cast<int>(rect.h), windowDc,
+               static_cast<int>(rect.x), static_cast<int>(rect.y), SRCCOPY);
+    ReleaseDC(hwnd, windowDc);
+    if (!blitted) return false;
+    if (IsBlankCapture(static_cast<size_t>(rect.w) * rect.h)) {
+      // A window that DirectComposition has taken over answers GDI with an
+      // empty surface on this driver (measured: the whole island captured as
+      // 0,0,0 while the same window answered red before SetRoot). PrintWindow
+      // with PW_RENDERFULLCONTENT asks DWM for the window's composed content
+      // instead, which is the documented route for DirectX-backed windows.
+      HDC fallback = GetDC(hwnd);
+      if (!fallback) return false;
+      const BOOL printed = PrintWindow(hwnd, fallback, PW_RENDERFULLCONTENT);
+      if (printed) {
+        HDC target = captureDc_;
+        BitBlt(target, 0, 0, static_cast<int>(rect.w), static_cast<int>(rect.h), fallback,
+               static_cast<int>(rect.x), static_cast<int>(rect.y), SRCCOPY);
+      }
+      ReleaseDC(hwnd, fallback);
+      if (!printed || IsBlankCapture(static_cast<size_t>(rect.w) * rect.h)) {
+        prism::win::startup::Trace::Instance().Count("c107_backdrop_blank");
+        return false;
+      }
+      prism::win::startup::Trace::Instance().Count("c107_backdrop_printwindow");
+    }
+    // The client area is opaque, so every captured texel is premultiplied by
+    // 255 -- force the alpha rather than trusting whatever the driver left in
+    // the fourth byte (a BitBlt into a 32bpp DIB does not guarantee it).
+    auto* texels = static_cast<UINT32*>(captureBits_);
+    const size_t count = static_cast<size_t>(rect.w) * rect.h;
+    for (size_t i = 0; i < count; ++i) texels[i] |= 0xFF000000u;
+
+    const UINT32 stride = rect.w * 4u;
+    if (backdrop_ && backdropW_ == rect.w && backdropH_ == rect.h) {
+      if (FAILED(backdrop_->CopyFromMemory(nullptr, captureBits_, stride))) return false;
+    } else {
+      // ONLY the bitmap: ReleaseBackdrop() would also free the staging DIB
+      // this very call is reading from (a use-after-free the C107 probe
+      // caught as an access violation right here).
+      ReleaseBackdropBitmap();
+      D2D1_BITMAP_PROPERTIES1 props = {};
+      props.pixelFormat =
+          D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+      if (FAILED(d2dContext_->CreateBitmap(D2D1::SizeU(rect.w, rect.h), captureBits_, stride, props,
+                                          backdrop_.ReleaseAndGetAddressOf()))) {
+        return false;
+      }
+      backdropW_ = rect.w;
+      backdropH_ = rect.h;
+    }
+    ++backdropCaptures_;
+    return true;
+  }
+
+  // What the last GrabBackdrop captured, as the chain's input. Null until the
+  // first capture: an island with no backdrop draws no optics rather than
+  // refracting an uninitialised surface.
+  ID2D1Bitmap* Backdrop() const { return backdrop_.Get(); }
+  size_t BackdropBytes() const {
+    return backdrop_ ? static_cast<size_t>(backdropW_) * backdropH_ * 4u : 0u;
+  }
+  int BackdropCaptures() const { return backdropCaptures_; }
+  int DroppedBackdrops() const { return droppedBackdrops_; }
+
   // Builds the shared effect chain (two Kawase passes + glass) on this host's
-  // device context.
+  // device context. C107: a failure is RECORDED, not swallowed -- "glass is
+  // grey" is not a diagnosis, and ShaderError() is where the reason surfaces.
   HRESULT InitializeOptics(const KawaseConstants& first, const KawaseConstants& second) {
-    if (!opticsReady_) return E_FAIL;
-    return chain_.Initialize(d2dContext_.Get(), first, second);
+    if (!opticsReady_) {
+      opticsError_ = "optics unavailable: the effect shaders did not register";
+      return E_FAIL;
+    }
+    const HRESULT hr = chain_.Initialize(d2dContext_.Get(), first, second);
+    if (FAILED(hr)) {
+      opticsError_ = "GlassChain::Initialize failed (0x" + Hex(hr) + ")";
+      if (!effects_.LastCompileMessage().empty()) {
+        opticsError_ += ": " + effects_.LastCompileMessage();
+      }
+      prism::win::startup::Trace::Instance().Count("c107_optics_failed");
+      std::fprintf(stderr, "c107: optics chain NOT initialized: %s\n", opticsError_.c_str());
+      return hr;
+    }
+    opticsError_.clear();
+    ++opticsInitializations_;
+    prism::win::startup::Trace::Instance().Count("c107_optics_ready");
+    return S_OK;
+  }
+
+  // C107: the product's entry point. The Kawase radius is DERIVED from the one
+  // setting that describes the material (appearance.glassIntensity), so a user
+  // who turns the glass down gets a thinner blur instead of the same blur with
+  // a lighter tint.
+  HRESULT InitializeOpticsForIntensity(double glassIntensity) {
+    return InitializeOptics(KawasePassConstants(glassIntensity, 1.0f),
+                            KawasePassConstants(glassIntensity, 0.5f));
   }
 
   bool UsesComposition() const { return compositionReady_; }
   bool OpticsReady() const { return opticsReady_; }
-  const std::string& ShaderError() const { return effects_.LastCompileMessage(); }
+  // The chain is what actually draws; OpticsReady() only says the shaders
+  // registered. A frame needs both, and the suite asserts both.
+  bool OpticsLive() const { return opticsReady_ && chain_.Ready(); }
+  int OpticsInitializations() const { return opticsInitializations_; }
+  const std::string& OpticsError() const { return opticsError_; }
+  const std::string& ShaderError() const {
+    // The compile message when the shaders never registered, the chain's own
+    // reason otherwise: one accessor, always the first thing that broke.
+    return effects_.LastCompileMessage().empty() ? opticsError_ : effects_.LastCompileMessage();
+  }
   ID2D1DeviceContext* Context() const { return d2dContext_.Get(); }
   IDCompositionDevice* CompositionDevice() const { return dcomp_.Get(); }
   size_t IslandCount() const { return surfaces_.size(); }
@@ -869,6 +1062,87 @@ class GlassIslandHost {
 
  private:
   static constexpr UINT kSwapChainBuffers = 2;  // DXGI flip model: front + back
+
+  static std::string Hex(long value) {
+    char text[16];
+    std::snprintf(text, sizeof(text), "%08lx", static_cast<unsigned long>(value));
+    return std::string(text);
+  }
+
+  // The staging surface a capture lands in: one 32bpp top-down DIB, reused
+  // across frames (allocating 184 KB per frame would be its own leak-shaped
+  // problem, and the C107 suite counts bytes over 200 frames).
+  bool EnsureCaptureSurface(UINT width, UINT height) {
+    if (captureDib_ && captureW_ == width && captureH_ == height) return true;
+    ReleaseBackdrop();
+    if (!captureDc_) {
+      HDC screen = GetDC(nullptr);
+      if (!screen) return false;
+      captureDc_ = CreateCompatibleDC(screen);
+      ReleaseDC(nullptr, screen);
+      if (!captureDc_) return false;
+    }
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = static_cast<LONG>(width);
+    info.bmiHeader.biHeight = -static_cast<LONG>(height);  // top-down: row 0 is the top
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    captureDib_ = CreateDIBSection(captureDc_, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!captureDib_ || !bits) {
+      ReleaseBackdrop();
+      return false;
+    }
+    captureBits_ = bits;
+    captureOld_ = SelectObject(captureDc_, captureDib_);
+    captureW_ = width;
+    captureH_ = height;
+    return true;
+  }
+
+  // A capture that came back entirely black is not a backdrop: the glass would
+  // refract nothing and look like a flat fill again. The product's UI is never
+  // pure black over a whole island, so this is a reliable signal (and it is
+  // counted, so the fallback is visible in the trace).
+  bool IsBlankCapture(size_t texels) const {
+    const auto* words = static_cast<const UINT32*>(captureBits_);
+    if (!words) return true;
+    for (size_t i = 0; i < texels; ++i) {
+      if ((words[i] & 0x00FFFFFFu) != 0u) return false;
+    }
+    return true;
+  }
+
+  void ReleaseBackdrop() {
+    ReleaseBackdropBitmap();
+    ReleaseCaptureSurface();
+  }
+
+  void ReleaseBackdropBitmap() {
+    backdrop_.Reset();
+    backdropW_ = 0;
+    backdropH_ = 0;
+  }
+
+  void ReleaseCaptureSurface() {
+    if (captureDc_ && captureOld_) {
+      SelectObject(captureDc_, captureOld_);
+      captureOld_ = nullptr;
+    }
+    if (captureDib_) {
+      DeleteObject(captureDib_);
+      captureDib_ = nullptr;
+    }
+    if (captureDc_) {
+      DeleteDC(captureDc_);
+      captureDc_ = nullptr;
+    }
+    captureBits_ = nullptr;
+    captureW_ = 0;
+    captureH_ = 0;
+  }
 
   bool AnySurfaceLive() const {
     for (const IslandSurface& surface : surfaces_) {
@@ -927,6 +1201,21 @@ class GlassIslandHost {
   std::vector<IslandSurface> surfaces_;
   GlassEffectRuntime effects_;
   GlassChain chain_;
+  // C107: the captured backdrop (a bitmap on THIS device) and the GDI staging
+  // surface it comes through.
+  ComPtr<ID2D1Bitmap1> backdrop_;
+  UINT backdropW_ = 0;
+  UINT backdropH_ = 0;
+  int backdropCaptures_ = 0;
+  int droppedBackdrops_ = 0;
+  HDC captureDc_ = nullptr;
+  HBITMAP captureDib_ = nullptr;
+  HGDIOBJ captureOld_ = nullptr;
+  void* captureBits_ = nullptr;
+  UINT captureW_ = 0;
+  UINT captureH_ = 0;
+  std::string opticsError_;
+  int opticsInitializations_ = 0;
   bool compositionReady_ = false;
   bool opticsReady_ = false;
   bool visible_ = true;

@@ -1491,6 +1491,25 @@ class GalleryRenderer {
     const float ratioX = right - cols.ratioW + 6.0f;
     const float textTop = static_cast<float>(header.top) + 4.0f;
 
+    // C90: GLYPHS ARE NOT A REFRACTION SOURCE. At 1/8 a 13 px run of near-white
+    // text rasterizes into a solid mini row (measured source coverage 0.81
+    // against 0.09 of real ink); 4 mini px of row pitch plus sigma 1.75 fuses
+    // those rows into one band, and the veil leaves 35% of it -- the white
+    // rectangles over the name and ratio columns. The header was excluded for
+    // exactly this reason (audit A2); the rows were missed. Folder icons, the
+    // ratio capsule and the selection tint STAY: they are the content a
+    // refraction layer is supposed to carry, and they keep C77-1's "the layer
+    // exists" measurable.
+#if defined(PRISM_C77_MUTANT_TEXT_IN_BACKDROP)
+    // C90 MUTANT ACTIVE: text-in-backdrop -- the shipped behaviour, restored.
+    // The counter is what the suite's verdict is armed on (D3): the injection
+    // provably ran before CAUGHT may be printed.
+    const bool drawGlyphs = true;
+    if (backdropPass) ++dbgBackdropGlyphPasses;
+#else
+    const bool drawGlyphs = !backdropPass;
+#endif
+
     // Header -- C81/A2: FLAT text on the canvas + a 1 px rule under it. No
     // panel, no ring. The band is repainted canvas-flat first: the C77
     // backdrop is a blurred still of the CONTENT, and its bleed into the
@@ -1571,21 +1590,25 @@ class GalleryRenderer {
             D2D1::RectF(nameLeft + 4.0f, top + 9.0f, nameLeft + 20.0f, top + 27.0f), 5.0f,
             5.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
-        DrawLabel(target, caption_.Get(), name,
-                  D2D1::RectF(nameLeft + 28.0f, top + 5.0f, nameRight, bottom - 4.0f),
-                  textPrimary_.Get());
-        DrawTrailingLabel(target, L"--", sizeX, top + 6.0f, cols.sizeW - 18,
-                          textSecondary_.Get());
-        DrawTrailingLabel(target, L"--", packedX, top + 6.0f, cols.packedW - 18,
-                          textSecondary_.Get());
+        if (drawGlyphs) {
+          DrawLabel(target, caption_.Get(), name,
+                    D2D1::RectF(nameLeft + 28.0f, top + 5.0f, nameRight, bottom - 4.0f),
+                    textPrimary_.Get());
+          DrawTrailingLabel(target, L"--", sizeX, top + 6.0f, cols.sizeW - 18,
+                            textSecondary_.Get());
+          DrawTrailingLabel(target, L"--", packedX, top + 6.0f, cols.packedW - 18,
+                            textSecondary_.Get());
+        }
       } else {
-        DrawLabel(target, caption_.Get(), name,
-                  D2D1::RectF(nameLeft, top + 5.0f, nameRight, bottom - 4.0f),
-                  textPrimary_.Get());
-        DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.size)), sizeX,
-                          top + 6.0f, cols.sizeW - 18, textPrimary_.Get());
-        DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.packedSize)), packedX,
-                          top + 6.0f, cols.packedW - 18, textPrimary_.Get());
+        if (drawGlyphs) {
+          DrawLabel(target, caption_.Get(), name,
+                    D2D1::RectF(nameLeft, top + 5.0f, nameRight, bottom - 4.0f),
+                    textPrimary_.Get());
+          DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.size)), sizeX,
+                            top + 6.0f, cols.sizeW - 18, textPrimary_.Get());
+          DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.packedSize)), packedX,
+                            top + 6.0f, cols.packedW - 18, textPrimary_.Get());
+        }
       }
 
       // 压缩率 cell -- C81/A3: THE canonical view string, shared with the
@@ -1609,10 +1632,12 @@ class GalleryRenderer {
         tileBorder_->SetColor(BarColorOf(bar->color));
         target->FillRoundedRectangle(fill, tileBorder_.Get());
         tileBorder_->SetColor(kTileBorder);
-        const std::wstring pct = Utf8(prism::list::RatioCellText(row));
-        DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + trackW + 6.0f,
-                          top + 6.0f, 40, textSecondary_.Get());
-      } else {
+        if (drawGlyphs) {
+          const std::wstring pct = Utf8(prism::list::RatioCellText(row));
+          DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + trackW + 6.0f,
+                            top + 6.0f, 40, textSecondary_.Get());
+        }
+      } else if (drawGlyphs) {
         DrawTrailingLabel(target, Utf8(prism::list::RatioCellText(row)),
                           right - cols.ratioW + 8.0f, top + 6.0f, cols.ratioW - 16,
                           textSecondary_.Get());
@@ -2004,6 +2029,11 @@ class GalleryRenderer {
   // C77: the backdrop layer's build/draw counters (see BackdropRebuilds).
   int dbgBackdropRebuilds = 0;
   int dbgBackdropDraws = 0;
+  // C90: list-mode backdrop passes that drew the row GLYPHS. Zero in every
+  // clean build (the increment is compiled into the mutant arm only); it is the
+  // runtime half of the negative control's verdict (CONTRACTS D3): a mutant
+  // that never reached the injected branch must not print CAUGHT.
+  int dbgBackdropGlyphPasses = 0;
   // C60: proof that the TAB STRIP reached pixels. TabsPainted() == 0 while no
   // archive is open is the positive half of case 7 ("the band is not drawn"),
   // and > 0 with two tabs is what makes case 1 a paint assertion instead of a
@@ -2012,6 +2042,7 @@ class GalleryRenderer {
   // (size/content changes only); draws counts every frame that composited it.
   int BackdropRebuilds() const { return dbgBackdropRebuilds; }
   int BackdropDraws() const { return dbgBackdropDraws; }
+  int BackdropGlyphPasses() const { return dbgBackdropGlyphPasses; }
   int BackdropBitmapPixels() const {
     if (!backdropBitmap_) return 0;
     const D2D1_SIZE_U size = backdropBitmap_->GetPixelSize();

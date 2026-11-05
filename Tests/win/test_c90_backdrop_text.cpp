@@ -38,6 +38,15 @@
 //      a red for an unrelated reason stays red WITHOUT a false CAUGHT.
 //   4. REBUILD POLICY unchanged: the ghost is rebuilt on a content change and
 //      NEVER on a scroll (C77's contract, still exactly one build).
+//   5. THE SELECTED ROW LEAVES NO BAND ACROSS THE ROW. The follow-up's defect:
+//      after opening an archive the window selects the first row, and its 32 px
+//      accent pill is 4 mini px of solid accent in the 1/8 source -- a band that
+//      reaches ~40 px above and below the row and, because BackdropKey never
+//      carried selectedRow, outlives the selection. The scan is the reporter's:
+//      x 400..1400 every 100 px, every y of the rows band, and at a pixel that
+//      is canvas in the backdrop-OFF frame ON may differ by at most 4 levels.
+//      PRISM_C77_MUTANT_STATE_IN_BACKDROP restores the pill and MUST print
+//      "C77 MUTATION CAUGHT: state-in-backdrop".
 //
 // The suite covers LIST MODE with multiple rows on purpose: test_c77_glass.cpp
 // only ever renders the GRID scene (it never sets listItems/listMode), which is
@@ -104,6 +113,11 @@ constexpr int kRatioMinPixels = 1500;
 // back to true, i.e. the code that shipped. Assertion (1) MUST go red.
 inline constexpr const char* kMutantBanner = "C77 MUTANT ACTIVE: text-in-backdrop";
 inline constexpr const char* kMutantMarker = "C77 MUTATION CAUGHT: text-in-backdrop";
+#elif defined(PRISM_C77_MUTANT_STATE_IN_BACKDROP)
+// C90 MUTANT ACTIVE: state-in-backdrop -- the selected row's 32 px accent pill is
+// back in the 1/8 source. Assertion (5), the full-row-band scan, MUST go red.
+inline constexpr const char* kMutantBanner = "C77 MUTANT ACTIVE: state-in-backdrop";
+inline constexpr const char* kMutantMarker = "C77 MUTATION CAUGHT: state-in-backdrop";
 #else
 inline constexpr const char* kMutantBanner = nullptr;
 inline constexpr const char* kMutantMarker = nullptr;
@@ -113,6 +127,7 @@ inline constexpr const char* kMutantMarker = nullptr;
 // arm (the counter is compiled out of the clean build), so a mutant that dies
 // for an unrelated reason never prints the verdict.
 int gGlyphPasses = 0;
+int gStatePasses = 0;
 
 IWICImagingFactory* gWic = nullptr;
 const char* gOutDir = nullptr;
@@ -184,6 +199,8 @@ struct Harness {
     if (FAILED(target->EndDraw())) return false;
 #if defined(PRISM_C77_MUTANT_TEXT_IN_BACKDROP)
     gGlyphPasses += renderer.BackdropGlyphPasses();
+#elif defined(PRISM_C77_MUTANT_STATE_IN_BACKDROP)
+    gStatePasses += renderer.BackdropStatePasses();
 #endif
     if (out == nullptr) return true;
     UINT bitmapWidth = 0;
@@ -533,6 +550,77 @@ PRISM_TEST("c90.list_name_band_is_not_a_white_plate") {
 }
 
 // ---------------------------------------------------------------------------
+// 5: the SELECTED ROW leaves no band anywhere across the row
+// ---------------------------------------------------------------------------
+// The audit's second red circle: after opening an archive the FIRST row is
+// selected (GalleryWindow: scene.selectedRow = folderToListRow_[selection_]),
+// and the 32 px accent pill went into the 1/8 source with the text. At 1/8 that
+// pill is 4 mini px of solid accent, so the blur returns a full-width band that
+// (a) is far wider than the row itself and (b) OUTLIVES the selection, because
+// BackdropKey does not carry selectedRow -- which is exactly the "rounded panel
+// smeared down the list" the parent measured at x 350..1200 on a row that no
+// longer holds anything.
+//
+// The scan is the parent's: x 400..1400 every 100 px, at every y of the rows'
+// band. The criterion is the parent's too -- at a pixel that is CANVAS in the
+// backdrop-OFF frame, ON may differ by at most 4 levels (the veil's own wash).
+PRISM_TEST("c90.selected_row_leaves_no_band_across_the_row") {
+  Fixture fixture;
+  fixture.scene.selectedRow = 0;  // the window's default after opening an archive
+  const Geometry geometry = TestGeometry(fixture.layout);
+  const int canvasLum = CanvasLuminance();
+  const int rowsBottom =
+      (std::min)(geometry.body.bottom,
+                 geometry.body.top + static_cast<int>(fixture.rows.size()) *
+                                         prism::layout::kListRowHeight);
+
+  Frame reference;
+  Frame lit;
+  PRISM_CHECK(Render(fixture.Off(), &reference));
+  PRISM_CHECK(Render(fixture.On(), &lit));
+  if (reference.pixels.empty() || lit.pixels.empty()) return;
+
+  // The frame this card's evidence uses: same scene, selection on.
+  if (!WritePng(L"c90-list-backdrop-selected-on.png", lit)) std::puts("  WARN: PNG failed");
+
+  constexpr int kBandTolerance = 4;  // the parent's "back to off +/- 4"
+  int probes = 0;
+  int violations = 0;
+  int worst = 0;
+  int worstX = -1;
+  int worstY = -1;
+  for (int x = kNameBandLeft; x <= kNameBandRight; x += 100) {
+    int columnWorst = 0;
+    for (int y = geometry.body.top; y < rowsBottom; ++y) {
+      if (!reference.In(x, y) || !lit.In(x, y)) continue;
+      // Only pixels that are CANVAS in the reference: crisp ink (the pill, a
+      // glyph, the bar) is drawn over the layer in both frames and is not the
+      // ghost's doing.
+      if (reference.Luminance(x, y) > canvasLum + kCanvasTolerance) continue;
+      ++probes;
+      const int delta = MaxChannelDelta(lit.At(x, y), reference.At(x, y));
+      columnWorst = (std::max)(columnWorst, delta);
+      if (delta > kBandTolerance) ++violations;
+      if (delta > worst) {
+        worst = delta;
+        worstX = x;
+        worstY = y;
+      }
+    }
+    std::printf("  C90 row band x=%4d: maxChannelDelta=%2d\n", x, columnWorst);
+  }
+  std::printf(
+      "C90 row band: probes=%d violations=%d worst=%d at (%d,%d) tolerance=%d canvas=%d\n",
+      probes, violations, worst, worstX, worstY, kBandTolerance, canvasLum);
+  // 11 columns x 448 rows of the row band, minus the selected pill's own crisp
+  // pixels (~4.5k). Not vacuous, and the mutant arm proves it is not.
+  PRISM_CHECK(probes > 4000);
+  // ASSERTION 5: no band of any width. This is what the name-column-only box
+  // could not see: the pill is 1600 px wide.
+  PRISM_CHECK(violations == 0);
+}
+
+// ---------------------------------------------------------------------------
 // 4: the ghost is a still -- rebuilt on a content change, never on a scroll
 // ---------------------------------------------------------------------------
 PRISM_TEST("c90.backdrop_rebuilds_on_content_change_not_on_scroll") {
@@ -566,7 +654,11 @@ int main(int argc, char** argv) {
     // D3/D27: the verdict prints at the FIRST failing check, and only when the
     // injected branch actually ran (the renderer counted the list-mode backdrop
     // passes that drew glyphs). A red for another reason stays red without it.
+#if defined(PRISM_C77_MUTANT_STATE_IN_BACKDROP)
+    prism::test::SetMutationVerdict(kMutantMarker, []() { return gStatePasses > 0; });
+#else
     prism::test::SetMutationVerdict(kMutantMarker, []() { return gGlyphPasses > 0; });
+#endif
   } else {
     std::puts("C77 MUTANT: none (clean build)");
   }

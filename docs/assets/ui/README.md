@@ -155,3 +155,30 @@ ctest --test-dir E:\build\wt-c90 -R "c90" --output-on-failure
 
 No `<out-dir>` = assertions only, no files (the CI path).
 
+## C90 follow-up -- the band that survived the text fix (the selection pill)
+
+The user's second red circle: ONE file open, the first row selected, and a
+full-width light band around that row -- wider than the row, still there with
+the pointer parked elsewhere. Same scene as above (1920 x 1080, list mode, 14
+rows, Midnight), selection ON (`scene.selectedRow = 0`, which is what the
+window does after opening an archive).
+
+| file | what it shows |
+| --- | --- |
+| `c90-list-band-before.png` | the 32 px accent pill is 4 mini px of solid accent in the 1/8 source; blurred, it becomes a band that reaches ~40 px above and below the row. Its `BackdropKey` never carried `selectedRow`, so it also survived the selection moving on. |
+| `c90-list-band-after.png` | the pill is STATE, not content: out of the refraction source (same rule Draw() states for hover/focus pills). The row keeps its crisp pill; the ghost keeps the icons and the ratio capsules. |
+
+Measured at the same coordinate (x 400, 8 px below the selected row -- canvas in
+the backdrop-OFF frame), `maxChannelDelta`:
+
+```
+shipped / mutant : 73   (the band)
+this change      :  2   (the veil's own wash; the card's limit is 4)
+```
+
+The scan is the reporter's: x 400..1400 every 100 px, every y of the rows band,
+4531 reference-canvas probes: `violations = 512 -> 0`, `worst = 73 -> 2`.
+`PRISM_C77_MUTANT_STATE_IN_BACKDROP` restores the pill in the 1/8 source and
+prints `C77 MUTATION CAUGHT: state-in-backdrop`.
+
+

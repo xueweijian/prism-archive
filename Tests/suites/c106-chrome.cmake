@@ -54,14 +54,17 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
       user32.lib gdi32.lib shell32.lib ole32.lib d2d1.lib dwrite.lib
       dwmapi.lib windowscodecs.lib oleacc.lib)
 
-  add_executable(win_c106_chrome_test win/test_c106_chrome.cpp)
-  target_link_libraries(win_c106_chrome_test PRIVATE ${PRISM_C106_WINDOW_LIBS})
-  target_compile_options(win_c106_chrome_test PRIVATE /WX-)
-  add_test(NAME "win.c106_chrome" COMMAND win_c106_chrome_test)
   # RESOURCE_LOCK: the assertions read REAL SCREEN pixels, so this must not run
   # while c83 (or another capture) has its own window in front of ours. The lock
   # name is the one c83 already holds for the same resource -- two names for one
   # screen would not serialise anything.
+  #
+  # D1 (tools/preflight.py) reads the 400 characters AFTER add_test, so the
+  # marker has to stay close to it: the comment goes ABOVE, not between.
+  add_executable(win_c106_chrome_test win/test_c106_chrome.cpp)
+  target_link_libraries(win_c106_chrome_test PRIVATE ${PRISM_C106_WINDOW_LIBS})
+  target_compile_options(win_c106_chrome_test PRIVATE /WX-)
+  add_test(NAME "win.c106_chrome" COMMAND win_c106_chrome_test)
   set_tests_properties(win.c106_chrome PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
       RESOURCE_LOCK "c83_screen"
       PASS_REGULAR_EXPRESSION "ALL C106 CHROME CHECKS PASSED")

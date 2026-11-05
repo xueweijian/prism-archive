@@ -236,6 +236,17 @@ inline constexpr int kNoLevel = -1;
 inline constexpr int kRootLevel = -2;
 inline constexpr std::string_view kBreadcrumbSeparator = " \xE2\x80\xBA ";  // " › "
 
+// C93 (CONTRACTS D3): the field report's "the bar is dead text" state, restored
+// on purpose. With the switch off NO pixel resolves to a level, so a click on
+// the bar falls into the window's "chrome, consumed, do nothing" branch -- the
+// pre-C93 product. The suite's "click segment 0 -> archive root" assertion MUST
+// go red; nothing else may change.
+#if defined(PRISM_C93_MUTANT_DEAD_CRUMB)
+inline constexpr bool kCrumbClickEnabled = false;
+#else
+inline constexpr bool kCrumbClickEnabled = true;
+#endif
+
 struct Segment {
   std::string text;
   int level = kNoLevel;  // kNoLevel = decorative separator
@@ -310,6 +321,7 @@ inline BreadcrumbLayout LayoutBreadcrumb(
 // boundary rule explicit: the left edge belongs to the crumb, the right edge
 // belongs to whatever comes next.
 inline int HitBreadcrumb(const BreadcrumbLayout& layout, int x) {
+  if (!kCrumbClickEnabled) return kNoLevel;  // C93 negative control
   for (const auto& span : layout.spans) {
     if (span.level == kNoLevel) continue;
     if (x >= span.left && x < span.right) return span.level;
@@ -418,6 +430,13 @@ class Navigator {
   int Selection() const { return selection_; }
   int Count() const { return static_cast<int>(view_.entries.size()); }
 
+  // C93: every real FOLDER TRANSITION this navigator performed (GoTo/Enter/
+  // Backspace/GoToLevel). "The path did not change" and "nothing happened" are
+  // two different claims: a click on the crumb the user is already on must not
+  // bump this counter, or it would push a history entry, reset the viewport and
+  // flash the list on every re-click. Asserted by count, not by eye.
+  int NavigationCount() const { return navigationCount_; }
+
   // Out-of-range clears the selection instead of clamping to a neighbour: a
   // click on empty space must not select a file the user did not touch.
   bool SetSelection(int index) {
@@ -458,9 +477,24 @@ class Navigator {
   // move the highlight.
   NavResult GoTo(std::string_view folder) {
     const std::string target = ClampToExisting(SafeFolder(folder));
+#if defined(PRISM_C93_MUTANT_CRUMB_RESETS)
+    // C93 negative control (D3): a click on the crumb the user is ALREADY on
+    // counts as a navigation. The path does not move, but the history grows, the
+    // viewport resets and the list flashes -- assertion 3 must go red on the
+    // counter alone, never on a visual impression.
+    if (target == folder_) {
+      NavResult repeat;
+      repeat.action = NavAction::FolderChanged;
+      ++navigationCount_;
+      repeat.selection = selection_;
+      return repeat;
+    }
+#else
     if (target == folder_) return Unchanged();  // clicking the current crumb
+#endif
     NavResult result;
     result.action = NavAction::FolderChanged;
+    ++navigationCount_;  // C93: only a REAL transition counts
     const std::string childName = FirstSegmentAfter(target, folder_);
     folder_ = target;
     Rebuild();
@@ -562,6 +596,7 @@ class Navigator {
   View view_;
   std::vector<ArchiveItem> items_;
   int selection_ = -1;
+  int navigationCount_ = 0;  // C93: FolderChanged transitions, for the tests
 };
 
 }  // namespace prism::tree

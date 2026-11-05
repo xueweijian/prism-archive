@@ -150,6 +150,22 @@ inline constexpr bool kPublishStatusSegments = false;
 inline constexpr bool kPublishStatusSegments = true;
 #endif
 
+// C93 (CONTRACTS D3): the two dead interactions the field report measured.
+//   PRISM_C93_MUTANT_DEAD_CRUMB -> no crumb pixel resolves to a level, so the
+//        bar paints text that answers nothing (the pre-C93 product).
+//   PRISM_C93_MUTANT_ROOT_NOOP  -> the tree's ROOT row answers nothing while
+//        sub-folders still navigate (the pre-C93 "can not get back to the root").
+// Each arm is its own executable compiled from the same suite source, so the
+// binary that goes red IS the one that runs these checks.
+inline constexpr std::string_view ActiveC93Mutation() {
+  if (!prism::tree::kCrumbClickEnabled) return "dead_crumb";
+#if defined(PRISM_C93_MUTANT_ROOT_NOOP)
+  return "root_noop";
+#else
+  return {};
+#endif
+}
+
 inline constexpr std::string_view ActiveGalleryMutation() {
   if (!prism::layout::kPersistWindowPosition) return "no_position";
   if (!kPublishStatusSegments) return "no_status_segments";
@@ -1772,6 +1788,56 @@ class GalleryWindow {
     return prism::tree::HitBreadcrumb(crumbLayout_, x);
   }
 
+  // C93: the crumb the POINTER is over (kNoLevel when none). Hovering a crumb
+  // must LOOK different from hovering the rest of the pill -- the bar shipped as
+  // dead text partly because nothing suggested it could be pressed. Derived from
+  // the same hit test the click uses, so "looks clickable" and "is clickable"
+  // cannot disagree.
+  int CrumbHoverLevel() const { return crumbHover_; }
+  bool HoveringCrumb() const { return crumbHover_ != prism::tree::kNoLevel; }
+
+  // The rectangle the renderer paints behind the hovered crumb: the crumb's own
+  // measured span (NOT the whole bar -- a 700 px highlight under a 90 px word
+  // is the "hit area covers the bar" defect), inset vertically inside the pill.
+  prism::layout::Rect CrumbHoverRect() const {
+    EnsureNavIsland();
+    if (crumbHover_ == prism::tree::kNoLevel) return prism::layout::Rect{};
+    for (const auto& span : crumbLayout_.spans) {
+      if (span.level != crumbHover_ || span.Empty()) continue;
+      return prism::layout::Rect{span.left, barTop_ + 6, span.right, barBottom_ - 6};
+    }
+    return prism::layout::Rect{};
+  }
+
+  // How many REAL folder transitions the window performed. A click on the crumb
+  // the user is already on must not move it (C93 assertion 3).
+  int NavigationEvents() const { return nav_.NavigationCount(); }
+
+  // C93 test seams: the rail's rows, and the hit box of one of them. The box is
+  // the SAME RowHit command SidebarClick resolves, so the suite aims at the row
+  // a user can press instead of re-deriving the rail's arithmetic.
+  int SidebarRowCountForTest() { return static_cast<int>(sidebar_.Tree().size()); }
+  std::string SidebarRowPathForTest(int row) {
+    const std::vector<prism::sidebar::TreeRow>& rows = sidebar_.Tree();
+    if (row < 0 || row >= static_cast<int>(rows.size())) return {};
+    return rows[static_cast<std::size_t>(row)].path;
+  }
+  std::string SidebarFocusedPathForTest() { return sidebar_.FocusedPath(); }
+  bool SidebarRowRectForTest(int row, int* left, int* top, int* right, int* bottom) {
+    EnsureSidebar();
+    for (const prism::win::sidebar::Command& command : sidebarLayout_.commands) {
+      if (command.kind != prism::win::sidebar::PrimKind::RowHit) continue;
+      if (command.section != prism::sidebar::Section::Tree) continue;
+      if (command.payload != row) continue;
+      *left = static_cast<int>(command.box.left);
+      *top = static_cast<int>(command.box.top);
+      *right = static_cast<int>(command.box.right);
+      *bottom = static_cast<int>(command.box.bottom);
+      return true;
+    }
+    return false;
+  }
+
   // ---------- card C52: dropping files INTO the window ----------------------
   // Explorer -> window. What the drop MEANS is PrismCore's decision
   // (prism::drop::PlanDrop); this window only turns an HDROP into the tree the
@@ -2369,6 +2435,12 @@ class GalleryWindow {
           actionHover_ = index;
           Invalidate();
         }
+        // C93: the breadcrumb's hover feedback, from the click's own hit test.
+        const int crumb = CrumbLevelAt(MouseX(lparam), MouseY(lparam));
+        if (crumb != crumbHover_) {
+          crumbHover_ = crumb;
+          Invalidate();
+        }
         if (!actionTracking_ && host_.hwnd) {
           TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, host_.hwnd, 0};
           actionTracking_ = TrackMouseEvent(&track) != FALSE;
@@ -2381,7 +2453,29 @@ class GalleryWindow {
           actionHover_ = -1;
           Invalidate();
         }
+        // C93: leaving the window drops the crumb's hover state too, otherwise
+        // the highlight would freeze on whatever crumb the pointer left through.
+        if (crumbHover_ != prism::tree::kNoLevel) {
+          crumbHover_ = prism::tree::kNoLevel;
+          Invalidate();
+        }
         return 0;
+      }
+      case WM_SETCURSOR: {
+        // C93: a crumb is a LINK. The hand pointer is the second half of "this
+        // word can be pressed" (the painted hover capsule is the first).
+        if (LOWORD(lparam) == HTCLIENT) {
+          POINT point{};
+          if (GetCursorPos(&point) && ScreenToClient(host_.hwnd, &point) &&
+              CrumbLevelAt(point.x, point.y) != prism::tree::kNoLevel) {
+            // IDC_HAND expands through MAKEINTRESOURCE, whose TCHAR-ness follows
+            // UNICODE. This header is also compiled by test TUs that do not set
+            // UNICODE, so the wide spelling is cast explicitly instead.
+            SetCursor(LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_HAND)));
+            return TRUE;
+          }
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_LBUTTONUP: {
         dragArmed_ = false;  // C67: the press ended without becoming a drag
@@ -3719,10 +3813,19 @@ class GalleryWindow {
       lastSidebarHit_ = target;
       sidebar_.SetFocus(target);
       sidebarDirty_ = true;
-      // Activating a favorite/recent row means "open this path": the app owns
-      // what that means, so it goes through the same door as Enter on a row.
-      if (command.section != prism::sidebar::Section::Tree) {
-        sidebar_.SetFocus(target);
+      if (command.section == prism::sidebar::Section::Tree) {
+        // C93: a tree row CLICK is a navigation, not a focus move (Bandizip's
+        // tree has always behaved this way). The root row's folder is the EMPTY
+        // path -- which is why "go to the archive root" and "do nothing" used to
+        // be the same value, and the root row shipped dead.
+        const prism::sidebar::TreeClickTarget plan =
+            prism::sidebar::PlanTreeClick(sidebar_.Tree(), command.payload);
+        if (plan.navigate) {
+          const prism::tree::NavResult result = nav_.GoTo(plan.folder);
+          if (result.action == prism::tree::NavAction::FolderChanged) {
+            AfterFolderChange();  // user navigation: it belongs in the history
+          }
+        }
       }
       Invalidate();
       return true;
@@ -4226,6 +4329,22 @@ class GalleryWindow {
   void ApplyFolderChange() {
     quickLookClose();          // the preview belongs to the old folder
     RebuildFolderView();
+    SyncSidebarToFolder();     // C93: the tree highlight IS the current folder
+  }
+
+  // C93: the rail's highlight is the CURRENT FOLDER, not "the last row the user
+  // pressed". Without this the tree kept painting payload_text after Backspace
+  // had already taken the list back to the archive root -- the second half of
+  // the field report's "the tree still says I am in the subfolder".
+  void SyncSidebarToFolder() {
+    const std::vector<prism::sidebar::TreeRow>& rows = sidebar_.Tree();
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      if (rows[i].path != nav_.Folder()) continue;
+      const bool moved = sidebar_.SetFocus(prism::sidebar::FocusTarget{
+          prism::sidebar::Section::Tree, static_cast<int>(i)});
+      if (moved) sidebarDirty_ = true;  // the painted Selection moved with it
+      return;
+    }
   }
 
   // Re-filter the rows, rebuild the layout, and put the viewport back at the
@@ -4539,6 +4658,9 @@ class GalleryWindow {
     scene.actions = &actionBar_;
     scene.actionHover = actionHover_;
     scene.actionPressed = actionPressed_;
+    // C93: the crumb under the pointer, and the exact span to highlight.
+    scene.crumbHoverLevel = crumbHover_;
+    if (crumbHover_ != prism::tree::kNoLevel) scene.crumbHoverRect = CrumbHoverRect();
     // C60: the strip's view is built from the SAME TabSet the hit tests read,
     // so a tab can never be painted somewhere it cannot be clicked.
     const prism::win::tabbar::View tabView = TabViewNow();
@@ -5572,6 +5694,7 @@ class GalleryWindow {
   prism::actionbar::Model actionBar_;
   std::function<void(prism::actionbar::ActionId, int)> onAction_;
   int actionHover_ = -1;
+  int crumbHover_ = prism::tree::kNoLevel;  // C93: crumb under the pointer
   int actionPressed_ = -1;
   bool actionTracking_ = false;
   bool readOnly_ = false;

@@ -81,6 +81,9 @@ class GalleryRenderer {
   // WindowLayout forbids. The snapshot suite calibrates its "no skeleton"
   // detector on this exact colour (Scene::debugForceSkeleton), so an absent hit
   // means the rule held, not that the detector was blind.
+  // C93: the capsule under the crumb the pointer is over. White at 14% reads as
+  // "hover" on both themes without inventing a token the theme does not own.
+  static constexpr D2D1_COLOR_F kCrumbHover = {1.0f, 1.0f, 1.0f, 0.14f};
   static constexpr D2D1_COLOR_F kSkeletonHighlight = {1.0f, 0.584f, 0.0f, 1.0f};  // #FF9500
   static constexpr D2D1_COLOR_F kSkeletonShimmer = {1.0f, 0.843f, 0.400f, 1.0f};  // #FFD766
 
@@ -189,6 +192,13 @@ class GalleryRenderer {
     const prism::actionbar::Model* actions = nullptr;
     int actionHover = -1;    // button index under the pointer (-1: none)
     int actionPressed = -1;  // button index held down (-1: none)
+
+    // C93: the crumb under the POINTER (kNoLevel -> nothing). The rect is the
+    // window's own measured span for that crumb, so the highlight can never be
+    // wider than the word it makes pressable -- "hit area covers the whole bar"
+    // is the defect this field exists to prevent.
+    int crumbHoverLevel = prism::tree::kNoLevel;
+    prism::layout::Rect crumbHoverRect;
 
     // C60: the tab strip. nullptr -> no strip at all (every pre-C60 scene, and
     // the "no archive is open" state, where the band is hidden and the action
@@ -1854,6 +1864,15 @@ class GalleryRenderer {
       target->DrawRoundedRectangle(shape, islandBorder_.Get(), 1.0f);
     }
     (void)height;
+    // C93: the hover capsule goes UNDER the words. It is the crumb's own span,
+    // painted through the same rounded-rect vocabulary as the pill.
+    if (scene.crumbHoverRect.Width() > 0 && scene.crumbHoverRect.Height() > 0) {
+      const D2D1_ROUNDED_RECT hover =
+          D2D1::RoundedRect(ToRectF(scene.crumbHoverRect), 8.0f, 8.0f);
+      islandBorder_->SetColor(kCrumbHover);
+      target->FillRoundedRectangle(hover, islandBorder_.Get());
+      islandBorder_->SetColor(kIslandBorder);
+    }
     DrawLabel(target, title_.Get(), scene.breadcrumb, ToRectF(textRect), textPrimary_.Get());
     if (scene.islands) {
       // Pointer-tracked specular rim (blueprint ch. 3.1 Layer 5): a bright

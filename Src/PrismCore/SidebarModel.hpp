@@ -164,6 +164,32 @@ struct FocusTarget {
   bool Valid() const { return section != Section::None && index >= 0; }
 };
 
+// C93: what a CLICK on a visible tree row means. A tree click is a NAVIGATION,
+// not a focus move: Bandizip's tree has always worked this way ("点根节点 = 跳到
+// 归档根"), and the field report's "clicking the tree root does nothing" is the
+// defect this card closes.
+//
+// The archive root is the EMPTY path, so "navigate to ''" and "do not navigate"
+// share a representation -- which is exactly how the dead row shipped. The bool
+// keeps the two apart at the type level.
+//
+// NEGATIVE CONTROL (D3): PRISM_C93_MUTANT_ROOT_NOOP makes ONLY the root row
+// answer nothing (sub-folders still navigate), so the suite assertion that goes
+// red names the root and nothing else.
+struct TreeClickTarget {
+  bool navigate = false;
+  std::string folder;
+};
+
+inline TreeClickTarget PlanTreeClick(const std::vector<TreeRow>& rows, int row) {
+  if (row < 0 || row >= static_cast<int>(rows.size())) return TreeClickTarget{};
+  const TreeRow& target = rows[static_cast<std::size_t>(row)];
+#if defined(PRISM_C93_MUTANT_ROOT_NOOP)
+  if (target.isRoot || target.path.empty()) return TreeClickTarget{};  // the bug
+#endif
+  return TreeClickTarget{true, target.path};
+}
+
 inline bool operator==(const FocusTarget& a, const FocusTarget& b) {
   return a.section == b.section && a.index == b.index;
 }

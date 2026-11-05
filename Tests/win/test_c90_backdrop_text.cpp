@@ -70,6 +70,7 @@
 #include <vector>
 
 #include "../mini_test.hpp"
+#include "../../Src/PrismCore/ChromeTheme.hpp"
 #include "../../Src/PrismCore/ListLayout.hpp"
 #include "../../Src/PrismCore/SidebarModel.hpp"
 #include "../../Src/PrismCore/WindowLayout.hpp"
@@ -251,6 +252,27 @@ int CanvasLuminance() {
   return (static_cast<int>((c >> 16) & 0xFFu) + static_cast<int>((c >> 8) & 0xFFu) +
           static_cast<int>(c & 0xFFu)) /
          3;
+}
+
+// C91: the canvas is the THEME's composite, and the C77 veil is part of what a
+// resting pixel shows. CanvasPresentedColor(v) IS that pixel -- the veil token
+// composited over the canvas, which is the same composition DrawBackdrop runs.
+//
+// WHY THIS IS THE BASELINE FOR THE BAND SCAN. The first version compared the
+// layer-ON frame against the layer-OFF frame and allowed 4 levels. On the night
+// canvas that wash is (16,17,23) -> (13,14,18): the BLUE channel moves 5 levels,
+// so the scan counted every empty pixel of the list as a violation and the
+// Windows lane went red with no band in the frame at all (PR #114). The band
+// this assertion exists for is +41..73, so measuring against the theme's own
+// presented canvas keeps the assertion just as sharp and makes it independent of
+// the theme, the DPI and the host's rounding.
+UINT32 PresentedCanvasPixel() {
+  const prism::theme::Rgba token =
+      prism::chrome::CanvasPresentedColor(prism::theme::Variant::Midnight);
+  const auto q = [](float v) {
+    return static_cast<UINT32>((std::min)(255.0f, (std::max)(0.0f, v * 255.0f + 0.5f)));
+  };
+  return (q(token.a) << 24) | (q(token.r) << 16) | (q(token.g) << 8) | q(token.b);
 }
 
 // ------------------------------------------------------------------ fixture
@@ -449,6 +471,50 @@ StripStats MeasureStrip(const Frame& on, const Frame& off, const Box& box) {
   return stats;
 }
 
+
+// The band scan, shared by both states (no selection / first row selected).
+// Reports the per-column profile the reporter asked for and returns the number
+// of reference-canvas pixels that do not sit on the theme's presented canvas.
+struct BandScan {
+  int probes = 0;
+  int violations = 0;
+  int worst = 0;
+  int worstX = -1;
+  int worstY = -1;
+};
+
+BandScan ScanRowBand(const Frame& lit, const Frame& reference, const Box& band, int rowsBottom,
+                     int canvasLum, int tolerance, const char* tag) {
+  BandScan scan;
+  const UINT32 washed = PresentedCanvasPixel();
+  std::printf("  C90 %s baseline: presentedCanvas=(%d,%d,%d) tolerance=%d\n", tag,
+              static_cast<int>((washed >> 16) & 0xFFu), static_cast<int>((washed >> 8) & 0xFFu),
+              static_cast<int>(washed & 0xFFu), tolerance);
+  for (int x = band.left; x <= band.right; x += 100) {
+    int columnWorst = 0;
+    for (int y = band.top; y < rowsBottom; ++y) {
+      if (!reference.In(x, y) || !lit.In(x, y)) continue;
+      // Only pixels that are CANVAS in the reference: crisp ink (the pill, a
+      // glyph, the bar) is drawn over the layer in both frames and is not the
+      // ghost's doing.
+      if (reference.Luminance(x, y) > canvasLum + kCanvasTolerance) continue;
+      ++scan.probes;
+      const int delta = MaxChannelDelta(lit.At(x, y), washed);
+      columnWorst = (std::max)(columnWorst, delta);
+      if (delta > tolerance) ++scan.violations;
+      if (delta > scan.worst) {
+        scan.worst = delta;
+        scan.worstX = x;
+        scan.worstY = y;
+      }
+    }
+    std::printf("  C90 %s x=%4d: maxChannelDelta=%2d\n", tag, x, columnWorst);
+  }
+  std::printf("  C90 %s: probes=%d violations=%d worst=%d at (%d,%d)\n", tag, scan.probes,
+              scan.violations, scan.worst, scan.worstX, scan.worstY);
+  return scan;
+}
+
 // The geometry the renderer itself will use for this scene shape, and the four
 // numbers the card's probe boxes depend on. Asserting them is what keeps the
 // boxes honest: they are the audit's coordinates, not derived ones.
@@ -547,6 +613,15 @@ PRISM_TEST("c90.list_name_band_is_not_a_white_plate") {
               strip.over, strip.maxDelta, kRatioMinDelta, kRatioMinPixels);
   PRISM_CHECK(strip.maxDelta >= kRatioMinDelta);
   PRISM_CHECK(strip.over >= kRatioMinPixels);
+
+  // ASSERTION 5 in the UNSELECTED state: the same wide scan (x 400..1400 every
+  // 100 px) must also hold with no pill in the scene. The assertion has to be a
+  // property of the layer, not of one selection state.
+  const Box scanBand{kNameBandLeft, geometry.body.top, kNameBandRight, rowsBottom};
+  const BandScan scan =
+      ScanRowBand(lit, reference, scanBand, rowsBottom, canvasLum, 4, "unselected");
+  PRISM_CHECK(scan.probes > 4000);
+  PRISM_CHECK(scan.violations == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -561,9 +636,14 @@ PRISM_TEST("c90.list_name_band_is_not_a_white_plate") {
 // smeared down the list" the parent measured at x 350..1200 on a row that no
 // longer holds anything.
 //
-// The scan is the parent's: x 400..1400 every 100 px, at every y of the rows'
-// band. The criterion is the parent's too -- at a pixel that is CANVAS in the
-// backdrop-OFF frame, ON may differ by at most 4 levels (the veil's own wash).
+// The scan is the reporter's: x 400..1400 every 100 px, at every y of the rows'
+// band. The criterion is theirs too -- at a pixel that is CANVAS in the
+// backdrop-OFF frame, the ON frame may not sit more than 4 levels away from the
+// canvas it should be showing. "The canvas it should be showing" is the THEME's
+// presented canvas (C91's CanvasPresentedColor: the veil composited over the
+// canvas), not the OFF frame: the veil's own wash is 5 levels on the night
+// canvas's blue channel, and the first version of this scan charged that wash as
+// a band at every empty pixel -- red on CI (PR #114) with no band in the frame.
 PRISM_TEST("c90.selected_row_leaves_no_band_across_the_row") {
   Fixture fixture;
   fixture.scene.selectedRow = 0;  // the window's default after opening an archive
@@ -583,41 +663,16 @@ PRISM_TEST("c90.selected_row_leaves_no_band_across_the_row") {
   // The frame this card's evidence uses: same scene, selection on.
   if (!WritePng(L"c90-list-backdrop-selected-on.png", lit)) std::puts("  WARN: PNG failed");
 
-  constexpr int kBandTolerance = 4;  // the parent's "back to off +/- 4"
-  int probes = 0;
-  int violations = 0;
-  int worst = 0;
-  int worstX = -1;
-  int worstY = -1;
-  for (int x = kNameBandLeft; x <= kNameBandRight; x += 100) {
-    int columnWorst = 0;
-    for (int y = geometry.body.top; y < rowsBottom; ++y) {
-      if (!reference.In(x, y) || !lit.In(x, y)) continue;
-      // Only pixels that are CANVAS in the reference: crisp ink (the pill, a
-      // glyph, the bar) is drawn over the layer in both frames and is not the
-      // ghost's doing.
-      if (reference.Luminance(x, y) > canvasLum + kCanvasTolerance) continue;
-      ++probes;
-      const int delta = MaxChannelDelta(lit.At(x, y), reference.At(x, y));
-      columnWorst = (std::max)(columnWorst, delta);
-      if (delta > kBandTolerance) ++violations;
-      if (delta > worst) {
-        worst = delta;
-        worstX = x;
-        worstY = y;
-      }
-    }
-    std::printf("  C90 row band x=%4d: maxChannelDelta=%2d\n", x, columnWorst);
-  }
-  std::printf(
-      "C90 row band: probes=%d violations=%d worst=%d at (%d,%d) tolerance=%d canvas=%d\n",
-      probes, violations, worst, worstX, worstY, kBandTolerance, canvasLum);
+  constexpr int kBandTolerance = 4;  // "back to the canvas it sits on, +/- 4"
+  const Box scanBand{kNameBandLeft, geometry.body.top, kNameBandRight, rowsBottom};
+  const BandScan scan =
+      ScanRowBand(lit, reference, scanBand, rowsBottom, canvasLum, kBandTolerance, "selected");
   // 11 columns x 448 rows of the row band, minus the selected pill's own crisp
   // pixels (~4.5k). Not vacuous, and the mutant arm proves it is not.
-  PRISM_CHECK(probes > 4000);
+  PRISM_CHECK(scan.probes > 4000);
   // ASSERTION 5: no band of any width. This is what the name-column-only box
   // could not see: the pill is 1600 px wide.
-  PRISM_CHECK(violations == 0);
+  PRISM_CHECK(scan.violations == 0);
 }
 
 // ---------------------------------------------------------------------------

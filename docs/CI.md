@@ -50,3 +50,9 @@ benchmark 数字都在那里，不用翻日志。仍看不出再 `--log-failed`�
   报 use-after-free（`#0/#1` 都在 `7z.dll`，我方栈帧为 0）。豁免只绑这一条签名。
 - **sccache + ASan**：sccache 不缓存 MSVC 的 `/fsanitize=address` 编译，所以
   windows lane 故意不挂 launcher（挂了也只是多一跳进程）。Linux 的 asan lane 用 ccache。
+
+## ASan 报告必须可读（PDB）
+
+Windows 的 ASan lane 必须带 `/DEBUG`（生成 PDB）。没有它，报告里每一帧都只有 `PrismArchive.exe+0x...`，
+内联帧和变量名一个都看不到——2026-11-05 的一次 `stack-use-after-scope` 因此花了 **4 轮 CI 红**才定位。
+`asan-msvc` preset 现在带 `/DEBUG /OPT:REF`；改动这个 preset 时**不要**把 `/DEBUG` 去掉。

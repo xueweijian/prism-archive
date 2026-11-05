@@ -223,3 +223,18 @@ cmake -S <tmp> -B <build> && cmake --build <build> --target PrismArchive
    它可能意味着"已经构建好"，也可能意味着"我在构建别人的树"。
 3. 打包/安装前同样核对：`package.ps1 -BuildDir` 指向的目录必须通过第 2 条。
 4. 从这种错误产物得出的**任何行为结论都必须撤回**并重测；尤其不要据此向别人派单。
+
+**D34 附则（2026-11-05，C85 的第三例）**：
+
+- 第三例：`FormatSniffer.hpp:78` 的成员 `std::string_view extensionHint` 被赋了**临时** `std::string`
+  （`sniffWindow.extensionHint = WideToUtf8(extension.substr(1));`），语句结束即悬垂；
+  `Sniff()` 随后在 `FormatSniffer.hpp:376` 比较它 → ASan `stack-use-after-scope`。
+  **MSVC 14.51 会 poison 那个栈槽、14.44 恰好不会**，于是本机 release/asan 全绿、CI runner 每次红——
+  这就是"本机绿、CI 红"最典型的 UB 形状。
+- **规则 4（类型级守卫）**：优先选**让悬垂在类型上不可能发生**的类型（`std::string` 而不是 `string_view`），
+  并补一条编译期守卫，把"成员必须是拥有所有权的类型"钉住：
+  ```cpp
+  static_assert(std::is_same_v<decltype(sniff::Window::extensionHint), std::string>,
+                "extensionHint must OWN its bytes: a view dangles (D34, measured twice)");
+  ```
+  **类型变更才是不会被下一次重构悄悄改回去的守卫**；断言只能证明"今天没坏"。

@@ -221,6 +221,26 @@ field: `Scene::theme`.
   `.58`; the frame then measures `6` levels and the run prints
   `C102 MUTATION CAUGHT: flat`.
 
+# C103 font stack evidence -- the same list window before/after
+
+`c103-font-before.png` and `c103-font-after.png` are the SAME scene painted by
+the REAL renderer (`Tests/win/gallery_snapshot.cpp` -> `GalleryRenderer` -> a
+headless WIC target): 1600 px list mode, Midnight. `before` is origin/main,
+where all 18 DirectWrite call sites hardcoded `Segoe UI`; `after` is this card,
+where every `IDWriteTextFormat` is created through
+`Src/PrismWin/Typography.hpp`.
+
+**The two PNGs are byte-identical (sha256 `C2035DAF...95BB51E`), and that is the
+honest result on this machine.** The installed collection has no *SF Pro
+Display*, no *Inter*, no *PingFang SC* and no *HarmonyOS Sans* (checked with
+`System.Drawing.Text.InstalledFontCollection`: 192 families, none of the four
+preferred). `ResolveFamily` therefore walks the stack and lands on the
+documented fallback, `Segoe UI` -- the same family the old literal used. No
+pixel changed. What changed is that the family is now chosen from the system
+collection at run time instead of written into 21 places, and the suite proves
+the order with injected collections (`win.c103_typography`: {Inter, Segoe UI}
+-> Inter; the mutation `PRISM_C103_MUTANT_SEGOE` makes that assertion red).
+
 ## Reproduce
 
 ```pwsh
@@ -274,3 +294,11 @@ ctest --test-dir E:\build\wt-c104 -R "c104" --output-on-failure
 ```
 
 No `<out-dir>` = assertions only, no files (the CI path).
+. E:\wg\env.ps1 -Card c103
+cmake --build E:\build\wt-c103 --parallel 2 --target gallery_snapshot
+& E:\build\wt-c103\Tests\gallery_snapshot.exe <out-dir>   # writes prism_list.png
+```
+
+The `before` frame was produced from the same tree with the seven edited
+headers stashed back to origin/main, then rebuilt and restored -- the two sets
+differ only by this card.

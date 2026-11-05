@@ -59,6 +59,7 @@
 #include "../PrismCore/ActionBarModel.hpp"
 #include "../PrismCore/I18n.hpp"  // C74: the eight band keys live in the tables
 #include "../PrismCore/ThemeTokens.hpp"
+#include "Typography.hpp"  // C103: the ONE font stack + TextFormat entry (BLUEPRINT:170)
 
 namespace prism::win::actionbar {
 
@@ -128,9 +129,9 @@ class ActionBarPainter {
       if (FAILED(hr)) return hr;
     }
     if (!labelFormat_) {
-      writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                      11.0f, L"en-US", labelFormat_.ReleaseAndGetAddressOf());
+      prism::win::typography::CreateTextFormat(
+          writeFactory_.Get(), 11.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+          L"en-US", labelFormat_.ReleaseAndGetAddressOf());
       if (labelFormat_) {
         labelFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         labelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -151,9 +152,9 @@ class ActionBarPainter {
     // Its text format exists again because the glyph that "needs" it exists
     // again -- the C100 suite's MnemonicGlyphsDrawn() assertion MUST go red.
     if (!mnemonicFormat_) {
-      writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                      10.0f, L"en-US", mnemonicFormat_.ReleaseAndGetAddressOf());
+      prism::win::typography::CreateTextFormat(
+          writeFactory_.Get(), 10.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+          L"en-US", mnemonicFormat_.ReleaseAndGetAddressOf());
       if (mnemonicFormat_) {
         mnemonicFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         mnemonicFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);

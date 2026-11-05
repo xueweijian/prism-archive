@@ -117,6 +117,7 @@
 #include "../PrismCore/ChromeTheme.hpp"      // C83: the shell palette (tokens only)
 #include "../PrismCore/ChromeMenuBar.hpp"    // C106: bar visibility + the 2-level gate
 #include "TabBar.hpp"                        // C60: the tab strip (pixels + hits)
+#include "Typography.hpp"                    // C103: the ONE font stack (BLUEPRINT:170)
 
 // C34: the glass layer is composition, so the window's TU needs the three
 // import libraries CreateSwapChainForComposition / D3D11 device creation pull
@@ -4695,8 +4696,8 @@ class GalleryWindow {
     barKnown_ = true;
   }
 
-  // DirectWrite measurement in the renderer's crumb format (Segoe UI 15 px
-  // semi-bold). Without a factory every width is 0 -> no crumb is clickable,
+  // DirectWrite measurement in the renderer's crumb format (the resolved stack,
+  // 15 px semi-bold). Without a factory every width is 0 -> no crumb is clickable,
   // which degrades to "Backspace still works" instead of navigating blind.
   int MeasureUtf8(std::string_view text) {
     EnsureTextMeasurement();
@@ -4723,9 +4724,9 @@ class GalleryWindow {
       return;
     }
     if (crumbFormat_) return;
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    15.0f, L"en-US", crumbFormat_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 15.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+        L"en-US", crumbFormat_.ReleaseAndGetAddressOf());
   }
 
   // ---------- rendering ----------

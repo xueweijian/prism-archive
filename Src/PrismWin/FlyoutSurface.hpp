@@ -82,6 +82,7 @@
 
 #include "../PrismCore/ThemeTokens.hpp"
 #include "CompanionPreviewBridge.hpp"  // C30: ComputeFlyoutRect, kMaxPreviewEntries
+#include "Typography.hpp"  // C103: the ONE font stack + TextFormat entry (BLUEPRINT:170)
 
 namespace prism::win::flyout {
 
@@ -396,25 +397,21 @@ class FlyoutSurface {
     rowFormat_.Reset();
     sizeFormat_.Reset();
     smallFormat_.Reset();
-    hr = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         static_cast<float>(m.fontSize), L"en-US",
-                                         titleFormat_.ReleaseAndGetAddressOf());
+    hr = prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), static_cast<float>(m.fontSize), DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        DWRITE_FONT_STYLE_NORMAL, L"en-US", titleFormat_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
-    hr = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         static_cast<float>(m.fontSize), L"en-US",
-                                         rowFormat_.ReleaseAndGetAddressOf());
+    hr = prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), static_cast<float>(m.fontSize), DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, L"en-US", rowFormat_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
-    hr = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         static_cast<float>(m.smallFontSize), L"en-US",
-                                         sizeFormat_.ReleaseAndGetAddressOf());
+    hr = prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), static_cast<float>(m.smallFontSize), DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, L"en-US", sizeFormat_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
-    hr = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         static_cast<float>(m.smallFontSize), L"en-US",
-                                         smallFormat_.ReleaseAndGetAddressOf());
+    hr = prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), static_cast<float>(m.smallFontSize), DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, L"en-US", smallFormat_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
 
     const auto pin = [](IDWriteTextFormat* format, float lineHeight, float baseline) {

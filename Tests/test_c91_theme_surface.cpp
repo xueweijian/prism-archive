@@ -163,7 +163,7 @@ PRISM_TEST("c91 the canvas is the theme's composite") {
 PRISM_TEST("c91 every content surface resolves from the theme") {
   for (const Variant variant : {Variant::Daylight, Variant::Midnight,
                                 Variant::HighContrast}) {
-    std::printf("  [c91] --- %s ---\n", Name(variant));
+    std::printf("  [c91] --- %s ---\n", Name(variant).c_str());
     const Rgba canvas = ch::CanvasPresentedColor(variant);
     const Pixel panel = ToPixel(PanelColor(variant));
 
@@ -216,7 +216,8 @@ PRISM_TEST("c91 every content surface resolves from the theme") {
     // the point of theming is not to trade contrast for colour.
     const double contrast = prism::theme::ContrastRatio(
         prism::theme::Lookup(TokenId::TextPrimary, variant).color, canvas);
-    std::printf("  [c91] %s text/canvas contrast=%.2f\n", Name(variant), contrast);
+    std::printf("  [c91] %s text/canvas contrast=%.2f\n", Name(variant).c_str(),
+              contrast);
     PRISM_CHECK(contrast >= prism::theme::kWcagBodyTextMinRatio);
   }
 }
@@ -232,8 +233,8 @@ PRISM_TEST("c91 the shell stays continuous with every theme's canvas") {
                                 Variant::HighContrast}) {
     const double shell = ch::Luma255(ch::PaletteFor(variant).background);
     const double canvas = ch::Luma255(ch::CanvasPresentedColor(variant));
-    std::printf("  [c91] %s shell luma=%.2f canvas luma=%.2f delta=%.2f\n", Name(variant),
-                shell, canvas, shell - canvas);
+    std::printf("  [c91] %s shell luma=%.2f canvas luma=%.2f delta=%.2f\n",
+                Name(variant).c_str(), shell, canvas, shell - canvas);
     PRISM_CHECK(ch::ShellMatchesCanvas(shell, canvas));
   }
   // The predicate is still a gate, not a tautology: a white caption over the

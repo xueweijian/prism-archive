@@ -1145,6 +1145,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // "which level did that click hit?") is answered by PrismCore.
   window.SetItems(&app->items);
   window.SetRootLabel(FileNameWide(archive));
+  // C92: Copy Path / "Show Archive in Explorer" need the file, not its label.
+  window.SetArchivePath(archive);
 
   // C76 segment: the catalog goes into the navigator (folder view + layout).
   c76.Add("set_items", "GalleryWindow::SetItems", c76T, c76.NowMs() - c76T);
@@ -1421,17 +1423,64 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // double click is SmartExtract, a bare one is the ordinary open). The app owns
   // the meaning, and it is deliberately the SAME plan the --extract-sub verb
   // builds (C25's BuildExtractionPlan), so the two can never drift.
-  window.SetSmartExtractHandler([app, &activateHandler](int /*catalogIndex*/) {
+  // C92: the whole-archive "smart extract here" is now a NAMED door, because the
+  // right-click menu offers the same verb (the card moved it out of the bare
+  // double-click, it did not delete it). Alt+double-click keeps it too.
+  std::function<void()> smartExtractHere = [app, activateHandler]() {
     app->plan = prism::app::BuildExtractionPlan(
         prism::app::LaunchMode::kExtractSub, prism::win::WideToUtf8(app->archivePath),
         app->catalog,
         [](const std::string& path) {
           return std::filesystem::exists(prism::win::Utf8ToWide(path));
         });
-    std::fprintf(stderr, "gesture alt-dblclick mode=%s target=%s\n",
+    std::fprintf(stderr, "gesture smart-extract-here mode=%s target=%s\n",
                  prism::app::LaunchModeName(app->plan.mode),
                  app->plan.plan.baseTargetDir.c_str());
     activateHandler(-1);  // the same worker, the same HUD, the same status line
+  };
+  window.SetSmartExtractHandler([smartExtractHere](int /*catalogIndex*/) {
+    smartExtractHere();
+  });
+
+  // ---- C92: Enter / double-click on a FILE = OPEN it -----------------------
+  //
+  // Bandizip's measured behaviour (REPORT.md §1.2): the entry is extracted to a
+  // temp directory and handed to the system's default program. The window routes
+  // BOTH Enter and the double-click through ActivateRow -> this handler, so the
+  // two gestures cannot drift apart. "Smart extract the whole archive" did not
+  // disappear: it is the right-click menu's item now (and Alt+double-click).
+  std::thread openWorker;
+  window.SetOpenHandler([&window, app, &openWorker](int catalogIndex) {
+    if (app->extracting.exchange(true)) return;
+    if (openWorker.joinable()) openWorker.join();
+    openWorker = std::thread([app, &window, catalogIndex]() {
+      // ShellExecute needs a COM apartment on this worker; the extraction path
+      // itself is the same OperationHandles every other verb uses.
+      CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+      const prism::app::OpenEntryOutcome opened = prism::app::OpenArchiveEntry(
+          *app->ops, app->catalog, static_cast<uint32_t>(catalogIndex), app->archivePath);
+      if (opened.ok) {
+        const HINSTANCE launched = ::ShellExecuteW(nullptr, L"open", opened.path.c_str(),
+                                                   nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(launched) <= 32) {
+          // Extraction worked but Windows has no program for this type: say so
+          // and name the file instead of looking like the double-click failed.
+          window.PostStatus(L"\u5DF2\u89E3\u538B\u5230\u4E34\u65F6\u76EE\u5F55\uFF0C"
+                            L"\u4F46\u6CA1\u6709\u5173\u8054\u7A0B\u5E8F\uFF1A" +
+                            opened.path);
+        } else {
+          window.PostStatus(L"\u5DF2\u6253\u5F00\uFF1A" + opened.path);  // 已打开：
+        }
+      } else {
+        window.PostStatus(L"\u6253\u5F00\u5931\u8D25\uFF1A" +
+                          prism::win::Utf8ToWide(opened.error));
+      }
+      std::fprintf(stderr, "open entry index=%d ok=%d path=%s error=%s\n", catalogIndex,
+                   static_cast<int>(opened.ok), prism::win::WideToUtf8(opened.path).c_str(),
+                   opened.error.c_str());
+      app->extracting = false;
+      CoUninitialize();
+    });
   });
 
   // ---- C67: "extract to..." over a SELECTION -------------------------------
@@ -1463,6 +1512,46 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       CoUninitialize();
     });
   };
+
+  // ---- C92: the right-click menu's archive-level verbs ---------------------
+  //
+  // The window owns the surface decision, the ids and the words; what each verb
+  // MEANS stays here, next to every other extraction entry point. Each case
+  // calls an existing door rather than a second implementation.
+  window.SetContextCommandHandler([&window, smartExtractHere,
+                                   &runSelectedExtraction,
+                                   activateHandler](prism::ctxmenu::Command command) {
+    switch (command) {
+      case prism::ctxmenu::Command::ExtractSelected: {
+        const std::vector<uint32_t> selected = window.SelectedCatalogIndices();
+        if (selected.empty()) {
+          window.SetStatus(L"\u6CA1\u6709\u9009\u4E2D\u9879");  // 没有选中项
+          return;
+        }
+        std::fprintf(stderr, "context extract-selected count=%zu\n", selected.size());
+        runSelectedExtraction(selected);
+        return;
+      }
+      case prism::ctxmenu::Command::ExtractAll:
+        std::fprintf(stderr, "context extract-all\n");
+        activateHandler(-1);
+        return;
+      case prism::ctxmenu::Command::SmartExtractHere:
+        std::fprintf(stderr, "context smart-extract-here\n");
+        smartExtractHere();
+        return;
+      case prism::ctxmenu::Command::Open:
+      case prism::ctxmenu::Command::CopyPath:
+      case prism::ctxmenu::Command::RevealArchive:
+      case prism::ctxmenu::Command::SelectAll:
+      case prism::ctxmenu::Command::Refresh:
+      case prism::ctxmenu::Command::None:
+      case prism::ctxmenu::Command::Count:
+        // These belong to the window (selection / clipboard / Explorer / repaint
+        // and the Open door) and never reach the app.
+        return;
+    }
+  });
 
   // ---- C67: drag OUT of the window ----------------------------------------
   //
@@ -1886,6 +1975,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                        prism::win::Utf8ToWide(switched.error));
       return;
     }
+    // C92: the right-click verbs follow the archive the window now shows.
+    window.SetArchivePath(app->archivePath);
     // The plan is derived from the catalogue and the archive's own folder, so it
     // is rebuilt against the file the session now shows instead of the old one.
     app->plan = prism::app::BuildExtractionPlan(

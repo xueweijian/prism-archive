@@ -72,6 +72,7 @@
 #include <cstdint>
 #include <functional>
 #include <cstdio>
+#include <cstring>  // C92: memcpy into the clipboard block
 #include <mutex>
 #include <ostream>
 #include <optional>
@@ -87,6 +88,7 @@
 #include "../PrismCore/FilterModel.hpp"     // list view filter (C13)
 #include "../PrismCore/Gallery.hpp"
 #include "../PrismCore/HistoryStack.hpp"    // Alt+Left / Alt+Right (C8)
+#include "../PrismCore/InAppContextMenu.hpp" // C92: right-click model (3 surfaces)
 #include "../PrismCore/ListLayout.hpp"
 #include "../PrismCore/ListSortModel.hpp"   // list view order (C13)
 #include "../PrismCore/Preview.hpp"
@@ -227,6 +229,33 @@ inline constexpr bool kHudDismissOnFinish = false;
 #else
 inline constexpr bool kHudDismissOnFinish = true;
 #endif
+
+// C92 negative controls (CONTRACTS D3; one per published rule).
+//   PRISM_C92_MUTANT_NO_DBLCLKS  : the window class drops CS_DBLCLKS again, i.e.
+//                                  the pre-fix state where WM_LBUTTONDBLCLK is
+//                                  never delivered and the handler is dead code.
+//   PRISM_C92_MUTANT_NO_CONTEXT  : WM_CONTEXTMENU / Shift+F10 stop opening a
+//                                  menu, i.e. the "right-click does nothing" bug.
+//   PRISM_C92_MUTANT_NO_PRESELECT: a right-click on an unselected row leaves the
+//                                  selection alone, so "Open" is greyed out on
+//                                  the row the user pointed at.
+// The suite builds each as its own executable and pins "C92 MUTATION CAUGHT: <arm>"
+// as the PASS regex (D26: never WILL_FAIL stacked on a regex).
+#if defined(PRISM_C92_MUTANT_NO_DBLCLKS)
+inline constexpr bool kDoubleClicksDelivered = false;
+#else
+inline constexpr bool kDoubleClicksDelivered = true;
+#endif
+#if defined(PRISM_C92_MUTANT_NO_CONTEXT)
+inline constexpr bool kContextMenusEnabled = false;
+#else
+inline constexpr bool kContextMenusEnabled = true;
+#endif
+#if defined(PRISM_C92_MUTANT_NO_PRESELECT)
+inline constexpr bool kContextPreselectsRow = false;
+#else
+inline constexpr bool kContextPreselectsRow = true;
+#endif
 #if defined(PRISM_C87_MUTANT_NO_PROGRESS_A11Y)
 inline constexpr bool kHudPublishedToA11y = false;
 #else
@@ -286,7 +315,11 @@ class GalleryWindow {
     // reordered to make a number look better.
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    // C92: CS_DBLCLKS is what makes Windows deliver WM_LBUTTONDBLCLK at all.
+    // Without it the double-click case below is unreachable dead code, which is
+    // exactly what the field report measured. The mutant removes it again.
     wc.style = CS_HREDRAW | CS_VREDRAW;
+    if (kDoubleClicksDelivered) wc.style |= CS_DBLCLKS;
     wc.lpfnWndProc = &GalleryWindow::ProcThunk;
     wc.hInstance = instance;
     // IDC_ARROW expands to MAKEINTRESOURCEA in a non-UNICODE TU; name the wide
@@ -459,6 +492,75 @@ class GalleryWindow {
   void SetSmartExtractHandler(std::function<void(int)> handler) {
     onSmartExtract_ = std::move(handler);
   }
+
+  // ---------- card C92: double-click OPENS, right-click has a MENU -----------
+  //
+  // "Open" is a different job from "smart-extract the archive": the app extracts
+  // the ONE entry to a temp directory and hands it to ShellExecute. It gets its
+  // own seam because Enter and double-click must share ONE call site
+  // (ActivateRow), and because a suite has to prove the file route without a
+  // real shell association (the handler is the injection point). With no handler
+  // installed the old activate path still runs -- no behaviour silently dies.
+  void SetOpenHandler(std::function<void(int)> handler) { onOpen_ = std::move(handler); }
+
+  // The archive-level verbs the window cannot perform itself. The window keeps
+  // the row -> catalog-index mapping; the app owns what "extract" means (same
+  // split as SetActivateHandler / SetSmartExtractHandler).
+  void SetContextCommandHandler(
+      std::function<void(prism::ctxmenu::Command)> handler) {
+    onContextCommand_ = std::move(handler);
+  }
+  // Where the archive is, for Copy Path and "Show Archive in Explorer". Unset =>
+  // those two items are DISABLED with a reason, never a silent no-op.
+  void SetArchivePath(const std::wstring& path) { archivePath_ = path; }
+
+  // The exact model and HMENU the REAL WM_CONTEXTMENU path built, immediately
+  // before it would enter TrackPopupMenu. A probe suppresses the modal loop only
+  // (a headless suite cannot dismiss a system menu); everything else -- the
+  // surface decision, the i18n words, the ids, the enabled/reason rules -- is
+  // the production path. HMENU is valid during the call and destroyed after.
+  struct ContextMenuInvocation {
+    prism::ctxmenu::Surface surface = prism::ctxmenu::Surface::Empty;
+    prism::ctxmenu::Menu model;
+    std::vector<UINT> ids;
+    HMENU menu = nullptr;
+    POINT screenPoint{0, 0};
+    bool fromKeyboard = false;
+  };
+  void SetContextMenuProbe(
+      std::function<void(const ContextMenuInvocation&)> probe) {
+    contextProbe_ = std::move(probe);
+  }
+  int ContextMenusShown() const { return contextMenusShown_; }
+  const prism::ctxmenu::Menu& LastContextMenuForTest() const { return lastContextMenu_; }
+  // The id -> verb table the open menu published; a test resolves an id the same
+  // way WM_COMMAND does instead of guessing from the slot number.
+  prism::ctxmenu::Command ContextCommandForId(UINT id) const {
+    if (!prism::ctxmenu::IsContextCommandId(id)) return prism::ctxmenu::Command::None;
+    const std::size_t surface = static_cast<std::size_t>(prism::ctxmenu::SurfaceOfCommandId(id));
+    const std::size_t slot = prism::ctxmenu::SlotOfCommandId(id);
+    if (surface >= contextCommands_.size() || slot >= contextCommands_[surface].size()) {
+      return prism::ctxmenu::Command::None;
+    }
+    return contextCommands_[surface][slot];
+  }
+  // Runs a verb through the SAME switch TrackPopupMenu's return value reaches.
+  // The suite calls this with an id from the probe, so the command path is
+  // exercised end to end instead of being re-implemented next to it.
+  void RunContextCommandForTest(prism::ctxmenu::Surface surface, UINT id) {
+    RunContextCommand(surface, id);
+  }
+  // Keyboard invocation (Shift+F10 / the Menu key) with a client point of its
+  // own. -1,-1 means "the same point WM_CONTEXTMENU(-1,-1) would pick".
+  void OpenContextMenuForTest(int clientX, int clientY) {
+    if (clientX < 0 && clientY < 0) {
+      OpenContextMenu(-1, -1, true);
+      return;
+    }
+    POINT point{clientX, clientY};
+    ClientToScreen(host_.hwnd, &point);
+    OpenContextMenu(point.x, point.y, false);
+  }
   // A headless window station has no keyboard: the suite injects the modifier
   // state here. Production reads the thread's REAL key state.
   void SetAltDownProbe(std::function<bool()> probe) { altDownProbe_ = std::move(probe); }
@@ -467,6 +569,10 @@ class GalleryWindow {
   }
   // D3: the one place the Alt chord can be switched off, so the mutant build
   // proves the injection compiled in (the verdict's predicate asks THIS).
+  // C92: the published rules, asked at runtime by the mutant verdicts.
+  static constexpr bool DoubleClicksDelivered() { return kDoubleClicksDelivered; }
+  static constexpr bool ContextMenusEnabled() { return kContextMenusEnabled; }
+  static constexpr bool ContextPreselectsRow() { return kContextPreselectsRow; }
   static constexpr bool AltChordEnabled() {
 #if defined(PRISM_C67_MUTANT_IGNORE_ALT)
     return false;
@@ -1486,7 +1592,13 @@ class GalleryWindow {
       return true;
     }
     if (result.action == prism::tree::NavAction::ActivateFile) {
-      if (onActivate_) onActivate_(static_cast<int>(result.catalogIndex));
+      // C92: Enter and double-click reach THIS line, so "open" and "Enter" are
+      // one behaviour by construction, not by two handlers agreeing.
+      if (onOpen_) {
+        onOpen_(static_cast<int>(result.catalogIndex));
+      } else if (onActivate_) {
+        onActivate_(static_cast<int>(result.catalogIndex));
+      }
       return true;
     }
     return false;
@@ -1563,6 +1675,9 @@ class GalleryWindow {
     // hands us a translator that lives only for its modal call, and a member
     // pointer would dangle the moment the dialog closed.
     sidebarLabels_ = prism::win::sidebar::LabelsFrom(translator);
+    // C92: the right-click words are copied for the same reason (no dangling
+    // translator pointer after the modal Settings call returns).
+    ctxLabels_ = prism::ctxmenu::LabelsFrom(translator);
     if (kActionBarLabelsRebuilt) {
       actionBar_.SetLabels(prism::win::actionbar::LabelsFromTranslator(translator));
     }
@@ -2055,6 +2170,15 @@ class GalleryWindow {
         // GCS_RESULTSTR already delivered the text; WM_IME_CHAR would double it.
         return search_.IsOpen() ? 0 : DefWindowProcW(host_.hwnd, message, wparam, lparam);
       case WM_KEYDOWN: {
+        // C92: Shift+F10 and the Menu key open the SAME context menu the mouse
+        // does. They arrive as WM_KEYDOWN (F10 with Shift is not a sys key);
+        // WM_CONTEXTMENU(-1,-1) is what DefWindowProc would then send, so the
+        // keyboard route calls that one entry point directly.
+        if (wparam == VK_APPS ||
+            (wparam == VK_F10 && (::GetKeyState(VK_SHIFT) & 0x8000) != 0)) {
+          OpenContextMenu(-1, -1, true);
+          return 0;
+        }
         // CARD C25: the key chain that used to live here (a dozen ifs next to
         // the pixel work) is now PrismCore's table. This case does ONE thing:
         // read the thread's modifier state, describe the stroke, and hand it to
@@ -2073,6 +2197,31 @@ class GalleryWindow {
         stroke.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         stroke.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         return HandleKey(stroke);
+      }
+      case WM_CONTEXTMENU: {
+        // C92: the door that did not exist at all. Windows sends this for a
+        // right-click AND for Shift+F10/the Menu key; both become the same
+        // surface decision (row / empty space / sidebar node) and the same
+        // TrackPopupMenu. (-1,-1) means "the keyboard asked, you pick the point".
+        if (!kContextMenusEnabled) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        const int screenX = static_cast<int>(static_cast<short>(LOWORD(lparam)));
+        const int screenY = static_cast<int>(static_cast<short>(HIWORD(lparam)));
+        OpenContextMenu(screenX, screenY, screenX == -1 && screenY == -1);
+        return 0;
+      }
+      case WM_MENUSELECT: {
+        // C92: the reason a context item is greyed. WM_MENUSELECT is sent while
+        // the pointer walks the open menu; the id is ours or it is the menu
+        // bar's (owner-drawn C83 items), and only ours explain themselves.
+        if (kContextMenusEnabled) {
+          const UINT flags = HIWORD(wparam);
+          if (!(flags == 0xFFFFu)) {  // 0xFFFF == the menu just closed
+            ExplainDisabledContextItem(LOWORD(wparam));
+          }
+        }
+        return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_MOUSEWHEEL: {
         // Target scroll follows the wheel; the spring makes the motion fluid.
@@ -2167,6 +2316,12 @@ class GalleryWindow {
         return DefWindowProcW(host_.hwnd, message, wparam, lparam);
       }
       case WM_SYSKEYDOWN: {
+        // C92: a bare F10 lands here; with Shift held the frame usually sends
+        // WM_KEYDOWN, but a host that sends WM_SYSKEYDOWN must get the menu too.
+        if (wparam == VK_F10 && (::GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+          OpenContextMenu(-1, -1, true);
+          return 0;
+        }
         if (!palette_.IsOpen()) {
           const UINT vk = static_cast<UINT>(wparam);
           if (vk >= 'A' && vk <= 'Z') {
@@ -2354,6 +2509,13 @@ class GalleryWindow {
         // the one-overlay gate BEFORE the dialog runs. Every other id is
         // forwarded verbatim: mapping an id to an ACTION is the app's job.
         const UINT command = LOWORD(wparam);
+        // C92: a context-menu id (from the test seam, an accelerator, or a host
+        // that forwards the choice) reaches the same verb switch
+        // TrackPopupMenu's return value does.
+        if (prism::ctxmenu::IsContextCommandId(command)) {
+          RunContextCommand(prism::ctxmenu::SurfaceOfCommandId(command), command);
+          return 0;
+        }
         if (command == prism::win::settingsui::SettingsDialog::kMenuSettingsId) {
           RunSettingsCommand();
           return 0;
@@ -3556,6 +3718,280 @@ class GalleryWindow {
       return true;
     }
     return true;  // inside the chrome: consumed, nothing to focus
+  }
+
+  // ---------- card C92: the in-app right-click menus ------------------------
+  //
+  // ONE model (PrismCore/InAppContextMenu.hpp) describes what each surface
+  // offers; this file is the RENDERER: ids from CommandId(surface, slot), words
+  // from the i18n table, greyed state from Facts, and the reason for a greyed
+  // item from the model. Nothing here invents a verb, and nothing in the model
+  // knows what an HMENU is.
+  bool SidebarContains(int x, int y) const {
+    EnsureSidebar();
+    const prism::win::sidebar::Box& panel = sidebarLayout_.panel;
+    if (panel.Empty()) return false;
+    const float fx = static_cast<float>(x);
+    const float fy = static_cast<float>(y);
+    return fx >= panel.left && fx < panel.right && fy >= panel.top && fy < panel.bottom;
+  }
+
+  prism::ctxmenu::Facts ContextFacts() const {
+    prism::ctxmenu::Facts facts;
+    // archiveOpen_ is the window's own "an archive is open" bit (SetArchiveOpen);
+    // catalog_ is the rows. Both must hold for the archive verbs to be offered.
+    facts.archiveOpen = archiveOpen_ && catalog_ != nullptr;
+    facts.rowCount = ItemCount();
+    facts.hasSelection = !sel_.Empty();
+    if (selection_ >= 0 && selection_ < ItemCount()) {
+      const prism::ArchiveItem& item = folderItems_[static_cast<std::size_t>(selection_)];
+      facts.singleFileSelected = !item.isDir && sel_.Size() == 1;
+      facts.singleFolderSelected = item.isDir && sel_.Size() == 1;
+    }
+    return facts;
+  }
+
+  // Which of the three menus a client point belongs to. The sidebar rail is
+  // painted OVER the grid, so it wins; the breadcrumb bar and the action band are
+  // chrome and belong to no list surface, so a right-click there falls back to
+  // the empty-space menu rather than pretending a row is under the pointer.
+  prism::ctxmenu::Surface ContextSurfaceAt(int x, int y) {
+    if (sidebarRailVisible_ && SidebarContains(x, y)) return prism::ctxmenu::Surface::Sidebar;
+    if (ItemAtPoint(x, y) >= 0) return prism::ctxmenu::Surface::Row;
+    return prism::ctxmenu::Surface::Empty;
+  }
+
+  // C92 follow-up: a right-click on a row the user has NOT selected selects that
+  // row first, exactly like Explorer and Bandizip. Without it the first thing a
+  // user tries -- right-click a file, choose Open -- is greyed out, and the
+  // feature reads as broken.
+  //
+  // A row that is ALREADY in the selection is left alone: that is the multi-
+  // select case, where re-selecting would silently throw away the other rows.
+  // Empty space and the sidebar never reach this function at all, so a
+  // right-click on chrome cannot clear a selection.
+  void SelectRowUnderContextPoint(int x, int y) {
+    const int row = ItemAtPoint(x, y);
+    if (row < 0 || row >= ItemCount()) return;
+    for (int selected : sel_.Selected()) {
+      if (selected == row) return;  // inside the existing set: keep it
+    }
+    sel_.Click(row, prism::sel::ClickModifiers{});
+    selection_ = sel_.Empty() ? -1 : sel_.Focus();
+    nav_.SetSelection(selection_);
+    SyncActionContext();
+    Invalidate();
+  }
+
+  // Builds and shows the menu. The model is kept as lastContextMenu_ so a test
+  // (or a future a11y bridge) reads the verbs the user was actually offered.
+  void OpenContextMenu(int screenX, int screenY, bool fromKeyboard) {
+    if (!kContextMenusEnabled || host_.hwnd == nullptr) return;
+    int clientX = screenX;
+    int clientY = screenY;
+    if (fromKeyboard && screenX < 0 && screenY < 0) {
+      // WM_CONTEXTMENU(-1,-1): the system asks the window where "here" is. The
+      // content centre is inside the list; the surface decision below is exactly
+      // the one a click at that pixel would get.
+      clientX = static_cast<int>(clientW_ / 2.0f);
+      clientY = static_cast<int>((layout_.content.top + layout_.content.bottom) / 2);
+      POINT point{clientX, clientY};
+      ClientToScreen(host_.hwnd, &point);
+      screenX = point.x;
+      screenY = point.y;
+    } else {
+      POINT point{screenX, screenY};
+      ScreenToClient(host_.hwnd, &point);
+      clientX = point.x;
+      clientY = point.y;
+    }
+    const prism::ctxmenu::Surface surface = ContextSurfaceAt(clientX, clientY);
+    // BEFORE the model is built: the menu's enabled state must describe the
+    // selection the user is about to act on. A right-click on empty space or a
+    // sidebar node never touches the selection (a click on chrome must not clear
+    // it). PRISM_C92_MUTANT_NO_PRESELECT compiles the row preselection out, so
+    // the "right-click an unselected row" assertion MUST go red (D3).
+    if (surface == prism::ctxmenu::Surface::Row && kContextPreselectsRow) {
+      SelectRowUnderContextPoint(clientX, clientY);
+    }
+    const prism::ctxmenu::Menu model =
+        prism::ctxmenu::Build(surface, ContextFacts(), ctxLabels_);
+    lastContextMenu_ = model;
+    // Kept per surface: WM_MENUSELECT can name an id from the menu that is open,
+    // and the reason lookup must find THAT surface's model, not whichever menu
+    // was built last (they share ids only by surface band).
+    if (static_cast<std::size_t>(surface) < 3) {
+      lastMenuBySurface_[static_cast<std::size_t>(surface)] = model;
+    }
+
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr) return;
+    const std::size_t surfaceIndex = static_cast<std::size_t>(surface);
+    if (surfaceIndex >= contextCommands_.size()) {
+      ::DestroyMenu(menu);
+      return;
+    }
+    contextCommands_[surfaceIndex].assign(model.items.size(), prism::ctxmenu::Command::None);
+    ContextMenuInvocation invocation;
+    invocation.surface = surface;
+    invocation.model = model;
+    invocation.menu = menu;
+    invocation.screenPoint = POINT{screenX, screenY};
+    invocation.fromKeyboard = fromKeyboard;
+    for (std::size_t slot = 0; slot < model.items.size(); ++slot) {
+      const prism::ctxmenu::Item& item = model.items[slot];
+      if (item.separatorBefore) ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+      const UINT id = prism::ctxmenu::CommandId(surface, slot);
+      contextCommands_[surfaceIndex][slot] = item.command;
+      invocation.ids.push_back(id);
+      ::AppendMenuW(menu,
+                    MF_STRING | (item.enabled ? MF_ENABLED : MF_GRAYED), id,
+                    Utf8ToWide(item.label).c_str());
+    }
+    // The status line explains a greyed item while the pointer is over it. The
+    // previous value is restored when the menu closes.
+    statusBeforeMenu_ = status_;
+    if (contextProbe_) {
+      contextProbe_(invocation);
+      ::DestroyMenu(menu);
+      return;
+    }
+    ++contextMenusShown_;
+    if (host_.hwnd != nullptr) ::SetForegroundWindow(host_.hwnd);
+    const UINT chosen = static_cast<UINT>(::TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, screenX, screenY, 0,
+        host_.hwnd, nullptr));
+    ::DestroyMenu(menu);
+    SetStatus(statusBeforeMenu_);  // the hover explanation was temporary
+    if (chosen != 0) RunContextCommand(surface, chosen);
+    Invalidate();
+  }
+
+  // The ONE switch a menu selection reaches. TPM_RETURNCMD means the production
+  // path arrives here with the id; WM_COMMAND (a synthesised accelerator, the
+  // test seam) resolves the same id through ContextCommandForId.
+  void RunContextCommand(prism::ctxmenu::Surface surface, UINT id) {
+    if (!prism::ctxmenu::IsContextCommandId(id)) return;
+    if (prism::ctxmenu::SurfaceOfCommandId(id) != surface) return;
+    const std::size_t surfaceIndex = static_cast<std::size_t>(surface);
+    const std::size_t slot = prism::ctxmenu::SlotOfCommandId(id);
+    if (surfaceIndex >= contextCommands_.size() ||
+        slot >= contextCommands_[surfaceIndex].size()) {
+      return;
+    }
+    ExecuteContextCommand(contextCommands_[surfaceIndex][slot]);
+  }
+
+  void ExecuteContextCommand(prism::ctxmenu::Command command) {
+    switch (command) {
+      case prism::ctxmenu::Command::Open: {
+        if (selection_ < 0 || selection_ >= ItemCount()) return;
+        const int catalogIndex =
+            static_cast<int>(folderItems_[static_cast<std::size_t>(selection_)].index);
+        if (onOpen_) {
+          onOpen_(catalogIndex);
+        } else if (onActivate_) {
+          onActivate_(catalogIndex);
+        }
+        return;
+      }
+      case prism::ctxmenu::Command::ExtractSelected:
+      case prism::ctxmenu::Command::ExtractAll:
+      case prism::ctxmenu::Command::SmartExtractHere: {
+        if (onContextCommand_) {
+          onContextCommand_(command);
+          return;
+        }
+        // No app wiring: the verbs degrade to the doors this window already has,
+        // so a menu item can never be a dead entry.
+        if (command == prism::ctxmenu::Command::SmartExtractHere && onSmartExtract_ &&
+            selection_ >= 0 && selection_ < ItemCount()) {
+          onSmartExtract_(
+              static_cast<int>(folderItems_[static_cast<std::size_t>(selection_)].index));
+        } else if (onActivate_) {
+          onActivate_(-1);
+        } else {
+          SetStatus(std::wstring(L"\u672A\u63A5\u7EBF\uFF1A") +
+                    Utf8ToWide(prism::ctxmenu::CommandName(command)));
+        }
+        return;
+      }
+      case prism::ctxmenu::Command::CopyPath: {
+        std::wstring text;
+        if (selection_ >= 0 && selection_ < ItemCount()) {
+          text = Utf8ToWide(folderItems_[static_cast<std::size_t>(selection_)].path);
+        }
+        if (text.empty()) text = archivePath_;
+        if (text.empty()) {
+          SetStatus(L"\u6CA1\u6709\u53EF\u590D\u5236\u7684\u8DEF\u5F84");  // 没有可复制的路径
+          return;
+        }
+        CopyTextToClipboard(text);
+        SetStatus(std::wstring(L"\u5DF2\u590D\u5236\u8DEF\u5F84\uFF1A") + text);  // 已复制路径：
+        return;
+      }
+      case prism::ctxmenu::Command::RevealArchive:
+        RevealArchiveInExplorer();
+        return;
+      case prism::ctxmenu::Command::SelectAll: {
+        sel_.SelectAll();
+        selection_ = sel_.Empty() ? -1 : sel_.Focus();
+        nav_.SetSelection(selection_);
+        SyncActionContext();
+        Invalidate();
+        return;
+      }
+      case prism::ctxmenu::Command::Refresh:
+        Invalidate();
+        return;
+      case prism::ctxmenu::Command::None:
+      case prism::ctxmenu::Command::Count:
+        return;
+    }
+  }
+
+  bool CopyTextToClipboard(const std::wstring& text) {
+    if (host_.hwnd == nullptr || !::OpenClipboard(host_.hwnd)) return false;
+    ::EmptyClipboard();
+    const std::size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL block = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+    bool stored = false;
+    if (block != nullptr) {
+      void* target = ::GlobalLock(block);
+      if (target != nullptr) {
+        std::memcpy(target, text.c_str(), bytes);
+        ::GlobalUnlock(block);
+        stored = ::SetClipboardData(CF_UNICODETEXT, block) != nullptr;
+      }
+      if (!stored) ::GlobalFree(block);
+    }
+    ::CloseClipboard();
+    return stored;
+  }
+
+  void RevealArchiveInExplorer() {
+    if (archivePath_.empty()) {
+      SetStatus(L"\u5C1A\u672A\u6253\u5F00\u5F52\u6863");  // 尚未打开归档
+      return;
+    }
+    // /select needs the path quoted; the archive is the only thing Explorer can
+    // show, because the selected ENTRY lives inside it.
+    const std::wstring arguments = L"/select,\"" + archivePath_ + L"\"";
+    ::ShellExecuteW(nullptr, L"open", L"explorer.exe", arguments.c_str(), nullptr,
+                    SW_SHOWNORMAL);
+  }
+
+  // A greyed context item explains itself while hovered; the words are the
+  // model's reason string (which is empty for every ENABLED item by rule).
+  bool ExplainDisabledContextItem(UINT id) {
+    if (!prism::ctxmenu::IsContextCommandId(id)) return false;
+    const std::size_t surface = static_cast<std::size_t>(prism::ctxmenu::SurfaceOfCommandId(id));
+    const std::size_t slot = prism::ctxmenu::SlotOfCommandId(id);
+    if (surface >= 3 || slot >= lastMenuBySurface_[surface].items.size()) return false;
+    const prism::ctxmenu::Item& item = lastMenuBySurface_[surface].items[slot];
+    if (item.enabled || item.disabledReason.empty()) return false;
+    SetStatus(Utf8ToWide(item.disabledReason));
+    return true;
   }
 
   // The real Windows menu bar, rebuilt from the labels the app supplied.
@@ -5061,6 +5497,22 @@ class GalleryWindow {
   int refusedOperations_ = 0;
   std::wstring lastOperationRefusal_;
   std::function<void(UINT)> onMenuCommand_;
+  // ---- card C92: open + right-click state ----
+  // "Open" (Enter / double-click on a file) has its own door; onActivate_ stays
+  // the whole-archive path the context menu's ExtractAll still uses.
+  std::function<void(int)> onOpen_;
+  std::function<void(prism::ctxmenu::Command)> onContextCommand_;
+  std::function<void(const ContextMenuInvocation&)> contextProbe_;
+  prism::ctxmenu::Labels ctxLabels_;
+  prism::ctxmenu::Menu lastContextMenu_;
+  prism::ctxmenu::Menu lastMenuBySurface_[3];
+  // id -> verb per surface, filled when the popup is built. The vector is sized
+  // to the model, so an id from a PREVIOUS menu whose slot no longer exists
+  // resolves to None instead of indexing past the end.
+  std::vector<std::vector<prism::ctxmenu::Command>> contextCommands_{3};
+  std::wstring archivePath_;
+  std::wstring statusBeforeMenu_;
+  int contextMenusShown_ = 0;
   // The app's persisted column geometry; the renderer paints it verbatim.
   prism::list::ColumnLayout listColumns_;
   bool hasListColumns_ = false;

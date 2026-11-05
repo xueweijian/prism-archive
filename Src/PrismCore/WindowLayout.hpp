@@ -607,7 +607,23 @@ struct StatusSegment {
 };
 
 inline constexpr int kStatusPad = 12;
+// C105 (plan 3.2): the band separates its segments with AIR, not with rules.
+// The gap is the 16-24 px the design asks for; the mutation arm squeezes it to
+// 8 px so the "adjacent segments are at least 16 px apart" assertion MUST go
+// red (CONTRACTS D3).
+#if defined(PRISM_C105_MUTANT_STATUS_TIGHT_GAP)
+inline constexpr int kStatusGap = 8;
+#else
 inline constexpr int kStatusGap = 24;
+#endif
+// ... and the 1 px vertical rule between the two clusters is GONE. The switch
+// is false in every shipping build; the mutation arm restores the rule, which
+// must turn the "the band carries no vertical rule" assertion red.
+#if defined(PRISM_C105_MUTANT_STATUS_DIVIDER)
+inline constexpr bool kStatusDividerEnabled = true;
+#else
+inline constexpr bool kStatusDividerEnabled = false;
+#endif
 inline constexpr int kStatusSegmentMinWidth = 96;
 
 // C79: TWO clusters, laid out from the bar's two edges. The left cluster
@@ -650,7 +666,11 @@ inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const Sta
     rightStart = leftEnd + kStatusGap;
   }
   const int gap = rightStart - leftEnd;
-  if (gap >= 2 * kStatusGap) {
+  // C105: NO DIVIDER. The band used to cut the two clusters apart with a 1 px
+  // vertical rule -- the "mechanical grey bar split by six rules" the user
+  // reported. The empty middle is now pure air; the clusters are told apart by
+  // the gap alone (and by the label/value roles inside each segment).
+  if (kStatusDividerEnabled && gap >= 2 * kStatusGap) {
     const int dividerX = leftEnd + gap / 2;
     out.push_back(StatusSegment{StatusId::Divider,
                                 Rect{dividerX, top, dividerX + 1, bottom}, {}, -1, {}});
@@ -1042,22 +1062,32 @@ inline WindowRestore PlanWindowRestore(const SavedWindow& saved, const Rect& wor
 // the order the band paints them. This function is the ONE spelling of a
 // segment's text -- the painter, the accessibility tree and the suite all call
 // it, so a label can never read one way on screen and another way in the tree.
+// C105: the VALUE half of a segment, spelled once. The painter draws it as its
+// own TextPrimary run (plan 3.2: "the leading word in TextSecondary, the value
+// in TextPrimary") while the accessibility tree keeps reading the whole line
+// through StatusSegmentLabel below -- both go through THIS function, so the
+// painted value and the announced one cannot drift apart.
+inline std::string StatusSegmentValueText(const StatusSegment& segment) {
+  if (segment.id == StatusId::Divider) return {};
+  // C81/A3: the canonical ratio string travels verbatim (it IS what the info
+  // card and the list cell render); the integer path stays for scenes that only
+  // set value.
+  if (!segment.valueText.empty()) return segment.valueText;
+  if (segment.value < 0) return {};
+  std::string text = std::to_string(segment.value);
+  if (segment.id == StatusId::Ratio) text.push_back('%');
+  return text;
+}
+
 inline std::string StatusSegmentLabel(const StatusSegment& segment) {
   if (segment.id == StatusId::Divider) return {};
   std::string text(segment.text);
-  // C81/A3: the canonical ratio string travels verbatim (it IS what the info
-  // card and the list cell render); the integer path stays for scenes that only
-  // set value. C86: this is the ONE place a band label is spelled, so the paint
-  // and the accessibility tree cannot disagree.
-  if (!segment.valueText.empty()) {
+  // C86: this is the ONE place a band label is spelled, so the paint and the
+  // accessibility tree cannot disagree.
+  const std::string value = StatusSegmentValueText(segment);
+  if (!value.empty()) {
     text.push_back(' ');
-    text.append(segment.valueText);
-    return text;
-  }
-  if (segment.value >= 0) {
-    text.push_back(' ');
-    text += std::to_string(segment.value);
-    if (segment.id == StatusId::Ratio) text.push_back('%');
+    text.append(value);
   }
   return text;
 }

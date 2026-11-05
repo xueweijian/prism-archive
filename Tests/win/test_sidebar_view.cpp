@@ -102,6 +102,14 @@ const Command* FindStatus(const Layout& layout, std::string_view text) {
   return nullptr;
 }
 
+// C105: the card's field label (the 10 px line above a value).
+const Command* FindStatusLabel(const Layout& layout, std::string_view text) {
+  for (const Command& command : layout.commands) {
+    if (command.kind == PrimKind::StatusLabel && command.text == text) return &command;
+  }
+  return nullptr;
+}
+
 std::vector<const Command*> OfKind(const Layout& layout, PrimKind kind) {
   std::vector<const Command*> out;
   for (const Command& command : layout.commands) {
@@ -126,16 +134,18 @@ PRISM_TEST("TestColumnAndPillGeometry") {
   const Layout layout = prism::win::sidebar::Build(model, metrics);
 
   PRISM_CHECK(SameBox(layout.panel, Box{0.0f, 0.0f, 236.0f, 1080.0f}));
-  // The capsule is anchored: its bottom edge sits paddingBottom above the
-  // viewport bottom, regardless of how much content is scrolled.
-  PRISM_CHECK(SameBox(layout.pill, Box{16.0f, 982.0f, 220.0f, 1068.0f}));
+  // The card is anchored: its bottom edge sits paddingBottom above the viewport
+  // bottom, regardless of how much content is scrolled.
+  // C105: the card is FOUR label/value pairs tall now (4*28 + 3*6 + 2*10 = 150)
+  // instead of three one-line readouts (86), so its top edge moved up by 64.
+  PRISM_CHECK(SameBox(layout.pill, Box{16.0f, 918.0f, 220.0f, 1068.0f}));
   PRISM_CHECK(Near(layout.contentTop, 12.0f));
-  PRISM_CHECK(Near(layout.contentBottom, 970.0f));
+  PRISM_CHECK(Near(layout.contentBottom, 906.0f));
   PRISM_CHECK(layout.contentHeight > 0.0f);
   // This fixture fits: no scroll needed, and the clamp is explicit.
   PRISM_CHECK(Near(layout.maxScroll, 0.0f));
-  // The capsule sits over the content area, so it reduces the scroll window.
-  PRISM_CHECK(Near(layout.contentBottom - layout.contentTop, 958.0f));
+  // The card sits over the content area, so it reduces the scroll window.
+  PRISM_CHECK(Near(layout.contentBottom - layout.contentTop, 894.0f));
   // First command is the panel background: paint order is part of the contract.
   PRISM_CHECK_EQ(layout.commands.front().kind, PrimKind::Panel);
 }
@@ -281,13 +291,17 @@ PRISM_TEST("TestScrollCullsRowsButKeepsContentHeight") {
   for (const Command& command : down.commands) {
     if (command.kind == PrimKind::Panel || command.kind == PrimKind::StatusPill ||
         command.kind == PrimKind::Separator || command.kind == PrimKind::RatioBar ||
-        command.kind == PrimKind::StatusIcon || command.kind == PrimKind::StatusText) {
+        command.kind == PrimKind::StatusIcon || command.kind == PrimKind::StatusLabel ||
+        command.kind == PrimKind::StatusText) {
       continue;
     }
     PRISM_CHECK(BoxInsideViewport(command.box, 0.0f, down.contentBottom));
   }
 }
 
+// C105 (plan 3.2): the card is FOUR label/value pairs -- a 10 px label line
+// above a 12 px value line -- not three one-line readouts. The geometry below
+// is the contract: card top 918, 10 px padding, 28 px pairs 6 px apart.
 PRISM_TEST("TestStatusCapsuleLinesAndRatioBar") {
   std::vector<ArchiveItem> items = {File("payload.bin", 0, 1420, 608)};
   prism::sidebar::Model model(&items);
@@ -295,21 +309,48 @@ PRISM_TEST("TestStatusCapsuleLinesAndRatioBar") {
       prism::sidebar::ArchiveInfo{"LZMA2", 64ull * 1024 * 1024, Encryption::Aes256});
   const Layout layout = prism::win::sidebar::Build(model, Metrics{});
 
-  const Command* encrypted = FindStatus(layout, "AES-256 ENCRYPTED");
-  const Command* dictionary = FindStatus(layout, "LZMA2 | DICT 64.0 MB");
-  const Command* ratio = FindStatus(layout, "RATIO 42.8%");
-  PRISM_CHECK(encrypted != nullptr);
+  const auto labels = OfKind(layout, PrimKind::StatusLabel);
+  PRISM_CHECK_EQ(labels.size(), std::size_t{4});
+  const Command* cryptoLabel = FindStatusLabel(layout, "ENCRYPTION");
+  const Command* methodLabel = FindStatusLabel(layout, "METHOD");
+  const Command* dictionaryLabel = FindStatusLabel(layout, "DICTIONARY");
+  const Command* ratioLabel = FindStatusLabel(layout, "RATIO");
+  PRISM_CHECK(cryptoLabel != nullptr);
+  PRISM_CHECK(methodLabel != nullptr);
+  PRISM_CHECK(dictionaryLabel != nullptr);
+  PRISM_CHECK(ratioLabel != nullptr);
+
+  const Command* cipher = FindStatus(layout, "AES-256");
+  const Command* method = FindStatus(layout, "LZMA2");
+  const Command* dictionary = FindStatus(layout, "64.0 MB");
+  const Command* ratio = FindStatus(layout, "42.8%");
+  PRISM_CHECK(cipher != nullptr);
+  PRISM_CHECK(method != nullptr);
   PRISM_CHECK(dictionary != nullptr);
   PRISM_CHECK(ratio != nullptr);
-  if (encrypted != nullptr) {
-    // Pill inner box: left 16+10, text after 16 px icon + 8 px gap.
-    PRISM_CHECK(SameBox(encrypted->box, Box{50.0f, 992.0f, 210.0f, 1014.0f}));
+  // Card inner box: left 16+10, text after 16 px icon + 8 px gap, right 220-10.
+  // The LABEL occupies the pair's first 12 px, the VALUE the next 16.
+  if (cryptoLabel != nullptr) {
+    PRISM_CHECK(SameBox(cryptoLabel->box, Box{50.0f, 928.0f, 210.0f, 940.0f}));
+    PRISM_CHECK_EQ(cryptoLabel->color, ColorToken::SecondaryText);
+    PRISM_CHECK(Near(cryptoLabel->fontSize, 10.0));
+  }
+  if (cipher != nullptr) {
+    PRISM_CHECK(SameBox(cipher->box, Box{50.0f, 940.0f, 210.0f, 956.0f}));
+    PRISM_CHECK_EQ(cipher->color, ColorToken::PrimaryText);
+    PRISM_CHECK(Near(cipher->fontSize, 12.0));
+  }
+  if (dictionaryLabel != nullptr) {
+    PRISM_CHECK(SameBox(dictionaryLabel->box, Box{50.0f, 996.0f, 210.0f, 1008.0f}));
   }
   if (dictionary != nullptr) {
-    PRISM_CHECK(SameBox(dictionary->box, Box{50.0f, 1014.0f, 210.0f, 1036.0f}));
+    PRISM_CHECK(SameBox(dictionary->box, Box{50.0f, 1008.0f, 210.0f, 1024.0f}));
+  }
+  if (ratioLabel != nullptr) {
+    PRISM_CHECK(SameBox(ratioLabel->box, Box{50.0f, 1030.0f, 210.0f, 1042.0f}));
   }
   if (ratio != nullptr) {
-    PRISM_CHECK(SameBox(ratio->box, Box{50.0f, 1036.0f, 210.0f, 1058.0f}));
+    PRISM_CHECK(SameBox(ratio->box, Box{50.0f, 1042.0f, 210.0f, 1058.0f}));
   }
   const auto bars = OfKind(layout, PrimKind::RatioBar);
   PRISM_CHECK_EQ(bars.size(), std::size_t{1});
@@ -396,8 +437,10 @@ PRISM_TEST("TestSectionHeadingTrackingAndRole") {
   }
 }
 
-// C79: the telemetry capsule is secondary text (12 px at paint time), not the
-// primary role it used to borrow.
+// C105 (plan 3.2 "上行 10px 灰色小字，下行 12px 深色文字"): the card's VALUES are
+// the primary role and its LABELS the secondary one. C79 had the opposite --
+// every readout was secondary -- which is what made the card read as one grey
+// block with no hierarchy.
 PRISM_TEST("TestCapsuleReadoutUsesSecondaryRole") {
   std::vector<ArchiveItem> items = {File("payload.bin", 0, 1420, 608)};
   prism::sidebar::Model model(&items);
@@ -405,10 +448,19 @@ PRISM_TEST("TestCapsuleReadoutUsesSecondaryRole") {
       prism::sidebar::ArchiveInfo{"LZMA2", 64ull * 1024 * 1024, Encryption::Aes256});
   const Layout layout = prism::win::sidebar::Build(model, Metrics{});
   const auto readouts = OfKind(layout, PrimKind::StatusText);
-  PRISM_CHECK_EQ(readouts.size(), std::size_t{3});
+  PRISM_CHECK_EQ(readouts.size(), std::size_t{4});
   for (const Command* readout : readouts) {
-    PRISM_CHECK_EQ(readout->color, ColorToken::SecondaryText);
+    PRISM_CHECK_EQ(readout->color, ColorToken::PrimaryText);
   }
+  const auto labels = OfKind(layout, PrimKind::StatusLabel);
+  PRISM_CHECK_EQ(labels.size(), std::size_t{4});
+  for (const Command* label : labels) {
+    PRISM_CHECK_EQ(label->color, ColorToken::SecondaryText);
+    PRISM_CHECK(label->fontSize < readouts.front()->fontSize);
+  }
+  // The card carries no rule above it: the pre-C105 hairline is gone.
+  PRISM_CHECK(OfKind(layout, PrimKind::Separator).empty());
+  PRISM_CHECK(!prism::win::sidebar::kCardUnderlineEnabled);
 }
 
 PRISM_TEST("TestRowPayloadsCoverEverySection") {

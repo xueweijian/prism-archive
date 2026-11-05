@@ -337,14 +337,25 @@ const prism::layout::StatusInfo GrowStatus() {
   return info;
 }
 
-// The sidebar info card's third capsule line, as the view builds it.
+// The sidebar info card's RATIO VALUE, as the view builds it.
+//
+// C105 (plan 3.2): the card is a label/value stack, so the ratio is no longer
+// one formatted line ("RATIO >100% (126.7%)") but a "RATIO" label with the
+// canonical string as the value directly under it. This helper reads that
+// value, which is a STRICTER check than the old one: the card's text must now
+// BE the canonical token, with no prefix to hide a mismatch behind.
 std::string CardRatioLine(prism::sidebar::Model* model) {
   const prism::win::sidebar::Layout card =
       prism::win::sidebar::Build(*model, prism::win::sidebar::Metrics{});
-  for (const prism::win::sidebar::Command& command : card.commands) {
-    if (command.kind == prism::win::sidebar::PrimKind::StatusText &&
-        command.text.find("RATIO") != std::string::npos) {
-      return command.text;
+  for (const prism::win::sidebar::Command& label : card.commands) {
+    if (label.kind != prism::win::sidebar::PrimKind::StatusLabel) continue;
+    if (label.text != "RATIO") continue;
+    for (const prism::win::sidebar::Command& value : card.commands) {
+      if (value.kind != prism::win::sidebar::PrimKind::StatusText) continue;
+      if (value.box.top >= label.box.bottom - 0.01f &&
+          std::fabs(value.box.left - label.box.left) < 0.01f) {
+        return value.text;
+      }
     }
   }
   return {};
@@ -441,7 +452,7 @@ PRISM_TEST("c81.a3.growth_consistency") {
   const prism::sidebar::Status sidebarStatus = model.ComputeStatus();
   PRISM_CHECK_EQ(sidebarStatus.ratioView, kGrowToken);
   const std::string cardLine = CardRatioLine(&model);
-  PRISM_CHECK_EQ(cardLine, std::string("RATIO ") + kGrowToken);
+  PRISM_CHECK_EQ(cardLine, kGrowToken);
 
   // 4. the status band: label stays 压缩率, the value IS the canonical string.
   //    The segment list is OWNED in a local: RatioSegment returns a pointer
@@ -461,8 +472,11 @@ PRISM_TEST("c81.a3.growth_consistency") {
   }
 
   // 5. byte-identical across the three surfaces (the audit's ①).
+  //    C105: the card's value line IS the token now (the "RATIO " prefix that
+  //    used to be stripped here is a label of its own), so the comparison is
+  //    exact instead of "equal after six characters".
   PRISM_CHECK_EQ(cell, sidebarStatus.ratioView);
-  PRISM_CHECK_EQ(cardLine.substr(6), sidebarStatus.ratioView);
+  PRISM_CHECK_EQ(cardLine, sidebarStatus.ratioView);
   if (segment != nullptr) {
     PRISM_CHECK_EQ(std::string(segment->valueText), sidebarStatus.ratioView);
   }
@@ -483,7 +497,7 @@ PRISM_TEST("c81.a3.zero_bytes_unknown_everywhere") {
   prism::sidebar::Model model(&catalog);
   const prism::sidebar::Status sidebarStatus = model.ComputeStatus();
   PRISM_CHECK_EQ(sidebarStatus.ratioView, std::string("未知"));
-  PRISM_CHECK_EQ(CardRatioLine(&model), std::string("RATIO 未知"));
+  PRISM_CHECK_EQ(CardRatioLine(&model), std::string("未知"));
 
   prism::layout::StatusInfo info;
   info.ratioView = prism::CompressionRatioView(0, 0);
@@ -514,7 +528,7 @@ PRISM_TEST("c81.a3.shrink_consistency") {
   }
   prism::sidebar::Model model(&catalog);
   PRISM_CHECK_EQ(model.ComputeStatus().ratioView, token);
-  PRISM_CHECK_EQ(CardRatioLine(&model), std::string("RATIO ") + token);
+  PRISM_CHECK_EQ(CardRatioLine(&model), token);
   PRISM_CHECK_EQ(prism::list::RatioCellText(rows[0]), token);
 
   prism::layout::StatusInfo info;

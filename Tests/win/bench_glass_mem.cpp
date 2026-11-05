@@ -458,6 +458,10 @@ struct GlassArm {
   size_t transientWhileLive = 0;
   size_t transientAfterRelease = 0;
   double bandDiff = 0.0;
+  // bandDiff / (1 - tint alpha): the chain's refraction response in units of
+  // the light the material actually passes. Independent of the token's alpha.
+  double bandPenetrable = 1.0;
+  double bandNormalized = 0.0;
   int opaqueOutside = 0;
   int bandSamples = 0;
   size_t wsWhileLive = 0;
@@ -550,6 +554,20 @@ GlassArm RunGlassArm(prism::win::glass::GlassIslandHost& host) {
   arm.bandDiff = MeanAbsDiff(
       second, baseline, [](float dist) { return dist > -8.0f && dist <= 0.5f; }, &bandSamples);
   arm.bandSamples = bandSamples;
+  // C102: NORMALISE the band's response by the material's own transmission.
+  // The refracted band can only show as much as the tint lets through, so the
+  // raw number is a function of --surface-floating-island's alpha: measured
+  // 0.86 at .58 and 0.35 at .82, ratio .41 == (1-.82)/(1-.58). Dividing by
+  // (1 - alpha) makes the gate a statement about the CHAIN (does the refraction
+  // still do the work the material allows) instead of a statement about the
+  // token's current value -- adjusting the material must not require editing a
+  // gate. 0.05 floors the divisor so an opaque tint cannot divide by zero.
+  const double tintAlpha = static_cast<double>(
+      prism::theme::Lookup(prism::theme::TokenId::SurfaceFloatingIsland,
+                           prism::theme::Variant::Daylight)
+          .color.a);
+  arm.bandPenetrable = (std::max)(0.05, 1.0 - tintAlpha);
+  arm.bandNormalized = arm.bandDiff / arm.bandPenetrable;
   int outside = 0;
   for (UINT32 y = 0; y < kGlassH; ++y) {
     for (UINT32 x = 0; x < kGlassW; ++x) {
@@ -810,13 +828,13 @@ int main(int argc, char** argv) {
   BM_CHECK(glass.transientAfterRelease == 0);
   BM_CHECK(glass.liveAfterReacquire);
   BM_CHECK(glass.identical);
-  // C102: the island's tint alpha went from .58 to .82 (ui-redesign-plan 2.1),
-  // and the refraction band's response is proportional to what the tint does
-  // NOT cover. Measured on this harness: bandDiff 0.86 at .58, 0.35 at .82
-  // (ratio .41 == (1-.82)/(1-.58)). The floor follows the material -- 0.30 is
-  // still far above a no-op chain's 0.00, which is what this check exists to
-  // catch. Only the number moved; the predicate is unchanged.
-  BM_CHECK(glass.bandDiff >= 0.30);
+  // The band really refracts -- in units of what the tint lets through, so the
+  // gate survives any change to --surface-floating-island's alpha (C102 moved
+  // it .58 -> .82 and this check stayed meaningful without a new constant):
+  //   .58: 0.86 / 0.42 = 2.05    .82: 0.35 / 0.18 = 1.94    no chain: 0.00
+  // The floor is 1.50: ~30 % of headroom on both measured points, and a broken
+  // chain still lands at exactly 0.
+  BM_CHECK(glass.bandNormalized >= 1.50);
   BM_CHECK(glass.opaqueOutside == 0);
 
   // ---- verdicts: thumbnail capacity (D17) ----
@@ -832,10 +850,10 @@ int main(int argc, char** argv) {
 
   std::printf(
       "    glass: live %.2f MB @%.1f MB ws -> released (%.1f MB ws, %.2f MB cheaper); "
-      "pixel-identical=%d bandDiff=%.2f outside=%d\n",
+      "pixel-identical=%d bandDiff=%.2f (%.2f per unit transmission) outside=%d\n",
       Mb(glass.transientWhileLive), Mb(glass.wsWhileLive), Mb(glass.wsAfterRelease),
       MbToMb(glass.wsWhileLive, glass.wsAfterRelease), glass.identical ? 1 : 0, glass.bandDiff,
-      glass.opaqueOutside);
+      glass.bandNormalized, glass.opaqueOutside);
   std::printf(
       "    thumb: budget %.1f MB resident %.2f MB (%zu thumbs, slack %.0f B), trim(1/8) -> "
       "%.2f MB returned %.2f MB, release-all %.2f MB\n",

@@ -434,14 +434,21 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
                           ColorToken::SelectedBackground, 1.0f, index, section};
         selection.cornerRadius = kSelectionPill ? metrics.selectionRadius : 0.0f;
         push(std::move(selection));
-        // C79: the 3 px accent rule at the highlight's left edge. It is a
-        // separate primitive (not a border on Selection) so the width is a
-        // number the pixel suite can measure, and so the fill's alpha stays the
-        // token's (14%) instead of being fused with an opaque edge.
-        const float barTop = pill.top + 2.0f;
-        const float barBottom = pill.bottom - 2.0f;
+        // C79: the 3 px accent rule at the ROW's left edge. It is a separate
+        // primitive (not a border on Selection) so the width is a number the
+        // pixel suite can measure, and so the fill's alpha stays the token's
+        // (14%) instead of being fused with an opaque edge.
+        // C104: it stays on the ROW edge and does NOT follow the capsule's
+        // inset. On a tree row the capsule's inset left edge (row.left + 8) is
+        // exactly where the expander chevron's vertex lands, so a bar there is
+        // notched by the chevron down to ~1 px of accent -- gallery_snapshot
+        // measured exactly that ("the midnight selection rule is 1 px wide")
+        // before this line moved back. The rule leads the capsule: the row owns
+        // the rule, the capsule is inset from it.
+        const float barTop = row.top + 2.0f;
+        const float barBottom = row.bottom - 2.0f;
         push(Command{PrimKind::SelectionBar,
-                     Box{pill.left, barTop, pill.left + metrics.selectionBarWidth, barBottom},
+                     Box{row.left, barTop, row.left + metrics.selectionBarWidth, barBottom},
                      {}, {}, ColorToken::Accent, 1.0f, index, section});
       }
       if (chevron) {

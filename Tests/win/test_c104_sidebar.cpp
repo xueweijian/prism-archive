@@ -479,10 +479,48 @@ PRISM_TEST("c104 pill geometry: 8 px inset, 6 px corner, 3 px accent rule") {
   PRISM_CHECK(selection->cornerRadius == 6.0f);
   PRISM_CHECK(selection->box.top == row->box.top);
   PRISM_CHECK(selection->box.bottom == row->box.bottom);
-  // The 3 px accent rule rides the pill's left edge (not the row's), so it can
-  // never be left behind when the pill is inset.
-  PRISM_CHECK(bar->box.left == selection->box.left);
+  // C104: the rule stays on the ROW's left edge, 8 px left of the capsule.
+  // Putting it on the capsule's inset edge notches it against the expander
+  // chevron's vertex (gallery_snapshot measured 1 px of accent there).
+  PRISM_CHECK(bar->box.left == row->box.left);
+  PRISM_CHECK(bar->box.left == selection->box.left - 8.0f);
   PRISM_CHECK(bar->box.Width() == 3.0f);
+}
+
+// C104: the guard the WHOLE-FRAME snapshot needed. The rule is 3 px in the
+// command, but "3 px in the command" is not "3 px on the screen": an overpainted
+// glyph can eat it (that is exactly how C104 shipped 1 px of accent into
+// gallery_snapshot's red run). This measures the RENDERED run, per theme, so a
+// future sidebar change turns THIS assertion red instead of the golden frame.
+PRISM_TEST("c104 the 3 px accent rule survives on the rendered frame") {
+  const std::vector<ArchiveItem> items = SampleCatalog();
+  const Variant variants[] = {Variant::Midnight, Variant::Daylight, Variant::HighContrast};
+  for (const Variant variant : variants) {
+    const Layout layout = BuildLayout(items, variant, static_cast<float>(kHeight),
+                                      FocusTarget{Section::Tree, 0});
+    const Command* bar = Find(layout, PrimKind::SelectionBar);
+    if (!PRISM_CHECK(bar != nullptr)) return;
+    prism::win::gallery::GalleryRenderer::Scene scene;
+    scene.listMode = true;
+    scene.sidebar = &layout;
+    scene.theme = variant;
+    Frame frame;
+    if (!PRISM_CHECK(RenderScene(scene, kWidth, kHeight, &frame))) return;
+    const int barY = static_cast<int>((bar->box.top + bar->box.bottom) * 0.5f);
+    int run = 0;
+    for (int x = static_cast<int>(bar->box.left) - 2;
+         x <= static_cast<int>(bar->box.left) + 6; ++x) {
+      const UINT32 p = frame.At(x, barY);
+      const int red = static_cast<int>((p >> 16) & 0xFFu);
+      const int blue = static_cast<int>(p & 0xFFu);
+      if (blue - red >= 120 && blue >= 180) ++run;
+    }
+    std::printf("  [c104] %s accent rule: %d px at x=%.0f (y=%d)\n",
+                std::string(prism::theme::VariantName(variant)).c_str(), run,
+                static_cast<double>(bar->box.left), barY);
+    PRISM_CHECK(run >= 2);
+    PRISM_CHECK(run <= 4);
+  }
 }
 
 // ASSERTION 3 (the soft folder). Source scan + token + pixel, all three.

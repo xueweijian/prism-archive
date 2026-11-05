@@ -103,6 +103,46 @@ inline void AppendPadded(std::string& out, int64_t value, size_t width) {
   out += digits;
 }
 
+// The civil date a UTC day count lands on (Howard Hinnant's algorithm). Split
+// out of FormatUtcTimestamp because the FILE SINK needs the DATE alone: the log
+// file is named prism-YYYYMMDD.log, and a second implementation of "which day is
+// it" is a rotation bug waiting to happen (C85).
+struct CivilDate {
+  int64_t year = 1970;
+  int month = 1;
+  int day = 1;
+};
+
+inline CivilDate CivilFromDays(int64_t days) {
+  const int64_t z = days + 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const int64_t doe = z - era * 146097;
+  const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const int64_t y = yoe + era * 400;
+  const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const int64_t mp = (5 * doy + 2) / 153;
+  const int64_t day = doy - (153 * mp + 2) / 5 + 1;
+  const int64_t month = mp < 10 ? mp + 3 : mp - 9;
+  const int64_t year = month <= 2 ? y + 1 : y;
+  CivilDate out;
+  out.year = year;
+  out.month = static_cast<int>(month);
+  out.day = static_cast<int>(day);
+  return out;
+}
+
+// "YYYYMMDD" in UTC -- the day component of a log file's name (C85).
+inline std::string FormatUtcDateCompact(int64_t epochMillis) {
+  const int64_t ms = epochMillis < 0 ? 0 : epochMillis;
+  const CivilDate date = CivilFromDays(ms / 86400000);
+  std::string out;
+  out.reserve(8);
+  AppendPadded(out, date.year, 4);
+  AppendPadded(out, date.month, 2);
+  AppendPadded(out, date.day, 2);
+  return out;
+}
+
 inline std::string FormatUtcTimestamp(int64_t epochMillis) {
   // Pre-epoch input is clamped: a negative timestamp is a caller bug, and a
   // deterministic 1970 line is better than a wrong 1969 one.
@@ -116,16 +156,10 @@ inline std::string FormatUtcTimestamp(int64_t epochMillis) {
   const int64_t seconds = rest / 1000;
   const int64_t millis = rest % 1000;
 
-  const int64_t z = days + 719468;
-  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-  const int64_t doe = z - era * 146097;
-  const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-  const int64_t y = yoe + era * 400;
-  const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-  const int64_t mp = (5 * doy + 2) / 153;
-  const int64_t day = doy - (153 * mp + 2) / 5 + 1;
-  const int64_t month = mp < 10 ? mp + 3 : mp - 9;
-  const int64_t year = month <= 2 ? y + 1 : y;
+  const CivilDate date = CivilFromDays(days);
+  const int64_t year = date.year;
+  const int64_t month = date.month;
+  const int64_t day = date.day;
 
   // Built with std::to_string, not snprintf: gcc's -Wformat-truncation cannot
   // bound %04lld against a 20-digit int64 and fails the build under -Werror
@@ -551,13 +585,23 @@ class Throttle {
 // ---------------------------------------------------------------------------
 class RollingFileSink {
  public:
-  RollingFileSink(std::string basePath, size_t maxBytes, size_t maxFiles)
+  // C85: the path a WINDOWS log really wants. On MSVC a narrow std::ofstream
+  // open converts with the ANSI code page, so "%LOCALAPPDATA%\PrismArchive" is
+  // unopenable for a user whose profile name is not ASCII -- the log silently
+  // never appears, which is the defect this card exists to close, one layer
+  // down. The std::filesystem::path overload keeps the wide form end to end.
+  explicit RollingFileSink(std::filesystem::path basePath, size_t maxBytes, size_t maxFiles)
       : base_(std::move(basePath)), maxBytes_(maxBytes), maxFiles_(maxFiles) {
     if (base_.empty()) throw std::invalid_argument("RollingFileSink base path must not be empty");
     if (maxBytes_ == 0) throw std::invalid_argument("RollingFileSink maxBytes must be >= 1");
     if (maxFiles_ == 0) throw std::invalid_argument("RollingFileSink maxFiles must be >= 1");
     Open();
   }
+
+  // Exactly ONE constructor: a const char*/std::string literal must not be able to
+  // pick between a path overload and a string overload (MSVC C2668 on
+  // RollingFileSink("", 100, 2)). std::filesystem::path accepts both, so there is
+  // nothing left to disambiguate.
 
   ~RollingFileSink() { Close(); }
 
@@ -575,7 +619,7 @@ class RollingFileSink {
     stream_ << line << '\n';
     if (!stream_) {
       ok_ = false;
-      error_ = "write failed on " + base_;
+      error_ = "write failed on " + NarrowPath(base_);
       return false;
     }
     stream_.flush();  // a log line that is still in a user-space buffer when the
@@ -591,36 +635,50 @@ class RollingFileSink {
 
   bool ok() const { return ok_; }
   const std::string& error() const { return error_; }
-  const std::string& basePath() const { return base_; }
+  std::string basePath() const { return NarrowPath(base_); }
   size_t maxBytes() const { return maxBytes_; }
   size_t maxFiles() const { return maxFiles_; }
   size_t rotations() const { return rotations_; }
   size_t currentBytes() const { return currentBytes_; }
   uint64_t bytesWritten() const { return bytesWritten_; }
 
+  // The path object, for a caller that has to keep the WIDE form (the Windows
+  // daily sink hands it straight back to the filesystem, C85).
+  const std::filesystem::path& path() const { return base_; }
+
   // index 0 = the current file, 1 = the previous one, ...
-  std::string PathFor(size_t index) const {
+  std::filesystem::path BaseFor(size_t index) const {
     if (index == 0) return base_;
-    const size_t dot = base_.find_last_of('.');
-    const size_t slash = base_.find_last_of("/\\");
+    const std::string text = NarrowPath(base_);
+    const size_t dot = text.find_last_of('.');
+    const size_t slash = text.find_last_of("/\\");
     const std::string suffix = "." + std::to_string(index);
     if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
-      return base_ + suffix;
+      return std::filesystem::path(text + suffix);
     }
-    return base_.substr(0, dot) + suffix + base_.substr(dot);
+    return std::filesystem::path(text.substr(0, dot) + suffix + text.substr(dot));
   }
+  std::string PathFor(size_t index) const { return NarrowPath(BaseFor(index)); }
 
  private:
+  // UTF-8 bytes of a path, for the narrow getters and the error strings. The
+  // u8string() form is used so a non-ASCII path round-trips as UTF-8 instead of
+  // the ANSI code page.
+  static std::string NarrowPath(const std::filesystem::path& path) {
+    const std::u8string utf8 = path.u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+  }
+
   void Open() {
     std::error_code ec;
-    const std::filesystem::path parent = std::filesystem::path(base_).parent_path();
+    const std::filesystem::path parent = base_.parent_path();
     if (!parent.empty()) std::filesystem::create_directories(parent, ec);
     const auto size = std::filesystem::file_size(base_, ec);
     currentBytes_ = ec ? 0 : static_cast<size_t>(size);
     stream_.open(base_, std::ios::binary | std::ios::app);
     if (!stream_.is_open()) {
       ok_ = false;
-      error_ = "cannot open " + base_;
+      error_ = "cannot open " + NarrowPath(base_);
       return;
     }
     ok_ = true;
@@ -630,14 +688,14 @@ class RollingFileSink {
     stream_.close();
     std::error_code ec;
     if (maxFiles_ <= 1) {
-      std::filesystem::remove(PathFor(0), ec);
+      std::filesystem::remove(BaseFor(0), ec);
     } else {
-      std::filesystem::remove(PathFor(maxFiles_ - 1), ec);  // the oldest goes first
+      std::filesystem::remove(BaseFor(maxFiles_ - 1), ec);  // the oldest goes first
       for (size_t index = maxFiles_ - 1; index >= 2; --index) {
-        std::filesystem::rename(PathFor(index - 1), PathFor(index), ec);
+        std::filesystem::rename(BaseFor(index - 1), BaseFor(index), ec);
         ec.clear();
       }
-      std::filesystem::rename(PathFor(0), PathFor(1), ec);
+      std::filesystem::rename(BaseFor(0), BaseFor(1), ec);
       ec.clear();
     }
     ++rotations_;
@@ -645,13 +703,13 @@ class RollingFileSink {
     stream_.open(base_, std::ios::binary | std::ios::app);
     if (!stream_.is_open()) {
       ok_ = false;
-      error_ = "cannot reopen " + base_ + " after rotation";
+      error_ = "cannot reopen " + NarrowPath(base_) + " after rotation";
       return false;
     }
     return true;
   }
 
-  std::string base_;
+  std::filesystem::path base_;
   size_t maxBytes_;
   size_t maxFiles_;
   std::ofstream stream_;
@@ -692,12 +750,23 @@ class Logger {
   void SetSink(Sink sink) { sink_ = std::move(sink); }
   void ClearSink() { sink_ = nullptr; }
 
+  // C85: the WALL CLOCK. Every record carries a timestamp, and a record left at
+  // the default 0 formats as "1970-01-01T00:00:00.000Z" -- which is exactly what
+  // the shipped stderr said, because nothing ever supplied one. The app installs
+  // the system clock once at startup; a test installs a fixed one. An explicit
+  // per-record timestamp still wins (that is what keeps the format unit-tested).
+  using Clock = std::function<int64_t()>;
+  void SetClock(Clock clock) { clock_ = std::move(clock); }
+  bool hasClock() const { return clock_ != nullptr; }
+  int64_t Now() const { return clock_ ? clock_() : 0; }
+
   bool Emit(const Record& record) {
     if (static_cast<int>(record.level) < static_cast<int>(minLevel_)) {
       ++filtered_;
       return false;
     }
     Record sanitized = record;
+    if (sanitized.timestampMs == 0 && clock_) sanitized.timestampMs = clock_();
     sanitized.component = redactor_.Redact(record.component);
     sanitized.message = redactor_.Redact(record.message);
     sanitized.fields.clear();
@@ -749,6 +818,7 @@ class Logger {
   RingBuffer ring_;
   Throttle throttle_;
   Sink sink_;
+  Clock clock_;
   size_t emitted_ = 0;
   size_t filtered_ = 0;
   size_t suppressed_ = 0;

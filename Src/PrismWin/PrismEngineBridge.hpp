@@ -58,6 +58,71 @@ inline std::string WideToUtf8(std::wstring_view wide) {
 }
 
 // ---------------------------------------------------------------------------
+// C85: WHY an open failed, in words a user and a developer can both use.
+// ---------------------------------------------------------------------------
+// The shipped dialog said "打开失败 Photos.7z" and then "CreateFileW failed; " --
+// a machine token with nothing after the semicolon. The Win32 code and the
+// failing PATH were both available at the moment of failure and both were
+// dropped. Two sentences cover the two shapes:
+//   * the file is not there   -> "找不到文件: <path> (Win32 0x2 ...)"
+//   * it is there but unreadable (a directory, a lock, ACLs)
+//                             -> "无法读取文件: <path> (Win32 0x5 ...)"
+inline std::string Win32ReasonText(DWORD code) {
+  std::string text;
+  wchar_t* buffer = nullptr;
+  const DWORD chars = FormatMessageW(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+      nullptr, code, 0, reinterpret_cast<wchar_t*>(&buffer), 0, nullptr);
+  if (chars > 0 && buffer != nullptr) {
+    std::wstring wide(buffer, chars);
+    while (!wide.empty() && (wide.back() == L'\r' || wide.back() == L'\n' || wide.back() == L' ')) {
+      wide.pop_back();
+    }
+    text = WideToUtf8(wide);
+  }
+  if (buffer != nullptr) LocalFree(buffer);
+  return text;
+}
+
+// "0x80070002" -- an HRESULT, rendered the same way everywhere (the trace, the
+// dialog, the log). One formatter, so a test can grep one spelling.
+inline std::string HresultText(unsigned long code) {
+  char buffer[16]{};
+  std::snprintf(buffer, sizeof(buffer), "0x%08lX", code);
+  return buffer;
+}
+
+// "0x00000002" -- the machine half of the sentence, stable across languages
+// (FormatMessageW is localized, so the code is the part that greps).
+inline std::string Win32CodeText(DWORD code) {
+  char buffer[16]{};
+  std::snprintf(buffer, sizeof(buffer), "0x%08lX", static_cast<unsigned long>(code));
+  return buffer;
+}
+
+inline bool Win32CodeIsMissing(DWORD code) {
+  return code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND ||
+         code == ERROR_INVALID_DRIVE || code == ERROR_BAD_NETPATH;
+}
+
+// The one sentence a failed CreateFileW produces. NEVER empty: when even
+// FormatMessage has nothing, the code alone still names the cause.
+inline std::string DescribeFileOpenFailure(const std::wstring& path, DWORD code) {
+  // Wide literals, then ONE conversion: a narrow "\u627E" would be a universal
+  // character name encoded into the execution charset, which is the ANSI code
+  // page on MSVC (the exact bug shape C38's audit found in the i18n tables).
+  std::wstring out = Win32CodeIsMissing(code)
+                         ? std::wstring(L"\u627E\u4E0D\u5230\u6587\u4EF6: ")
+                         : std::wstring(L"\u65E0\u6CD5\u8BFB\u53D6\u6587\u4EF6: ");
+  out += path;
+  out += L" (Win32 " + Utf8ToWide(Win32CodeText(code));
+  const std::string text = Win32ReasonText(code);
+  if (!text.empty()) out += L" " + Utf8ToWide(text);
+  out += L")";
+  return WideToUtf8(out);
+}
+
+// ---------------------------------------------------------------------------
 // Engine format table (card C26: extension -> CLSID routing)
 // ---------------------------------------------------------------------------
 // 7z.dll publishes its own handler table through GetHandlerProperty2(): name,
@@ -541,6 +606,11 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
     if (handle_ != INVALID_HANDLE_VALUE) {
       LARGE_INTEGER size{};
       if (GetFileSizeEx(handle_, &size)) size_ = static_cast<uint64_t>(size.QuadPart);
+    } else {
+      // C85: the Win32 code is the ONLY reason a failed open has. It used to be
+      // thrown away together with the handle, so the user's dialog read
+      // "CreateFileW failed; " -- a semicolon and nothing after it.
+      lastError_ = GetLastError();
     }
   }
   ~InFileStream() {
@@ -549,6 +619,8 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
 
   bool valid() const { return handle_ != INVALID_HANDLE_VALUE; }
   uint64_t size() const { return size_; }
+  // GetLastError() from the failed CreateFileW (0 when the handle is valid).
+  DWORD lastError() const { return lastError_; }
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
@@ -604,6 +676,7 @@ class InFileStream final : public abi::IInStream, public abi::IStreamGetSize {
  private:
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   uint64_t size_ = 0;
+  DWORD lastError_ = 0;
   LONG refs_ = 1;
 };
 
@@ -1530,7 +1603,13 @@ inline std::wstring PathExtensionLower(std::wstring_view path) {
   return extension;
 }
 
-inline const FormatRoute* FindFormatRoute(std::wstring_view path) {
+// The table, looked up by an ALREADY-lowered extension (".7z"). Split out of
+// FindFormatRoute because Open() already holds that string: recomputing it there
+// created a second std::wstring temporary whose lifetime the optimizer is free
+// to shorten -- which is what ASan's "stack-use-after-scope" in Open's frame was
+// pointing at (2026-11-05, MSVC 14.51 + /fsanitize=address). One caller, one
+// extension, one object.
+inline const FormatRoute* FindRouteForExtension(std::wstring_view extension) {
   static const FormatRoute kRoutes[] = {
       {L".7z", "7z", &abi::CLSID_CFormat7z},
       {L".zip", "zip", &abi::CLSID_CFormatZip},
@@ -1567,12 +1646,18 @@ inline const FormatRoute* FindFormatRoute(std::wstring_view path) {
       {L".lha", "Lzh", &kClsidLzh},
       {L".dmg", "Dmg", &kClsidDmg},
   };
-  const std::wstring extension = PathExtensionLower(path);
   if (extension.empty()) return nullptr;
   for (const FormatRoute& route : kRoutes) {
     if (extension == route.extension) return &route;
   }
   return nullptr;
+}
+
+// The path-taking door stays: suites assert the routing table by PATH
+// ("C:\x.y\pack.tar" must route to tar even though the directory has a dot),
+// and that contract must not depend on who calls it.
+inline const FormatRoute* FindFormatRoute(std::wstring_view path) {
+  return FindRouteForExtension(PathExtensionLower(path));
 }
 
 // ---------------------------------------------------------------------------
@@ -1593,6 +1678,10 @@ class ArchiveReader {
   }
 
   bool Open(const std::wstring& archivePath, const std::wstring& password = {}) {
+    // C85: a stale reason from a previous Open() on this reader is worse than
+    // none -- the dialog would explain the PREVIOUS file's failure.
+    failureReason_.clear();
+    failureHr_ = 0;
     auto hr = [this](const char* what, HRESULT code) {
       char buf[80];
       std::snprintf(buf, sizeof(buf), "%s hr=0x%08lX; ", what,
@@ -1623,6 +1712,7 @@ class ArchiveReader {
           // with the plan's own sentence (it NAMES the missing volume). A silent
           // truncation here would open a shifted stream and misread every byte.
           failureReason_ = volumePlan.error;
+          failureHr_ = static_cast<unsigned long>(E_FAIL);
           openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
                         " reason=missing-volume; ";
           return false;
@@ -1645,6 +1735,7 @@ class ArchiveReader {
       std::string volumeError;
       if (!volumeStream_->Open(DirectoryOfVolumePath(archivePath), volumePlan, &volumeError)) {
         failureReason_ = volumeError.empty() ? "cannot open the volume set" : volumeError;
+        failureHr_ = static_cast<unsigned long>(E_FAIL);
         openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
                       " reason=volume-open-failed; ";
         volumeStream_->Release();
@@ -1670,7 +1761,13 @@ class ArchiveReader {
     if (!volumeStream_) {
       stream_ = new InFileStream(archivePath);
       if (!stream_->valid()) {
-        openTrace_ = "CreateFileW failed; ";
+        // C85: the semicolon-after-nothing that the user saw. The Win32 code and
+        // the path are both known here, so the sentence names them.
+        const DWORD code = stream_->lastError();
+        failureReason_ = DescribeFileOpenFailure(archivePath, code);
+        failureHr_ = static_cast<unsigned long>(HRESULT_FROM_WIN32(code));
+        openTrace_ = std::string("CreateFileW failed path=") + WideToUtf8(archivePath) +
+                     " reason=win32-" + Win32CodeText(code) + "; ";
         return false;
       }
     }
@@ -1693,7 +1790,7 @@ class ArchiveReader {
     // kNone keep the full route + probe list, so a mislabeled or prefix-wrapped
     // file still opens.
     const std::wstring extension = PathExtensionLower(archivePath);
-    const FormatRoute* route = FindFormatRoute(archivePath);
+    const FormatRoute* route = FindRouteForExtension(extension);
     openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
     // The C26 trace token stays verbatim ("route=<handler>" / "route=probe"):
     // win.extract_failure asserts on it, and a diagnostic format is a contract
@@ -1732,6 +1829,11 @@ class ArchiveReader {
                                  : static_cast<abi::IStreamGetSize*>(stream_);
     if (ReadSniffWindow(*probeStream, *probeSize, &sniffWindow,
                         &sniffHead, &sniffTail, &sniffSector16)) {
+      // C85: the hint OWNS its bytes (sniff::Window::extensionHint is a
+      // std::string). It used to be a std::string_view, and this assignment
+      // handed it a temporary that died at the end of the statement -- Sniff()
+      // then compared the dead buffer ("br" tie-break) and ASan called it a
+      // stack-use-after-scope in Open's frame.
       sniffWindow.extensionHint = WideToUtf8(extension.substr(1));
       finding = sniff::Sniff(sniffWindow);
     }
@@ -1773,8 +1875,8 @@ class ArchiveReader {
           formatExt ? library_.ClsidsForExtension(formatExt) : std::vector<GUID>{};
       for (const GUID& clsid : fromEngine) addCandidate(clsid, handler);
       if (fromEngine.empty() && formatExt) {
-        const FormatRoute* sniffRoute = FindFormatRoute(std::wstring(1, L'.') +
-                                                        Utf8ToWide(formatExt));
+        const std::wstring sniffExtension = std::wstring(1, L'.') + Utf8ToWide(formatExt);
+        const FormatRoute* sniffRoute = FindRouteForExtension(sniffExtension);
         if (sniffRoute && sniffRoute->pinnedClsid) addCandidate(*sniffRoute->pinnedClsid, handler);
       }
       if (candidates.empty()) {
@@ -1784,6 +1886,7 @@ class ArchiveReader {
         unsupportedFormat_ = handler;
         failureReason_ = std::string("unsupported format '") + handler +
                          "': this 7z.dll has no handler for it";
+        failureHr_ = static_cast<unsigned long>(E_NOTIMPL);
         openTrace_ += std::string("unsupported=") + handler + " reason=no-handler; ";
         return false;
       }
@@ -1808,6 +1911,10 @@ class ArchiveReader {
       addCandidate(abi::CLSID_CFormat7z, "7z");
     }
 
+    // C85: the last handler's HRESULT, so a refusal that a sniff could not name
+    // still carries a machine cause into the dialog.
+    HRESULT lastDeclineHr = E_FAIL;
+    const char* lastDeclineName = "";
     for (const Candidate& slot : candidates) {
       abi::IInArchive* candidate = nullptr;
       const char* name = slot.label;
@@ -1840,6 +1947,8 @@ class ArchiveReader {
         DiscoverPropertyIds();
         return true;
       }
+      lastDeclineHr = result;
+      lastDeclineName = name;
       candidate->Release();
     }
     if (sniffIsFinal) {
@@ -1849,8 +1958,22 @@ class ArchiveReader {
       const char* handler = sniff::FormatName(finding.format);
       failureReason_ = std::string("the '") + handler + "' handler rejected this file: its bytes " +
                        "identify it as " + handler + ", but this 7z.dll cannot read this one";
+      failureHr_ = static_cast<unsigned long>(lastDeclineHr);
       openTrace_ += std::string("declined=") + handler + " reason=handler-rejected; ";
+      return false;
     }
+    // C85: no sniff to name the refusal (an unknown container, a text file, a
+    // truncated header). "Every handler declined" IS the reason, and the last
+    // HRESULT is the machine half -- leaving failureReason_ empty here is what
+    // produced a dialog with a blank line under the file name.
+    failureHr_ = static_cast<unsigned long>(lastDeclineHr);
+    failureReason_ = std::string("no handler accepted this file: the last candidate (") +
+                     (lastDeclineName[0] != '\0' ? lastDeclineName : "none") +
+                     ") declined it with hr=" + HresultText(lastDeclineHr) +
+                     "; the file may be corrupt, truncated, or not an archive at all";
+    openTrace_ += std::string("declined=") +
+                  (lastDeclineName[0] != '\0' ? lastDeclineName : "none") +
+                  " reason=handler-rejected; ";
     return false;
   }
 
@@ -1862,6 +1985,9 @@ class ArchiveReader {
   // rejected the file. Empty after a successful Open().
   const std::string& unsupportedFormat() const { return unsupportedFormat_; }
   const std::string& failureReason() const { return failureReason_; }
+  // C85: the machine cause of the failure failureReason() describes (0 when the
+  // open succeeded). The dialog prints it as "(0x...)".
+  unsigned long failureHr() const { return failureHr_; }
   const std::string& propTrace() const { return propTrace_; }
 
   // Release the archive and the file handle *before* the caller deletes the
@@ -2561,6 +2687,7 @@ class ArchiveReader {
   // open. 'unsupportedFormat_' is set only when NO handler exists at all;
   // 'failureReason_' explains that case and a handler that rejected the file.
   std::string failureReason_;
+  unsigned long failureHr_ = 0;
   std::string unsupportedFormat_;
   std::string openTrace_;
   // Diagnostics only -- see PropertyId(): this set must never gate a

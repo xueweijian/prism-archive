@@ -28,11 +28,11 @@
     {
       "name": "asan-msvc",
       "displayName": "Windows x64 Release + AddressSanitizer (MSVC)",
-      "description": "Byte-for-byte the flags of the Windows CI lane: /fsanitize=address /Zi /EHsc + /InferAsanLibraries. CONTRACTS D14: the 7z.dll shipped by some runner images is itself ASan-instrumented and reports a SetCodecs use-after-free with zero frames of ours -- that report is 7-Zip's, not ours.",
+      "description": "Byte-for-byte the flags of the Windows CI lane: /fsanitize=address /Z7 /EHsc + /InferAsanLibraries /DEBUG. CONTRACTS D14: the 7z.dll shipped by some runner images is itself ASan-instrumented and reports a SetCodecs use-after-free with zero frames of ours -- that report is 7-Zip's, not ours. /DEBUG is NOT optional: without a PDB every ASan frame prints as 'PrismArchive.exe+0x1400048c2', and the 2026-11-05 stack-use-after-scope took four red Windows runs to identify because the frame names (sniff::Sniff, ArchiveReader::Open) and the dead object were all invisible. /OPT:REF keeps dead-code elimination identical, so nothing changes at run time -- only whether a crash can be read.",
       "inherits": "base-msvc",
       "cacheVariables": {
         "CMAKE_CXX_FLAGS": "/fsanitize=address /Z7 /EHsc",
-        "CMAKE_EXE_LINKER_FLAGS": "/InferAsanLibraries"
+        "CMAKE_EXE_LINKER_FLAGS": "/InferAsanLibraries /DEBUG /OPT:REF"
       }
     },
     {

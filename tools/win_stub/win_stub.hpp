@@ -81,6 +81,22 @@ using SSIZE_T = long long;
 // winerror.h: ERROR_OPEN_FAILED = 123L -- volume streams return it when a
 // volume cannot be opened (card C82). Shapes/values only, like everything here.
 #define ERROR_OPEN_FAILED 123L
+// winerror.h: the codes the open-failure text distinguishes (card C85). Values are
+// the real ones -- a test may compare them, so a made-up number would hide a bug.
+#define ERROR_FILE_NOT_FOUND 2L
+#define ERROR_PATH_NOT_FOUND 3L
+#define ERROR_INVALID_DRIVE 15L
+#define ERROR_BAD_NETPATH 53L
+
+// winbase.h: message formatting (card C85 failure-reason text). Constants and one
+// declaration only -- the stub never formats anything.
+#define FORMAT_MESSAGE_ALLOCATE_BUFFER 0x00000100
+#define FORMAT_MESSAGE_FROM_SYSTEM 0x00001000
+#define FORMAT_MESSAGE_IGNORE_INSERTS 0x00000200
+inline DWORD FormatMessageW(DWORD, const void*, DWORD, DWORD, wchar_t*, DWORD, void*) {
+    return 0;
+}
+inline void* LocalFree(void* memory) { return nullptr; }
 
 // Volume enumeration vocabulary (card C82). Shapes only, following the
 // CreateFileW precedent above: the stub NEVER enumerates, so a syntax-only

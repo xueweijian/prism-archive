@@ -136,6 +136,10 @@ inline long RoleToMsaa(prism::a11y::Role role) {
     case prism::a11y::Role::ProgressBar: return ROLE_SYSTEM_PROGRESSBAR;
     case prism::a11y::Role::MenuBar: return ROLE_SYSTEM_MENUBAR;
     case prism::a11y::Role::MenuItem: return ROLE_SYSTEM_MENUITEM;
+    // C85: the tab's x is a button to the client -- that is what makes UIA
+    // expose InvokePattern on it -- while the a11y role keeps the payload
+    // (a TAB index) unambiguous inside this process.
+    case prism::a11y::Role::CloseButton: return ROLE_SYSTEM_PUSHBUTTON;
   }
   return ROLE_SYSTEM_CLIENT;
 }
@@ -154,7 +158,8 @@ inline long StateOf(const prism::a11y::Node& node) {
       node.role == prism::a11y::Role::ListItem ||
       node.role == prism::a11y::Role::OutlineItem ||
       node.role == prism::a11y::Role::List ||
-      node.role == prism::a11y::Role::Text) {
+      node.role == prism::a11y::Role::Text ||
+      node.role == prism::a11y::Role::CloseButton) {
     state |= STATE_SYSTEM_FOCUSABLE;
   }
   // NO STATE_SYSTEM_READONLY on the search field: the UIA proxy derives
@@ -198,6 +203,9 @@ class Host {
   virtual void SelectRow(int row) = 0;
   virtual void ActivateRow(int row) = 0;
   virtual void ActivateTab(int index) = 0;
+  // C85: the tab's x. Its own verb because it must reach RequestCloseTab (the
+  // same door Ctrl+W and the painted x use), NOT ActivateTab.
+  virtual void CloseTab(int index) = 0;
   virtual void ActivateFolder(const std::string& key) = 0;
   // The search field's two verbs (C80 follow-up): a VALUE write and "put the
   // keyboard in it". Both must reach the SAME model the keyboard uses.
@@ -425,6 +433,10 @@ class Accessible final : public IAccessible {
       case prism::a11y::Role::PageTab:
         if (host_) host_->ActivateTab(node->index);
         return S_OK;
+      case prism::a11y::Role::CloseButton:
+        // "Focus the x" has no separate state: it is a button, not a focus stop
+        // in this product's keyboard model (Ctrl+W is the keyboard door).
+        return S_FALSE;
       case prism::a11y::Role::ListItem:
         if (host_) host_->SelectRow(node->index);
         return S_OK;
@@ -546,6 +558,12 @@ class Accessible final : public IAccessible {
         return S_OK;
       case prism::a11y::Role::PageTab:
         if (host_) host_->ActivateTab(node->index);
+        return S_OK;
+      case prism::a11y::Role::CloseButton:
+        // C85: the ONE verb a screen reader's Invoke (or UIA InvokePattern) ends
+        // at -- the window's RequestCloseTab, i.e. the same path as Ctrl+W and
+        // the painted x. index is a TAB index, never a band action.
+        if (host_) host_->CloseTab(node->index);
         return S_OK;
       case prism::a11y::Role::ListItem:
         if (host_) host_->ActivateRow(node->index);

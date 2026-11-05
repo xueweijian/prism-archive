@@ -281,10 +281,14 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // list captions, three buttons, progress, the two-part error line and nine
   // status sentences). The census was 129.
   // C92: +11 for the in-app right-click menus (eight verbs and three disabled
-  // reasons -- a greyed item must be able to say why). The census is 140 and a
-  // table that drops one fails here; the FIRST push of C92 forgot this line and
-  // this assertion is what caught it.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{140});
+  // reasons -- a greyed item must be able to say why). The census was 140; the
+  // FIRST push of C92 forgot this line and this assertion is what caught it.
+  // C105: +4 for the info card's FIELD LABELS (sidebar.card.crypto / method /
+  // dictionary / ratio). The card is a label/value stack now, so "DICT 64.0 MB"
+  // became a label above a value and each label is a word of its own. The census
+  // is 144 -- and the first push of C105 forgot this line too, which is exactly
+  // what this number is for.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{144});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

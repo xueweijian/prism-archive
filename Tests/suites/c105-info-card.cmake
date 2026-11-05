@@ -10,7 +10,9 @@
 #   3. adjacent status segments are at least 16 px apart, read from their rects;
 #   4. the band paints no vertical rule column;
 #   5. the value run of the ratio segment is the PRIMARY role (>= 20 levels
-#      brighter than its label), at the x the painter actually used.
+#      brighter than its label), at the x the painter actually used;
+#   6. the four i18n keys this card added are in the census exactly once and the
+#      census carries no duplicate (a +N drift cannot hide behind a count).
 #
 # One card = one file (see Tests/suites/README.md): Tests/CMakeLists.txt is
 # untouched; the glob picks this up.
@@ -21,6 +23,11 @@
 # printed at the FIRST failing check and only when the injected branch is
 # compiled in. A clean build never prints it, so an injection that silently
 # stopped matching turns its registration red instead of green.
+#
+# The loop is the repo's conventional shape (foreach IN ITEMS + string(TOLOWER))
+# on purpose: tools/mutation/mutant_matrix.py expands exactly that form, and a
+# list(GET)-derived name stays literal and is reported as a wiring problem
+# (measured: it was, on the first push of this card).
 if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_executable(win_c105_info_card win/test_c105_info_card.cpp)
   target_link_libraries(win_c105_info_card PRIVATE prism_core prism_win_bridge
@@ -32,25 +39,20 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
       PASS_REGULAR_EXPRESSION "ALL C105 INFO-CARD CHECKS PASSED")
 
   # The verdict names the injection it caught; the regex IS the verdict.
-  set(C105_MUTANT_ARMS underline:underline status-divider:status_divider
-                               status-tight-gap:status_tight_gap)
-  foreach(arm IN LISTS C105_MUTANT_ARMS)
-    string(REPLACE ":" ";" parts "${arm}")
-    list(GET parts 0 arm_id)
-    list(GET parts 1 arm_symbol)
-    string(TOUPPER "${arm_symbol}" arm_upper)
-    add_executable("win_c105_info_card_mutant_${arm_id}" win/test_c105_info_card.cpp)
-    target_link_libraries("win_c105_info_card_mutant_${arm_id}"
+  foreach(mutant IN ITEMS UNDERLINE STATUS_DIVIDER STATUS_TIGHT_GAP)
+    string(TOLOWER "${mutant}" mutant_lc)
+    add_executable("win_c105_info_card_mutant_${mutant_lc}" win/test_c105_info_card.cpp)
+    target_link_libraries("win_c105_info_card_mutant_${mutant_lc}"
                           PRIVATE prism_core prism_win_bridge
                                   user32.lib gdi32.lib d2d1.lib dwrite.lib
                                   windowscodecs.lib ole32.lib)
-    target_compile_options("win_c105_info_card_mutant_${arm_id}" PRIVATE /WX-)
-    target_compile_definitions("win_c105_info_card_mutant_${arm_id}"
-                               PRIVATE "PRISM_C105_MUTANT_${arm_upper}=1")
-    add_test(NAME "mutation.c105.${arm_id}"
-             COMMAND "win_c105_info_card_mutant_${arm_id}")
-    set_tests_properties("mutation.c105.${arm_id}" PROPERTIES
+    target_compile_options("win_c105_info_card_mutant_${mutant_lc}" PRIVATE /WX-)
+    target_compile_definitions("win_c105_info_card_mutant_${mutant_lc}"
+                               PRIVATE "PRISM_C105_MUTANT_${mutant}=1")
+    add_test(NAME "mutation.c105.${mutant_lc}"
+             COMMAND "win_c105_info_card_mutant_${mutant_lc}")
+    set_tests_properties("mutation.c105.${mutant_lc}" PROPERTIES
                          TIMEOUT 240
-                         PASS_REGULAR_EXPRESSION "C105 MUTATION CAUGHT: ${arm_id}")
+                         PASS_REGULAR_EXPRESSION "C105 MUTATION CAUGHT: ${mutant_lc}")
   endforeach()
 endif()

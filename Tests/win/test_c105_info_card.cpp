@@ -68,21 +68,25 @@ constexpr UINT32 kWidth = 1600;
 constexpr UINT32 kHeight = 1000;
 
 // ---------------------------------------------------------------- mutations
+// The verdict string is the LOWER-CASE mutant id, exactly as the suite's
+// foreach(mutant IN ITEMS ...) + string(TOLOWER) spells the ctest name: one
+// name from the registration to the printed marker, so the PASS_REGULAR_
+// EXPRESSION and the marker cannot drift apart.
 #if defined(PRISM_C105_MUTANT_UNDERLINE)
 // C105 MUTANT ACTIVE: underline
 // NEGATIVE CONTROL (CONTRACTS D3): the card's full-width hairline is restored,
 // so assertion (1) -- "no full-width 1 px rule inside the card" -- MUST go red.
 constexpr const char* kMutationName = "underline";
 #elif defined(PRISM_C105_MUTANT_STATUS_DIVIDER)
-// C105 MUTANT ACTIVE: status-divider
+// C105 MUTANT ACTIVE: status_divider
 // NEGATIVE CONTROL (CONTRACTS D3): the band's 1 px vertical rule is restored,
 // so assertion (4) MUST go red.
-constexpr const char* kMutationName = "status-divider";
+constexpr const char* kMutationName = "status_divider";
 #elif defined(PRISM_C105_MUTANT_STATUS_TIGHT_GAP)
-// C105 MUTANT ACTIVE: status-tight-gap
+// C105 MUTANT ACTIVE: status_tight_gap
 // NEGATIVE CONTROL (CONTRACTS D3): the air between segments collapses to 8 px,
 // so assertion (3) MUST go red.
-constexpr const char* kMutationName = "status-tight-gap";
+constexpr const char* kMutationName = "status_tight_gap";
 #else
 constexpr const char* kMutationName = nullptr;
 #endif
@@ -618,6 +622,39 @@ void CheckBandTwoTone(const Frame& frame, const GalleryRenderer& renderer,
   }
 }
 
+// (6) the i18n census, checked from the card that introduced the keys.
+//
+// test_i18n.cpp pins the census SIZE, and a size is a number somebody has to
+// remember to bump (C88, C92 and this card each forgot it once -- the Linux lane
+// is what caught all three). This check makes the other half visible locally: a
+// key added twice, or a key the table was updated for but the census was not,
+// fails HERE, in the suite that owns the words.
+void CheckI18nCensus() {
+  const std::vector<std::string>& keys = prism::i18n::RequiredKeys();
+  const char* kAdded[] = {"sidebar.card.crypto", "sidebar.card.method",
+                          "sidebar.card.dictionary", "sidebar.card.ratio"};
+  for (const char* key : kAdded) {
+    const int count = static_cast<int>(std::count(keys.begin(), keys.end(), std::string(key)));
+    if (count != 1) {
+      char message[192];
+      std::snprintf(message, sizeof(message),
+                    "i18n key %s appears %d times in RequiredKeys() (want exactly 1)", key,
+                    count);
+      Fail(message);
+    }
+  }
+  int duplicates = 0;
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    for (std::size_t j = i + 1; j < keys.size(); ++j) {
+      if (keys[i] == keys[j]) ++duplicates;
+    }
+  }
+  std::printf("C105 I18N CENSUS: keys=%zu added=4 duplicates=%d\n", keys.size(), duplicates);
+  if (duplicates != 0) {
+    Fail("RequiredKeys() carries a duplicate key (the census would count it twice)");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -637,9 +674,9 @@ int main(int argc, char** argv) {
 #if defined(PRISM_C105_MUTANT_UNDERLINE)
   std::puts("C105 MUTANT ACTIVE: underline (the card's hairline is back)");
 #elif defined(PRISM_C105_MUTANT_STATUS_DIVIDER)
-  std::puts("C105 MUTANT ACTIVE: status-divider (the band's 1 px rule is back)");
+  std::puts("C105 MUTANT ACTIVE: status_divider (the band's 1 px rule is back)");
 #elif defined(PRISM_C105_MUTANT_STATUS_TIGHT_GAP)
-  std::puts("C105 MUTANT ACTIVE: status-tight-gap (the 24 px air is 8 px)");
+  std::puts("C105 MUTANT ACTIVE: status_tight_gap (the 24 px air is 8 px)");
 #endif
 
   SceneRig rig;
@@ -670,6 +707,7 @@ int main(int argc, char** argv) {
   CheckStatusGaps(rig.frame, rig.scene.status);
   CheckBandHasNoVerticalRule(frame, rig.frame, rig.scene.status);
   CheckBandTwoTone(frame, harness.renderer, rig.frame, rig.scene.status);
+  CheckI18nCensus();
 
   // The design artifacts: the same pixels, cropped to the two surfaces the card
   // is about. Written only when a directory is passed (ctest passes none).

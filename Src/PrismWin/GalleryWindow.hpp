@@ -761,9 +761,19 @@ class GalleryWindow {
   // so a fresh install's shell is continuous with the content on day one.
   void SetChromeVariant(prism::theme::Variant variant) {
     chromeVariant_ = variant;
+    // C91: the SAME variant drives the CONTENT. Until this card the shell
+    // (caption + owner-drawn menu) followed the setting while every renderer
+    // surface kept its Midnight default -- which is why a whole-window day ->
+    // night diff moved 7.96 % of the pixels, all of them in the title bar. One
+    // setter, one field, both halves of the window.
     ApplyChromeTheme();
+    Invalidate();
   }
   prism::theme::Variant ChromeVariant() const { return chromeVariant_; }
+  // C91: what the renderer is handed as Scene::theme. It is the SAME field the
+  // shell uses, so "the caption changed but the canvas did not" is no longer a
+  // state this window can be put in.
+  prism::theme::Variant ContentTheme() const { return chromeVariant_; }
   const prism::win::chrome::TitleBarRecord& TitleBar() const { return titleBar_; }
 
   // The words the owner-drawn bar carries. The OS no longer stores an
@@ -4515,9 +4525,10 @@ class GalleryWindow {
     // have shipped the pre-C77 look (a translucent panel over a flat colour).
     scene.glassPanels = prism::theme::BackdropRefractionEnabled();
     scene.backdropRefraction = scene.glassPanels;
-    // glassTheme keeps its Midnight default: no window code sets a Variant yet
-    // (sidebarTheme / actionTheme / tabTheme are all the same default), so
-    // inventing a fourth source here would be a second theme authority.
+    // C91: the frame's ONE theme input. It is the same field the shell paints
+    // from (chromeVariant_), so a theme switch can no longer reach the caption
+    // and stop there.
+    scene.theme = chromeVariant_;
     // V4: the status band's four segments read the archive properties the
     // engine reported (encryption from SetArchiveInfo, the rest from
     // SetArchiveStatus). Unknown is a state, not an empty strip.

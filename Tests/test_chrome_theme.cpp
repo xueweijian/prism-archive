@@ -106,7 +106,10 @@ PRISM_TEST("c83 menu text meets 4.5:1 on every variant and every row state") {
 // 3. THE CARD'S LUMA RULE: the dark shell is within 12 levels of the canvas.
 // ---------------------------------------------------------------------------
 PRISM_TEST("c83 the dark shell is within 12 luma levels of the canvas") {
-  const double canvas = prism::chrome::Luma255(prism::chrome::kCanvasReference);
+  // C91: the canvas the window actually clears to is the theme's composite, so
+  // the pure gate asks the SAME function the renderer asks.
+  const double canvas =
+      prism::chrome::Luma255(prism::chrome::CanvasPresentedColor(Variant::Midnight));
   const double shell = prism::chrome::Luma255(PaletteFor(Variant::Midnight).background);
   std::printf("  canvas luma=%.2f shell luma=%.2f delta=%.2f\n", canvas, shell,
               shell - canvas);

@@ -354,6 +354,10 @@ class ListFrameBench {
     return window.last - window.first + 1;
   }
 
+  // C91: the canvas is the THEME's composite now (prism::chrome::CanvasColor),
+  // not the #0B0E13 literal. Ask the SAME entry the renderer asks, so "the frame
+  // painted" keeps meaning "the content surface reached the target" -- a blank or
+  // garbage target still fails, and the measured pixel is printed either way.
   bool BackdropPainted() {
     WICRect rect{0, 0, static_cast<INT>(width_), static_cast<INT>(height_)};
     ComPtr<IWICBitmapLock> lock;
@@ -364,7 +368,21 @@ class ListFrameBench {
         buffer == nullptr) {
       return false;
     }
-    return buffer[0] == 0x13 && buffer[1] == 0x0E && buffer[2] == 0x0B;
+    const prism::theme::Rgba canvas =
+        prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+    const auto byteOf = [](float v) {
+      const double scaled = static_cast<double>(v) * 255.0 + 0.5;
+      return static_cast<int>(scaled < 0.0 ? 0.0 : (scaled > 255.0 ? 255.0 : scaled));
+    };
+    const int want[3] = {byteOf(canvas.b), byteOf(canvas.g), byteOf(canvas.r)};  // BGRA
+    const int got[3] = {buffer[0], buffer[1], buffer[2]};
+    const bool painted = std::abs(got[0] - want[0]) <= 2 && std::abs(got[1] - want[1]) <= 2 &&
+                         std::abs(got[2] - want[2]) <= 2;
+    if (!painted) {
+      std::printf("    [c91] corner pixel BGR=(%d,%d,%d) want=(%d,%d,%d)\n", got[0], got[1],
+                  got[2], want[0], want[1], want[2]);
+    }
+    return painted;
   }
 
  private:

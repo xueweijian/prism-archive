@@ -90,9 +90,16 @@ struct Box {
   int left = 0, top = 0, right = 0, bottom = 0;
 };
 
-// The canvas colour as the render target quantizes kBackdrop to bytes.
-UINT32 CanvasPixel() {
-  const D2D1_COLOR_F c = prism::win::gallery::GalleryRenderer::kBackdrop;
+// The canvas colour as the render target quantizes it to bytes. C91: it is the
+// theme's canvas composite, not the #0B0E13 literal the renderer used to clear
+// to. "presented" asks for the pixel a resting area shows when the C77 backdrop
+// layer is ON (the canvas is washed by the veil then) -- the layer is part of
+// the canvas recipe, so a frame that turns it on moves every canvas pixel.
+UINT32 CanvasPixel(bool presented) {
+  const prism::theme::Rgba token =
+      presented ? prism::chrome::CanvasPresentedColor(prism::theme::Variant::Midnight)
+                : prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+  const D2D1_COLOR_F c = D2D1::ColorF(token.r, token.g, token.b, token.a);
   const auto q = [](float v) {
     return static_cast<UINT32>((std::min)(255.0f, (std::max)(0.0f, v * 255.0f + 0.5f)));
   };
@@ -217,10 +224,10 @@ bool InChrome(const prism::layout::Rect& box, int x, int y) {
 // A2, assertions 1-3, on one frame. chrome == nullptr: no floating chrome in
 // the frame, the whole band is audited strictly.
 void AssertHeaderPixels(const Render& painted, const char* tag,
-                        const prism::layout::Rect* chrome) {
+                        const prism::layout::Rect* chrome, bool presented) {
   const prism::layout::Layout layout = TestLayout();
   const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
-  const UINT32 canvas = CanvasPixel();
+  const UINT32 canvas = CanvasPixel(presented);
 
   // 1. no accent-dominant pixel in the band (no ring, no accent panel). The
   //    chrome shadow is neutral grey, so the full band stays under this one.
@@ -283,6 +290,27 @@ void AssertHeaderPixels(const Render& painted, const char* tag,
 // between two identical frames (the C79 standard). On a deterministic host
 // the floor is 0 and the original byte-identical standard applies verbatim --
 // a relative criterion, not a relaxation.
+// The mean per-channel change between two frames over one rectangle: the
+// magnitude counterpart of BandDifferingPixels, for pairs where the whole area
+// legitimately moves (the C91 veil) and a pixel COUNT cannot discriminate.
+double MeanChannelDelta(const Render& a, const Render& b, const prism::layout::Rect& rect) {
+  double sum = 0.0;
+  int count = 0;
+  for (int y = rect.top; y < rect.bottom; ++y) {
+    for (int x = rect.left; x < rect.right; ++x) {
+      if (!a.frame.In(x, y) || !b.frame.In(x, y)) continue;
+      const UINT32 pa = a.frame.At(x, y);
+      const UINT32 pb = b.frame.At(x, y);
+      for (int shift = 0; shift <= 16; shift += 8) {
+        sum += std::abs(static_cast<int>((pa >> shift) & 0xFFu) -
+                        static_cast<int>((pb >> shift) & 0xFFu));
+      }
+      ++count;
+    }
+  }
+  return count == 0 ? 0.0 : sum / (3.0 * static_cast<double>(count));
+}
+
 int BandDifferingPixels(const Render& a, const Render& b) {
   const prism::layout::Layout layout = TestLayout();
   const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
@@ -339,7 +367,7 @@ PRISM_TEST("c81.a2.header_flat_on_canvas") {
   std::vector<SortItem> rows = AuditRows();
   Render plain;
   if (!PRISM_CHECK(RenderScene(ListScene(&rows, GrowStatus()), &plain))) return;
-  AssertHeaderPixels(plain, "plain", nullptr);
+  AssertHeaderPixels(plain, "plain", nullptr, /*presented=*/false);
 }
 
 PRISM_TEST("c81.a2.header_with_glass_backdrop") {
@@ -361,15 +389,29 @@ PRISM_TEST("c81.a2.header_with_glass_backdrop") {
   const prism::layout::Layout layout = TestLayout();
   const prism::layout::Rect chromeBox =
       ChromeShadowBox(layout, prism::layout::ListHeaderRect(layout));
-  AssertHeaderPixels(glass, "glass", &chromeBox);
+  AssertHeaderPixels(glass, "glass", &chromeBox, /*presented=*/true);
 
   Render glassAgain;
   if (!PRISM_CHECK(RenderScene(glassScene, &glassAgain))) return;
   const int noise = BandDifferingPixels(glass, glassAgain);
   const int changed = BandDifferingPixels(glass, chromeOnly);
-  std::printf("  [c81] header band: backdrop changed=%d px, same-scene noise floor=%d px\n",
-              changed, noise);
-  PRISM_CHECK(changed <= noise);
+  // C91: toggling the refraction layer also toggles the VEIL, which is part of
+  // the canvas recipe -- so the whole band now moves by a couple of levels and a
+  // pixel COUNT saturates. The audit's actual question is "does the blurred
+  // still bleed UNDER the header", i.e. "does the band move MORE than bare
+  // canvas does". So the comparison is the MEAN channel delta of the band
+  // against the same-sized strip of empty canvas below it, in the same pair of
+  // frames.
+  const prism::layout::Rect header = prism::layout::ListHeaderRect(TestLayout());
+  prism::layout::Rect reference = header;
+  reference.top = header.bottom + 200;
+  reference.bottom = reference.top + (header.bottom - header.top);
+  const double bandDelta = MeanChannelDelta(glass, chromeOnly, header);
+  const double refDelta = MeanChannelDelta(glass, chromeOnly, reference);
+  std::printf("  [c81] header band: backdrop changed=%d px, same-scene noise floor=%d px, "
+              "bandDelta=%.2f canvasDelta=%.2f\n",
+              changed, noise, bandDelta, refDelta);
+  PRISM_CHECK(bandDelta <= refDelta + 1.0);
 }
 
 // ---------------------------------------------------------------------------

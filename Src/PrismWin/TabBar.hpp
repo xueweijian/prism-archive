@@ -55,6 +55,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../PrismCore/ChromeTheme.hpp"  // C91: the canvas the strip sits on
 #include "../PrismCore/ThemeTokens.hpp"
 #include "../PrismCore/WindowLayout.hpp"
 
@@ -340,6 +341,16 @@ class Painter {
   // case 7 of the suite measures.
   void Paint(ID2D1RenderTarget* target, const prism::layout::Layout& layout, const View& view,
              prism::theme::Variant variant = prism::theme::Variant::Midnight) {
+    Paint(target, layout, view, variant, prism::chrome::CanvasPresentedColor(variant));
+  }
+
+  // C91: the strip IS the canvas, so the caller passes the colour the frame was
+  // actually cleared to. It used to be filled with the TRANSLUCENT canvas token,
+  // which was right while the target was cleared to an opaque backdrop reference
+  // and became a double composite (2-3 levels darker, a visible seam beside the
+  // content) once the clear itself became the theme's canvas.
+  void Paint(ID2D1RenderTarget* target, const prism::layout::Layout& layout, const View& view,
+             prism::theme::Variant variant, const prism::theme::Rgba& canvas) {
     lastPainted_ = 0;
     lastDirtyDots_ = 0;
     lastInsertMarks_ = 0;
@@ -351,9 +362,10 @@ class Painter {
 
     target->PushAxisAlignedClip(ToRectF(bar), D2D1_ANTIALIAS_MODE_ALIASED);
 
-    // The strip's own background is the CANVAS token, so the band reads as the
+    // The strip's own background is the CANVAS, so the band reads as the
     // window's backdrop with tabs floating on it -- never as a third surface.
-    SetToken(prism::theme::TokenId::SurfaceCanvasBase, variant);
+    // C91: the OPAQUE canvas, not the token over it (see the overload above).
+    brush_->SetColor(ToD2d(canvas));
     target->FillRectangle(ToRectF(bar), brush_.Get());
 
     for (const TabGeometry& tab : tabs) {

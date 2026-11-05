@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "../PrismCore/ActionBarModel.hpp"  // C-V2: the action table + band geometry
+#include "../PrismCore/ChromeTheme.hpp"    // C91: ThemeSurfaceColor -- the ONE theme entry
 #include "../PrismCore/Gallery.hpp"
 #include "../PrismCore/GlassIsland.hpp"
 #include "../PrismCore/ListLayout.hpp"
@@ -59,7 +60,13 @@ inline constexpr bool kPaintSidebar = true;
 class GalleryRenderer {
  public:
   // The design tokens (iOS 26 dark glass language).
-  static constexpr D2D1_COLOR_F kBackdrop = {0.043f, 0.055f, 0.075f, 1.0f};   // #0B0E13
+  //
+  // C91: THERE IS NO kBackdrop ANY MORE. The canvas used to be this literal
+  // (#0B0E13, ~11,14,19), which is why the day/night diff of the whole window
+  // moved 7.96 % of its pixels -- all of them in the title bar. The canvas, the
+  // action band and the list header now resolve from the theme through
+  // prism::chrome::CanvasColor / CanvasPresentedColor / ThemeSurfaceColor, the
+  // ONE entry point in PrismCore. A literal here would be a second authority.
   static constexpr D2D1_COLOR_F kTileFill = {1.0f, 1.0f, 1.0f, 0.06f};        // glass pane
   static constexpr D2D1_COLOR_F kTileBorder = {1.0f, 1.0f, 1.0f, 0.12f};
   static constexpr D2D1_COLOR_F kIslandFill = {0.10f, 0.12f, 0.16f, 0.72f};   // floating glass
@@ -122,6 +129,12 @@ class GalleryRenderer {
   }
 
   struct Scene {
+    // C91: WHICH theme every surface in this frame paints. This is the scene's
+    // ONLY theme input: the sidebar, the tab strip, the action island, the glass
+    // panels, the canvas, the status band and the list all read it, so a window
+    // that sets one field can no longer ship a frame where four surfaces follow
+    // the theme and the loot behind them does not.
+    prism::theme::Variant theme = prism::theme::Variant::Midnight;
     std::vector<prism::ArchiveItem>* items = nullptr;
     prism::gallery::ViewportWindow* viewport = nullptr;
     prism::ProgressHud::View hud;
@@ -153,10 +166,9 @@ class GalleryRenderer {
     const prism::list::ColumnLayout* listColumns = nullptr;
     bool hasListColumns = false;
     // C29: the explicit fold (the width fold is GalleryWindow's policy through
-    // SidebarFits) and the theme whose design tokens the rail resolves. Both
-    // default to the shipping values, so a pre-C29 scene is unchanged.
+    // SidebarFits). Defaults to the shipping value, so a pre-C29 scene is
+    // unchanged.
     bool sidebarCollapsed = false;
-    prism::theme::Variant sidebarTheme = prism::theme::Variant::Midnight;
     // V1: the window hands in the SAME layout it hit-tests with. When absent
     // (snapshot / bench scenes), the renderer computes it from the target size.
     const prism::layout::Layout* layout = nullptr;
@@ -176,14 +188,12 @@ class GalleryRenderer {
     const prism::actionbar::Model* actions = nullptr;
     int actionHover = -1;    // button index under the pointer (-1: none)
     int actionPressed = -1;  // button index held down (-1: none)
-    prism::theme::Variant actionTheme = prism::theme::Variant::Midnight;
 
     // C60: the tab strip. nullptr -> no strip at all (every pre-C60 scene, and
     // the "no archive is open" state, where the band is hidden and the action
     // island sits directly under the title). The band's rectangle comes from
     // V1's layout (Layout::tabBar); this view only says what to paint in it.
     const prism::win::tabbar::View* tabs = nullptr;
-    prism::theme::Variant tabTheme = prism::theme::Variant::Midnight;
 
     // ------------------------------------------------------------- C77 glass
     // The BACKDROP LAYER: the current items rendered at 1/8 resolution, blurred
@@ -200,9 +210,6 @@ class GalleryRenderer {
     // for the breadcrumb island, the action island's base, the rail's base and
     // the Quick Look card. Same opt-in rule as above.
     bool glassPanels = false;
-    // Which theme's C77 tokens the glass resolves. Midnight is the shipping
-    // default and the pre-C77 scenes never read these tokens at all.
-    prism::theme::Variant glassTheme = prism::theme::Variant::Midnight;
     // A caller-side bump for "the items changed". The renderer ALSO fingerprints
     // the catalog (count + first/middle/last path), so a rename rebuilds even
     // when nobody bumps this; the field exists so a test can force the change.
@@ -320,12 +327,24 @@ class GalleryRenderer {
 
   void Draw(ID2D1RenderTarget* target, const Scene& scene) {
     const D2D1_SIZE_F size = target->GetSize();
+    // C91: ONE theme resolution per frame. Everything below -- the clear, the
+    // bands, the status strip, the tab strip, the rail, the action band, the
+    // list, the floating islands -- reads this local theme and canvasColor_,
+    // never a variant field of its own. That is what makes "the theme reached
+    // the content" a property of this function instead of a promise from the
+    // caller.
+    const prism::theme::Variant theme = ThemeOf(scene);
+    canvasColor_ = CanvasOf(scene, theme);
     // C71: one resolution per frame; every method below that resets a brush
     // restores THESE values, not the pre-C71 constants.
-    accentColor_ = AccentOf(scene.actionTheme);
-    islandColor_ = IslandOf(scene.actionTheme);
+    accentColor_ = AccentOf(theme);
+    islandColor_ = IslandOf(theme);
     accent_->SetColor(accentColor_);
     island_->SetColor(islandColor_);
+    // C91: the text roles and the rail brush are recoloured EVERY frame. They
+    // used to be built once from two literals, so even a scene that knew the
+    // variant painted midnight text on a daylight canvas.
+    ApplyThemeBrushes(theme);
     // V1: ONE layout for the whole frame -- bands, grid metrics, list body and
     // chrome. A component that wants a rectangle asks this object.
     // V4: the rail is CHROME (DESIGN.md §2 lists it as a band beside the
@@ -340,7 +359,7 @@ class GalleryRenderer {
             : prism::layout::Compute(static_cast<int>(size.width),
                                      static_cast<int>(size.height), railColumn,
                                      scene.listMode);
-    target->Clear(kBackdrop);
+    target->Clear(canvasColor_);
     // C77: the refraction layer sits under EVERYTHING -- bands, content, chrome.
     // It is built from the content only (the items), never from the chrome, so
     // a hover or a focus pill cannot make the wallpaper shimmer.
@@ -350,7 +369,15 @@ class GalleryRenderer {
     // the bands and before the content, so the content's clip never covers it
     // and a tab can never be drawn over a tile. A null view or a hidden band
     // paints nothing at all -- case 7 of the suite measures the pixels.
-    if (scene.tabs != nullptr) tabPainter_.Paint(target, layout, *scene.tabs, scene.tabTheme);
+    if (scene.tabs != nullptr) {
+      // C91: hand the strip the SAME canvas this frame cleared to -- the strip
+      // repaints its band over the refraction layer, and a translucent token
+      // there would composite the canvas twice (2-3 levels darker than the
+      // content beside it, a visible seam).
+      const prism::theme::Rgba canvas(canvasColor_.r, canvasColor_.g, canvasColor_.b,
+                                      canvasColor_.a);
+      tabPainter_.Paint(target, layout, *scene.tabs, theme, canvas);
+    }
     // V4: the 28 px band carries its four segments; an empty strip was symptom
     // #4 of the screenshot.
     DrawStatusBar(target, scene, layout);
@@ -379,7 +406,7 @@ class GalleryRenderer {
           D2D1::RectF(rail.panel.left, (std::max)(rail.panel.top, 0.0f), rail.panel.right,
                       (std::min)(rail.panel.bottom, size.height));
       if (railBox.right > railBox.left && railBox.bottom > railBox.top) {
-        glassPanel_.PaintShadow(target, railBox, scene.glassTheme, &glassStats_);
+        glassPanel_.PaintShadow(target, railBox, scene.theme, &glassStats_);
       }
     }
     // NEGATIVE CONTROL (CONTRACTS D3): the rail is never painted, so the suite's
@@ -471,9 +498,9 @@ class GalleryRenderer {
     }
     if (!backdropBitmap_) return;
     const prism::theme::Rgba ghost =
-        prism::theme::Lookup(prism::theme::TokenId::SurfaceBackdropGhost, scene.glassTheme).color;
+        prism::theme::Lookup(prism::theme::TokenId::SurfaceBackdropGhost, scene.theme).color;
     const prism::theme::Rgba veil =
-        prism::theme::Lookup(prism::theme::TokenId::SurfaceBackdropVeil, scene.glassTheme).color;
+        prism::theme::Lookup(prism::theme::TokenId::SurfaceBackdropVeil, scene.theme).color;
     target->DrawBitmap(backdropBitmap_.Get(), D2D1::RectF(0.0f, 0.0f, size.width, size.height),
                        ghost.a, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     if (sidebarBrush_ && veil.a > 0.0f) {
@@ -596,10 +623,18 @@ class GalleryRenderer {
     // 19 levels brighter than the canvas instead of the token's ~13. The island
     // itself is painted by ActionBarPainter (SurfaceFloatingIsland); everything
     // outside its squircle must read as the canvas it floats on.
-    island_->SetColor(kBackdrop);
+    //
+    // C91: that canvas is now THE theme's canvas, and the same one the target was
+    // cleared to. Filling the band with a literal here would have left a 92 %
+    // untheme-able rectangle around the island -- the defect this card measures.
+    island_->SetColor(canvasColor_);
     target->FillRectangle(ToRectF(layout.actionIsland), island_.Get());
 
-    D2D1_COLOR_F status = kBackdrop;
+    // C91: the status strip is the canvas + the card's documented lift, resolved
+    // from the theme. The lift is a constant RATIO of the band's own brightness
+    // (0.016/0.018/0.022 on the dark canvas); on an opaque high-contrast canvas
+    // it lands on (4,5,6), which is the value the pixel suite pins.
+    D2D1_COLOR_F status = canvasColor_;
     status.r += 0.016f;
     status.g += 0.018f;
     status.b += 0.022f;
@@ -653,7 +688,7 @@ class GalleryRenderer {
         // C79: a 1 px alpha-.08 rule at the midpoint of the empty middle. It is
         // a token, so HighContrast can raise it without a second code path.
         island_->SetColor(ToD2d(
-            prism::theme::Lookup(prism::theme::TokenId::DividerSubtle, scene.actionTheme)
+            prism::theme::Lookup(prism::theme::TokenId::DividerSubtle, scene.theme)
                 .color));
         target->FillRectangle(rect, island_.Get());
         island_->SetColor(islandColor_);
@@ -730,22 +765,77 @@ class GalleryRenderer {
     accent.a = 1.0f;
     return ToD2d(accent);
   }
-  static D2D1_COLOR_F IslandOf(prism::theme::Variant variant) {
-    // These content surfaces (breadcrumb pill, progress capsule) used the
-    // pre-C71 kIslandFill .72 literal. C71 scales exactly that alpha by the
-    // same intensity/reference ratio the token path uses: the default stays
-    // pixel-identical (C60/C64 pin it) and the setting still reaches them.
-    (void)variant;
+  // C91: the island fill (breadcrumb pill, progress capsule) is the FLOATING
+  // ISLAND token, composited over THIS theme's canvas by the one PrismCore
+  // entry. The old body was "a literal, and (void)variant" -- which is why the
+  // breadcrumb island stayed (25,29,37) in all three themes.
+  D2D1_COLOR_F IslandOf(prism::theme::Variant variant) const {
+#if defined(PRISM_C91_MUTANT_ISLAND_LITERAL)
+    // NEGATIVE CONTROL (CONTRACTS D3): the pre-C91 literal, variant ignored.
+    ++dbgMutantIsland;
     D2D1_COLOR_F fill = kIslandFill;
-#if defined(PRISM_C71_MUTANT_IGNORE_GLASS)
-    ++prism::theme::live::MutantGlassHits();
-#else
     double alpha = 0.72 * prism::theme::GlassIntensityScale();
-    if (alpha < 0.0) alpha = 0.0;
-    if (alpha > 1.0) alpha = 1.0;
-    fill.a = static_cast<float>(alpha);
-#endif
+    fill.a = static_cast<float>(alpha < 0.0 ? 0.0 : (alpha > 1.0 ? 1.0 : alpha));
     return fill;
+#else
+    // The canvas THIS frame cleared to, not a per-theme assumption: an island
+    // painted over the veiled canvas and an island painted over the flat one are
+    // different pixels, and only the frame knows which it is.
+    const prism::theme::Rgba canvas(canvasColor_.r, canvasColor_.g, canvasColor_.b,
+                                    canvasColor_.a);
+    return ToD2d(prism::chrome::ThemeSurfaceColor(
+        prism::theme::TokenId::SurfaceFloatingIsland, variant, canvas));
+#endif
+  }
+
+  // ---------------------------------------------------------------- C91 theme
+  // C91: the frame's theme. The mutation arm is here, in ONE place, so every
+  // "the theme quietly went back to Midnight" control below really is the
+  // shipped defect and not a lookalike.
+  static prism::theme::Variant ThemeOf(const Scene& scene) {
+#if defined(PRISM_C91_MUTANT_SCENE_MIDNIGHT)
+    ++dbgMutantTheme;
+    return prism::theme::Variant::Midnight;
+#else
+    return scene.theme;
+#endif
+  }
+
+  // The canvas colour the target is cleared to. With the C77 backdrop layer ON
+  // (the shipping default) the canvas pixel at rest is the VEILED composite;
+  // with it off it is the flat one. The band fills read this same value, so the
+  // action band can never be a rectangle of a slightly different canvas.
+  static D2D1_COLOR_F CanvasOf(const Scene& scene, prism::theme::Variant theme) {
+    return ToD2d(scene.backdropRefraction ? prism::chrome::CanvasPresentedColor(theme)
+                                         : prism::chrome::CanvasColor(theme));
+  }
+
+  // C91: the text roles, recoloured EVERY frame. A brush built once from a
+  // literal is the second half of "the theme did not reach the content": the
+  // surfaces would change while every glyph stayed midnight.
+  void ApplyThemeBrushes(prism::theme::Variant theme) {
+#if defined(PRISM_C91_MUTANT_BRUSHES_ONCE)
+    ++dbgMutantBrushes;  // the injection ran and left the brushes as built
+#else
+    if (textPrimary_) {
+      textPrimary_->SetColor(ToD2d(prism::chrome::ThemeSurfaceColor(
+          prism::theme::TokenId::TextPrimary, theme)));
+    }
+    if (textSecondary_) {
+      textSecondary_->SetColor(ToD2d(prism::chrome::ThemeSurfaceColor(
+          prism::theme::TokenId::TextSecondary, theme)));
+    }
+    if (sidebarBrush_) {
+      sidebarBrush_->SetColor(ToD2d(prism::chrome::ThemeSurfaceColor(
+          prism::theme::TokenId::TextPrimary, theme)));
+    }
+    // The Quick Look sheet's body (the no-glass path; the glass path resolves
+    // its own tokens). It was kCardFill, a midnight literal.
+    if (card_) {
+      card_->SetColor(ToD2d(prism::chrome::ThemeSurfaceColor(
+          prism::theme::TokenId::SurfaceFloatingIsland, theme)));
+    }
+#endif
   }
 
   // ColorToken -> concrete RGBA from the token table (C15). The rail's panel is
@@ -1123,7 +1213,7 @@ class GalleryRenderer {
     }
     if (!sidebarBrush_) return;
     const prism::win::sidebar::Layout& layout = *scene.sidebar;
-    const prism::theme::Variant variant = scene.sidebarTheme;
+    const prism::theme::Variant variant = scene.theme;
     using prism::win::sidebar::ColorToken;
     const float left = layout.panel.left;
     const float right = layout.panel.right;
@@ -1517,7 +1607,7 @@ class GalleryRenderer {
     // "灰底面板 + 原始大小重影" of audit A2. The backdrop PASS never draws the
     // header at all, so the blurred still cannot contain header text either.
     if (!backdropPass) {
-      island_->SetColor(kBackdrop);
+      island_->SetColor(canvasColor_);
       target->FillRectangle(ToRectF(header), island_.Get());
       DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^",
                 D2D1::RectF(static_cast<float>(header.left) + prism::layout::kListIndent,
@@ -1531,7 +1621,7 @@ class GalleryRenderer {
                         textSecondary_.Get());
       // The one 1 px separator (DESIGN: flat text + a rule, nothing else).
       island_->SetColor(ToD2d(prism::theme::Lookup(prism::theme::TokenId::DividerSubtle,
-                                                   scene.actionTheme)
+                                                   scene.theme)
                                   .color));
       target->FillRectangle(D2D1::RectF(static_cast<float>(header.left),
                                         static_cast<float>(header.bottom) - 1.0f,
@@ -1679,16 +1769,16 @@ class GalleryRenderer {
     // (C64 pins it to CompositeOver(SurfaceFloatingIsland, canvas), and a second
     // fill under it would have repainted that contract from the outside).
     if (scene.glassPanels && !band.island.Empty()) {
-      glassPanel_.PaintShadow(target, ToRectF(band.island), scene.glassTheme, &glassStats_);
+      glassPanel_.PaintShadow(target, ToRectF(band.island), scene.theme, &glassStats_);
     }
     actionBar_.Draw(target, band, *scene.actions, scene.actionHover, scene.actionPressed,
-                    scene.actionTheme);
+                    scene.theme);
     if (scene.glassPanels && !band.island.Empty()) {
       prism::win::glass::Parts parts;
       parts.shadow = false;
       parts.fill = false;
       parts.border = false;
-      glassPanel_.PaintRim(target, ToRectF(band.island), scene.glassTheme, parts, &glassStats_);
+      glassPanel_.PaintRim(target, ToRectF(band.island), scene.theme, parts, &glassStats_);
     }
     dbgActionButtons += actionBar_.dbgButtons - beforeButtons;
     dbgActionIcons += actionBar_.dbgIcons - beforeIcons;
@@ -1724,7 +1814,7 @@ class GalleryRenderer {
     if (scene.glassPanels) {
       // C77: fill + top specular rim + drop shadow + squircle 14, in one call.
       prism::win::glass::Parts parts;
-      glassPanel_.Paint(target, pill, scene.glassTheme, parts, &glassStats_);
+      glassPanel_.Paint(target, pill, scene.theme, parts, &glassStats_);
     } else {
       const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(pill, height / 2.0f, height / 2.0f);
       target->FillRoundedRectangle(shape, island_.Get());
@@ -1801,7 +1891,7 @@ class GalleryRenderer {
     if (scene.glassPanels) {
       // C77: the Quick Look sheet is a glass panel like the rest of the chrome.
       prism::win::glass::Parts parts;
-      glassPanel_.Paint(target, card, scene.glassTheme, parts, &glassStats_);
+      glassPanel_.Paint(target, card, scene.theme, parts, &glassStats_);
     } else {
       const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(card, 24.0f, 24.0f);
       target->FillRoundedRectangle(shape, card_.Get());
@@ -1955,6 +2045,10 @@ class GalleryRenderer {
   // C71: the live colours this frame resolved (see Draw).
   D2D1_COLOR_F accentColor_{0.243f, 0.545f, 1.0f, 1.0f};
   D2D1_COLOR_F islandColor_{0.10f, 0.12f, 0.16f, 0.72f};
+  // C91: the canvas this frame cleared to -- the SAME colour the action band and
+  // the list header refill themselves with (see DrawBands / DrawListMode).
+  D2D1_COLOR_F canvasColor_{0.043f, 0.055f, 0.075f, 1.0f};
+
   ComPtr<ID2D1SolidColorBrush> accent_, tile_, tileBorder_, island_, card_, islandBorder_;
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
   // C29 sidebar: one recolourable brush + the two single-line text formats.
@@ -1994,6 +2088,12 @@ class GalleryRenderer {
   // gradient). The suite's preview assertion keys on this counter, so a card
   // that silently fell back to the stand-in cannot pass on luck.
   int dbgQuickLookThumbDraws = 0;
+  // C91: proof that a mutation arm's injected branch really ran. Each mutant
+  // binary arms its CAUGHT verdict on one of these, so a red that came from an
+  // unrelated assertion can never print a false verdict (CONTRACTS D3).
+  static inline int dbgMutantTheme = 0;
+  static inline int dbgMutantBrushes = 0;
+  static inline int dbgMutantIsland = 0;
   // C27: proof that the sidebar command list reached pixels. dbgSidebarCommands
   // counts every non-hit command considered, dbgSidebarPrimitives the ones
   // actually painted, dbgSidebarLabels the text runs, dbgSidebarPanels the

@@ -146,16 +146,16 @@ prism::theme::Rgba Token(prism::theme::TokenId id) {
   return prism::theme::Lookup(id, prism::theme::Variant::Midnight).color;
 }
 
-// The renderer clears to kBackdrop (opaque) before any band is painted, so every
-// semi-transparent token lands ON that colour. Computing the expectation the
-// same way D2D composites it is what makes the assertion "the token reached the
-// pixel" instead of "some dark colour is there".
-constexpr prism::theme::Rgba kBackdropPixel{0.043f, 0.055f, 0.075f, 1.0f};
-
-prism::theme::Rgba CanvasPlate() {
-  return prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceCanvasBase),
-                                     kBackdropPixel);
+// The renderer clears to the THEME's canvas (C91: prism::chrome::CanvasColor)
+// before any band is painted, so every semi-transparent token lands ON that
+// colour. Computing the expectation the same way D2D composites it is what makes
+// the assertion "the token reached the pixel" instead of "some dark colour is
+// there".
+prism::theme::Rgba BackdropPixel() {
+  return prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
 }
+
+prism::theme::Rgba CanvasPlate() { return BackdropPixel(); }
 prism::theme::Rgba IslandPlate() {
   return prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceFloatingIsland),
                                      CanvasPlate());
@@ -169,7 +169,7 @@ prism::theme::Rgba AccentColor() {
                               prism::theme::Variant::Midnight)
       .gradient.from;
 }
-UINT32 Backdrop() { return ToPixel(kBackdropPixel); }
+UINT32 Backdrop() { return ToPixel(BackdropPixel()); }
 UINT32 CanvasOverBackdrop() { return ToPixel(CanvasPlate()); }
 UINT32 IslandOverCanvas() { return ToPixel(IslandPlate()); }
 // C79: the ACTIVE tab is its own token now (brighter than the island) and the
@@ -746,7 +746,13 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   // fill: one uniform band with no seam where the strip would have been.
   const UINT32 bandPixel = bare.At(850, 48);
   PRISM_CHECK(ColorDistance(bandPixel, bare.At(850, 80)) == 0);
-  PRISM_CHECK(ColorDistance(bandPixel, CanvasOverBackdrop()) > 2);
+  // C91: the band and the strip's own background are the SAME colour now (both
+  // resolve through prism::chrome::CanvasColor), so "the band != the canvas" can
+  // no longer discriminate "the strip painted". The colour that would appear if
+  // a strip DID paint here is the tab PLATE (--surface-tab-active), so that is
+  // what the band must not be; the "nothing was painted" half stays measured by
+  // the painter's counter above and by the seam-free probe on the line before.
+  PRISM_CHECK(ColorDistance(bandPixel, ActivePlate()) > 8);
   // No accent (the dirty dot / insertion marker) anywhere in the band.
   // Accent reaches the band in two forms: the raw from-stop (a dot on the
   // strip's canvas) and the same stop composited over a tab plate. Both are

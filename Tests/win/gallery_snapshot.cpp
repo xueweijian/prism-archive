@@ -1123,16 +1123,12 @@ int main(int argc, char** argv) {
     // The same chrome in Daylight and HighContrast: the C79 tokens have a row
     // per variant, and a wash that vanishes on black is a bug this catches.
     GalleryRenderer::Scene sceneDaylight = sceneChrome;
-    sceneDaylight.sidebarTheme = prism::theme::Variant::Daylight;
-    sceneDaylight.tabTheme = prism::theme::Variant::Daylight;
-    sceneDaylight.actionTheme = prism::theme::Variant::Daylight;
+    sceneDaylight.theme = prism::theme::Variant::Daylight;
     std::vector<UINT32> frameDaylight;
     renderScene(sceneDaylight, L"prism_chrome_daylight.png", &frameDaylight);
 
     GalleryRenderer::Scene sceneHighContrast = sceneChrome;
-    sceneHighContrast.sidebarTheme = prism::theme::Variant::HighContrast;
-    sceneHighContrast.tabTheme = prism::theme::Variant::HighContrast;
-    sceneHighContrast.actionTheme = prism::theme::Variant::HighContrast;
+    sceneHighContrast.theme = prism::theme::Variant::HighContrast;
     std::vector<UINT32> frameHighContrast;
     renderScene(sceneHighContrast, L"prism_chrome_highcontrast.png", &frameHighContrast);
 

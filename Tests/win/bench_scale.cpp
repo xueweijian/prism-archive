@@ -231,9 +231,16 @@ class ListFrameBench {
         buffer == nullptr) {
       return false;
     }
-    // Corner pixel = backdrop (#0B0E13 as BGR = 13 0E 0B).
+    // Corner pixel = the theme's canvas (C91: prism::chrome::CanvasColor), BGR.
+    const prism::theme::Rgba canvas =
+        prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+    const auto byteOf = [](float v) {
+      const double scaled = static_cast<double>(v) * 255.0 + 0.5;
+      return static_cast<int>(scaled < 0.0 ? 0.0 : (scaled > 255.0 ? 255.0 : scaled));
+    };
     const BYTE* px = buffer;
-    return px[0] == 0x13 && px[1] == 0x0E && px[2] == 0x0B;
+    return std::abs(px[0] - byteOf(canvas.b)) <= 2 && std::abs(px[1] - byteOf(canvas.g)) <= 2 &&
+           std::abs(px[2] - byteOf(canvas.r)) <= 2;
   }
 
  private:

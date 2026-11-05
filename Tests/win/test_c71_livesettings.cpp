@@ -151,10 +151,10 @@ bool NearPixel(UINT32 measured, const th::Rgba& expected, int tolerance,
   return ok;
 }
 
-th::Rgba Backdrop() {
-  const D2D1_COLOR_F c = prism::win::gallery::GalleryRenderer::kBackdrop;
-  return th::Rgba(c.r, c.g, c.b, c.a);
-}
+// C91: the canvas is no longer a literal on the renderer -- it resolves from the
+// theme, so the expectation asks the SAME entry the renderer asks (C71's scenes
+// leave the refraction layer off, so the flat canvas is the pixel on screen).
+th::Rgba Backdrop() { return prism::chrome::CanvasColor(th::Variant::Midnight); }
 
 prism::layout::Layout WindowLayout() {
   return prism::layout::Compute(static_cast<int>(kWidth), static_cast<int>(kHeight),

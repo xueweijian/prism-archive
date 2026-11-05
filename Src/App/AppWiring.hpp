@@ -1184,6 +1184,98 @@ inline ExtractionOutcome RunSelectionExtraction(OperationHandles& handles,
                         prism::win::amsi::InitMode::LoadAmsi, options);
 }
 
+
+// ---------------------------------------------------------------------------
+// C92: OPENING one entry (Enter / double-click on a file)
+//
+// "Open" is not "extract the archive": the user asked for ONE file. It gets its
+// own directory under %TEMP% (never the archive's folder, which the user did not
+// choose), the entry is extracted there through the SAME OperationHandles path
+// every other verb uses, and the caller hands the resulting path to ShellExecute.
+//
+// WHY THE TEMP DIRECTORY IS NAMED HERE, NOT BY THE PLANNER: the smart planner's
+// collision suffix exists for user-visible extraction targets; a throwaway open
+// directory must be unique on every call and must never accumulate into a
+// user-visible folder. The extracted file keeps the archive's own relative path
+// under that directory, so two entries with the same base name cannot collide.
+struct OpenEntryOutcome {
+  bool ok = false;
+  std::wstring path;     // the single file on disk
+  std::wstring tempDir;
+  std::string error;
+  ExtractionOutcome extraction;
+};
+
+inline std::wstring MakeOpenTempDir() {
+  wchar_t buffer[MAX_PATH] = {};
+  const DWORD length = ::GetTempPathW(MAX_PATH, buffer);
+  std::filesystem::path root =
+      length > 0 ? std::filesystem::path(std::wstring(buffer, length))
+                 : std::filesystem::path(L".");
+  static std::atomic<unsigned long long> counter{0};
+  const unsigned long long stamp = static_cast<unsigned long long>(::GetTickCount64());
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    const unsigned long long serial = counter.fetch_add(1) + 1;
+    std::filesystem::path candidate =
+        root / L"PrismArchive-Open" /
+        (L"open-" + std::to_wstring(stamp) + L"-" + std::to_wstring(serial));
+    std::error_code ec;
+    if (std::filesystem::create_directories(candidate, ec) && !ec) {
+      return candidate.wstring();
+    }
+  }
+  return std::wstring();
+}
+
+inline OpenEntryOutcome OpenArchiveEntry(OperationHandles& handles,
+                                         const std::vector<ArchiveItem>& catalog,
+                                         uint32_t index,
+                                         const std::wstring& archivePathWide,
+                                         const ExtractionOptions& options = {}) {
+  OpenEntryOutcome outcome;
+  const ArchiveItem* entry = nullptr;
+  for (const ArchiveItem& item : catalog) {
+    if (item.index == index) {
+      entry = &item;
+      break;
+    }
+  }
+  if (entry == nullptr || entry->isDir) {
+    outcome.error = "the selected entry is not a file";
+    outcome.extraction.status = L"\u65E0\u6CD5\u6253\u5F00\u76EE\u5F55";  // 无法打开目录
+    return outcome;
+  }
+  outcome.tempDir = MakeOpenTempDir();
+  if (outcome.tempDir.empty()) {
+    outcome.error = "no temporary directory could be created";
+    outcome.extraction.status = L"\u65E0\u6CD5\u521B\u5EFA\u4E34\u65F6\u76EE\u5F55";
+    return outcome;
+  }
+  outcome.extraction = RunSelectionExtraction(
+      handles, catalog, {index}, prism::win::WideToUtf8(outcome.tempDir), archivePathWide,
+      /*scanExecutables=*/true, options);
+  if (!outcome.extraction.ok) {
+    outcome.error = outcome.extraction.error.empty() ? "extraction failed"
+                                                     : outcome.extraction.error;
+    return outcome;
+  }
+  // The selection plan is FlatDirectly: the entry lands at <tempDir>\<its path>.
+  std::wstring relative = prism::win::Utf8ToWide(entry->path);
+  for (wchar_t& ch : relative) {
+    if (ch == L'/') ch = L'\\';
+  }
+  std::filesystem::path landed = std::filesystem::path(outcome.tempDir) / relative;
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(landed, ec)) {
+    outcome.error = "the entry was not written to the temporary directory";
+    outcome.extraction.status = L"\u6253\u5F00\u5931\u8D25\uFF1A\u4E34\u65F6\u6587\u4EF6\u4E0D\u5B58\u5728";
+    return outcome;
+  }
+  outcome.ok = true;
+  outcome.path = landed.wstring();
+  return outcome;
+}
+
 // --smart-extract-each <archives...> (C58): the same "extract to <name>" verb
 // --extract-sub runs, once per archive. Each archive gets its OWN handler and
 // its OWN folder (collision-suffixed by the planner), so a multi-selection from

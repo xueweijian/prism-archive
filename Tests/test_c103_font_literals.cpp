@@ -17,7 +17,7 @@
 // silently reporting zero hits.
 //
 // NEGATIVE CONTROL (CONTRACTS D3/D26): the SAME source compiled with
-// PRISM_C103_SCAN_FIXTURE=1 scans Tests/fixtures/c103, which contains the
+// PRISM_C103_MUTANT_SCAN_FIXTURE=1 scans Tests/fixtures/c103, which contains the
 // literal on purpose. The zero-hit assertion MUST go red and the D27 marker
 // "C103 MUTATION CAUGHT: segoe_literal" is printed at that first failure.
 // No WILL_FAIL is stacked on the regex (D26).
@@ -121,9 +121,10 @@ void PrintOffenses(const char* what, const std::vector<Offense>& offenses) {
 }  // namespace
 
 int main(int argc, char** argv) {
-#if defined(PRISM_C103_SCAN_FIXTURE)
+#if defined(PRISM_C103_MUTANT_SCAN_FIXTURE)
   // The fixture deliberately contains the literal: the zero-hit assertion below
   // MUST go red, and the verdict proves the injected defect really reached it.
+  std::printf("C103 MUTANT ACTIVE: segoe_literal\n");
   ::prism::test::SetMutationVerdict("C103 MUTATION CAUGHT: segoe_literal",
                                     [] { return gSegoHits > 0; });
 #endif
@@ -137,7 +138,7 @@ PRISM_TEST("c103 Src carries no font literal and no direct DWrite TextFormat cal
   const ScanResult scan = ScanTree(fs::path(PRISM_C103_SRC_DIR));
   std::printf("  scanned %zu files under %s\n", scan.files, PRISM_C103_SRC_DIR);
 
-#if defined(PRISM_C103_SCAN_FIXTURE)
+#if defined(PRISM_C103_MUTANT_SCAN_FIXTURE)
   // The fixture has exactly one file; the positive check only proves the
   // scanner opened something before the zero-hit assertion fires.
   PRISM_CHECK(scan.files >= 1);

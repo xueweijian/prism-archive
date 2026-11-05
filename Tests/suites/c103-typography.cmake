@@ -33,7 +33,7 @@ add_executable(core_c103_font_literals_mutant_segoe test_c103_font_literals.cpp)
 target_link_libraries(core_c103_font_literals_mutant_segoe PRIVATE prism_core)
 target_compile_definitions(core_c103_font_literals_mutant_segoe PRIVATE
     "PRISM_C103_SRC_DIR=\"${CMAKE_SOURCE_DIR}/Tests/fixtures/c103\""
-    PRISM_C103_SCAN_FIXTURE=1)
+    PRISM_C103_MUTANT_SCAN_FIXTURE=1)
 add_test(NAME "mutation.c103.segoe_literal"
          COMMAND core_c103_font_literals_mutant_segoe)
 set_tests_properties(mutation.c103.segoe_literal PROPERTIES TIMEOUT 60

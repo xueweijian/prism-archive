@@ -104,7 +104,13 @@ inline constexpr int kContentPadding = 16;
 inline constexpr int kStatusBarHeight = 28;
 inline constexpr int kIslandGap = 12;
 inline constexpr int kListHeaderHeight = 32;
-inline constexpr int kListRowHeight = 32;
+// C109: 36 px, not 32. Data-dense archives were a wall of 32 px rows with no
+// air between them; 4 px is the smallest bump that reads as a deliberate rhythm
+// at 100% DPI without turning the list into a "comfortable" touch list. The
+// whole list stack (ListRowRect / VisibleListRows / ListRowAt and the window's
+// scroll pitch) reads THIS constant, so one number moves paint and hit test
+// together -- the C109 suite pins both.
+inline constexpr int kListRowHeight = 36;
 inline constexpr int kListIndent = 20;
 inline constexpr int kMinTileWidth = 120;  // DESIGN.md §2: minimum column width
 inline constexpr int kMaxTileWidth = 192;
@@ -119,10 +125,13 @@ inline constexpr int kProgressCapsuleHeight = 46;
 inline constexpr int kQuickLookWidth = 380;
 inline constexpr int kQuickLookHeight = 500;
 // V4: a fallback row is a BAND across the content, not a cell inside the grid.
-// A 32 px band is what makes 19 rows fit in 800 px (DESIGN.md §2 "列表：行高
-// 32"); the cell-sized row V1 shipped was a 220 px pill with dead air to its
-// right -- the exact defect the v2 screenshot showed.
-inline constexpr int kFlowRowHeight = kListRowHeight;
+// A 32 px band is what makes 19 rows fit in 800 px; the cell-sized row V1
+// shipped was a 220 px pill with dead air to its right -- the exact defect the
+// v2 screenshot showed.
+// C109: the GRID's fallback band stays 32. Only the file LIST got the 36 px
+// breathing room; aliasing this to kListRowHeight would silently reflow every
+// tile-less grid row and invalidate V4's band assertions for no design reason.
+inline constexpr int kFlowRowHeight = 32;
 inline constexpr int kFlowTileGap = kIslandGap;  // alias: the grid's gap
 // The hit test's row pitch. Off by one in the CONTROL build only: a click on
 // the last pixel of row N-1 must then land on row N (the neighbour), which is

@@ -240,17 +240,60 @@ inline void FolderFirstOrder(std::vector<SortItem>& items) {
   });
 }
 
-// Fixed column geometry: Size=110, Packed=110, Ratio=130 anchored right;
-// Name flexes to fill the remainder.
+// Fixed column geometry, right-anchored to the body's right edge.
+//
+// C109: the three numeric columns are explicit BOXES with a >= 16 px gutter
+// between them, and a cell's number is right-aligned to the box's right edge --
+// the COLUMN BASELINE. Before this card the renderer derived three loose X
+// positions with magic +6/-18 nudges, so the "columns" had no shared edge a test
+// could name and a 6.3 KB / 11.2 KB pair was only as aligned as the font's
+// digits happened to be. Name flexes to fill the remainder.
+inline constexpr uint32_t kColumnGutter = 16;       // DESIGN: >= 16 px between columns
+inline constexpr uint32_t kColumnRightMargin = 10;  // body edge -> ratio baseline
+
 struct ColumnLayout {
   uint32_t sizeW = 110;
   uint32_t packedW = 110;
   uint32_t ratioW = 130;
 
   static ColumnLayout Default(uint32_t) { return {}; }
-  uint32_t sizeX(uint32_t canvasW) const { return canvasW - sizeW - packedW - ratioW; }
-  uint32_t packedX(uint32_t canvasW) const { return canvasW - packedW - ratioW; }
-  uint32_t ratioX(uint32_t canvasW) const { return canvasW - ratioW; }
+
+  // Right edges are the column baselines the renderer aligns trailing text to.
+  // Every Left() is exactly one gutter away from its neighbour's Right(), which
+  // is what keeps the columns from touching even when a persisted width is odd.
+  uint32_t ratioRight(uint32_t canvasW) const {
+    return canvasW > kColumnRightMargin ? canvasW - kColumnRightMargin : 0;
+  }
+  uint32_t ratioLeft(uint32_t canvasW) const {
+    const uint32_t right = ratioRight(canvasW);
+    return right > ratioW ? right - ratioW : 0;
+  }
+  uint32_t packedRight(uint32_t canvasW) const {
+    const uint32_t left = ratioLeft(canvasW);
+    return left > kColumnGutter ? left - kColumnGutter : 0;
+  }
+  uint32_t packedLeft(uint32_t canvasW) const {
+    const uint32_t right = packedRight(canvasW);
+    return right > packedW ? right - packedW : 0;
+  }
+  uint32_t sizeRight(uint32_t canvasW) const {
+    const uint32_t left = packedLeft(canvasW);
+    return left > kColumnGutter ? left - kColumnGutter : 0;
+  }
+  uint32_t sizeLeft(uint32_t canvasW) const {
+    const uint32_t right = sizeRight(canvasW);
+    return right > sizeW ? right - sizeW : 0;
+  }
+  uint32_t nameRight(uint32_t canvasW) const {
+    const uint32_t left = sizeLeft(canvasW);
+    return left > kColumnGutter ? left - kColumnGutter : 0;
+  }
+
+  // C27 persisted the three widths and older call sites asked for a column's
+  // left edge by name; keep those names meaning "left edge of the box".
+  uint32_t sizeX(uint32_t canvasW) const { return sizeLeft(canvasW); }
+  uint32_t packedX(uint32_t canvasW) const { return packedLeft(canvasW); }
+  uint32_t ratioX(uint32_t canvasW) const { return ratioLeft(canvasW); }
 };
 
 }  // namespace prism::list

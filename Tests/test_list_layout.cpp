@@ -101,11 +101,21 @@ PRISM_TEST("folders sort first, then names ascend; files after folders") {
   PRISM_CHECK_EQ(items[3].name, std::string("zeta.txt"));
 }
 
+// C109 moved the three numeric columns from loose X offsets to right-anchored
+// BOXES separated by a 16 px gutter. The old expectations (850/960/1070) were
+// the pre-card formula with no gutter and no body-edge margin; they are updated
+// here on purpose, and the gutter itself is asserted so the change cannot
+// silently collapse back to abutting columns.
 PRISM_TEST("column layout: fixed x positions, name takes the flex space") {
   const ColumnLayout cols = ColumnLayout::Default(1200);
-  PRISM_CHECK_EQ(cols.sizeX(1200), 1200u - (110u + 110u + 130u));
-  PRISM_CHECK_EQ(cols.packedX(1200), 1200u - (110u + 130u));
-  PRISM_CHECK_EQ(cols.ratioX(1200), 1200u - 130u);
+  PRISM_CHECK_EQ(cols.sizeX(1200), 808u);    // 1200 - 10 margin - 130 - 16 - 110 - 16 - 110
+  PRISM_CHECK_EQ(cols.packedX(1200), 934u);
+  PRISM_CHECK_EQ(cols.ratioX(1200), 1060u);
+  PRISM_CHECK_EQ(cols.ratioRight(1200), 1200u - prism::list::kColumnRightMargin);
+  PRISM_CHECK_EQ(cols.packedLeft(1200) - cols.sizeRight(1200), prism::list::kColumnGutter);
+  PRISM_CHECK_EQ(cols.ratioLeft(1200) - cols.packedRight(1200), prism::list::kColumnGutter);
+  PRISM_CHECK_EQ(cols.sizeLeft(1200) - cols.nameRight(1200), prism::list::kColumnGutter);
+  PRISM_CHECK(prism::list::kColumnGutter >= 16u);
 }
 
 PRISM_TEST("hit test maps a y coordinate to a row index") {

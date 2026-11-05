@@ -275,7 +275,9 @@ PRISM_TEST("v1.layout: no thumbnail means a 32px row, never a skeleton tile") {
   PRISM_CHECK(cell.Contains(row));
 }
 
-PRISM_TEST("v1.layout: list mode rows are 32px and stay inside the content") {
+// C109 raised the list row from 32 to 36 px for breathing room. The invariant
+// is still "rows tile the body at one fixed pitch"; only the pitch changed.
+PRISM_TEST("v1.layout: list mode rows are 36px and stay inside the content") {
   const Layout l = prism::layout::Compute(1200, 800, true, true);
   PRISM_CHECK_EQ(l.columns, 1);
   const Rect header = prism::layout::ListHeaderRect(l);
@@ -287,11 +289,11 @@ PRISM_TEST("v1.layout: list mode rows are 32px and stay inside the content") {
   PRISM_CHECK(l.contentInner.Contains(header));
   PRISM_CHECK(l.contentInner.Contains(body));
   PRISM_CHECK(!header.Intersects(body));
-  // Rows: 32 px pitch, anchored to the body, never over the status bar.
+  // Rows: 36 px pitch (C109), anchored to the body, never over the status bar.
   const Rect r0 = prism::layout::ListRowRect(l, 0, 0);
   const Rect r1 = prism::layout::ListRowRect(l, 1, 0);
-  PRISM_CHECK_EQ(r0.Height(), 32);
-  PRISM_CHECK_EQ(r1.top - r0.top, 32);
+  PRISM_CHECK_EQ(r0.Height(), 36);
+  PRISM_CHECK_EQ(r1.top - r0.top, 36);
   PRISM_CHECK_EQ(r0.left, l.contentInner.left);
   PRISM_CHECK_EQ(r0.right, l.contentInner.right);
   PRISM_CHECK(!r0.Intersects(l.statusBar));

@@ -32,7 +32,7 @@
       "inherits": "base-msvc",
       "cacheVariables": {
         "CMAKE_CXX_FLAGS": "/fsanitize=address /Z7 /EHsc",
-        "CMAKE_EXE_LINKER_FLAGS": "/InferAsanLibraries"
+        "CMAKE_EXE_LINKER_FLAGS": "/InferAsanLibraries /DEBUG /OPT:REF"
       }
     },
     {

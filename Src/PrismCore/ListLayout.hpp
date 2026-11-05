@@ -117,6 +117,100 @@ inline bool RatioBarVisible(const SortItem& item) {
          item.packedSize <= item.size;
 }
 
+// ---------------------------------------------------------------- C101 ratio
+// The compression-ratio strip used to be a full-saturation rule across the WHOLE
+// ratio column: 6 px tall, alpha 1.0, the file-kind colour (#007AFF for text).
+// The user's report is "刺眼荧光绿厚条" and the re-design plan §2.2 turns the bar
+// into a READOUT: 4 px, radius 2, at most 56 px wide, alpha 0.55, and its hue
+// comes from the MEASURED RATIO -- <=50 % green, 51..80 % amber, >80 % red.
+//
+// Why the tint is not the raw palette value: alpha alone does not mute. At 0.55
+// over the Midnight canvas the full-saturation hues composite to HSV S 0.70
+// (#34C759) .. 0.90 (#FF9F0A), because the canvas is dark and the hue is not;
+// the plan's own pixel ceiling (S <= 0.45, <= 60 levels above the canvas) is
+// unreachable that way. So the palette below is the HUE SOURCE and the fill is
+// that hue DESATURATED toward its own mean grey (keeping hue and mean, lowering
+// S) and then capped in mean so the composite stays under the ceiling. The
+// threshold still decides which hue you see; the tests assert the hue angle.
+enum class RatioBand : uint8_t { Low, Medium, High };
+
+inline RatioBand RatioBandOf(uint32_t percent) {
+  if (percent > 80) return RatioBand::High;
+  if (percent > 50) return RatioBand::Medium;
+  return RatioBand::Low;
+}
+
+struct Rgb {
+  float r = 0.0f;
+  float g = 0.0f;
+  float b = 0.0f;
+};
+
+// The plan's palette: #34C759 / #FF9F0A / #FF3B30.
+inline Rgb RatioHueOf(RatioBand band) {
+  switch (band) {
+    case RatioBand::Low: return {0.204f, 0.780f, 0.349f};
+    case RatioBand::Medium: return {1.000f, 0.624f, 0.039f};
+    case RatioBand::High: return {1.000f, 0.231f, 0.188f};
+  }
+  return {1.0f, 1.0f, 1.0f};
+}
+
+// The plan's geometry and alpha. The renderer and the suite read them here, so
+// "4 px / 56 px / 0.55" can never become two numbers.
+inline constexpr float kRatioBarAlpha = 0.55f;
+inline constexpr float kRatioBarHeight = 4.0f;
+inline constexpr float kRatioBarRadius = 2.0f;
+inline constexpr float kRatioBarMaxWidth = 56.0f;
+
+// Mute: pull the hue 60 % of the way to its own mean grey. Hue and mean are
+// preserved (mixing toward the mean leaves the mean where it was), S drops.
+inline constexpr float kRatioBarMute = 0.60f;
+// The MEAN the fill may not exceed, derived from the plan's ceiling. Measured
+// on the Midnight frame: the canvas composites to 18.7 levels and the groove
+// under the fill (kTileBorder, white at 12 %) to 47, so a 0.55 fill lands at
+// 0.55*m + 0.45*47 and the ceiling of canvas+60 = 78.7 allows m <= 92/255 =
+// 0.361. Every band is held at or below it, which is why the three bands differ
+// in HUE and not in brightness.
+inline constexpr float kRatioBarMeanCeiling = 0.36f;
+
+inline Rgb RatioBarTint(uint32_t percent) {
+  const Rgb hue = RatioHueOf(RatioBandOf(percent));
+  const float mean = (hue.r + hue.g + hue.b) / 3.0f;
+  Rgb tint{hue.r + (mean - hue.r) * kRatioBarMute,
+           hue.g + (mean - hue.g) * kRatioBarMute,
+           hue.b + (mean - hue.b) * kRatioBarMute};
+  const float tintMean = (tint.r + tint.g + tint.b) / 3.0f;
+  if (tintMean > kRatioBarMeanCeiling) {
+    const float scale = kRatioBarMeanCeiling / tintMean;
+    tint.r *= scale;
+    tint.g *= scale;
+    tint.b *= scale;
+  }
+  return tint;
+}
+
+// The composite the target actually shows for a fill pixel: the tint at the
+// bar's alpha over the surface underneath it (the groove). Exposed so the core
+// suite can assert the plan's pixel ceilings without a window.
+inline Rgb RatioBarComposite(uint32_t percent, const Rgb& underneath) {
+  const Rgb tint = RatioBarTint(percent);
+  return {tint.r * kRatioBarAlpha + underneath.r * (1.0f - kRatioBarAlpha),
+          tint.g * kRatioBarAlpha + underneath.g * (1.0f - kRatioBarAlpha),
+          tint.b * kRatioBarAlpha + underneath.b * (1.0f - kRatioBarAlpha)};
+}
+
+// HSV saturation of a colour (max == 0 -> 0). The plan's pixel ceiling is on
+// this number, so it lives next to the palette instead of in a test.
+inline float RgbSaturation(const Rgb& color) {
+  const float high = (std::max)(color.r, (std::max)(color.g, color.b));
+  const float low = (std::min)(color.r, (std::min)(color.g, color.b));
+  if (high <= 0.0f) return 0.0f;
+  return (high - low) / high;
+}
+
+inline float RgbMean(const Rgb& color) { return (color.r + color.g + color.b) / 3.0f; }
+
 // tnum-friendly fixed-scale byte strings (OpenType tnum keeps digits equal
 // width; the formatter keeps one decimal and stable units).
 inline std::string FormatBytes(uint64_t bytes) {

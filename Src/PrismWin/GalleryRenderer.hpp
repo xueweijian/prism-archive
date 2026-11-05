@@ -369,7 +369,15 @@ class GalleryRenderer {
     // the bands and before the content, so the content's clip never covers it
     // and a tab can never be drawn over a tile. A null view or a hidden band
     // paints nothing at all -- case 7 of the suite measures the pixels.
-    if (scene.tabs != nullptr) tabPainter_.Paint(target, layout, *scene.tabs, theme);
+    if (scene.tabs != nullptr) {
+      // C91: hand the strip the SAME canvas this frame cleared to -- the strip
+      // repaints its band over the refraction layer, and a translucent token
+      // there would composite the canvas twice (2-3 levels darker than the
+      // content beside it, a visible seam).
+      const prism::theme::Rgba canvas(canvasColor_.r, canvasColor_.g, canvasColor_.b,
+                                      canvasColor_.a);
+      tabPainter_.Paint(target, layout, *scene.tabs, theme, canvas);
+    }
     // V4: the 28 px band carries its four segments; an empty strip was symptom
     // #4 of the screenshot.
     DrawStatusBar(target, scene, layout);

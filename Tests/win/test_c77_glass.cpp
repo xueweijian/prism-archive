@@ -492,9 +492,17 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
   Frame flatFrame;
   PRISM_CHECK(Render(empty, kWidth, kHeight, &flatFrame));
   if (!flatFrame.pixels.empty()) {
-      // 32bppPBGRA read as a UINT32 is B,G,R,A in memory order, so #0B0E13 is
-    // 0xFF0B0E13 -- the constant is the layout, not a guess.
-    const UINT32 canvas = 0xFF0B0E13u;
+    // 32bppPBGRA read as a UINT32 is B,G,R,A in memory order. C91: the canvas is
+    // the THEME's composite now, so the constant is built from the same entry the
+    // renderer clears with -- not a second copy of #0B0E13.
+    const prism::theme::Rgba canvasRgba =
+        prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+    const auto byteOf = [](float v) {
+      const double scaled = static_cast<double>(v) * 255.0 + 0.5;
+      return static_cast<UINT32>(scaled < 0.0 ? 0.0 : (scaled > 255.0 ? 255.0 : scaled));
+    };
+    const UINT32 canvas = 0xFF000000u | (byteOf(canvasRgba.r) << 16) |
+                          (byteOf(canvasRgba.g) << 8) | byteOf(canvasRgba.b);
     int notBackground = 0;
     for (int i = 0; i < 4; ++i) {
       if (!flatFrame.In(cornerX[i], cornerY[i])) continue;

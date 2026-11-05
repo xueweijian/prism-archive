@@ -746,7 +746,13 @@ PRISM_TEST("c60 no archive: the strip is not rendered and reserves nothing") {
   // fill: one uniform band with no seam where the strip would have been.
   const UINT32 bandPixel = bare.At(850, 48);
   PRISM_CHECK(ColorDistance(bandPixel, bare.At(850, 80)) == 0);
-  PRISM_CHECK(ColorDistance(bandPixel, CanvasOverBackdrop()) > 2);
+  // C91: the band and the strip's own background are the SAME colour now (both
+  // resolve through prism::chrome::CanvasColor), so "the band != the canvas" can
+  // no longer discriminate "the strip painted". The colour that would appear if
+  // a strip DID paint here is the tab PLATE (--surface-tab-active), so that is
+  // what the band must not be; the "nothing was painted" half stays measured by
+  // the painter's counter above and by the seam-free probe on the line before.
+  PRISM_CHECK(ColorDistance(bandPixel, ActivePlate()) > 8);
   // No accent (the dirty dot / insertion marker) anywhere in the band.
   // Accent reaches the band in two forms: the raw from-stop (a dot on the
   // strip's canvas) and the same stop composited over a tab plate. Both are

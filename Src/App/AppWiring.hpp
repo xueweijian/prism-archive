@@ -94,6 +94,7 @@
 #include "../PrismCore/Appearance.hpp"      // C71: live theme overrides
 #include "../PrismCore/CompressionPlan.hpp"   // C9 decision layer (what to write)
 #include "../PrismCore/OverwritePolicy.hpp"   // C71: extract.overwrite decision
+#include "../PrismCore/OverwriteSession.hpp"   // C94: one decision per operation
 #include "../PrismCore/DropPlan.hpp"           // C53: C52's drop model (what a drop means)
 #include "../PrismCore/I18n.hpp"             // C19 resource tables + language choice
 #include "../PrismCore/Log.hpp"              // C16 logger (the one warn a key miss gets)
@@ -1011,6 +1012,10 @@ struct ExtractionOptions {
   // Test/UI seams. An empty prompt makes "ask" behave like "skip" -- never like
   // a silent overwrite (see OverwritePolicy.hpp).
   prism::overwrite::PromptFn prompt;
+  // C94: the ONE-dialog seam. When set it wins over `prompt`: the dialog can
+  // answer "all" and the extract callback's session remembers it for every
+  // later conflict (see OverwriteSession.hpp). Empty -> `prompt` per file.
+  prism::overwrite::BatchPromptFn promptAll;
   prism::overwrite::ExistsFn exists;
 };
 
@@ -1115,7 +1120,9 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   prism::win::SmartExtractCallback::Result result;
   bool ok = task->reader->ExtractWithPlan(catalog, plan.plan, plan.plan.baseTargetDir,
                                           nullptr, &result, options.overwrite,
-                                          options.prompt, options.exists);
+                                          options.prompt, options.exists,
+                                          prism::win::SmartExtractCallback::ProgressFn(),
+                                          options.promptAll);
   handles.Finish(*task, ok);
 
   outcome.ok = ok;

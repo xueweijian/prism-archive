@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "../PrismCore/OverwritePolicy.hpp"
+#include "../PrismCore/OverwriteSession.hpp"  // C94: one decision per operation
 #include "../PrismCore/PrismCore.hpp"
 #include "FormatSniffer.hpp"
 #include "SevenZipAbi.hpp"
@@ -1175,6 +1176,8 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     uint64_t skippedFiles = 0;
     uint64_t renamedFiles = 0;
     uint64_t overwritePrompts = 0;
+    // C94: conflicts answered from the ONE remembered answer (no dialog).
+    uint64_t rememberedOverwrites = 0;
     std::string firstRenamedTo;
     // C41: a second operation was attempted on this handler while one was
     // already running. Refused, not allowed to corrupt the first one.
@@ -1201,16 +1204,23 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
                        prism::overwrite::Mode overwriteMode = prism::overwrite::Mode::Ask,
                        prism::overwrite::PromptFn overwritePrompt = {},
                        prism::overwrite::ExistsFn exists = {},
-                       ProgressFn progress = {})
+                       ProgressFn progress = {},
+                       prism::overwrite::BatchPromptFn overwriteBatchPrompt = {})
       : catalog_(catalog),
         plan_(plan),
         guard_(targetRoot),
         fuse_(fuse),
         methodLookup_(std::move(methodLookup)),
         requestedIndices_(std::move(requestedIndices)),
-        overwriteMode_(overwriteMode),
-        overwritePrompt_(std::move(overwritePrompt)),
-        exists_(std::move(exists)),
+        // C94: ONE session for the whole operation. The callback is created once
+        // per ExtractWithPlan, so every GetStream below reads the same object --
+        // the first answer that says "all" is remembered here, not in the UI.
+        overwrite_(overwriteMode,
+                   overwriteBatchPrompt ? std::move(overwriteBatchPrompt)
+                                        : prism::overwrite::SequentialPrompt(
+                                              std::move(overwritePrompt)),
+                   exists),
+        exists_(exists),
         progress_(std::move(progress)) {
     // The denominator: every requested file the plan will really write. A skip
     // decision made later can only make the run finish at 100% sooner, never
@@ -1305,21 +1315,20 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     // even create a parent directory; a rename lands beside the existing file.
     std::string targetPath = finalPath;
     {
-      prism::overwrite::Mode mode = overwriteMode_;
 #if defined(PRISM_C71_MUTANT_IGNORE_OVERWRITE)
       // NEGATIVE CONTROL (CONTRACTS D3): the saved policy is discarded and
       // everything behaves like the pre-C71 CREATE_ALWAYS. The counter proves
       // the injected branch ran; the suite's verdict is armed on it (D27).
       ++MutantOverwriteHits();
-      mode = prism::overwrite::Mode::Replace;
-#endif
-      const auto prompt = [this](const std::string& existing) {
-        ++result_.overwritePrompts;
-        return overwritePrompt_ ? overwritePrompt_(existing)
-                                : prism::overwrite::Choice::Skip;
-      };
       const prism::overwrite::Decision decided = prism::overwrite::Decide(
-          finalPath, false, mode, exists_, prompt);
+          finalPath, false, prism::overwrite::Mode::Replace, exists_);
+#else
+      // C94: EVERY file reads the SAME session. "全部覆盖/全部跳过/全部重命名"
+      // latch here, so the 2nd..Nth conflict never reaches the dialog.
+      const prism::overwrite::Decision decided = overwrite_.Decide(finalPath, false);
+      result_.overwritePrompts = overwrite_.prompts();
+      result_.rememberedOverwrites = overwrite_.remembered();
+#endif
       if (decided.choice == prism::overwrite::Choice::Skip) {
         ++result_.skippedFiles;
         currentPath_.clear();
@@ -1520,10 +1529,11 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   uint64_t fedProduced_ = 0;
   uint64_t freeDiskBytes_ = 0;
   abi::UInt64 total_ = 0;
-  // C71: extract.overwrite inputs. The exists probe is injected so this class
-  // stays testable without touching the filesystem in its unit cases.
-  prism::overwrite::Mode overwriteMode_ = prism::overwrite::Mode::Ask;
-  prism::overwrite::PromptFn overwritePrompt_;
+  // C71/C94: extract.overwrite inputs. The exists probe is injected so this
+  // class stays testable without touching the filesystem in its unit cases.
+  // C94: the session -- not the mode -- is what each GetStream reads, so one
+  // "apply to all" answer covers the whole operation.
+  prism::overwrite::Session overwrite_;
   prism::overwrite::ExistsFn exists_;
   // C87: measured extraction progress (uncompressed bytes).
   ProgressFn progress_;
@@ -2171,7 +2181,8 @@ class ArchiveReader {
                        prism::overwrite::Mode overwriteMode = prism::overwrite::Mode::Ask,
                        prism::overwrite::PromptFn overwritePrompt = {},
                        prism::overwrite::ExistsFn exists = {},
-                       SmartExtractCallback::ProgressFn progress = {}) const {
+                       SmartExtractCallback::ProgressFn progress = {},
+                       prism::overwrite::BatchPromptFn overwriteBatchPrompt = {}) const {
     if (!archive_) return false;
     OperationScope operation(*this);
     if (!operation.Enter()) {
@@ -2205,7 +2216,8 @@ class ArchiveReader {
         catalog, plan, targetRoot, fuse,
         [this](uint32_t index) { return GetString(index, abi::kpidMethod); },
         std::vector<uint32_t>(indices.begin(), indices.end()), overwriteMode,
-        std::move(overwritePrompt), std::move(exists), std::move(progress));
+        std::move(overwritePrompt), std::move(exists), std::move(progress),
+        std::move(overwriteBatchPrompt));
     const HRESULT hr =
         archive_->Extract(indices.data(), static_cast<abi::UInt32>(indices.size()), 0, callback);
     // C26: SUCCEEDED(hr) is NOT the verdict. The engine reports "this item did

@@ -64,6 +64,10 @@ PrismArchive：Windows 11 x64 归档管理器，引擎是运行时 `LoadLibraryW
   —— configure + build + ctest + preflight + manifest + headers + windows_tu，
   最后一行 `LOCAL GATES: PASS/FAIL`，日志在 `<build>/local-gates/`。
 - 部分跑：`-Only preflight,headers`；ASan 复现：`-Preset asan-msvc -SkipShell`。
+- **本机 WSL 不必硬磕**（这台机器 7.9 GB，多卡并行时常因内存不足 `CreateVm/ERROR_TIMEOUT`）：
+  `headers` / `windows_tu` 两步**由 CI 的 Linux lane 覆盖**（它就跑这两个），本地用
+  `clang++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only` 做快速语法自检即可。
+  **不要**因为本地跑不了就把这两条写成 SKIP 或假绿（D1）。
 - CMake 预设与 CI 完全同款，别自造命令行：
   `release-msvc` / `asan-msvc`（Windows）、`release-gcc` / `asan-clang`（Linux，PrismCore-only）。
 - 看 CI：`gh run view <run-id> --log-failed`；失败先看 run 页面的 step summary。

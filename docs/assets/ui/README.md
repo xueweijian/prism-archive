@@ -194,3 +194,45 @@ prints `C77 MUTATION CAUGHT: state-in-backdrop` (unselected: 0 violations,
 selected: 512).
 
 
+
+# C104 sidebar evidence -- capsule selection + soft folder
+
+One frame of the REAL renderer (`Tests/win/test_c104_sidebar.cpp` ->
+`GalleryRenderer::Draw` -> a headless WIC target), cropped to the rail plus a
+80 px slice of the list. Daylight, focus on a depth-1 tree row, 1400 x 900
+window, 320 x 900 output. Not a mockup: the same code path paints the shipping
+window.
+
+| file | what it shows |
+| --- | --- |
+| `c104-sidebar.png` | the selected row as a CAPSULE -- 8 px inset at both ends, 6 px squircle corner, accent @ 14% -- with the 3 px accent rule on its left edge, and the tree's folder glyph as a two-tone translucent soft blue instead of the solid accent plate |
+
+## Pixel assertions (measured on the rendered frame, not eyeballed)
+
+- **Roundness**: the pill's corner pixel `#FF252835` vs its centre `#FF213451`
+  -> `|corner-centre| = 30.7`; the corner is the panel (`|corner-panel| = 1.0`).
+  A square fill measures `|corner-centre| = 0.0`, which is the shipped defect.
+- **Wash alpha**: `--selection-tint` Day `0.140`, Night `0.140` (was `0.160`),
+  HighContrast `0.240` pinned as its own accessibility floor. Rendered wash vs
+  panel: Day `40.7`, Night `31.6`; vs the opaque accent: `246.9` / `192.9`.
+- **Folder glyph**: body `#FF1268BF` vs the alpha composite `#FF1368C0`
+  (`|d| = 1.4`), and `70.3` away from the opaque plate `#FF0A84FF`. The folder
+  painter contains no `#007AFF` literal (source scan, comments stripped).
+- **Indent**: tree row lefts `16 / 32 / 48` -> one step is 16 px, inside the
+  14..16 px band.
+- **Negative controls**: `PRISM_C104_MUTANT_SQUARE` (hard-edged rectangle)
+  makes the corner and the centre the same pixel and prints
+  `C104 MUTATION CAUGHT: square`; `PRISM_C104_MUTANT_FOLDER_OPAQUE` restores the
+  solid plate (`|body-soft| = 69.5`) and prints `C104 MUTATION CAUGHT:
+  folder_opaque`.
+
+## Reproduce
+
+```pwsh
+. E:\wg\env.ps1 -Card c104
+cmake --build E:\build\wt-c104 --parallel 2 --target win_c104_sidebar
+ctest --test-dir E:\build\wt-c104 -R "c104" --output-on-failure
+& E:\build\wt-c104\Tests\win_c104_sidebar.exe docs\assets\ui
+```
+
+No `<out-dir>` = assertions only, no files (the CI path).

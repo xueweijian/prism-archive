@@ -265,7 +265,7 @@ en-US 表保持半角。断言：zh-CN 的可见文本里不出现 `: ` / ` (` �
 **修法**：`const bool drawGlyphs = !backdropPass;`，行文字包进该分支；保留图标/压缩率条/选中 tint（层仍可测）。
 断言：名称区 `maxLum ≤ lum(canvas)+24`（今天 78.7 → 红）；压缩率列仍需 ≥8 级差且 ≥1500 px；
 负向控制 `PRISM_C77_MUTANT_TEXT_IN_BACKDROP`。
-**状态**：C90 修复中。
+**状态**：✅ 已修（C90/#110）——行文字不再进 1/8 倒影；名称区 maxLum 88 → 13（画布 14，门限 38），白板面积 55,663 px → 0 px；负向控制渲染出的帧与修复前 sha256 完全相同。
 
 **附带发现**：`glassTheme` 恒为 Midnight（`GalleryWindow.hpp:4013-4015`）——settings 里的主题对玻璃层不生效；
 mini 图按 DIP 算，真实下采样是 10× 而非注释里的 8×（白块羽化 16–20 px 与此吻合）。

@@ -54,8 +54,12 @@ PrismArchive：Windows 11 x64 归档管理器，引擎是运行时 `LoadLibraryW
 
 ## R6 构建与测试（推之前必须过本地门禁）
 
-- 环境：仓库根目录 `. .\dev-env.ps1`（导入 MSVC/SDK，前置 Python/7-Zip/Ninja，
-  设 `PRISM_7Z_DLL` 与 E 盘 TEMP）。同一 pwsh 里再跑 cmake / ctest / python。
+- 环境：**`dev-env.ps1` 不在仓库里**（含本机路径，被 `.git/info/exclude` 排除），所以每个新 worktree 都没有它。
+  两条路：① 用机器上已有的多卡脚本 `. E:\wg\env.ps1 -Card <卡号>`；
+  ② `Copy-Item tools/dev-env.example.ps1 <worktree>\dev-env.ps1` 后按本机路径改默认值，再 `. .\dev-env.ps1`。
+  两者都做同一件事：导入 MSVC/SDK、前置 Python/7-Zip/Ninja、设 `PRISM_7Z_DLL` 与 E 盘 TEMP。
+  **必须先 dot-source 再调 `local_gates.ps1`**——裸跑时 PATH 里没有 python，preflight/manifest 会直接红。
+  同一 pwsh 里再跑 cmake / ctest / python。
 - 一条命令全门禁：`pwsh -File tools/local_gates.ps1 -BuildDir E:\build\wt-<卡>`
   —— configure + build + ctest + preflight + manifest + headers + windows_tu，
   最后一行 `LOCAL GATES: PASS/FAIL`，日志在 `<build>/local-gates/`。

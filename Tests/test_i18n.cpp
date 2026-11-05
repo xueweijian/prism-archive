@@ -279,8 +279,12 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // diagnostics). The census was 102.
   // C88: +27 for the password gate (prompt, six labels, two memo radios, the two
   // list captions, three buttons, progress, the two-part error line and nine
-  // status sentences). The census is 129 and a table that drops one fails here.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{129});
+  // status sentences). The census was 129.
+  // C92: +11 for the in-app right-click menus (eight verbs and three disabled
+  // reasons -- a greyed item must be able to say why). The census is 140 and a
+  // table that drops one fails here; the FIRST push of C92 forgot this line and
+  // this assertion is what caught it.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{140});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

@@ -681,6 +681,21 @@ inline const std::vector<std::string>& RequiredKeys() {
       "menu.edit.delete",
       "menu.edit.rename",
       "menu.edit.newFolder",
+      // C92: the IN-APP right-click menus (three surfaces in GalleryWindow).
+      // One key per verb, plus one per DISABLED REASON: a greyed item that cannot
+      // say why is the same defect as a missing label. Listed in the same order
+      // as the tables so a translator diff reads row for row.
+      "context.open",
+      "context.extract.selected",
+      "context.extract.all",
+      "context.smart.extract.here",
+      "context.copy.path",
+      "context.reveal.archive",
+      "context.select.all",
+      "context.refresh",
+      "context.disabled.no.selection",
+      "context.disabled.not.a.file",
+      "context.disabled.no.archive",
       // Sidebar headings and the empty state.
       "sidebar.section.favorites",
       "sidebar.section.recent",

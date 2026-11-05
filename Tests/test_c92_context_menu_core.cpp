@@ -165,6 +165,19 @@ PRISM_TEST("c92.both_tables_define_every_context_key") {
   for (const char* key : keys) {
     if (!PRISM_CHECK(en.Has(key))) std::fprintf(stderr, "en-US lacks %s\n", key);
     if (!PRISM_CHECK(zh.Has(key))) std::fprintf(stderr, "zh-CN lacks %s\n", key);
+    // The CENSUS (I18n.hpp RequiredKeys) must know every one of them: a key the
+    // tables carry but the census forgets makes test_i18n's
+    // "table size == RequiredKeys().size()" assertion red, which is exactly how
+    // this card's first push failed the Linux lane.
+    const std::vector<std::string>& required = prism::i18n::RequiredKeys();
+    PRISM_CHECK(std::find(required.begin(), required.end(), key) != required.end());
+  }
+  // The census covers the context surface exactly once: no key twice, and the
+  // eleven rows above are all present (the count check lives in test_i18n).
+  const std::vector<std::string>& required = prism::i18n::RequiredKeys();
+  for (const char* key : keys) {
+    PRISM_CHECK_EQ(std::count(required.begin(), required.end(), std::string(key)),
+                   static_cast<std::ptrdiff_t>(1));
   }
 
   // The model's label keys are exactly the table rows, and the Chinese table

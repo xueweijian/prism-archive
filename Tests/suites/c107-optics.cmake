@@ -42,4 +42,24 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties("mutation.c107.optics.no_backdrop" PROPERTIES
                        TIMEOUT 300
                        PASS_REGULAR_EXPRESSION "C107 MUTATION CAUGHT: no_backdrop")
+
+  # The memory-accounting control: the backdrop is allocated but left out of
+  # TransientBytes(). The 200-frame case asserts the total against its
+  # COMPOSITION (island + graph + backdrop), so that assertion must go red --
+  # this is the guard that keeps "what counts as transient" honest when the
+  # layout resizes the island (the constant it replaced broke on 2026-11-06).
+  add_executable(win_c107_optics_mutant_backdrop_not_counted win/test_c107_optics.cpp)
+  target_link_libraries(win_c107_optics_mutant_backdrop_not_counted
+                        PRIVATE prism_core prism_win_bridge
+                                user32.lib gdi32.lib d2d1.lib dwrite.lib
+                                d3d11.lib dxgi.lib dcomp.lib d3dcompiler.lib
+                                windowscodecs.lib ole32.lib)
+  target_compile_options(win_c107_optics_mutant_backdrop_not_counted PRIVATE /WX-)
+  target_compile_definitions(win_c107_optics_mutant_backdrop_not_counted
+                             PRIVATE PRISM_C107_MUTANT_BACKDROP_NOT_COUNTED=1)
+  add_test(NAME "mutation.c107.optics.backdrop_not_counted"
+           COMMAND win_c107_optics_mutant_backdrop_not_counted)
+  set_tests_properties("mutation.c107.optics.backdrop_not_counted" PROPERTIES
+                       TIMEOUT 300
+                       PASS_REGULAR_EXPRESSION "C107 MUTATION CAUGHT: backdrop_not_counted")
 endif()

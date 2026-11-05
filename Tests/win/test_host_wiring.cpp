@@ -385,10 +385,30 @@ PRISM_TEST("glass: minimise releases the transient layer, restore rebuilds it") 
   }
   PRISM_CHECK(window.GlassLayerReady());
   PRISM_CHECK(window.GlassLayerVisible());
+  // C107: the island takes the LAYOUT's rect at its FIRST present (C76's
+  // deferral is what decides when that is), so the layer must be measured AFTER
+  // a frame has run -- otherwise "before" is the host's birth size (960x48) and
+  // "after" is the layout's (560x44), and the two can never agree.
+  window.Dispatch(WM_PAINT, 0, 0);
+  window.Dispatch(WM_PAINT, 0, 0);
+  // C107: the transient layer is a COMPOSITION (island surfaces + the effect
+  // graph + the captured backdrop), and the island is the LAYOUT's panel -- it
+  // is 560x44 on a 1280 px window, not the 960x48 the host is born with. A test
+  // that pinned the total to a constant (the pre-C107 "960*48*4*2") broke the
+  // moment the island started following the layout, so this asserts the total
+  // against the sum of its terms, each read from its own accessor.
+  const auto composition = [&window]() {
+    return window.GlassIslandSurfaceBytes() + window.GlassGraphBytes() +
+           window.GlassBackdropBytes();
+  };
   const size_t resident = window.GlassTransientBytes();
+  const size_t islandBytesBefore = window.GlassIslandSurfaceBytes();
   PRISM_CHECK(resident > 0);
   PRISM_CHECK(window.GlassTransientLive());
-  std::cout << "  [glass] transient before minimise: " << resident << " bytes" << std::endl;
+  std::cout << "  [glass] transient before minimise: " << resident << " bytes (island "
+            << window.GlassIslandSurfaceBytes() << " + graph " << window.GlassGraphBytes()
+            << " + backdrop " << window.GlassBackdropBytes() << ")" << std::endl;
+  PRISM_CHECK_EQ(window.GlassTransientBytes(), composition());
 
   // A thumbnail store with real pixels: the idle trim must move resident DOWN,
   // and the target is an eighth of the budget (PERF.md 2.1).
@@ -416,9 +436,23 @@ PRISM_TEST("glass: minimise releases the transient layer, restore rebuilds it") 
   PRISM_CHECK_EQ(window.GlassReleasedBytes(), size_t(0));
 
   window.Dispatch(WM_SIZE, SIZE_RESTORED, MAKELPARAM(1280, 800));
+  PRISM_CHECK_EQ(window.GlassTransientBytes(), composition());
   PRISM_CHECK_EQ(window.GlassTransientBytes(), resident);
+  // The rebuild is the SAME layer, not a differently-sized one: the island kept
+  // its layout rect and the graph kept its resolution.
+  PRISM_CHECK_EQ(window.GlassIslandSurfaceBytes(), islandBytesBefore);
   PRISM_CHECK(window.GlassTransientLive());
   PRISM_CHECK(window.GlassLayerVisible());
+
+  // GROWTH GUARD (C107, C33's discipline): 200 composed frames leave the total
+  // exactly at its composition. RestoreGlassLayer is the product's own "rebuild
+  // and present" door, so this drives the SAME capture + effect-graph path the
+  // frames use (the deferral stops presenting on WM_PAINT after frame 2).
+  for (int frame = 0; frame < 200; ++frame) {
+    if (!PRISM_CHECK(window.RestoreGlassLayer())) break;
+    if (!PRISM_CHECK_EQ(window.GlassTransientBytes(), composition())) break;
+  }
+  PRISM_CHECK_EQ(window.GlassTransientBytes(), resident);
 
   window.Dispatch(WM_DESTROY, 0, 0);
 }

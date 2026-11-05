@@ -1157,6 +1157,11 @@ class GalleryWindow {
   // What the last composed island was fed with: the capture ran, the backdrop
   // is a bitmap on the host's device, and the frame count proves the paint path
   // (not just EnableGlassLayer) reached the chain.
+  // The COMPOSITION of GlassTransientBytes(), term by term (C107): a test that
+  // asserts the total against this sum cannot be invalidated by a layout change
+  // that resizes the island, and one that asserts a constant can.
+  size_t GlassIslandSurfaceBytes() const { return glass_ ? glass_->IslandSurfaceBytes() : 0; }
+  size_t GlassGraphBytes() const { return glass_ ? glass_->GraphBytes() : 0; }
   bool GlassBackdropLive() const { return glass_ && glass_->Backdrop() != nullptr; }
   size_t GlassBackdropBytes() const { return glass_ ? glass_->BackdropBytes() : 0; }
   int GlassBackdropCaptures() const { return glass_ ? glass_->BackdropCaptures() : 0; }

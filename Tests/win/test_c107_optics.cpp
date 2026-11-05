@@ -680,6 +680,12 @@ PRISM_TEST("c107_200_frames_do_not_leak") {
   const prism::win::glass::GlassConstants constants = PanelConstants(rect);
   PRISM_CHECK(stage.Paint(120, 140, 200));
 
+#if defined(PRISM_C107_MUTANT_BACKDROP_NOT_COUNTED)
+  // NEGATIVE CONTROL (D27): the product allocates the backdrop but leaves it
+  // out of TransientBytes(). The composition assertion below must go red.
+  prism::test::SetMutationVerdict("C107 MUTATION CAUGHT: backdrop_not_counted",
+                                  [] { return true; });
+#endif
   size_t first = 0;
   bool ok = true;
   for (int frame = 0; frame < 200 && ok; ++frame) {
@@ -692,6 +698,16 @@ PRISM_TEST("c107_200_frames_do_not_leak") {
   }
   PRISM_CHECK(ok);
   const size_t last = host.TransientBytes();
+  // The total IS its composition (C107): island surfaces + effect graph +
+  // the captured backdrop. Pinning a number would break the next time the
+  // layout resizes the island; pinning the composition cannot, and the
+  // backdrop_not_counted mutant makes exactly this line red.
+  std::printf("  composition: island=%zu graph=%zu backdrop=%zu total=%zu\n",
+              host.IslandSurfaceBytes(), host.GraphBytes(), host.BackdropBytes(), last);
+  PRISM_CHECK_EQ(last, host.IslandSurfaceBytes() + host.GraphBytes() + host.BackdropBytes());
+#if defined(PRISM_C107_MUTANT_BACKDROP_NOT_COUNTED)
+  prism::test::ClearMutationVerdict();
+#endif
   std::printf("  transient bytes: first frame=%zu, after 200 frames=%zu, backdrop=%zu\n", first,
               last, host.BackdropBytes());
   // The backdrop is REUSED: the accounting is identical, not merely bounded.

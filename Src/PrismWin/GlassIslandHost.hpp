@@ -783,23 +783,42 @@ class GlassIslandHost {
   //   * the effect graph, if live: three intermediate surfaces at the largest
   //     island's resolution (the graph is shared by every island).
   size_t TransientBytes() const {
-    size_t bytes = 0;
-    UINT maxPixels = 0;
-    for (const IslandSurface& surface : surfaces_) {
-      if (!surface.swapchain) continue;
-      bytes += static_cast<size_t>(surface.width) * surface.height * 4u * kSwapChainBuffers;
-      const UINT pixels = surface.width * surface.height;
-      if (pixels > maxPixels) maxPixels = pixels;
-    }
-    const size_t graph = chain_.IntermediateBytes();
-    bytes += graph > 0 ? graph : (chain_.Live() && maxPixels > 0
-                                      ? static_cast<size_t>(maxPixels) * 4u * 3u
-                                      : 0);
+    size_t bytes = IslandSurfaceBytes() + GraphBytes();
     // C107: the captured backdrop is a real allocation on this device too. A
     // frame loop that re-created it instead of reusing it would leak here, and
     // the C33/C107 accounting has to be able to see that.
+#if defined(PRISM_C107_MUTANT_BACKDROP_NOT_COUNTED)
+    // NEGATIVE CONTROL (CONTRACTS D3/D27): the backdrop is allocated but not
+    // accounted for. A suite that pins this total to its COMPOSITION
+    // (island + backdrop + graph) must go red; a suite that pinned it to a
+    // number would not notice.
+    prism::win::startup::Trace::Instance().Count("c107_backdrop_not_counted");
+#else
     bytes += BackdropBytes();
+#endif
     return bytes;
+  }
+
+  // The three terms TransientBytes() is made of, each observable on its own, so
+  // a test can assert the TOTAL against its COMPOSITION instead of pinning a
+  // number that a layout change silently invalidates (C107).
+  size_t IslandSurfaceBytes() const {
+    size_t bytes = 0;
+    for (const IslandSurface& surface : surfaces_) {
+      if (!surface.swapchain) continue;
+      bytes += static_cast<size_t>(surface.width) * surface.height * 4u * kSwapChainBuffers;
+    }
+    return bytes;
+  }
+  size_t GraphBytes() const {
+    const size_t graph = chain_.IntermediateBytes();
+    if (graph > 0) return graph;
+    UINT maxPixels = 0;
+    for (const IslandSurface& surface : surfaces_) {
+      const UINT pixels = surface.width * surface.height;
+      if (pixels > maxPixels) maxPixels = pixels;
+    }
+    return (chain_.Live() && maxPixels > 0) ? static_cast<size_t>(maxPixels) * 4u * 3u : 0;
   }
 
   bool TransientLive() const { return chain_.Live() || AnySurfaceLive(); }

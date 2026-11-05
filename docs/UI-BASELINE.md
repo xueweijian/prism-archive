@@ -60,6 +60,7 @@ agent-desktop screenshot --window-id w-<hwnd> docs/assets/ui/baseline/prism-1600
 ## 2. 验收矩阵
 
 判定符号：**FAIL** = 现在没达标（就是待办）；**PASS** = 现在达标，改动不得回退。
+下表 13 条主张；工具把它展开成 16 行（画布、岛体、菜单/标题各多一份"截图读数"），当前是 2 PASS / 14 FAIL。
 
 | 主张 | 测量方法 | 阈值 | 当前实测 | 目标卡 |
 |---|---|---|---|---|

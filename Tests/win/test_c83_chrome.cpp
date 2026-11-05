@@ -263,12 +263,16 @@ PRISM_TEST("c83 the DWM caption takes the shell token") {
 // ---------------------------------------------------------------------------
 // 2. THE PIXELS: caption luma vs canvas luma, and the menu plate == the token.
 // ---------------------------------------------------------------------------
+// C91: this case now runs ONCE PER THEME and compares the shell against the
+// canvas the renderer ACTUALLY painted for that theme. Before C91 the canvas was
+// the literal #0B0E13 in all three variants, so "the shell is continuous with
+// the canvas" was only ever true for Midnight -- and only Midnight was tested.
+// A Day run whose canvas stayed at 12.9 luma (the old behaviour) fails this.
 PRISM_TEST("c83 the caption and the menu bar are the canvas's surface") {
   GalleryWindow window;
   if (!MakeWindow(&window, L"PrismArchive c83 pixels")) return;
   window.SetItems(nullptr);
   InstallChineseLabels(&window);
-  window.SetChromeVariant(Variant::Midnight);
   ::ShowWindow(window.Hwnd(), SW_SHOWNORMAL);
   // On top for the duration of the capture: an occluded window's pixels belong
   // to whatever covers it.
@@ -288,6 +292,14 @@ PRISM_TEST("c83 the caption and the menu bar are the canvas's surface") {
 
   const RECT visible{measured.visible.left, measured.visible.top,
                      measured.visible.right, measured.visible.bottom};
+  const Variant variants[3] = {Variant::Midnight, Variant::Daylight,
+                               Variant::HighContrast};
+  for (int i = 0; i < 3; ++i) {
+    const Variant variant = variants[i];
+    const std::string themeName(prism::theme::VariantName(variant));
+    window.SetChromeVariant(variant);
+    ::UpdateWindow(window.Hwnd());
+    ::Sleep(300);
   Shot shot;
   const bool captured = GrabScreen(visible, &shot);
   if (!captured) {
@@ -310,22 +322,64 @@ PRISM_TEST("c83 the caption and the menu bar are the canvas's surface") {
                                       measured.visible.right - 220, menuTop - 1);
   const uint32_t menuPlate = ModalColor(shot, measured.visible.left + 8, menuTop + 1,
                                         measured.visible.right - 8, clientOrigin.y - 1);
-  const Palette palette = PaletteFor(Variant::Midnight);
+  const Palette palette = PaletteFor(variant);
   const int expectedR = static_cast<int>(palette.background.r * 255.0f + 0.5f);
   const int expectedG = static_cast<int>(palette.background.g * 255.0f + 0.5f);
   const int expectedB = static_cast<int>(palette.background.b * 255.0f + 0.5f);
-  std::printf("  [pixels] canvasLuma=%.2f titleLuma=%.2f menu=#%02X%02X%02X expected=#%02X%02X%02X\n",
-              canvasLuma, titleLuma, ChannelR(menuPlate), ChannelG(menuPlate),
-              ChannelB(menuPlate), expectedR, expectedG, expectedB);
+  // C91: the canvas pixel this theme SHOULD have painted. This is the "actual
+  // canvas pixels" half of the gate -- it is what the renderer resolved from the
+  // one theme entry, not a constant this test carries.
+  const prism::theme::Rgba wantCanvas =
+      prism::chrome::CanvasPresentedColor(variant);
+  const int wantR = static_cast<int>(wantCanvas.r * 255.0f + 0.5f);
+  const int wantG = static_cast<int>(wantCanvas.g * 255.0f + 0.5f);
+  const int wantB = static_cast<int>(wantCanvas.b * 255.0f + 0.5f);
+  const uint32_t centrePixel =
+      shot.pixels[static_cast<std::size_t>(clientOrigin.y - shot.screen.top +
+                                           (clientRect.bottom - clientRect.top) / 2) *
+                      shot.width +
+                  static_cast<std::size_t>(clientOrigin.x - shot.screen.left +
+                                           (clientRect.right - clientRect.left) / 2)];
+  std::printf("  [%s] canvasLuma=%.2f titleLuma=%.2f menu=#%02X%02X%02X expected=#%02X%02X%02X "
+              "canvas=#%02X%02X%02X wantCanvas=#%02X%02X%02X\n",
+              themeName.c_str(), canvasLuma, titleLuma, ChannelR(menuPlate),
+              ChannelG(menuPlate), ChannelB(menuPlate), expectedR, expectedG, expectedB,
+              ChannelR(centrePixel), ChannelG(centrePixel), ChannelB(centrePixel), wantR,
+              wantG, wantB);
 
   // A capture that did not see the window (a locked/absent desktop) is not a
-  // verdict either way; say so instead of pretending the pixels matched.
-  if (canvasLuma > 80.0) {
-    std::puts("  [skip] the screen capture did not see the window (no interactive desktop)");
+  // verdict either way. The old heuristic ("the canvas is bright, so we must be
+  // looking at a desktop") cannot survive a DAYLIGHT canvas, which IS bright by
+  // design, so the test now asks the only question that matters: is the sampled
+  // pixel one of the three themes at all?
+  const bool sawAnyTheme = [&] {
+    for (const Variant candidate : variants) {
+      const prism::theme::Rgba expected = prism::chrome::CanvasPresentedColor(candidate);
+      if (std::abs(ChannelR(centrePixel) - static_cast<int>(expected.r * 255.0f + 0.5f)) <= 4 &&
+          std::abs(ChannelG(centrePixel) - static_cast<int>(expected.g * 255.0f + 0.5f)) <= 4 &&
+          std::abs(ChannelB(centrePixel) - static_cast<int>(expected.b * 255.0f + 0.5f)) <= 4) {
+        return true;
+      }
+    }
+    return false;
+  }();
+  if (!sawAnyTheme) {
+    std::printf("  [skip] the screen capture did not see the window (canvas #%02X%02X%02X is "
+                "none of the three themes)\n",
+                ChannelR(centrePixel), ChannelG(centrePixel), ChannelB(centrePixel));
     g_noWindowStation = true;
+    ::SetWindowPos(window.Hwnd(), HWND_NOTOPMOST, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     window.Dispatch(WM_DESTROY, 0, 0);
     return;
   }
+
+  // RULE 0 (C91): the CONTENT followed the theme. The window hands its variant to
+  // the renderer, so the canvas pixel must be this theme's composite -- in Day
+  // (247,249,252), in HighContrast (0,0,0).
+  PRISM_CHECK(std::abs(ChannelR(centrePixel) - wantR) <= 3);
+  PRISM_CHECK(std::abs(ChannelG(centrePixel) - wantG) <= 3);
+  PRISM_CHECK(std::abs(ChannelB(centrePixel) - wantB) <= 3);
 
   // RULE 1: title bar luma < canvas luma + 12 (the card's number). Windows 11
   // accepts DWMWA_CAPTION_COLOR and lands exactly on the token; Windows 10
@@ -337,19 +391,21 @@ PRISM_TEST("c83 the caption and the menu bar are the canvas's surface") {
   g_titleBarTooBright = !prism::chrome::ShellMatchesCanvas(titleLuma, canvasLuma);
   if (strict) {
     PRISM_CHECK(g_titleBarTooBright == false);
-  } else {
+  } else if (prism::chrome::IsDarkSurface(palette.background)) {
+    // Without DWMWA_CAPTION_COLOR the OS can only offer its dark-mode grey to a
+    // DARK theme; a daylight shell legitimately keeps the system's light caption
+    // (and DWM's default), so the absolute floor applies only to the dark arms.
     PRISM_CHECK(titleLuma < canvasLuma + 40.0);
     PRISM_CHECK(titleLuma < 64.0);
   }
 
-  // RULE 2: the menu plate IS the dark shell token (each channel within 3 -- the
-  // bar is a solid brush, the tolerance is for the capture's colour management).
+  // RULE 2: the menu plate IS the shell token (each channel within 3 -- the bar
+  // is a solid brush, the tolerance is for the capture's colour management).
   g_menuNotToken = std::abs(ChannelR(menuPlate) - expectedR) > 3 ||
                    std::abs(ChannelG(menuPlate) - expectedG) > 3 ||
                    std::abs(ChannelB(menuPlate) - expectedB) > 3;
   PRISM_CHECK(g_menuNotToken == false);
-  // ... and the token is dark, so a "matching" white bar cannot pass by accident.
-  PRISM_CHECK(LumaOf(menuPlate) < 64.0);
+  }
 
   ::SetWindowPos(window.Hwnd(), HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);

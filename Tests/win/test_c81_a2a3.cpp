@@ -90,9 +90,12 @@ struct Box {
   int left = 0, top = 0, right = 0, bottom = 0;
 };
 
-// The canvas colour as the render target quantizes kBackdrop to bytes.
+// The canvas colour as the render target quantizes it to bytes. C91: it is the
+// theme's canvas composite, not the #0B0E13 literal the renderer used to clear to.
 UINT32 CanvasPixel() {
-  const D2D1_COLOR_F c = prism::win::gallery::GalleryRenderer::kBackdrop;
+  const prism::theme::Rgba token =
+      prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+  const D2D1_COLOR_F c = D2D1::ColorF(token.r, token.g, token.b, token.a);
   const auto q = [](float v) {
     return static_cast<UINT32>((std::min)(255.0f, (std::max)(0.0f, v * 255.0f + 0.5f)));
   };

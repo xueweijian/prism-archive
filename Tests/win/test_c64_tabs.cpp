@@ -241,9 +241,11 @@ double ContrastRatio(UINT32 a, UINT32 b) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-// The renderer clears to this opaque backdrop; the canvas token is composited
-// over it wherever a surface paints (DESIGN.md §4).
-constexpr prism::theme::Rgba kBackdropPixel{0.043f, 0.055f, 0.075f, 1.0f};
+// The renderer clears to this opaque canvas (C91: the theme's own composite, no
+// #0B0E13 literal); every surface token is composited over it.
+prism::theme::Rgba BackdropPixel() {
+  return prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+}
 
 prism::theme::Rgba Token(prism::theme::TokenId id) {
   return prism::theme::Lookup(id, prism::theme::Variant::Midnight).color;
@@ -450,7 +452,7 @@ PRISM_TEST("c64 action island pixels: token fill, bounded canvas contrast, 4.5:1
 
   // The canvas: the content area, far from every island.
   const UINT32 canvasPixel = frame.At(static_cast<int>(kWidth) / 2, static_cast<int>(kHeight) / 2);
-  PRISM_CHECK(ColorDistance(canvasPixel, ToPixel(kBackdropPixel)) <= 2);
+  PRISM_CHECK(ColorDistance(canvasPixel, ToPixel(BackdropPixel())) <= 2);
 
   // The island's own fill (inside its padding, left of every button).
   const int islandX = band.island.left + 3;
@@ -458,7 +460,7 @@ PRISM_TEST("c64 action island pixels: token fill, bounded canvas contrast, 4.5:1
   const UINT32 islandPixel = frame.At(islandX, islandY);
   const prism::theme::Rgba expectedIsland =
       prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceFloatingIsland),
-                                  kBackdropPixel);
+                                  BackdropPixel());
   PRISM_CHECK(ColorDistance(islandPixel, ToPixel(expectedIsland)) <= 2);
 
   // Luminance (0..255, Rec.709) of the island against the canvas. The token

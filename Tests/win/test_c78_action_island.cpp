@@ -163,7 +163,7 @@ prism::win::gallery::GalleryRenderer::Scene BaseScene(
   scene.actions = model;
   scene.actionHover = hover;
   scene.actionPressed = pressed;
-  scene.actionTheme = variant;
+  scene.theme = variant;
   scene.breadcrumb = L"Design_Assets_v4.7z";
   return scene;
 }

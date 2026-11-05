@@ -49,11 +49,90 @@ struct Palette {
   Rgba rim{};           // --border-specular-rim over the background
 };
 
-// The canvas the window actually clears to (GalleryRenderer::kBackdrop,
-// #0B0E13). It is a literal there for historical reasons; naming it here lets
-// the shell test say "the shell is continuous with THAT pixel" without importing
-// the renderer into PrismCore.
-inline constexpr Rgba kCanvasReference{0.043f, 0.055f, 0.075f, 1.0f};
+// ---------------------------------------------------------------------------
+// C91: THE ONE THEME ENTRY.
+//
+// THE MEASURED DEFECT. A 1,544,424 px whole-window diff of day -> night moved
+// 122,969 px (7.96 %), all of it in y=0..62 (caption + menu bar). The content
+// area -- 92 % of the window -- was pixel-identical in all three themes, because
+// the canvas was a literal (#0B0E13) and the renderer's variant was never set.
+//
+// WHY THESE THREE FUNCTIONS AND NOT A TOKEN LOOKUP AT EACH CALL SITE. Every
+// surface asks the same chain: token -> composite over THIS theme's canvas. If a
+// painter resolved its own combination, the canvas and the surface painted on it
+// could disagree by the alpha of one layer -- the "two authorities" drift the
+// token table exists to prevent. A call site that wants a colour from the theme
+// calls ThemeSurfaceColor(); it never composites by hand.
+//
+// THE CHAIN, in order:
+//   CanvasColor(v)          --surface-canvas-base over --surface-backdrop-reference.
+//                              This is the colour the target is CLEARED to.
+//   CanvasPresentedColor(v) the same, washed with --surface-backdrop-veil: the
+//                              pixel a resting canvas region actually shows once
+//                              the C77 backdrop layer has run (it is ON by
+//                              default, and its veil covers the whole frame).
+//   ThemeSurfaceColor(id,v) the token composited over CanvasPresentedColor(v) --
+//                              what a surface painted straight onto the canvas
+//                              resolves to (island, tab plate, panel, ...).
+//
+// The numbers this reproduces, measured by the pixel suites:
+//   canvas      day (247,249,252)  night (13,14,18)  high-contrast (0,0,0)
+//   island      day (252,252,254)  night (26,29,37)
+//   sidebar     day (255,255,255)  high-contrast (26,26,28)
+//   swim lane   day (251,254,255)  high-contrast (4,5,6)
+// ---------------------------------------------------------------------------
+
+#if defined(PRISM_C91_MUTANT_CORE_MIDNIGHT)
+// NEGATIVE CONTROL (CONTRACTS D3): prove the injected branch ran, so a red that
+// came from somewhere else cannot print the CAUGHT verdict.
+inline int& MutantCoreHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+
+// The flat canvas tile: the two tokens composed, no backdrop layer involved.
+inline Rgba CanvasColor(Variant variant) {
+#if defined(PRISM_C91_MUTANT_CORE_MIDNIGHT)
+  // NEGATIVE CONTROL (CONTRACTS D3): every theme resolves to Midnight, so a Day
+  // assertion that expects a light canvas MUST go red.
+  ++MutantCoreHits();
+  variant = Variant::Midnight;
+#endif
+  const Rgba base = theme::Lookup(theme::TokenId::SurfaceCanvasBase, variant).color;
+  const Rgba reference =
+      theme::Lookup(theme::TokenId::SurfaceBackdropReference, variant).color;
+  return theme::CompositeOver(base, reference);
+}
+
+// The canvas pixel at rest, with the C77 backdrop layer's veil on top. Empty
+// regions of a frame show exactly this; the renderer's band fills must use it
+// too, or the action band would be a visible rectangle on the canvas.
+inline Rgba CanvasPresentedColor(Variant variant) {
+  const Rgba veil = theme::Lookup(theme::TokenId::SurfaceBackdropVeil, variant).color;
+  return theme::CompositeOver(veil, CanvasColor(variant));
+}
+
+// A token as it lands on this theme's canvas. Surfaces that are drawn straight
+// onto the canvas (the floating island, the tab plate, the rail panel) resolve
+// here; the result is OPAQUE, because "what colour is that pixel" is the only
+// question the pixel suites ask, and a translucent answer is not a colour.
+//
+// The three-argument form takes the canvas a caller ALREADY has (the renderer
+// knows exactly which colour it cleared to this frame, veil or no veil). There
+// is one implementation; the two-argument form is a convenience, not a second
+// rule.
+inline Rgba ThemeSurfaceColor(theme::TokenId id, Variant variant, const Rgba& canvas) {
+  if (id == theme::TokenId::SurfaceCanvasBase) return canvas;
+  const Rgba top = id == theme::TokenId::SurfaceFloatingIsland
+                       ? theme::EffectiveGlassSurface(variant)
+                       : theme::Lookup(id, variant).color;
+  return theme::CompositeOver(top, canvas);
+}
+
+inline Rgba ThemeSurfaceColor(theme::TokenId id, Variant variant) {
+  return ThemeSurfaceColor(id, variant, CanvasPresentedColor(variant));
+}
 
 inline Rgba Flatten(const Rgba& top, const Rgba& bottom) {
   return theme::CompositeOver(top, bottom);

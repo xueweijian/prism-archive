@@ -146,16 +146,16 @@ prism::theme::Rgba Token(prism::theme::TokenId id) {
   return prism::theme::Lookup(id, prism::theme::Variant::Midnight).color;
 }
 
-// The renderer clears to kBackdrop (opaque) before any band is painted, so every
-// semi-transparent token lands ON that colour. Computing the expectation the
-// same way D2D composites it is what makes the assertion "the token reached the
-// pixel" instead of "some dark colour is there".
-constexpr prism::theme::Rgba kBackdropPixel{0.043f, 0.055f, 0.075f, 1.0f};
-
-prism::theme::Rgba CanvasPlate() {
-  return prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceCanvasBase),
-                                     kBackdropPixel);
+// The renderer clears to the THEME's canvas (C91: prism::chrome::CanvasColor)
+// before any band is painted, so every semi-transparent token lands ON that
+// colour. Computing the expectation the same way D2D composites it is what makes
+// the assertion "the token reached the pixel" instead of "some dark colour is
+// there".
+prism::theme::Rgba BackdropPixel() {
+  return prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
 }
+
+prism::theme::Rgba CanvasPlate() { return BackdropPixel(); }
 prism::theme::Rgba IslandPlate() {
   return prism::theme::CompositeOver(Token(prism::theme::TokenId::SurfaceFloatingIsland),
                                      CanvasPlate());
@@ -169,7 +169,7 @@ prism::theme::Rgba AccentColor() {
                               prism::theme::Variant::Midnight)
       .gradient.from;
 }
-UINT32 Backdrop() { return ToPixel(kBackdropPixel); }
+UINT32 Backdrop() { return ToPixel(BackdropPixel()); }
 UINT32 CanvasOverBackdrop() { return ToPixel(CanvasPlate()); }
 UINT32 IslandOverCanvas() { return ToPixel(IslandPlate()); }
 // C79: the ACTIVE tab is its own token now (brighter than the island) and the

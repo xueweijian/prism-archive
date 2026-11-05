@@ -311,7 +311,7 @@ PRISM_TEST("C77-1 the backdrop layer really refracts the content (pixel 1)") {
   GalleryRenderer::Scene glass = fixture.scene;
   glass.backdropRefraction = true;
   glass.glassPanels = true;
-  glass.glassTheme = prism::theme::Variant::Midnight;
+  glass.theme = prism::theme::Variant::Midnight;
 
   // The REFERENCE for assertion (1) is the same frame with the panels ON and
   // the layer OFF: then the ONLY difference between the two renders is the
@@ -392,7 +392,7 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
   GalleryRenderer::Scene glass = fixture.scene;
   glass.backdropRefraction = true;
   glass.glassPanels = true;
-  glass.glassTheme = prism::theme::Variant::Midnight;
+  glass.theme = prism::theme::Variant::Midnight;
   GalleryRenderer::Scene bare = glass;
   bare.glassPanels = false;  // the reference: same content, no panel at all
 
@@ -486,7 +486,7 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
   // only thing behind the card is the canvas itself (kBackdrop).
   GalleryRenderer::Scene empty;
   empty.glassPanels = true;
-  empty.glassTheme = prism::theme::Variant::Midnight;
+  empty.theme = prism::theme::Variant::Midnight;
   empty.quickLookOpen = true;
   empty.breadcrumb = L"empty.7z";
   Frame flatFrame;
@@ -640,7 +640,7 @@ PRISM_TEST("C77-5 the panel helper paints every part it is asked for") {
   GalleryRenderer::Scene scene = fixture.scene;
   scene.backdropRefraction = true;
   scene.glassPanels = true;
-  scene.glassTheme = prism::theme::Variant::Midnight;
+  scene.theme = prism::theme::Variant::Midnight;
 
   Harness harness;
   PRISM_CHECK(harness.Open(kWidth, kHeight));

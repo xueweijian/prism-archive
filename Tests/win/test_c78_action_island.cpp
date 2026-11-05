@@ -539,19 +539,44 @@ PRISM_TEST("c78 group seams measure alpha 0.06-0.10 on every theme") {
     for (const prism::actionbar::GroupSeparator& sep : band.separators) {
       const UINT32 seam = rest.frame.At(sep.rect.left, y);
       const UINT32 fill = rest.frame.At(sep.rect.left - 2, y);
-      const double alpha = RecoveredWhiteAlpha(seam, fill);
-      std::printf("  [c78] %s seam x=%d alpha=%.3f\n",
+      // C91: the seam is --divider-subtle at the ActionBar's 8%, not a WHITE
+      // wash. Recovering a "white alpha" only works while the island is dark;
+      // once the daylight theme reaches it the seam is a DARK hairline and that
+      // recovery reads a negative alpha. The expectation is therefore the token
+      // composited over the island -- one authority, all three themes -- and a
+      // separate "it is actually visible" check keeps the 6-10 % intent.
+      const prism::theme::Rgba seamToken =
+          prism::theme::Lookup(prism::theme::TokenId::DividerSubtle, variant).color;
+      prism::theme::Rgba seamPaint = seamToken;
+      seamPaint.a = prism::actionbar::kGroupSeparatorAlpha;
+      const prism::theme::Rgba fillRgba(static_cast<float>((fill >> 16) & 0xFFu) / 255.0f,
+                                        static_cast<float>((fill >> 8) & 0xFFu) / 255.0f,
+                                        static_cast<float>(fill & 0xFFu) / 255.0f, 1.0f);
+      const prism::theme::Rgba want =
+          prism::theme::CompositeOver(seamPaint, fillRgba);
+      const auto byteOf = [](float v) {
+        const double scaled = static_cast<double>(v) * 255.0 + 0.5;
+        return static_cast<int>(scaled < 0.0 ? 0.0 : (scaled > 255.0 ? 255.0 : scaled));
+      };
+      const UINT32 wantPixel = (static_cast<UINT32>(byteOf(want.r)) << 16) |
+                               (static_cast<UINT32>(byteOf(want.g)) << 8) |
+                               static_cast<UINT32>(byteOf(want.b));
+      const int delta = ColorDistance(seam, wantPixel);
+      std::printf("  [c78] %s seam x=%d alpha=%.3f wantAlpha=%.3f dist=%d\n",
                   std::string(prism::theme::VariantName(variant)).c_str(), sep.rect.left,
-                  alpha);
-      PRISM_CHECK(alpha >= 0.06);
-      PRISM_CHECK(alpha <= 0.10);
+                  RecoveredWhiteAlpha(seam, fill),
+                  static_cast<double>(prism::actionbar::kGroupSeparatorAlpha), delta);
+      PRISM_CHECK(delta <= 2);
+      // ... and the hairline is visible against its own fill (the Day defect this
+      // change fixes was a seam that measured zero levels).
+      PRISM_CHECK(ColorDistance(seam, fill) >= 6);
     }
     // Inside the first Group the 4 px gap carries NO seam: its centre pixel is
     // the island fill, not a hairline.
     const int intra = band.buttons[0].rect.right + 2;
     const UINT32 gapPixel = rest.frame.At(intra, y);
     const UINT32 gapFill = rest.frame.At(intra - 1, y);
-    PRISM_CHECK(RecoveredWhiteAlpha(gapPixel, gapFill) < 0.02);
+    PRISM_CHECK(ColorDistance(gapPixel, gapFill) <= 1);
   }
 }
 

@@ -343,12 +343,17 @@ class ActionBarPainter {
     c.a = alpha;
     return ToD2d(c);
   }
-  // C78: the seam is the specular-rim token at a measured 8%. Using the token
-  // (not ColorF(1,1,1)) keeps HighContrast honest: a theme that redefines the
-  // rim redefines the seam.
+  // C78: the seam is a hairline at a measured 8%. C91 moved it from the
+  // specular RIM to --divider-subtle: the rim is WHITE in all three variants, and
+  // once the daylight theme actually reached the island (a near-white surface)
+  // a white 8% seam measured ZERO levels -- the group separator disappeared in
+  // Day. --divider-subtle is the token that exists for exactly this: dark in
+  // Daylight, white in Midnight, white at .40 in HighContrast. The ActionBar's
+  // own alpha still decides the weight, so Midnight paints the same 8% white
+  // pixel as before and the C78 band (0.06..0.10) still holds.
   static D2D1_COLOR_F SeparatorColor(prism::theme::Variant variant) {
     prism::theme::Rgba c =
-        prism::theme::Lookup(prism::theme::TokenId::BorderSpecularRim, variant).gradient.from;
+        prism::theme::Lookup(prism::theme::TokenId::DividerSubtle, variant).color;
     c.a = prism::actionbar::kGroupSeparatorAlpha;
     return ToD2d(c);
   }

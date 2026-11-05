@@ -117,3 +117,41 @@ cmake --build E:\build\wt-c83 --parallel 2 --target win_c83_chrome_test test_chr
 ctest --test-dir E:\build\wt-c83 -R "c83" --output-on-failure
 ```
 
+# C90 list backdrop evidence -- the white plate over the rows
+
+Two frames of the SAME scene (1920 x 1080, list mode, 14 rows, Midnight, rail
+shown), rendered by the REAL renderer (`Tests/win/test_c90_backdrop_text.cpp`
+-> `GalleryRenderer` -> a headless WIC target). They differ by exactly one
+thing: whether the C77 refraction source contains the row GLYPHS.
+
+| file | what it shows |
+| --- | --- |
+| `c90-list-backdrop-before.png` | shipped code: the name column's 13 px labels are rasterized into the 1/8 backdrop, fused by the 1.75 mini px blur and returned at 35% -- the white rectangles the user circled. The 原始大小 / 压缩后 / 压缩率 columns smear the same way. |
+| `c90-list-backdrop-after.png` | C90: glyphs are out of the refraction source; the folder icon and the ratio capsules stay, so the layer still refracts something (the green haloes around the capsules). |
+
+## Pixel assertions (measured on the rendered frame)
+
+- **Name band** (the audit's x 400..1400, rows band y 136..584), over the pixels
+  that are canvas in the backdrop-OFF reference: `onMaxLum = 88` before,
+  `13` after, canvas `14`, limit `canvas + 24 = 38`. Plate area
+  `55 663 px` -> `0 px`.
+- **Positive control** (ratio column x 1730..1830): `23 270` pixels still differ
+  by `>= 8` levels (max channel delta `58`), i.e. the layer was not switched
+  off along with the glyphs.
+- **Negative control**: `PRISM_C77_MUTANT_TEXT_IN_BACKDROP` restores the shipped
+  `drawGlyphs`; its frame is byte-identical to
+  `c90-list-backdrop-before.png` (same sha256) and it prints
+  `C77 MUTATION CAUGHT: text-in-backdrop`.
+- **Rebuild policy**: one backdrop build per content change, zero on a scroll.
+
+## Reproduce
+
+```pwsh
+. E:\wg\env.ps1 -Card c90
+cmake --build E:\build\wt-c90 --target win_c90_backdrop_text
+ctest --test-dir E:\build\wt-c90 -R "c90" --output-on-failure
+& E:\build\wt-c90\Tests\win_c90_backdrop_text.exe <out-dir>
+```
+
+No `<out-dir>` = assertions only, no files (the CI path).
+

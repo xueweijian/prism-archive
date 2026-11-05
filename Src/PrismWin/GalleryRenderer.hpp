@@ -2007,6 +2007,11 @@ class GalleryRenderer {
     return bytes;
   }
   bool DeviceResourcesLive() const { return accent_ != nullptr; }
+  // C100: the band painter itself, so a suite can read its device-state facts
+  // (MnemonicGlyphsDrawn / IconCurveCount / the stroke style's caps) after a
+  // REAL Draw through the real renderer. Exposing the painter beats duplicating
+  // its geometry in a test: the numbers then describe the shipping pixels.
+  const prism::win::actionbar::ActionBarPainter& ActionBand() const { return actionBar_; }
   // Drops every target-bound object (brushes, text formats, gradient stops, the
   // device-bitmap cache of decoded thumbnails). The D2D/DWrite FACTORIES are
   // kept: they are small, shared, and re-creating them costs more than they hold.

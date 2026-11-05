@@ -22,6 +22,14 @@
 //     that still passes AA is a lie about being clickable);
 //   * icons are vector glyphs drawn from scratch (no Bandizip pixels, no
 //     bitmap pipeline): eight silhouettes, one recolourable brush;
+//   * C100: the silhouettes are CURVES (ID2D1PathGeometry + AddBezier/AddArc,
+//     stroked through ONE round-cap ID2D1StrokeStyle), and the band carries NO
+//     mnemonic letter any more -- the "single-letter psoriasis" is gone from the
+//     device. Alt+<letter> never depended on that glyph: the window claims the
+//     chord in WM_SYSKEYDOWN and asks the MODEL (Model::PressMnemonic), and the
+//     UIA node publishes shortcut = "Alt+O" for assistive tech. Both counts
+//     below (MnemonicGlyphsDrawn / IconCurveCount) are what the C100 suite
+//     asserts, and the two mutant arms put each defect back;
 //   * the dropdown panel is the same glass, hanging below its button.
 //
 // The counters at the bottom are the negative control's evidence (CONTRACTS
@@ -42,6 +50,7 @@
 #include <dwrite.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -101,6 +110,10 @@ class ActionBarPainter {
   static constexpr float kFocusRingWidth = 2.0f;
   static constexpr float kFocusRingInset = 2.0f;
   static constexpr float kFocusRingRadius = 10.0f;
+  // C100: ONE ink width for all eight silhouettes (the blueprint's 1.8-2.0 px
+  // band). Eight icons at eight widths is how a band starts to look assembled
+  // from different families; the suite asserts this exact number.
+  static constexpr float kGlyphStroke = 1.8f;
 
   HRESULT CreateDeviceResources(ID2D1RenderTarget* target) {
     if (!writeFactory_) {
@@ -133,6 +146,10 @@ class ActionBarPainter {
         }
       }
     }
+#if defined(PRISM_C100_MUTANT_MNEMONIC)
+    // MUTANT ACTIVE (card C100, arm mnemonic): the 10 px corner letter is back.
+    // Its text format exists again because the glyph that "needs" it exists
+    // again -- the C100 suite's MnemonicGlyphsDrawn() assertion MUST go red.
     if (!mnemonicFormat_) {
       writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -141,6 +158,23 @@ class ActionBarPainter {
         mnemonicFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         mnemonicFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         mnemonicFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+      }
+    }
+#endif
+    // C100: ONE stroke style for all eight glyphs -- round caps on both ends and
+    // on a dash, round joins. A curve that ends in a flat shaved rectangle reads
+    // as a cut wire at 24 px; the round cap is what makes "圆头" true. The suite
+    // reads the caps back off the DEVICE object (GetStartCap/GetDashCap), so a
+    // style that silently degraded to butt caps cannot pass.
+    if (!strokeStyle_) {
+      ComPtr<ID2D1Factory> factory;
+      target->GetFactory(factory.ReleaseAndGetAddressOf());
+      if (factory) {
+        const D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties(
+            D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+            D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f);
+        factory->CreateStrokeStyle(props, nullptr, 0,
+                                   strokeStyle_.ReleaseAndGetAddressOf());
       }
     }
     return S_OK;
@@ -167,6 +201,12 @@ class ActionBarPainter {
 
     const D2D1_SIZE_F size = target->GetSize();
     lastVariant_ = variant;
+    // C100: both counts describe the BAND THIS CALL PAINTS, not "everything
+    // since launch". The suite asks two questions -- "does the painted band
+    // carry a mnemonic letter" and "is this icon a curve drawing" -- and a
+    // cumulative counter would answer neither.
+    dbgMnemonicGlyphs = 0;
+    iconCurves_.fill(0);
 
     // 1. the island: floating glass, specular hairline, squircle corners.
     const D2D1_RECT_F island = RectF(layout.island);
@@ -285,6 +325,37 @@ class ActionBarPainter {
   // V4: labels that needed the ellipsis. MUST be 0 for the shipping table (the
   // assertion is "no truncated label"), and non-zero only in a squeeze.
   int dbgLabelsClipped = 0;
+  // C100: the mnemonic letters this band painted last frame. MUST be 0 in the
+  // shipping build -- the correction the card asks for is "no letter on the
+  // device", and a counter is the only way to say that without eyeballing a PNG.
+  int dbgMnemonicGlyphs = 0;
+
+  // ---- C100 evidence: the four numbers/edges the suite reads back ----------
+  // 1. how many Alt+<letter> glyphs the LAST Draw put on the device (0 shipping).
+  int MnemonicGlyphsDrawn() const { return dbgMnemonicGlyphs; }
+  // 2. curve primitives (AddBezier + AddArc) the last paint of one icon used.
+  //    An icon that regressed to DrawLine calls reports 0 and goes red.
+  int IconCurveCount(int actionIndex) const {
+    if (actionIndex < 0 || actionIndex >= prism::actionbar::kActionCount) return 0;
+    return iconCurves_[static_cast<std::size_t>(actionIndex)];
+  }
+  // 3. the stroke style the glyphs are drawn with, read off the DEVICE object
+  //    (D2D1_CAP_STYLE_ROUND). D3: query it, never trust the comment.
+  bool StrokeStyleBound() const { return strokeStyle_ != nullptr; }
+  D2D1_CAP_STYLE StrokeStartCap() const {
+    return strokeStyle_ ? strokeStyle_->GetStartCap() : D2D1_CAP_STYLE_FLAT;
+  }
+  D2D1_CAP_STYLE StrokeEndCap() const {
+    return strokeStyle_ ? strokeStyle_->GetEndCap() : D2D1_CAP_STYLE_FLAT;
+  }
+  D2D1_CAP_STYLE StrokeDashCap() const {
+    return strokeStyle_ ? strokeStyle_->GetDashCap() : D2D1_CAP_STYLE_FLAT;
+  }
+  D2D1_LINE_JOIN StrokeJoin() const {
+    return strokeStyle_ ? strokeStyle_->GetLineJoin() : D2D1_LINE_JOIN_MITER;
+  }
+  // 4. the glyph ink width, so "1.8-2.0 px stroke" is a number, not a claim.
+  static constexpr float GlyphStrokeWidth() { return kGlyphStroke; }
 
   // V4: proves the ellipsis is wired into the text format (D3-style: query the
   // device state, do not trust a comment). Requires CreateDeviceResources.
@@ -501,7 +572,6 @@ class ActionBarPainter {
     const prism::actionbar::Spec& spec = prism::actionbar::SpecOf(
         (std::max)(0, prism::actionbar::IndexOf(button.id)));
     const float alpha = enabled ? 1.0f : kDisabledAlpha;
-    const D2D1_RECT_F r = RectF(button.rect);
     // V4: both boxes come from the MODEL, and the press sink moves both by the
     // SAME dy -- moving one would reopen the misalignment the screenshot showed.
     const prism::actionbar::Rect iconRect(prism::actionbar::IconBoxRect(button.rect));
@@ -511,7 +581,8 @@ class ActionBarPainter {
                     static_cast<float>(iconRect.right),
                     static_cast<float>(iconRect.bottom) + dy);
     SetBrush(ToD2d(Token(prism::theme::TokenId::TextPrimary, lastVariant_), alpha));
-    PaintGlyph(target, spec.icon, iconBox);
+    const int actionIndex = prism::actionbar::IndexOf(button.id);
+    PaintGlyph(target, spec.icon, iconBox, actionIndex);
     ++dbgIcons;
 
     // C74: the word comes from the caller-injected table (or the built-in
@@ -542,7 +613,9 @@ class ActionBarPainter {
     // word and never becomes a second icon. Only the caller's arrow flag (menu
     // action + hover/press/open) reaches this branch.
 #if !defined(PRISM_C78_MUTANT_NO_ARROW)
-    if (arrow && mnemonicFormat_) {
+    // C100: the gate used to be "arrow && mnemonicFormat_" -- the chevron was
+    // hanging off a text format that only the deleted corner letter needed.
+    if (arrow) {
       const prism::actionbar::Rect arrowRect(prism::actionbar::ArrowBoxRect(button.rect));
       const float ax = (arrowRect.left + arrowRect.right) * 0.5f;
       const float top = static_cast<float>(arrowRect.top) + dy;
@@ -557,97 +630,250 @@ class ActionBarPainter {
     }
 #endif
 
-    // The mnemonic: a quiet 10 px letter in the corner. It is the only visible
-    // promise that Alt+<letter> works, and it disappears when disabled.
+    // C100: the corner letter is GONE ("单字母牛皮癣"). It was never the
+    // shortcut's entry point -- the window claims Alt+<letter> in WM_SYSKEYDOWN
+    // and asks the MODEL (Model::PressMnemonic -> FromMnemonic), and the UIA
+    // button already publishes shortcut = "Alt+O". So deleting the glyph deletes
+    // a decoration, not a feature. The mutant below puts the letter back, which
+    // is what makes MnemonicGlyphsDrawn() == 0 a real assertion instead of a
+    // statement about the source code.
+#if defined(PRISM_C100_MUTANT_MNEMONIC)
+    const D2D1_RECT_F r = RectF(button.rect);
     if (mnemonicFormat_ && spec.mnemonic != 0) {
       const wchar_t letter[2] = {static_cast<wchar_t>(spec.mnemonic), L'\0'};
-      // C64: 0.60 alpha measured 3.2:1 against the island (below WCAG 4.5:1),
-      // which is why the letter read as a detached speck. 0.90 measures ~5.5:1
-      // and is still visibly quieter than the label's TextPrimary.
       SetBrush(ToD2d(Token(prism::theme::TokenId::TextSecondary, lastVariant_),
                      enabled ? 0.90f : kDisabledAlpha * 0.90f));
       target->DrawText(letter, 1, mnemonicFormat_.Get(),
                        D2D1::RectF(r.right - 18.0f, r.top + 5.0f + dy, r.right - 5.0f,
                                    r.top + 17.0f + dy),
                        brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+      ++dbgMnemonicGlyphs;
     }
+#endif
+  }
+
+  // ---- C100: one path builder for all eight silhouettes -------------------
+  // A silhouette is a set of figures stroked through the ONE round-cap style.
+  // The builder counts its curve primitives (AddBezier / AddArc) because "this
+  // icon is a curve drawing" has to be a NUMBER a test can read: the C100 suite
+  // asserts >= 2 per icon. What it replaces is a stack of 23 DrawLine calls with
+  // zero curves, whose worst member was the compress glyph -- four straight
+  // lines from the corners to the middle, i.e. a big X.
+  struct GlyphPath {
+    ComPtr<ID2D1PathGeometry> geometry;
+    ComPtr<ID2D1GeometrySink> sink;
+    int curves = 0;
+    bool figureOpen = false;
+  };
+
+  static bool BeginGlyph(ID2D1RenderTarget* target, GlyphPath* glyph) {
+    if (target == nullptr || glyph == nullptr) return false;
+    ComPtr<ID2D1Factory> factory;
+    target->GetFactory(factory.ReleaseAndGetAddressOf());
+    if (!factory) return false;
+    if (FAILED(factory->CreatePathGeometry(glyph->geometry.ReleaseAndGetAddressOf()))) {
+      return false;
+    }
+    return SUCCEEDED(glyph->geometry->Open(glyph->sink.ReleaseAndGetAddressOf()));
+  }
+
+  static void GlyphBegin(GlyphPath& g, D2D1_POINT_2F p) {
+    if (!g.sink) return;
+    if (g.figureOpen) {
+      g.sink->EndFigure(D2D1_FIGURE_END_OPEN);
+      g.figureOpen = false;
+    }
+    g.sink->BeginFigure(p, D2D1_FIGURE_BEGIN_HOLLOW);
+    g.figureOpen = true;
+  }
+
+  static void GlyphLine(GlyphPath& g, D2D1_POINT_2F p) {
+    if (!g.sink || !g.figureOpen) return;
+    g.sink->AddLine(p);
+  }
+
+  // A cubic -- the workhorse of a round corner and of an arch.
+  static void GlyphCurve(GlyphPath& g, D2D1_POINT_2F c1, D2D1_POINT_2F c2, D2D1_POINT_2F end) {
+    if (!g.sink || !g.figureOpen) return;
+    g.sink->AddBezier(D2D1::BezierSegment(c1, c2, end));
+    ++g.curves;
+  }
+
+  // An elliptical arc -- a circle is two of these, so a "round" icon is round
+  // in the geometry, not because an ellipse primitive was substituted in.
+  static void GlyphArc(GlyphPath& g, D2D1_POINT_2F end, D2D1_SIZE_F radius,
+                       D2D1_SWEEP_DIRECTION sweep) {
+    if (!g.sink || !g.figureOpen) return;
+    g.sink->AddArc(D2D1::ArcSegment(end, radius, 0.0f, sweep, D2D1_ARC_SIZE_SMALL));
+    ++g.curves;
+  }
+
+  // One stroke, one style, one width: DrawGeometry (never DrawLine/DrawEllipse),
+  // so the round caps of the shared stroke style reach every end in the set.
+  void StrokeGlyph(ID2D1RenderTarget* target, GlyphPath& g, ID2D1Brush* brush, float width) {
+    if (!g.sink) return;
+    if (g.figureOpen) {
+      g.sink->EndFigure(D2D1_FIGURE_END_OPEN);
+      g.figureOpen = false;
+    }
+    if (FAILED(g.sink->Close())) return;
+    target->DrawGeometry(g.geometry.Get(), brush, width, strokeStyle_.Get());
+    g.sink.Reset();
   }
 
   // ---- eight self-drawn silhouettes, all inside the 24 px box.
+  // C100: every one is built from curves (>= 2 primitives) and stroked at ONE
+  // width with round caps. The shapes are written in NORMALISED box coordinates
+  // so a change to the icon box moves the whole family together instead of only
+  // the icons whose numbers happened to be pixels.
   void PaintGlyph(ID2D1RenderTarget* target, std::string_view icon,
-                  const D2D1_RECT_F& box) {
+                  const D2D1_RECT_F& box, int actionIndex) {
     ID2D1Brush* brush = brush_.Get();
     const float l = box.left, t = box.top, r = box.right, b = box.bottom;
-    const float cx = (l + r) * 0.5f, cy = (t + b) * 0.5f;
     const float w = r - l, h = b - t;
-    constexpr float kStroke = 1.8f;  // 24 px box: one more fifth of a pixel
+    const auto P = [&](float nx, float ny) {
+      return D2D1::Point2F(l + w * nx, t + h * ny);
+    };
+
+    GlyphPath g;
+    if (!BeginGlyph(target, &g)) return;
 
     if (icon == "open") {
-      // Folder outline with an arrow leaving it: "open the archive".
-      target->DrawLine(D2D1::Point2F(l + w * 0.10f, t + h * 0.34f),
-                       D2D1::Point2F(l + w * 0.40f, t + h * 0.34f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(l + w * 0.40f, t + h * 0.34f),
-                       D2D1::Point2F(l + w * 0.52f, t + h * 0.46f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(l + w * 0.52f, t + h * 0.46f),
-                       D2D1::Point2F(r - w * 0.12f, t + h * 0.46f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(r - w * 0.12f, t + h * 0.46f),
-                       D2D1::Point2F(r - w * 0.12f, b - h * 0.14f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(r - w * 0.12f, b - h * 0.14f),
-                       D2D1::Point2F(l + w * 0.12f, b - h * 0.14f), brush, kStroke);
+      // A rounded folder whose lid is lifted ajar: the lid is an arch, the body
+      // is a tab plus a tray with two rounded bottom corners.
+      GlyphBegin(g, P(0.12f, 0.44f));
+      GlyphLine(g, P(0.38f, 0.44f));
+      GlyphLine(g, P(0.46f, 0.54f));
+      GlyphLine(g, P(0.86f, 0.54f));
+      GlyphLine(g, P(0.86f, 0.80f));
+      GlyphCurve(g, P(0.86f, 0.835f), P(0.835f, 0.86f), P(0.80f, 0.86f));
+      GlyphLine(g, P(0.20f, 0.86f));
+      GlyphCurve(g, P(0.165f, 0.86f), P(0.14f, 0.835f), P(0.14f, 0.80f));
+      GlyphLine(g, P(0.14f, 0.44f));
+      GlyphBegin(g, P(0.10f, 0.42f));
+      GlyphCurve(g, P(0.34f, 0.24f), P(0.64f, 0.22f), P(0.92f, 0.32f));
     } else if (icon == "extract") {
-      // A tray the content drops into.
-      target->DrawLine(D2D1::Point2F(cx, t + h * 0.12f), D2D1::Point2F(cx, t + h * 0.58f),
-                       brush, kStroke);
-      target->DrawLine(D2D1::Point2F(cx - w * 0.22f, t + h * 0.38f),
-                       D2D1::Point2F(cx, t + h * 0.60f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(cx + w * 0.22f, t + h * 0.38f),
-                       D2D1::Point2F(cx, t + h * 0.60f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(l + w * 0.14f, b - h * 0.16f),
-                       D2D1::Point2F(r - w * 0.14f, b - h * 0.16f), brush, kStroke);
+      // A box the content drops into, under a rounded arrow head.
+      GlyphBegin(g, P(0.12f, 0.56f));
+      GlyphLine(g, P(0.12f, 0.74f));
+      GlyphCurve(g, P(0.12f, 0.82f), P(0.16f, 0.86f), P(0.24f, 0.86f));
+      GlyphLine(g, P(0.76f, 0.86f));
+      GlyphCurve(g, P(0.84f, 0.86f), P(0.88f, 0.82f), P(0.88f, 0.74f));
+      GlyphLine(g, P(0.88f, 0.56f));
+      GlyphBegin(g, P(0.50f, 0.12f));
+      GlyphLine(g, P(0.50f, 0.44f));
+      GlyphBegin(g, P(0.34f, 0.30f));
+      GlyphCurve(g, P(0.40f, 0.36f), P(0.46f, 0.42f), P(0.50f, 0.46f));
+      GlyphCurve(g, P(0.54f, 0.42f), P(0.60f, 0.36f), P(0.66f, 0.30f));
     } else if (icon == "compress") {
-      // Two arrows meeting in the middle: the inverse of extract.
+#if defined(PRISM_C100_MUTANT_LINE_COMPRESS)
+      // MUTANT ACTIVE (card C100, arm line_compress): the pre-fix glyph, four
+      // straight lines from the corners into the middle -- which is a big X,
+      // not a packed box. The suite's "the centre pixel is background" and
+      // "no radial stroke in any quadrant" assertions MUST go red.
+      const float cx = (l + r) * 0.5f, cy = (t + b) * 0.5f;
       target->DrawLine(D2D1::Point2F(l + w * 0.14f, t + h * 0.20f),
-                       D2D1::Point2F(cx - w * 0.06f, cy), brush, kStroke);
+                       D2D1::Point2F(cx - w * 0.06f, cy), brush, kGlyphStroke);
       target->DrawLine(D2D1::Point2F(r - w * 0.14f, t + h * 0.20f),
-                       D2D1::Point2F(cx + w * 0.06f, cy), brush, kStroke);
+                       D2D1::Point2F(cx + w * 0.06f, cy), brush, kGlyphStroke);
       target->DrawLine(D2D1::Point2F(l + w * 0.14f, b - h * 0.20f),
-                       D2D1::Point2F(cx - w * 0.06f, cy), brush, kStroke);
+                       D2D1::Point2F(cx - w * 0.06f, cy), brush, kGlyphStroke);
       target->DrawLine(D2D1::Point2F(r - w * 0.14f, b - h * 0.20f),
-                       D2D1::Point2F(cx + w * 0.06f, cy), brush, kStroke);
+                       D2D1::Point2F(cx + w * 0.06f, cy), brush, kGlyphStroke);
+#else
+      // A PACKED BOX: a rounded carton with two open flaps above it and two
+      // straps down the face. Nothing crosses the middle -- the straps sit a
+      // quarter of the box in from each edge, and the carton's lid is a whole
+      // quarter ABOVE the icon centre, so the centre of the glyph stays paper.
+      // That clearance is the difference between a parcel and a cross, and the
+      // suite measures it in pixels (centre pixel + a radial-run sweep).
+      GlyphBegin(g, P(0.28f, 0.26f));
+      GlyphLine(g, P(0.72f, 0.26f));
+      GlyphCurve(g, P(0.79f, 0.26f), P(0.84f, 0.31f), P(0.84f, 0.38f));
+      GlyphLine(g, P(0.84f, 0.80f));
+      GlyphCurve(g, P(0.84f, 0.87f), P(0.79f, 0.92f), P(0.72f, 0.92f));
+      GlyphLine(g, P(0.28f, 0.92f));
+      GlyphCurve(g, P(0.21f, 0.92f), P(0.16f, 0.87f), P(0.16f, 0.80f));
+      GlyphLine(g, P(0.16f, 0.38f));
+      GlyphCurve(g, P(0.16f, 0.31f), P(0.21f, 0.26f), P(0.28f, 0.26f));
+      // the two open flaps, angled out like a lid that was folded back
+      GlyphBegin(g, P(0.16f, 0.26f));
+      GlyphLine(g, P(0.34f, 0.16f));
+      GlyphBegin(g, P(0.84f, 0.26f));
+      GlyphLine(g, P(0.66f, 0.16f));
+      // the two straps, from the lid seam to the foot
+      GlyphBegin(g, P(0.26f, 0.27f));
+      GlyphLine(g, P(0.26f, 0.92f));
+      GlyphBegin(g, P(0.74f, 0.27f));
+      GlyphLine(g, P(0.74f, 0.92f));
+#endif
     } else if (icon == "add") {
-      target->DrawLine(D2D1::Point2F(cx, t + h * 0.16f), D2D1::Point2F(cx, b - h * 0.16f),
-                       brush, kStroke);
-      target->DrawLine(D2D1::Point2F(l + w * 0.16f, cy), D2D1::Point2F(r - w * 0.16f, cy),
-                       brush, kStroke);
+      // The round-headed plus: two arms, round caps from the shared style. The
+      // arms are cubics with a half-pixel bow so the family keeps ONE primitive
+      // vocabulary (lines for straight runs, cubics for everything else) -- a
+      // call-add glyph that is two bare DrawLine calls is the defect this ends.
+      GlyphBegin(g, P(0.50f, 0.16f));
+      GlyphCurve(g, P(0.494f, 0.40f), P(0.506f, 0.62f), P(0.50f, 0.84f));
+      GlyphBegin(g, P(0.16f, 0.50f));
+      GlyphCurve(g, P(0.40f, 0.494f), P(0.62f, 0.506f), P(0.84f, 0.50f));
     } else if (icon == "delete") {
-      target->DrawLine(D2D1::Point2F(l + w * 0.14f, t + h * 0.26f),
-                       D2D1::Point2F(r - w * 0.14f, t + h * 0.26f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(cx - w * 0.12f, t + h * 0.14f),
-                       D2D1::Point2F(cx + w * 0.12f, t + h * 0.14f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(l + w * 0.22f, t + h * 0.26f),
-                       D2D1::Point2F(l + w * 0.28f, b - h * 0.12f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(r - w * 0.22f, t + h * 0.26f),
-                       D2D1::Point2F(r - w * 0.28f, b - h * 0.12f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(l + w * 0.28f, b - h * 0.12f),
-                       D2D1::Point2F(r - w * 0.28f, b - h * 0.12f), brush, kStroke);
+      // A lidded bin: lid bar, arched handle, tapered can with a rounded foot,
+      // two ribs.
+      GlyphBegin(g, P(0.14f, 0.30f));
+      GlyphLine(g, P(0.86f, 0.30f));
+      GlyphBegin(g, P(0.38f, 0.30f));
+      GlyphLine(g, P(0.38f, 0.22f));
+      GlyphCurve(g, P(0.38f, 0.20f), P(0.39f, 0.19f), P(0.41f, 0.19f));
+      GlyphLine(g, P(0.59f, 0.19f));
+      GlyphCurve(g, P(0.61f, 0.19f), P(0.62f, 0.20f), P(0.62f, 0.22f));
+      GlyphLine(g, P(0.62f, 0.30f));
+      GlyphBegin(g, P(0.20f, 0.30f));
+      GlyphLine(g, P(0.26f, 0.80f));
+      GlyphCurve(g, P(0.265f, 0.855f), P(0.30f, 0.88f), P(0.36f, 0.88f));
+      GlyphLine(g, P(0.64f, 0.88f));
+      GlyphCurve(g, P(0.70f, 0.88f), P(0.735f, 0.855f), P(0.74f, 0.80f));
+      GlyphLine(g, P(0.80f, 0.30f));
+      GlyphBegin(g, P(0.42f, 0.50f));
+      GlyphLine(g, P(0.42f, 0.72f));
+      GlyphBegin(g, P(0.58f, 0.50f));
+      GlyphLine(g, P(0.58f, 0.72f));
     } else if (icon == "test") {
-      // Check: "the archive is sound".
-      target->DrawLine(D2D1::Point2F(l + w * 0.16f, t + h * 0.54f),
-                       D2D1::Point2F(cx - w * 0.02f, b - h * 0.24f), brush, kStroke);
-      target->DrawLine(D2D1::Point2F(cx - w * 0.02f, b - h * 0.24f),
-                       D2D1::Point2F(r - w * 0.14f, t + h * 0.24f), brush, kStroke);
+      // A shield with a swept check inside it: "the archive is sound".
+      GlyphBegin(g, P(0.50f, 0.10f));
+      GlyphLine(g, P(0.82f, 0.22f));
+      GlyphLine(g, P(0.82f, 0.50f));
+      GlyphCurve(g, P(0.82f, 0.68f), P(0.68f, 0.80f), P(0.50f, 0.88f));
+      GlyphCurve(g, P(0.32f, 0.80f), P(0.18f, 0.68f), P(0.18f, 0.50f));
+      GlyphLine(g, P(0.18f, 0.22f));
+      GlyphLine(g, P(0.50f, 0.10f));
+      GlyphBegin(g, P(0.35f, 0.47f));
+      GlyphCurve(g, P(0.40f, 0.52f), P(0.44f, 0.56f), P(0.47f, 0.60f));
+      GlyphCurve(g, P(0.53f, 0.52f), P(0.60f, 0.43f), P(0.67f, 0.36f));
     } else if (icon == "view") {
-      // Eye: outline + pupil.
-      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), w * 0.42f, h * 0.26f), brush,
-                          kStroke);
-      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), w * 0.10f, h * 0.10f), brush);
+      // An eye made of four cubics, with a filled pupil sitting on the axis.
+      const float cx = (l + r) * 0.5f, cy = (t + b) * 0.5f;
+      GlyphBegin(g, P(0.10f, 0.50f));
+      GlyphCurve(g, P(0.24f, 0.28f), P(0.40f, 0.24f), P(0.50f, 0.24f));
+      GlyphCurve(g, P(0.60f, 0.24f), P(0.76f, 0.28f), P(0.90f, 0.50f));
+      GlyphCurve(g, P(0.76f, 0.72f), P(0.60f, 0.76f), P(0.50f, 0.76f));
+      GlyphCurve(g, P(0.40f, 0.76f), P(0.24f, 0.72f), P(0.10f, 0.50f));
+      target->FillEllipse(
+          D2D1::Ellipse(D2D1::Point2F(cx, cy), w * 0.11f, h * 0.11f), brush);
     } else if (icon == "search") {
-      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx - w * 0.06f, cy - h * 0.06f),
-                                        w * 0.26f, h * 0.26f),
-                          brush, kStroke);
-      target->DrawLine(D2D1::Point2F(cx + w * 0.14f, cy + h * 0.14f),
-                       D2D1::Point2F(r - w * 0.12f, b - h * 0.12f), brush, kStroke);
+      // A magnifier: a circle of TWO arcs (not an ellipse primitive) on a 45
+      // degree handle, so the lens and the handle share one ink.
+      const float lx = l + w * 0.44f, ly = t + h * 0.44f, rad = w * 0.28f;
+      GlyphBegin(g, D2D1::Point2F(lx - rad, ly));
+      GlyphArc(g, D2D1::Point2F(lx + rad, ly), D2D1::SizeF(rad, rad),
+               D2D1_SWEEP_DIRECTION_CLOCKWISE);
+      GlyphArc(g, D2D1::Point2F(lx - rad, ly), D2D1::SizeF(rad, rad),
+               D2D1_SWEEP_DIRECTION_CLOCKWISE);
+      GlyphBegin(g, P(0.64f, 0.64f));
+      GlyphLine(g, P(0.86f, 0.86f));
     }
+
+    StrokeGlyph(target, g, brush, kGlyphStroke);
+    iconCurves_[actionIndex] = g.curves;
   }
 
   static int OwnerIndex(const prism::actionbar::Layout& layout,
@@ -719,8 +945,15 @@ class ActionBarPainter {
 
  public:
   int BrushCount() const { return brush_ ? 1 : 0; }
+  // C100: ONE text format -- the label. The corner letter's 10 px semi-bold
+  // format is gone with the letter, so a band that still allocates two formats
+  // is a band that still has the defect (the suite asserts this is 1).
   int TextFormatCount() const {
+#if defined(PRISM_C100_MUTANT_MNEMONIC)
     return (labelFormat_ ? 1 : 0) + (mnemonicFormat_ ? 1 : 0);
+#else
+    return labelFormat_ ? 1 : 0;
+#endif
   }
 
   // C75: drop everything bound to a render target (and the DWrite factory this
@@ -730,13 +963,26 @@ class ActionBarPainter {
     brush_.Reset();
     writeFactory_.Reset();
     labelFormat_.Reset();
+#if defined(PRISM_C100_MUTANT_MNEMONIC)
     mnemonicFormat_.Reset();
+#endif
+    // C100: the stroke style is a device object too (it came from the target's
+    // factory); a minimised window must be able to return it.
+    strokeStyle_.Reset();
   }
 
  private:
   ComPtr<ID2D1SolidColorBrush> brush_;
   ComPtr<IDWriteFactory> writeFactory_;
-  ComPtr<IDWriteTextFormat> labelFormat_, mnemonicFormat_;
+  ComPtr<IDWriteTextFormat> labelFormat_;
+#if defined(PRISM_C100_MUTANT_MNEMONIC)
+  // MUTANT ACTIVE (arm mnemonic) only: the deleted letter's text format.
+  ComPtr<IDWriteTextFormat> mnemonicFormat_;
+#endif
+  // C100: the one stroke style every silhouette is drawn through.
+  ComPtr<ID2D1StrokeStyle> strokeStyle_;
+  // C100: per-action curve primitive count of the LAST Draw (see accessors).
+  std::array<int, static_cast<std::size_t>(prism::actionbar::kActionCount)> iconCurves_{};
   prism::theme::Variant lastVariant_ = prism::theme::Variant::Midnight;
 };
 

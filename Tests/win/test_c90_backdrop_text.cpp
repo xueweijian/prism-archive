@@ -215,9 +215,14 @@ bool Render(const GalleryRenderer::Scene& scene, Frame* out) {
   return harness.Open(kWidth, kHeight) && harness.Paint(scene, out);
 }
 
-// The canvas colour as the render target quantizes kBackdrop to bytes.
+// The canvas colour as the render target quantizes it to bytes. C91: the canvas
+// is the THEME's composite now (prism::chrome::CanvasColor) -- asking the same
+// entry the renderer clears with, not a literal. The C90 scenes leave the C77
+// refraction layer off, so the FLAT composite is the pixel on screen.
 UINT32 CanvasPixel() {
-  const D2D1_COLOR_F c = GalleryRenderer::kBackdrop;
+  const prism::theme::Rgba token =
+      prism::chrome::CanvasColor(prism::theme::Variant::Midnight);
+  const D2D1_COLOR_F c = D2D1::ColorF(token.r, token.g, token.b, token.a);
   const auto q = [](float v) {
     return static_cast<UINT32>((std::min)(255.0f, (std::max)(0.0f, v * 255.0f + 0.5f)));
   };

@@ -25,6 +25,7 @@
 #include <dwrite.h>
 #include <dwrite_1.h>  // C79: IDWriteTextLayout1::SetCharacterSpacing (heading tracking)
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <unordered_map>
@@ -1565,6 +1566,8 @@ class GalleryRenderer {
                     const prism::layout::Layout& layout,
                     bool backdropPass = false) {
     if (!scene.listItems) return;
+    // C101: this frame's bars replace the previous frame's.
+    ratioBarCount_ = 0;
     const auto& rows = *scene.listItems;
     // The app persists the user's column geometry (C27); absent means the module
     // default, which is what every pre-C27 call site gets.
@@ -1709,22 +1712,52 @@ class GalleryRenderer {
       if (prism::list::RatioBarVisible(row)) {
         const auto bar = prism::list::RatioBar(row);
         const float trackX = right - cols.ratioW + 8.0f;
-        const float trackW = cols.ratioW - 64.0f;
+        // C101 (ui-redesign-plan §2.2): the bar is a READOUT, not a rule. The
+        // shipped one was 6 px of full-alpha #007AFF across the entire 130 px
+        // ratio column -- the user's "刺眼荧光绿厚条". This one is 4 px tall with
+        // a 2 px radius, at most 56 px wide (it never spans the column), and its
+        // hue comes from the MEASURED ratio through PrismCore's RatioBarTint,
+        // where the mute (alpha 0.55 + desaturation) is explained and pinned.
+        float barWidth = (std::min)(prism::list::kRatioBarMaxWidth,
+                                    static_cast<float>(cols.ratioW) - 64.0f);
+        float halfH = prism::list::kRatioBarHeight * 0.5f;
+        float radius = prism::list::kRatioBarRadius;
+        const prism::list::Rgb tint = prism::list::RatioBarTint(bar->percent);
+        D2D1_COLOR_F fillColor =
+            D2D1::ColorF(tint.r, tint.g, tint.b, prism::list::kRatioBarAlpha);
+#if defined(PRISM_C101_MUTANT_LOUD)
+        // C101 MUTANT ACTIVE: the shipped bar is restored -- 6 px, radius 3,
+        // alpha 1.0, the full ratio column, the file-kind colour. The suite's
+        // geometry, alpha and pixel assertions MUST go red on this arm.
+        barWidth = static_cast<float>(cols.ratioW) - 64.0f;
+        halfH = 3.0f;
+        radius = 3.0f;
+        fillColor = BarColorOf(bar->color);
+        ++dbgMutantRatioBars;
+#endif
         const float cy = top + prism::layout::kListRowHeight / 2.0f;
-        D2D1_ROUNDED_RECT track =
-            D2D1::RoundedRect(D2D1::RectF(trackX, cy - 3.0f, trackX + trackW, cy + 3.0f),
-                              3.0f, 3.0f);
+        const D2D1_ROUNDED_RECT track =
+            D2D1::RoundedRect(D2D1::RectF(trackX, cy - halfH, trackX + barWidth, cy + halfH),
+                              radius, radius);
         tileBorder_->SetColor(kTileBorder);
         target->FillRoundedRectangle(track, tileBorder_.Get());
-        D2D1_ROUNDED_RECT fill = D2D1::RoundedRect(
-            D2D1::RectF(trackX, cy - 3.0f, trackX + trackW * bar->percent / 100.0f, cy + 3.0f),
-            3.0f, 3.0f);
-        tileBorder_->SetColor(BarColorOf(bar->color));
+        const D2D1_ROUNDED_RECT fill = D2D1::RoundedRect(
+            D2D1::RectF(trackX, cy - halfH, trackX + barWidth * bar->percent / 100.0f, cy + halfH),
+            radius, radius);
+        tileBorder_->SetColor(fillColor);
         target->FillRoundedRectangle(fill, tileBorder_.Get());
+        // C101: the read-back seam. The colour is taken from the brush AFTER
+        // SetColor, so the suite measures what reached the device rather than
+        // what the caller intended.
+        // The backdrop pass paints the same bars into a 1/8 target; the
+        // read-back is about the frame the user sees, so only that pass records.
+        if (!backdropPass) {
+          RecordRatioBar(track.rect, fill.rect, radius, tileBorder_->GetColor(), bar->percent);
+        }
         tileBorder_->SetColor(kTileBorder);
         if (drawGlyphs) {
           const std::wstring pct = Utf8(prism::list::RatioCellText(row));
-          DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + trackW + 6.0f,
+          DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + barWidth + 6.0f,
                             top + 6.0f, 40, textSecondary_.Get());
         }
       } else if (drawGlyphs) {
@@ -2045,6 +2078,18 @@ class GalleryRenderer {
   }
 
  private:
+  // C101: the read-back seam's storage, refreshed by every frame that paints a
+  // list. Kept tiny on purpose: 64 bars is more than a 1080p row window holds.
+  void RecordRatioBar(const D2D1_RECT_F& track, const D2D1_RECT_F& fill, float radius,
+                      const D2D1_COLOR_F& color, uint32_t percent) {
+    if (ratioBarCount_ >= kMaxRatioBarPaints) return;
+    RatioBarPaint& entry = ratioBars_[ratioBarCount_++];
+    entry.track = track;
+    entry.fill = fill;
+    entry.radius = radius;
+    entry.color = color;
+    entry.percent = percent;
+  }
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> writeFactory_;
   // C71: the live colours this frame resolved (see Draw).
@@ -2139,6 +2184,26 @@ class GalleryRenderer {
   // runtime half of the negative control's verdict (CONTRACTS D3): a mutant
   // that never reached the injected branch must not print CAUGHT.
   int dbgBackdropGlyphPasses = 0;
+  // C101: how many ratio bars the LOUD mutant arm painted. Zero in every clean
+  // build (the increment is compiled in only under PRISM_C101_MUTANT_LOUD), so a
+  // mutant that never reached the injected branch cannot print CAUGHT (D3).
+  static inline int dbgMutantRatioBars = 0;
+  // C101: THE RATIO BAR AS IT REACHED THE DEVICE. One entry per bar the last
+  // frame painted, in row order. The rectangles are the ones handed to
+  // FillRoundedRectangle and the colour is read back from the brush AFTER
+  // SetColor, so a suite cannot pass by agreeing with the caller's intent while
+  // the target draws something else.
+  struct RatioBarPaint {
+    D2D1_RECT_F track{};
+    D2D1_RECT_F fill{};
+    float radius = 0.0f;
+    D2D1_COLOR_F color{};
+    uint32_t percent = 0;
+  };
+  static constexpr int kMaxRatioBarPaints = 64;
+  int RatioBarsPainted() const { return ratioBarCount_; }
+  const RatioBarPaint& RatioBarPainted(int index) const { return ratioBars_[index]; }
+
   // C60: proof that the TAB STRIP reached pixels. TabsPainted() == 0 while no
   // archive is open is the positive half of case 7 ("the band is not drawn"),
   // and > 0 with two tabs is what makes case 1 a paint assertion instead of a
@@ -2162,6 +2227,10 @@ class GalleryRenderer {
 
  private:
   ComPtr<IDWriteTextFormat> caption_, title_, small_;
+  // C101: the read-back seam's storage (the type is declared in the public
+  // block above; the frame's bars are refreshed by every list paint).
+  RatioBarPaint ratioBars_[kMaxRatioBarPaints];
+  int ratioBarCount_ = 0;
 };
 
 }  // namespace prism::win::gallery

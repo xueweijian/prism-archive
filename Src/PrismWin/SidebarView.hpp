@@ -49,6 +49,15 @@ inline constexpr bool kCullEnabled = false;
 #else
 inline constexpr bool kCullEnabled = true;
 #endif
+// C105 (plan 3.2 "移除刺眼的下划线"): the info card used to carry a full-width
+// 1 px hairline between the tree and the capsule. The SHIPPING value is false --
+// the line is gone -- so the switch reads "enabled" only in the mutation build,
+// where it must turn the "no horizontal rule inside the card" assertion RED.
+#if defined(PRISM_C105_MUTANT_UNDERLINE)
+inline constexpr bool kCardUnderlineEnabled = true;
+#else
+inline constexpr bool kCardUnderlineEnabled = false;
+#endif
 
 enum class PrimKind : std::uint8_t {
   Panel,        // sidebar background
@@ -63,6 +72,11 @@ enum class PrimKind : std::uint8_t {
   EmptyState,   // "NO ARCHIVE OPEN"
   StatusPill,   // telemetry capsule background
   StatusIcon,
+  // C105: the card's 10 px field label (the line ABOVE a value). StatusText is
+  // the 12 px VALUE. Two primitives, not one with a flag: the paint path, the
+  // type size and the colour role all differ, and a suite has to be able to
+  // count them separately.
+  StatusLabel,
   StatusText,
   RatioBar,     // compression-ratio bar inside the capsule
 };
@@ -81,6 +95,7 @@ inline std::ostream& operator<<(std::ostream& os, PrimKind kind) {
     case PrimKind::EmptyState: return os << "EmptyState";
     case PrimKind::StatusPill: return os << "StatusPill";
     case PrimKind::StatusIcon: return os << "StatusIcon";
+    case PrimKind::StatusLabel: return os << "StatusLabel";
     case PrimKind::StatusText: return os << "StatusText";
     case PrimKind::RatioBar: return os << "RatioBar";
   }
@@ -147,6 +162,11 @@ struct Command {
   // this into DWrite's em-relative SetCharacterSpacing, so the number stays a
   // design token rather than a per-call-site magic constant.
   float letterSpacing = 0.0f;
+  // C105: the type size of a text run, in DIPs. 0 means "whatever the renderer
+  // uses for this primitive by default". The info card sets it explicitly
+  // (10 px label / 12 px value) so the two sizes are a LAYOUT fact the geometry
+  // suite can read, not a number buried in the painter.
+  float fontSize = 0.0f;
 };
 
 // Tokens from blueprint 3.3, translated to a 236 px column. Every number is an
@@ -166,10 +186,21 @@ struct Metrics {
   // rule is exactly 3 px wide.
   float indent = 16.0f;
   float selectionBarWidth = 3.0f;
-  float statusHeight = 86.0f;
+  // C105: the card is FOUR label/value pairs stacked (plan 3.2). Each pair is
+  // a 12 px label line above a 16 px value line (28 px), the pairs are 6 px
+  // apart, and the card keeps 10 px of padding -- 4*28 + 3*6 + 2*10 = 150.
+  // The numbers are integral floats so the pixel assertions are exact.
+  float statusHeight = 150.0f;
   float statusGapAbove = 12.0f;
   float statusPadding = 10.0f;
   float statusLineHeight = 22.0f;
+  float cardLabelHeight = 12.0f;
+  float cardValueHeight = 16.0f;
+  float cardRowGap = 6.0f;
+  float cardLabelFontSize = 10.0f;
+  float cardValueFontSize = 12.0f;
+
+  float CardRowHeight() const { return cardLabelHeight + cardValueHeight; }
   float scrollY = 0.0f;
   float viewportTop = 0.0f;
   float viewportBottom = 1080.0f;
@@ -205,6 +236,13 @@ struct Labels {
   std::string unknownMethod = "UNKNOWN";
   std::string ratio = "RATIO {percent}";
   std::string dictionary = "DICT {size}";
+  // C105: the four FIELD LABELS of the info card. The card is a label/value
+  // stack now, so "DICT 64.0 MB" became a label ("DICTIONARY") above a value
+  // ("64.0 MB"), and each label is a key of its own.
+  std::string cardCrypto = "ENCRYPTION";
+  std::string cardMethod = "METHOD";
+  std::string cardDictionary = "DICTIONARY";
+  std::string cardRatio = "RATIO";
 };
 
 // The translator the app installs ONCE at startup (Main.cpp, before the window
@@ -237,6 +275,10 @@ inline Labels LabelsFrom(const prism::i18n::Translator* translator) {
   labels.unknownMethod = pick("status.unknownMethod", labels.unknownMethod);
   labels.ratio = pick("status.ratio", labels.ratio);
   labels.dictionary = pick("status.dictionary", labels.dictionary);
+  labels.cardCrypto = pick("sidebar.card.crypto", labels.cardCrypto);
+  labels.cardMethod = pick("sidebar.card.method", labels.cardMethod);
+  labels.cardDictionary = pick("sidebar.card.dictionary", labels.cardDictionary);
+  labels.cardRatio = pick("sidebar.card.ratio", labels.cardRatio);
   return labels;
 }
 
@@ -443,70 +485,105 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
   const float scrollable = layout.contentBottom - layout.contentTop;
   layout.maxScroll = (std::max)(0.0f, layout.contentHeight - (std::max)(0.0f, scrollable));
 
-  // --- bottom telemetry capsule (anchored, never scrolled) -----------------
-  push(Command{PrimKind::Separator,
-               Box{metrics.paddingX, pillTop - metrics.statusGapAbove * 0.5f,
-                   metrics.width - metrics.paddingX,
-                   pillTop - metrics.statusGapAbove * 0.5f + 1.0f},
-               {}, {}, ColorToken::SecondaryText, 0.35f, -1, Section::None});
+  // --- bottom telemetry card (anchored, never scrolled) --------------------
+  // C105 (plan 3.2 "移除刺眼的下划线 / 标签与数值分层排版"): the pre-C105 capsule
+  // was three one-line readouts ("AES-256 ENCRYPTED", "LZMA2 | DICT 64.0 MB",
+  // "RATIO 42.8%") sitting under a full-width 1 px hairline -- the user's "hard
+  // underline with the label and the value squeezed onto one line". The hairline
+  // is gone in every shipping build (kCardUnderlineEnabled is false; the
+  // mutation build restores it as the negative control) and every metric is a
+  // 10 px TextSecondary label ABOVE a 12 px TextPrimary value.
+  if (kCardUnderlineEnabled) {
+    push(Command{PrimKind::Separator,
+                 Box{metrics.paddingX, pillTop - metrics.statusGapAbove * 0.5f,
+                     metrics.width - metrics.paddingX,
+                     pillTop - metrics.statusGapAbove * 0.5f + 1.0f},
+                 {}, {}, ColorToken::SecondaryText, 0.35f, -1, Section::None});
+  }
   push(Command{PrimKind::StatusPill, layout.pill, {}, {}, ColorToken::Panel,
                status.hasArchive ? 1.0f : 0.6f, -1, Section::None});
 
-  const float textLeft = layout.pill.left + metrics.statusPadding + metrics.iconSize +
-                         metrics.iconGap;
+  const float cardLeft = layout.pill.left + metrics.statusPadding;
+  const float cardRight = layout.pill.right - metrics.statusPadding;
+  const float textLeft = cardLeft + metrics.iconSize + metrics.iconGap;
   if (!status.hasArchive) {
-    const Box lineTop{layout.pill.left + metrics.statusPadding, pillTop + metrics.statusPadding,
-                      layout.pill.right - metrics.statusPadding,
+    const Box lineTop{cardLeft, pillTop + metrics.statusPadding, cardRight,
                       pillTop + metrics.statusPadding + metrics.statusLineHeight};
     push(Command{PrimKind::StatusIcon, detail::GlyphBox(metrics, lineTop), {},
                  "empty", ColorToken::Muted, 0.7f, -1, Section::None});
     push(Command{PrimKind::StatusText,
-                 Box{textLeft, lineTop.top, layout.pill.right - metrics.statusPadding,
-                     lineTop.bottom},
+                 Box{textLeft, lineTop.top, cardRight, lineTop.bottom},
                  labels.noArchive, {}, ColorToken::Muted, 0.7f, -1, Section::None});
     return layout;
   }
 
-  const float lineTop = pillTop + metrics.statusPadding;
-  const std::string method =
-      status.method.empty() ? labels.unknownMethod : status.method;
+  // C105: the cipher is the VALUE under the "ENCRYPTION" label; when the engine
+  // cannot name it the value is the honest word ("UNKNOWN" / "NOT ENCRYPTED"),
+  // never a fabricated "AES-256".
+  std::string cipher;
+  switch (status.encryption) {
+    case prism::sidebar::Encryption::Aes256: cipher = "AES-256"; break;
+    case prism::sidebar::Encryption::None: cipher = labels.notEncrypted; break;
+    case prism::sidebar::Encryption::Unknown: cipher = labels.unknownMethod; break;
+  }
+  const std::string method = status.method.empty() ? labels.unknownMethod : status.method;
   const std::string dictionary =
       status.dictionaryBytes == 0 ? std::string("--") : FormatBytes(status.dictionaryBytes);
-  // C74: the three capsule lines are table entries, not literals. " | " is a
-  // separator, not a word, so it is not a key; the cipher prefix ("AES-256") is
-  // a token the same way "DICT" was.
-  const std::string lines[3] = {
-      EncryptionLabel(status.encryption, labels),
-      method + " | " +
-          prism::i18n::FormatPattern(labels.dictionary, {{"size", dictionary}}),
-      // C81/A3: {percent} carries the CANONICAL view string -- the same one
-      // the list cell and the status band render (UI-AUDIT A3's three
-      // surfaces used to disagree). FormatRatio stays for the bar fraction.
-      prism::i18n::FormatPattern(labels.ratio, {{"percent", status.ratioView}}),
+  // C81/A3: the ratio VALUE is the CANONICAL view string -- the same one the
+  // list cell and the status band render. FormatRatio stays for the bar's
+  // fraction only, so the three surfaces cannot disagree about the number.
+  const std::string ratioValue =
+      status.ratioView.empty() ? FormatRatio(status.ratioPermille) : status.ratioView;
+
+  struct CardRow {
+    const char* icon;
+    const std::string* label;
+    const std::string* value;
   };
-  const char* icons[3] = {"lock", "bolt", "chart"};
-  for (int i = 0; i < 3; ++i) {
-    const float top = lineTop + metrics.statusLineHeight * static_cast<float>(i);
-    const Box line{layout.pill.left + metrics.statusPadding, top,
-                   layout.pill.right - metrics.statusPadding,
-                   top + metrics.statusLineHeight};
-    push(Command{PrimKind::StatusIcon, detail::GlyphBox(metrics, line), {},
-                 icons[i],
+  const CardRow cardRows[4] = {
+      {"lock", &labels.cardCrypto, &cipher},
+      {"bolt", &labels.cardMethod, &method},
+      {"drum", &labels.cardDictionary, &dictionary},
+      {"chart", &labels.cardRatio, &ratioValue},
+  };
+  const float rowHeight = metrics.CardRowHeight();
+  const float rowPitch = rowHeight + metrics.cardRowGap;
+  float rowTop = pillTop + metrics.statusPadding;
+  for (int i = 0; i < 4; ++i) {
+    // The icon is centred on the PAIR (not on the value line): it belongs to
+    // the metric, and centring it on one of the two lines makes the card read
+    // as two unrelated columns.
+    const float iconTop = rowTop + (rowHeight - metrics.iconSize) * 0.5f;
+    push(Command{PrimKind::StatusIcon,
+                 Box{cardLeft, iconTop, cardLeft + metrics.iconSize, iconTop + metrics.iconSize},
+                 {}, std::string(cardRows[i].icon),
                  i == 0 && status.encrypted ? ColorToken::Locked : ColorToken::SecondaryText,
                  1.0f, i, Section::None});
-    push(Command{PrimKind::StatusText,
-                 Box{textLeft, top, layout.pill.right - metrics.statusPadding,
-                     top + metrics.statusLineHeight},
-                 lines[i], {}, ColorToken::SecondaryText, 1.0f, i, Section::None});
+    Command label{PrimKind::StatusLabel,
+                  Box{textLeft, rowTop, cardRight, rowTop + metrics.cardLabelHeight},
+                  *cardRows[i].label, {}, ColorToken::SecondaryText, 1.0f, i,
+                  Section::None};
+    label.fontSize = metrics.cardLabelFontSize;
+    push(std::move(label));
+    Command value{PrimKind::StatusText,
+                  Box{textLeft, rowTop + metrics.cardLabelHeight, cardRight,
+                      rowTop + rowHeight},
+                  *cardRows[i].value, {}, ColorToken::PrimaryText, 1.0f, i,
+                  Section::None};
+    value.fontSize = metrics.cardValueFontSize;
+    push(std::move(value));
+    rowTop += rowPitch;
   }
+  // The micro ratio bar closes the ratio pair: 3 px tall, the canonical
+  // fraction wide, inside the value line's box (so it can never cross the
+  // card's bottom padding).
   const float fraction =
       (std::min)(1.0f, static_cast<float>(status.ratioPermille) / 1000.0f);
-  const Box lastLine{textLeft, lineTop + metrics.statusLineHeight * 2.0f,
-                     layout.pill.right - metrics.statusPadding,
-                     lineTop + metrics.statusLineHeight * 3.0f};
+  const float barBottom = rowTop - metrics.cardRowGap;
+  const Box lastValue{textLeft, barBottom - metrics.cardValueHeight, cardRight, barBottom};
   push(Command{PrimKind::RatioBar,
-               Box{lastLine.left, lastLine.bottom - 5.0f,
-                   lastLine.left + lastLine.Width() * fraction, lastLine.bottom - 2.0f},
+               Box{lastValue.left, lastValue.bottom - 5.0f,
+                   lastValue.left + lastValue.Width() * fraction, lastValue.bottom - 2.0f},
                {}, {}, ColorToken::Accent, 0.9f, -1, Section::None});
   return layout;
 }

@@ -109,12 +109,27 @@ const char* kEnTree = "ARCHIVE TREE";
 const char* kZhTree = "\xE5\xBD\x92\xE6\xA1\xA3\xE7\x9B\xAE\xE5\xBD\x95\xE6\xA0\x91";  // 归档目录树
 const char* kEnNotEncrypted = "NOT ENCRYPTED";
 const char* kZhNotEncrypted = "\xE6\x9C\xAA\xE5\x8A\xA0\xE5\xAF\x86";  // 未加密
-const char* kEnUnknownDict = "UNKNOWN | DICT --";
-const char* kZhUnknownDict = "\xE6\x9C\xAA\xE7\x9F\xA5 | \xE5\xAD\x97\xE5\x85\xB8 --";  // 未知 | 字典 --
+// C105 (plan 3.2): the info card is a LABEL/VALUE stack, so each pair is
+// asserted twice -- the 10 px FIELD LABEL above (which is a translated word) and
+// the 12 px VALUE below (which is data, and only the "unknown" words move with
+// the language). That is a stronger language-switch check than the old
+// one-line readout: four labels and three values have to come from the table.
+const char* kEnCryptoLabel = "ENCRYPTION";
+const char* kZhCryptoLabel =
+    "\xE5\x8A\xA0\xE5\xAF\x86\xE7\x8A\xB6\xE6\x80\x81";  // 加密状态
+const char* kEnMethodLabel = "METHOD";
+const char* kZhMethodLabel =
+    "\xE5\x8E\x8B\xE7\xBC\xA9\xE6\x96\xB9\xE6\xB3\x95";  // 压缩方法
+const char* kEnDictLabel = "DICTIONARY";
+const char* kZhDictLabel = "\xE5\xAD\x97\xE5\x85\xB8";  // 字典
+const char* kEnRatioLabel = "RATIO";
+const char* kZhRatioLabel = "\xE5\x8E\x8B\xE7\xBC\xA9\xE7\x8E\x87";  // 压缩率
+const char* kEnUnknown = "UNKNOWN";
+const char* kZhUnknown = "\xE6\x9C\xAA\xE7\x9F\xA5";  // 未知
 // The fixture is 100 B packed to 60 B: a REAL ratio, so a zero placeholder
-// could not pass this line.
-const char* kEnRatio = "RATIO 60.0%";
-const char* kZhRatio = "\xE5\x8E\x8B\xE7\xBC\xA9\xE6\xAF\x94 60.0%";  // 压缩比 60.0%
+// could not pass this line -- and a number is NOT translated.
+const char* kEnRatio = "60.0%";
+const char* kZhRatio = "60.0%";
 
 std::string SectionText(const prism::win::sidebar::Layout& layout,
                         prism::sidebar::Section section) {
@@ -127,9 +142,22 @@ std::string SectionText(const prism::win::sidebar::Layout& layout,
   return std::string();
 }
 
+// The card's VALUE line of pair <index> (C105: 0 crypto, 1 method, 2 dictionary,
+// 3 ratio -- the order the card paints them in).
 std::string StatusLine(const prism::win::sidebar::Layout& layout, int index) {
   for (const prism::win::sidebar::Command& command : layout.commands) {
     if (command.kind == prism::win::sidebar::PrimKind::StatusText &&
+        command.payload == index) {
+      return command.text;
+    }
+  }
+  return std::string();
+}
+
+// ... and its LABEL line, which is the translated field word.
+std::string StatusLabel(const prism::win::sidebar::Layout& layout, int index) {
+  for (const prism::win::sidebar::Command& command : layout.commands) {
+    if (command.kind == prism::win::sidebar::PrimKind::StatusLabel &&
         command.payload == index) {
       return command.text;
     }
@@ -247,17 +275,28 @@ PRISM_TEST("win: switching the language rebuilds all eight band labels") {
   const prism::win::sidebar::Layout& sidebar = window.SidebarLayout();
   PRISM_CHECK_EQ(SectionText(sidebar, prism::sidebar::Section::Tree),
                  std::string(kZhTree));
+  // C105: four labels + four values, in paint order.
+  PRISM_CHECK_EQ(StatusLabel(sidebar, 0), std::string(kZhCryptoLabel));
+  PRISM_CHECK_EQ(StatusLabel(sidebar, 1), std::string(kZhMethodLabel));
+  PRISM_CHECK_EQ(StatusLabel(sidebar, 2), std::string(kZhDictLabel));
+  PRISM_CHECK_EQ(StatusLabel(sidebar, 3), std::string(kZhRatioLabel));
   PRISM_CHECK_EQ(StatusLine(sidebar, 0), std::string(kZhNotEncrypted));
-  PRISM_CHECK_EQ(StatusLine(sidebar, 1), std::string(kZhUnknownDict));
-  PRISM_CHECK_EQ(StatusLine(sidebar, 2), std::string(kZhRatio));
+  PRISM_CHECK_EQ(StatusLine(sidebar, 1), std::string(kZhUnknown));
+  PRISM_CHECK_EQ(StatusLine(sidebar, 2), std::string("--"));  // no dictionary: never a fabricated size
+  PRISM_CHECK_EQ(StatusLine(sidebar, 3), std::string(kZhRatio));
 
   window.ApplyLanguage(&TranslatorFor(L"en-US"));
   const prism::win::sidebar::Layout& englishSidebar = window.SidebarLayout();
   PRISM_CHECK_EQ(SectionText(englishSidebar, prism::sidebar::Section::Tree),
                  std::string(kEnTree));
+  PRISM_CHECK_EQ(StatusLabel(englishSidebar, 0), std::string(kEnCryptoLabel));
+  PRISM_CHECK_EQ(StatusLabel(englishSidebar, 1), std::string(kEnMethodLabel));
+  PRISM_CHECK_EQ(StatusLabel(englishSidebar, 2), std::string(kEnDictLabel));
+  PRISM_CHECK_EQ(StatusLabel(englishSidebar, 3), std::string(kEnRatioLabel));
   PRISM_CHECK_EQ(StatusLine(englishSidebar, 0), std::string(kEnNotEncrypted));
-  PRISM_CHECK_EQ(StatusLine(englishSidebar, 1), std::string(kEnUnknownDict));
-  PRISM_CHECK_EQ(StatusLine(englishSidebar, 2), std::string(kEnRatio));
+  PRISM_CHECK_EQ(StatusLine(englishSidebar, 1), std::string(kEnUnknown));
+  PRISM_CHECK_EQ(StatusLine(englishSidebar, 2), std::string("--"));
+  PRISM_CHECK_EQ(StatusLine(englishSidebar, 3), std::string(kEnRatio));
 
   // ---- 5. and back again -------------------------------------------------
   window.ApplyLanguage(&TranslatorFor(L"zh-CN"));

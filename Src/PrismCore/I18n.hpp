@@ -701,6 +701,14 @@ inline const std::vector<std::string>& RequiredKeys() {
       "sidebar.section.recent",
       "sidebar.section.tree",
       "sidebar.empty.noArchive",
+      // C105: the info card's four FIELD LABELS. The card is a label/value
+      // stack now (plan 3.2), so the words above each value are their own
+      // strings -- they used to be absent because the old capsule glued a
+      // field word and its value into one sentence ("DICT 64.0 MB").
+      "sidebar.card.crypto",
+      "sidebar.card.method",
+      "sidebar.card.dictionary",
+      "sidebar.card.ratio",
       // Status capsule.
       "status.encrypted",
       "status.notEncrypted",

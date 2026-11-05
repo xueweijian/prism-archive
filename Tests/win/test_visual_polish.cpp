@@ -595,23 +595,22 @@ PRISM_TEST("v4.status: two clusters with the four DESIGN states") {
   clear.dictionary = "字典 64 MB";
   clear.ratioPercent = 87;
   PRISM_CHECK_EQ(prism::layout::CryptoText(clear), std::string_view("未加密"));
-  // C79: TWO clusters -- left (encryption/method/dictionary), a 1 px Divider,
-  // then the right-aligned counts and ratio. The vector is in VISUAL order.
+  // C79: TWO clusters -- left (encryption/method/dictionary), then the
+  // right-aligned counts and ratio. The vector is in VISUAL order.
+  // C105 (plan 3.2): the 1 px Divider between the clusters is GONE -- the band
+  // separates them with air, not with a rule -- so the vector is six segments
+  // and no StatusId::Divider may appear at all.
   auto segments = prism::layout::StatusSegments(layout, clear);
-  PRISM_CHECK_EQ(static_cast<int>(segments.size()), 7);
+  PRISM_CHECK_EQ(static_cast<int>(segments.size()), 6);
   PRISM_CHECK_EQ(segments[0].id, prism::layout::StatusId::Encryption);
   PRISM_CHECK_EQ(segments[1].id, prism::layout::StatusId::Method);
   PRISM_CHECK_EQ(segments[2].id, prism::layout::StatusId::Dictionary);
-  PRISM_CHECK_EQ(segments[3].id, prism::layout::StatusId::Divider);
-  PRISM_CHECK_EQ(segments[4].id, prism::layout::StatusId::ItemCount);
-  PRISM_CHECK_EQ(segments[5].id, prism::layout::StatusId::SelectedCount);
-  PRISM_CHECK_EQ(segments[6].id, prism::layout::StatusId::Ratio);
+  PRISM_CHECK_EQ(segments[3].id, prism::layout::StatusId::ItemCount);
+  PRISM_CHECK_EQ(segments[4].id, prism::layout::StatusId::SelectedCount);
+  PRISM_CHECK_EQ(segments[5].id, prism::layout::StatusId::Ratio);
   for (const auto& segment : segments) {
     PRISM_CHECK(layout.statusBar.Contains(segment.rect));
-    if (segment.id == prism::layout::StatusId::Divider) {
-      PRISM_CHECK_EQ(segment.rect.Width(), 1);
-      continue;
-    }
+    PRISM_CHECK(segment.id != prism::layout::StatusId::Divider);
     PRISM_CHECK(segment.rect.Width() >= prism::layout::kStatusSegmentMinWidth);
     PRISM_CHECK(!segment.text.empty());
   }
@@ -621,8 +620,8 @@ PRISM_TEST("v4.status: two clusters with the four DESIGN states") {
   }
   PRISM_CHECK_EQ(segments[1].text, std::string_view("LZMA2"));
   PRISM_CHECK_EQ(segments[2].text, std::string_view("字典 64 MB"));
-  PRISM_CHECK_EQ(segments[6].text, std::string_view("压缩率"));
-  PRISM_CHECK_EQ(segments[6].value, 87);
+  PRISM_CHECK_EQ(segments[5].text, std::string_view("压缩率"));
+  PRISM_CHECK_EQ(segments[5].value, 87);
 
   // State 2: encrypted.
   prism::layout::StatusInfo encrypted = clear;
@@ -637,14 +636,14 @@ PRISM_TEST("v4.status: two clusters with the four DESIGN states") {
   auto unknownSegments = prism::layout::StatusSegments(layout, unknown);
   PRISM_CHECK_EQ(unknownSegments[1].text, std::string_view("方法未知"));
   PRISM_CHECK_EQ(unknownSegments[2].text, std::string_view("字典未知"));
-  PRISM_CHECK_EQ(unknownSegments[6].value, -1);
+  PRISM_CHECK_EQ(unknownSegments[5].value, -1);
 
   // State 4: compressing.
   prism::layout::StatusInfo compressing = clear;
   compressing.compressing = true;
   auto compressingSegments = prism::layout::StatusSegments(layout, compressing);
-  PRISM_CHECK_EQ(compressingSegments[6].text, std::string_view("压缩中…"));
-  PRISM_CHECK_EQ(compressingSegments[6].value, -1);
+  PRISM_CHECK_EQ(compressingSegments[5].text, std::string_view("压缩中…"));
+  PRISM_CHECK_EQ(compressingSegments[5].value, -1);
 }
 
 PRISM_TEST("v4.status: the band is no longer empty at the device") {

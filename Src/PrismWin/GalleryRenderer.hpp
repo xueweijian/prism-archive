@@ -237,6 +237,13 @@ class GalleryRenderer {
 
   ID2D1Factory* Factory() const { return factory_.Get(); }
 
+  // C105: the info card's two type sizes as the REAL DirectWrite objects. The
+  // geometry suite reads GetFontSize() off these -- 10 (label) / 12 (value) --
+  // so "the label is 10 px and the value is 12 px" is measured on the format
+  // the painter actually draws with, not on a copy of the number.
+  IDWriteTextFormat* CardLabelFormat() const { return sidebarCardLabel_.Get(); }
+  IDWriteTextFormat* CardValueFormat() const { return sidebarStatus_.Get(); }
+
   // Per-target brush creation (call once per render target).
   HRESULT CreateDeviceResources(ID2D1RenderTarget* target) {
     HRESULT hr = target->CreateSolidColorBrush(kAccent, accent_.ReleaseAndGetAddressOf());
@@ -312,6 +319,18 @@ class GalleryRenderer {
     if (sidebarStatus_) {
       sidebarStatus_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       sidebarStatus_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+    // C105: the info card's LABEL line. 10 px, regular weight, secondary role --
+    // the line ABOVE a value, per plan 3.2's "上行 10px 灰色小字". It is its own
+    // IDWriteTextFormat (not a size passed at DrawText time) so a suite can read
+    // the REAL format back through CardLabelFormat() and pin the size.
+    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                    10.0f, L"en-US",
+                                    sidebarCardLabel_.ReleaseAndGetAddressOf());
+    if (sidebarCardLabel_) {
+      sidebarCardLabel_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+      sidebarCardLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     // V4/C79: the status band's readout format (12 px, one line, leading,
     // centred in its 20 px inner band so the six segments share one baseline).
@@ -665,6 +684,30 @@ class GalleryRenderer {
     island_->SetColor(islandColor_);
   }
 
+  // C105: the air between a segment's label and its value, in DIPs. It is a
+  // token (not an inline 6) because the value run's x is derived from it.
+  static constexpr float kStatusValueGap = 6.0f;
+
+  // The advance width of one run in its own format. Used for the status band's
+  // label/value split and by nothing else -- a second measuring path would be a
+  // second opinion about where the value starts.
+  float MeasureRunWidth(const std::wstring& text, IDWriteTextFormat* format,
+                        float maxWidth) const {
+    if (!writeFactory_ || format == nullptr || text.empty() || maxWidth <= 0.0f) {
+      return 0.0f;
+    }
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(writeFactory_->CreateTextLayout(text.c_str(),
+                                               static_cast<UINT32>(text.size()), format,
+                                               maxWidth, 40.0f,
+                                               layout.ReleaseAndGetAddressOf()))) {
+      return 0.0f;
+    }
+    DWRITE_TEXT_METRICS metrics{};
+    if (FAILED(layout->GetMetrics(&metrics))) return 0.0f;
+    return metrics.widthIncludingTrailingWhitespace;
+  }
+
   // V4: the status band (DESIGN.md §2 "状态条 28", §3 four states).
   //
   // Four segments, left to right: encryption | method | dictionary | ratio. The
@@ -726,13 +769,35 @@ class GalleryRenderer {
       // the band and the accessibility tree cannot read differently.
       const std::string label = prism::layout::StatusSegmentLabel(segment);
       if (label.empty()) continue;
-      const std::wstring text = Utf8(label);
-      // C79: secondary role at 12 px (the format is 12 px now), so the band is
-      // a readout rather than a second heading row.
-      target->DrawText(text.c_str(), static_cast<UINT32>(text.size()), statusFormat_.Get(),
+      // C105 (plan 3.2): TWO TONES in one segment -- the leading word in the
+      // secondary role, its value in the primary role. The split is the one
+      // PrismCore spells (StatusSegmentValueText), so the painted value and the
+      // announced one are the same string.
+      const std::string labelText(segment.text);
+      const std::string valueText = prism::layout::StatusSegmentValueText(segment);
+      const std::wstring wideLabel = Utf8(labelText);
+      target->DrawText(wideLabel.c_str(), static_cast<UINT32>(wideLabel.size()),
+                       statusFormat_.Get(),
                        D2D1::RectF(textLeft, rect.top, rect.right, rect.bottom),
                        textSecondary_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
       ++dbgStatusSegments;
+      if (!valueText.empty()) {
+        // The value starts after the MEASURED label, not at a guessed offset:
+        // the label is localised ("压缩率" / "RATIO"), so its width is not a
+        // constant this painter may assume.
+        const float labelWidth =
+            MeasureRunWidth(wideLabel, statusFormat_.Get(), rect.right - textLeft);
+        const float valueLeft = textLeft + labelWidth + kStatusValueGap;
+        const std::wstring wideValue = Utf8(valueText);
+        if (valueLeft + 2.0f < rect.right && !wideValue.empty()) {
+          target->DrawText(wideValue.c_str(), static_cast<UINT32>(wideValue.size()),
+                           statusFormat_.Get(),
+                           D2D1::RectF(valueLeft, rect.top, rect.right, rect.bottom),
+                           textPrimary_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+          ++dbgStatusValues;
+          dbgLastStatusValueLeft = valueLeft;
+        }
+      }
     }
   }
 
@@ -1054,21 +1119,41 @@ class GalleryRenderer {
       target->DrawLine(west, north, brush, 1.5f);
       return;
     }
+    // C105 (plan 3.2 "图标使用细线矢量替代原先的字符符号"): the info card's four
+    // glyphs are STROKED outlines -- no filled plates, no character symbols.
+    // They are shared with nothing else in the rail (the tree uses folder /
+    // star / clock / chevron), so this is the card's whole icon language.
     if (icon == "lock") {
-      target->FillRoundedRectangle(
+      target->DrawRoundedRectangle(
           D2D1::RoundedRect(D2D1::RectF(l + w * 0.24f, t + h * 0.46f, r - w * 0.24f,
-                                        b - h * 0.12f), 2.0f, 2.0f), brush);
-      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, t + h * 0.44f), w * 0.22f,
-                                        h * 0.26f), brush, 1.4f);
+                                        b - h * 0.12f), 2.0f, 2.0f), brush, 1.3f);
+      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, t + h * 0.44f), w * 0.20f,
+                                        h * 0.24f), brush, 1.3f);
+      target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, t + h * 0.72f), 1.0f, 1.0f), brush);
       return;
     }
     if (icon == "bolt") {
       target->DrawLine(D2D1::Point2F(r - w * 0.26f, t + h * 0.14f),
-                       D2D1::Point2F(l + w * 0.32f, cy), brush, 1.6f);
+                       D2D1::Point2F(l + w * 0.32f, cy), brush, 1.4f);
       target->DrawLine(D2D1::Point2F(l + w * 0.32f, cy),
-                       D2D1::Point2F(r - w * 0.32f, cy), brush, 1.6f);
+                       D2D1::Point2F(r - w * 0.32f, cy), brush, 1.4f);
       target->DrawLine(D2D1::Point2F(r - w * 0.32f, cy),
-                       D2D1::Point2F(l + w * 0.26f, b - h * 0.14f), brush, 1.6f);
+                       D2D1::Point2F(l + w * 0.26f, b - h * 0.14f), brush, 1.4f);
+      return;
+    }
+    if (icon == "drum") {
+      // The DICTIONARY row: an archive drum in outline (lid ellipse, two walls,
+      // a base and one band) -- the same 1.3 px stroke as the lock.
+      target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, t + h * 0.28f), w * 0.30f,
+                                        h * 0.16f), brush, 1.3f);
+      target->DrawLine(D2D1::Point2F(cx - w * 0.30f, t + h * 0.28f),
+                       D2D1::Point2F(cx - w * 0.30f, b - h * 0.26f), brush, 1.3f);
+      target->DrawLine(D2D1::Point2F(cx + w * 0.30f, t + h * 0.28f),
+                       D2D1::Point2F(cx + w * 0.30f, b - h * 0.26f), brush, 1.3f);
+      target->DrawLine(D2D1::Point2F(cx - w * 0.30f, b - h * 0.26f),
+                       D2D1::Point2F(cx + w * 0.30f, b - h * 0.26f), brush, 1.3f);
+      target->DrawLine(D2D1::Point2F(cx - w * 0.30f, t + h * 0.54f),
+                       D2D1::Point2F(cx + w * 0.30f, t + h * 0.54f), brush, 1.0f);
       return;
     }
     if (icon == "chart") {
@@ -1076,9 +1161,9 @@ class GalleryRenderer {
       for (int i = 0; i < 3; ++i) {
         const float x = l + w * (0.16f + 0.28f * static_cast<float>(i));
         const float top = b - h * 0.14f - (h * 0.68f) * heights[i];
-        target->FillRoundedRectangle(
+        target->DrawRoundedRectangle(
             D2D1::RoundedRect(D2D1::RectF(x, top, x + w * 0.18f, b - h * 0.14f), 1.0f,
-                              1.0f), brush);
+                              1.0f), brush, 1.2f);
       }
       return;
     }
@@ -1113,6 +1198,7 @@ class GalleryRenderer {
       case PrimKind::Separator:
       case PrimKind::StatusPill:
       case PrimKind::StatusIcon:
+      case PrimKind::StatusLabel:
       case PrimKind::StatusText:
       case PrimKind::RatioBar:
         return true;
@@ -1202,12 +1288,20 @@ class GalleryRenderer {
         }
         return;
       }
+      case PrimKind::StatusLabel:
+        ++dbgSidebarLabels;
+        // C105: the card's field label -- 10 px, secondary role, the line above
+        // the value. Its box is the 12 px line the layout reserved for it, so no
+        // vertical nudge is applied: the format centres the glyphs in it.
+        DrawSidebarText(target, sidebarCardLabel_.Get(), command.text, box,
+                        sidebarBrush_.Get(), 0.0f, 0.0f);
+        return;
       case PrimKind::StatusText:
         ++dbgSidebarLabels;
-        // C79: the capsule's readout is 12 px secondary text, not 11 px
-        // semibold chrome.
+        // C105: the card's VALUE line -- 12 px in the PRIMARY role (it used to
+        // be secondary, which is what made the card read as one grey block).
         DrawSidebarText(target, sidebarStatus_.Get(), command.text, box,
-                        sidebarBrush_.Get(), 3.0f, 2.0f);
+                        sidebarBrush_.Get(), 0.0f, 0.0f);
         return;
       case PrimKind::RatioBar:
         target->FillRoundedRectangle(D2D1::RoundedRect(box, 1.5f, 1.5f),
@@ -2045,6 +2139,7 @@ class GalleryRenderer {
     if (sidebarLabel_) ++n;
     if (sidebarSmall_) ++n;
     if (sidebarStatus_) ++n;
+    if (sidebarCardLabel_) ++n;
     if (statusFormat_) ++n;
     return n + actionBar_.TextFormatCount() + tabPainter_.TextFormatCount();
   }
@@ -2083,6 +2178,7 @@ class GalleryRenderer {
     sidebarLabel_.Reset();
     sidebarSmall_.Reset();
     sidebarStatus_.Reset();
+    sidebarCardLabel_.Reset();
     statusFormat_.Reset();
     for (auto& gradient : thumbs_) gradient.Reset();
     thumbBitmaps_.clear();
@@ -2123,8 +2219,11 @@ class GalleryRenderer {
   // C29 sidebar: one recolourable brush + the two single-line text formats.
   ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
   ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
-  // C79: the capsule readout (12 px secondary); headings reuse sidebarSmall_.
+  // C79: the capsule readout (12 px); headings reuse sidebarSmall_. C105: it is
+  // the card's VALUE line (primary role), and sidebarCardLabel_ is the 10 px
+  // label line above it.
   ComPtr<IDWriteTextFormat> sidebarStatus_;
+  ComPtr<IDWriteTextFormat> sidebarCardLabel_;
   ComPtr<IDWriteTextFormat> statusFormat_;
   // C-V2: the action band's painter (own brush + text formats).
   prism::win::actionbar::ActionBarPainter actionBar_;
@@ -2195,6 +2294,12 @@ class GalleryRenderer {
   int dbgActionDropdowns = 0;
   // V4: proof that the status band painted its segments (four per frame).
   int dbgStatusSegments = 0;
+  // C105: how many segment VALUES were painted in the PRIMARY role, and where
+  // the last one started. The band's two-tone split is only real if the value
+  // run exists AND lands to the right of its label, so the suite reads both
+  // instead of trusting a brush constant.
+  int dbgStatusValues = 0;
+  float dbgLastStatusValueLeft = -1.0f;
   // C77: the backdrop layer's build/draw counters (see BackdropRebuilds).
   int dbgBackdropRebuilds = 0;
   int dbgBackdropDraws = 0;

@@ -269,3 +269,40 @@ en-US 表保持半角。断言：zh-CN 的可见文本里不出现 `: ` / ` (` �
 
 **附带发现**：`glassTheme` 恒为 Midnight（`GalleryWindow.hpp:4013-4015`）——settings 里的主题对玻璃层不生效；
 mini 图按 DIP 算，真实下采样是 10× 而非注释里的 8×（白块羽化 16–20 px 与此吻合）。
+
+---
+
+## A12 主题只换了 7.96% 的像素（变体从不下发给内容渲染器）
+
+**实测**（同窗口、同内容，三主题全窗口差分，1,544,424 px）：
+
+```
+day -> night : changed=122,969 (7.96%)   bands=[(0,62),(811,811)]
+night -> hc  : changed=121,958 (7.90%)   bands=[(0,62),(811,811)]
+day -> hc    : changed=122,922 (7.96%)   bands=[(0,62),(811,811)]
+```
+
+y=0..62 = 标题栏+菜单栏；y=811 = DWM 1px 边框。**y=64..810（92% 像素）三主题逐像素相同。**
+
+| 区域 | Day / Night / HC | 变化 |
+|---|---|---|
+| 标题栏、菜单栏 | 255,255,255 / 11,12,16 / 0,0,0 | **100%** |
+| 画布、标签条、面包屑岛、动作岛、侧栏、列表、信息卡、状态栏 | 三主题完全相同 | 0% |
+| 搜索框（打开态） | 三主题 max Δ = **0** | 0% |
+| 设置对话框（整窗） | 252,253,254 / 27,30,39 / 28,28,30 | **98.37%**（唯一全量换肤） |
+
+**根因**：
+1. `GalleryWindow.hpp:3987-4032` 组 `Scene` 时 `sidebarTheme/actionTheme/tabTheme/glassTheme` **一个都没赋值**，
+   全走默认 Midnight；`SetChromeVariant`（`:644-648`）只改 DWM+菜单。渲染器本身认变体（数值精确吻合）。
+2. 画布是字面量：`GalleryRenderer.hpp:62 kBackdrop`、`:343 Clear`、`:599`、`:602-607`、`:1501`；
+   `ChromeTheme.hpp:56 kCanvasReference` 是同一字面量的第二份。
+3. `IslandOf()`（`:733-749`）`(void)variant;` 后返回常量 → 面包屑岛/进度胶囊永远深色。
+4. 文字/表面笔刷只建一次且不改色（`:69-70`、`:236-239`、`:276`）。
+5. 单点写死：搜索框 `GalleryWindow.hpp:1259` Daylight（实测 Δ=0）、拖放提示 `:4668`、
+   `FlyoutSurface.hpp:376`、`CompanionWindow.hpp:423`；对话框写死 Midnight：About `:582`、Compress `:955`、Vault `:856`、Password `:250`。
+
+**副作用**：C83 的 `ShellMatchesCanvas` 在 Day 下必然为假（shell 255 vs canvas 12.9），它只测 Midnight 所以没红。
+
+**修法**：PrismCore 加唯一入口 `ThemeSurfaceColor(TokenId, Variant)` + `Scene::theme`；各面改读它；
+文字刷子每帧 `SetColor`；`IslandOf` 用 `EffectiveGlassSurface(variant)`；C83 门禁对三主题各跑一次。
+**状态**：C91 修复中（主窗口 0–7 条）；对话框/浮层（8–10 条）另开卡。

@@ -224,6 +224,9 @@ inline constexpr bool kHudDismissOnFinish = true;
 //                                  never delivered and the handler is dead code.
 //   PRISM_C92_MUTANT_NO_CONTEXT  : WM_CONTEXTMENU / Shift+F10 stop opening a
 //                                  menu, i.e. the "right-click does nothing" bug.
+//   PRISM_C92_MUTANT_NO_PRESELECT: a right-click on an unselected row leaves the
+//                                  selection alone, so "Open" is greyed out on
+//                                  the row the user pointed at.
 // The suite builds each as its own executable and pins "C92 MUTATION CAUGHT: <arm>"
 // as the PASS regex (D26: never WILL_FAIL stacked on a regex).
 #if defined(PRISM_C92_MUTANT_NO_DBLCLKS)
@@ -235,6 +238,11 @@ inline constexpr bool kDoubleClicksDelivered = true;
 inline constexpr bool kContextMenusEnabled = false;
 #else
 inline constexpr bool kContextMenusEnabled = true;
+#endif
+#if defined(PRISM_C92_MUTANT_NO_PRESELECT)
+inline constexpr bool kContextPreselectsRow = false;
+#else
+inline constexpr bool kContextPreselectsRow = true;
 #endif
 #if defined(PRISM_C87_MUTANT_NO_PROGRESS_A11Y)
 inline constexpr bool kHudPublishedToA11y = false;
@@ -552,6 +560,7 @@ class GalleryWindow {
   // C92: the published rules, asked at runtime by the mutant verdicts.
   static constexpr bool DoubleClicksDelivered() { return kDoubleClicksDelivered; }
   static constexpr bool ContextMenusEnabled() { return kContextMenusEnabled; }
+  static constexpr bool ContextPreselectsRow() { return kContextPreselectsRow; }
   static constexpr bool AltChordEnabled() {
 #if defined(PRISM_C67_MUTANT_IGNORE_ALT)
     return false;
@@ -3660,7 +3669,9 @@ class GalleryWindow {
 
   prism::ctxmenu::Facts ContextFacts() const {
     prism::ctxmenu::Facts facts;
-    facts.archiveOpen = catalog_ != nullptr;
+    // archiveOpen_ is the window's own "an archive is open" bit (SetArchiveOpen);
+    // catalog_ is the rows. Both must hold for the archive verbs to be offered.
+    facts.archiveOpen = archiveOpen_ && catalog_ != nullptr;
     facts.rowCount = ItemCount();
     facts.hasSelection = !sel_.Empty();
     if (selection_ >= 0 && selection_ < ItemCount()) {
@@ -3679,6 +3690,28 @@ class GalleryWindow {
     if (sidebarRailVisible_ && SidebarContains(x, y)) return prism::ctxmenu::Surface::Sidebar;
     if (ItemAtPoint(x, y) >= 0) return prism::ctxmenu::Surface::Row;
     return prism::ctxmenu::Surface::Empty;
+  }
+
+  // C92 follow-up: a right-click on a row the user has NOT selected selects that
+  // row first, exactly like Explorer and Bandizip. Without it the first thing a
+  // user tries -- right-click a file, choose Open -- is greyed out, and the
+  // feature reads as broken.
+  //
+  // A row that is ALREADY in the selection is left alone: that is the multi-
+  // select case, where re-selecting would silently throw away the other rows.
+  // Empty space and the sidebar never reach this function at all, so a
+  // right-click on chrome cannot clear a selection.
+  void SelectRowUnderContextPoint(int x, int y) {
+    const int row = ItemAtPoint(x, y);
+    if (row < 0 || row >= ItemCount()) return;
+    for (int selected : sel_.Selected()) {
+      if (selected == row) return;  // inside the existing set: keep it
+    }
+    sel_.Click(row, prism::sel::ClickModifiers{});
+    selection_ = sel_.Empty() ? -1 : sel_.Focus();
+    nav_.SetSelection(selection_);
+    SyncActionContext();
+    Invalidate();
   }
 
   // Builds and shows the menu. The model is kept as lastContextMenu_ so a test
@@ -3704,6 +3737,14 @@ class GalleryWindow {
       clientY = point.y;
     }
     const prism::ctxmenu::Surface surface = ContextSurfaceAt(clientX, clientY);
+    // BEFORE the model is built: the menu's enabled state must describe the
+    // selection the user is about to act on. A right-click on empty space or a
+    // sidebar node never touches the selection (a click on chrome must not clear
+    // it). PRISM_C92_MUTANT_NO_PRESELECT compiles the row preselection out, so
+    // the "right-click an unselected row" assertion MUST go red (D3).
+    if (surface == prism::ctxmenu::Surface::Row && kContextPreselectsRow) {
+      SelectRowUnderContextPoint(clientX, clientY);
+    }
     const prism::ctxmenu::Menu model =
         prism::ctxmenu::Build(surface, ContextFacts(), ctxLabels_);
     lastContextMenu_ = model;

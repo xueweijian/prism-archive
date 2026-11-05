@@ -85,4 +85,19 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
       SKIP_RETURN_CODE 77
       ENVIRONMENT "PRISM_C92_LANG_DIR=${CMAKE_SOURCE_DIR}/Assets/Lang"
       PASS_REGULAR_EXPRESSION "C92 MUTATION CAUGHT: no_context")
+
+  # Arm 3 (follow-up): the right-click no longer selects the row under it, so
+  # "Open" is greyed on the very file the user pointed at.
+  add_executable(win_c92_input_menus_mutant_no_preselect win/test_c92_input_menus.cpp)
+  target_link_libraries(win_c92_input_menus_mutant_no_preselect PRIVATE ${PRISM_C92_LIBS})
+  target_compile_options(win_c92_input_menus_mutant_no_preselect PRIVATE /WX-)
+  target_compile_definitions(win_c92_input_menus_mutant_no_preselect
+                             PRIVATE PRISM_C92_MUTANT_NO_PRESELECT=1)
+  add_test(NAME "mutation.c92.no_preselect"
+           COMMAND win_c92_input_menus_mutant_no_preselect)
+  set_tests_properties(mutation.c92.no_preselect PROPERTIES
+      TIMEOUT 180
+      SKIP_RETURN_CODE 77
+      ENVIRONMENT "PRISM_C92_LANG_DIR=${CMAKE_SOURCE_DIR}/Assets/Lang"
+      PASS_REGULAR_EXPRESSION "C92 MUTATION CAUGHT: no_preselect")
 endif()

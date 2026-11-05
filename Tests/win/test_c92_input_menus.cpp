@@ -140,8 +140,11 @@ bool BuildFixture(Fixture& fixture) {
   fs::create_directories(fixture.dir.path() / L"folder", ec);
   if (!WriteText(fixture.dir.path() / L"folder" / L"inner.txt", "inner-bytes")) return false;
   if (!WriteText(fixture.dir.path() / L"alpha.txt", "alpha-bytes")) return false;
+  // A THIRD root row: the right-click preselection case needs a multi-selection
+  // big enough to prove a plain re-select would destroy it.
+  if (!WriteText(fixture.dir.path() / L"beta.txt", "beta-bytes")) return false;
   if (!prism::fixture::PackSolid(g_exePath, fixture.dir.wstr(), L"pack.7z",
-                                 {L"folder", L"alpha.txt"})) {
+                                 {L"folder", L"alpha.txt", L"beta.txt"})) {
     return false;
   }
   fixture.archive = (fixture.dir.path() / L"pack.7z").wstring();
@@ -276,7 +279,7 @@ PRISM_TEST("c92.posted_double_click_enters_folder_then_opens_file") {
   window.SetArchivePath(fixture.archive);
   window.Dispatch(WM_SIZE, 0, MAKELPARAM(1280, 800));
   if (!PRISM_CHECK_EQ(window.Folder(), std::string())) return;
-  if (!PRISM_CHECK_EQ(window.ItemCount(), 2)) return;
+  if (!PRISM_CHECK_EQ(window.ItemCount(), 3)) return;
 
   int openedIndex = -1;
   int openedCount = 0;
@@ -317,7 +320,7 @@ PRISM_TEST("c92.posted_double_click_enters_folder_then_opens_file") {
 
   // ---- Enter and double-click must reach the SAME open handler ------------
   if (!PRISM_CHECK(window.Back())) return;  // back to the archive root
-  if (!PRISM_CHECK_EQ(window.ItemCount(), 2)) return;
+  if (!PRISM_CHECK_EQ(window.ItemCount(), 3)) return;
   const int fileRow = RowOfPath(window, "alpha.txt");
   if (!PRISM_CHECK(fileRow >= 0)) return;
   int x = 0, y = 0;
@@ -384,15 +387,35 @@ PRISM_TEST("c92.context_menu_has_three_surfaces_with_distinct_ids") {
     seen.push_back(std::move(record));
   });
 
-  // Row surface: the point the window resolves to a row.
+  // ---- (1) nothing selected: right-click a row SELECTS it ------------------
+  // Explorer/Bandizip behaviour: the menu must describe the row under the
+  // pointer, otherwise "Open" is greyed on the very file the user pointed at.
   int rx = 0, ry = 0;
   if (!PRISM_CHECK(RowPoint(window, &rx, &ry))) return;
+  const int alphaRow = RowOfPath(window, "alpha.txt");
+  if (!PRISM_CHECK(alphaRow >= 0)) return;
+  PRISM_CHECK_EQ(window.SelectionCount(), 0);
   RightClickAt(window, rx, ry);
-  // Empty space: a point no row claims.
+  std::cout << "    [preselect] selection=" << window.Selection()
+            << " expected=" << alphaRow << " count=" << window.SelectionCount()
+            << std::endl;
+  PRISM_CHECK_EQ(window.Selection(), alphaRow);
+  PRISM_CHECK_EQ(window.SelectionCount(), 1);
+  if (!PRISM_CHECK_EQ(seen.size(), static_cast<std::size_t>(1))) return;
+  {
+    const prism::ctxmenu::Item* open =
+        seen[0].model.Find(prism::ctxmenu::Command::Open);
+    if (!PRISM_CHECK(open != nullptr)) return;
+    // The preselection is exactly what makes this read enabled.
+    PRISM_CHECK(open->enabled);
+  }
+
+  // ---- (3) empty space keeps the selection ---------------------------------
   int ex = 0, ey = 0;
   if (!PRISM_CHECK(EmptyPoint(window, &ex, &ey))) return;
   RightClickAt(window, ex, ey);
-  // Sidebar node: inside the painted rail.
+  PRISM_CHECK_EQ(window.Selection(), alphaRow);
+  // ... and a sidebar node keeps it too.
   int sx = 0, sy = 0;
   if (PRISM_CHECK(SidebarPoint(window, &sx, &sy))) {
     RightClickAt(window, sx, sy);
@@ -443,31 +466,50 @@ PRISM_TEST("c92.context_menu_has_three_surfaces_with_distinct_ids") {
   PRISM_CHECK(has(seen[2], prism::ctxmenu::Command::RevealArchive));
   PRISM_CHECK(has(seen[2], prism::ctxmenu::Command::CopyPath));
 
+  // ---- (2) a multi-selection survives a right-click INSIDE it --------------
+  // Ctrl+A selects all three root rows (folder + alpha.txt + beta.txt); a
+  // right-click on one of them must not collapse the set to that row.
+  prism::keys::Stroke selectAll;
+  selectAll.key = 'A';
+  selectAll.ctrl = true;
+  window.DispatchKeyStroke(selectAll);
+  if (!PRISM_CHECK_EQ(window.SelectionCount(), 3)) return;
+  const std::vector<int> selectionBefore = window.SelectedRows();
+  RightClickAt(window, rx, ry);  // alpha.txt is inside the set
+  std::cout << "    [preselect] multi kept=" << (window.SelectedRows() == selectionBefore)
+            << " count=" << window.SelectionCount() << std::endl;
+  PRISM_CHECK(window.SelectedRows() == selectionBefore);
+  PRISM_CHECK_EQ(window.SelectionCount(), 3);
+  if (!PRISM_CHECK(seen.size() >= 4)) return;
+  const SeenMenu multiRowMenu = seen.back();
+  PRISM_CHECK(multiRowMenu.surface == prism::ctxmenu::Surface::Row);
+
   // ---- a disabled item explains itself on the status line ------------------
-  const SeenMenu& rowMenu = seen[0];
-  const prism::ctxmenu::Item* open = rowMenu.model.Find(prism::ctxmenu::Command::Open);
-  if (!PRISM_CHECK(open != nullptr)) return;
-  if (!PRISM_CHECK(!open->enabled)) return;  // nothing is selected yet
-  const std::size_t slot = static_cast<std::size_t>(open - rowMenu.model.items.data());
-  const UINT openId = rowMenu.ids[slot];
-  PRISM_CHECK_EQ(rowMenu.model.items[slot].command, prism::ctxmenu::Command::Open);
-  window.Dispatch(WM_MENUSELECT, MAKEWPARAM(openId, MF_GRAYED), 0);
+  // Only the archive verbs can be greyed while an archive is open, so close the
+  // archive fact for this probe: the verbs stay VISIBLE with a reason.
+  window.SetArchiveOpen(false);
+  RightClickAt(window, ex, ey);
+  const SeenMenu& greyed = seen.back();
+  const prism::ctxmenu::Item* extractAll =
+      greyed.model.Find(prism::ctxmenu::Command::ExtractAll);
+  if (!PRISM_CHECK(extractAll != nullptr)) return;
+  if (!PRISM_CHECK(!extractAll->enabled)) return;
+  const std::size_t greyedSlot =
+      static_cast<std::size_t>(extractAll - greyed.model.items.data());
+  const UINT greyedId = greyed.ids[greyedSlot];
+  window.Dispatch(WM_MENUSELECT, MAKEWPARAM(greyedId, MF_GRAYED), 0);
   std::cout << "    [reason] " << prism::win::WideToUtf8(window.StatusText()) << std::endl;
-  PRISM_CHECK_EQ(prism::win::WideToUtf8(window.StatusText()), open->disabledReason);
+  PRISM_CHECK_EQ(prism::win::WideToUtf8(window.StatusText()), extractAll->disabledReason);
+  window.SetArchiveOpen(true);
 
   // ---- the chosen id runs the verb (the same switch TrackPopupMenu reaches) --
-  window.Dispatch(WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(rx, ry));
-  window.Dispatch(WM_LBUTTONUP, 0, MAKELPARAM(rx, ry));
-  RightClickAt(window, rx, ry);  // rebuild with a selection
-  if (!PRISM_CHECK(seen.size() >= 4)) return;
-  const SeenMenu& selectedRow = seen.back();
-  const prism::ctxmenu::Item* extract = selectedRow.model.Find(
-      prism::ctxmenu::Command::ExtractSelected);
+  const prism::ctxmenu::Item* extract =
+      multiRowMenu.model.Find(prism::ctxmenu::Command::ExtractSelected);
   if (!PRISM_CHECK(extract != nullptr)) return;
   PRISM_CHECK(extract->enabled);
   const std::size_t extractSlot =
-      static_cast<std::size_t>(extract - selectedRow.model.items.data());
-  const UINT extractId = selectedRow.ids[extractSlot];
+      static_cast<std::size_t>(extract - multiRowMenu.model.items.data());
+  const UINT extractId = multiRowMenu.ids[extractSlot];
 
   std::vector<prism::ctxmenu::Command> dispatched;
   window.SetContextCommandHandler([&dispatched](prism::ctxmenu::Command command) {
@@ -707,6 +749,12 @@ int main(int argc, char** argv) {
   std::cout << "C92 MUTANT ACTIVE: WM_CONTEXTMENU opens nothing" << std::endl;
   prism::test::SetMutationVerdict("C92 MUTATION CAUGHT: no_context",
                                   [] { return !GalleryWindow::ContextMenusEnabled(); });
+#endif
+#if defined(PRISM_C92_MUTANT_NO_PRESELECT)
+  std::cout << "C92 MUTANT ACTIVE: a right-click no longer selects the row under it"
+            << std::endl;
+  prism::test::SetMutationVerdict("C92 MUTATION CAUGHT: no_preselect",
+                                  [] { return !GalleryWindow::ContextPreselectsRow(); });
 #endif
   const int rc = prism::test::RunAll(argc, argv);
   ::CoUninitialize();

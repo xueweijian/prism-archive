@@ -107,6 +107,7 @@
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
 #include "../PrismWin/DragOutToShell.hpp"   // C67: CF_HDROP drag out (lazy extract)
 #include "../PrismWin/EditConfirmDialog.hpp"  // C54: the edit confirmation (programmatic)
+#include "../PrismWin/OverwriteDialog.hpp"  // C94: the ONE conflict dialog
 #include "../PrismWin/GalleryWindow.hpp"
 #include "../PrismWin/LogFile.hpp"           // C85: the daily file sink + the wall clock
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
@@ -302,25 +303,30 @@ void ReportRefusedVerb(const prism::app::LaunchRequest& request) {
                flag.c_str());
 }
 
-// C71: the GUI's overwrite prompt. The policy decides WHEN to ask (only "ask"
-// mode + an existing file); this function is the UI seam. Yes = replace,
-// No = skip, Cancel = save beside as "name (1).ext". No owner window: the
-// extraction runs on a worker thread and must not touch GalleryWindow state
-// (CONTRACTS B9), and a MessageBox is safe from any thread.
+// C71/C94: the GUI's overwrite prompt. The policy decides WHEN to ask (only
+// "ask" mode + an existing file); this function is the UI seam.
+//
+// C94: it is asked AT MOST ONCE per extraction. The dialog offers
+// 全部覆盖 / 全部跳过 / 全部重命名 / 仅这一个：覆盖|跳过|另存为 plus
+// 本操作内记住我的选择; the session in the extract callback latches "all" and
+// answers every later conflict without another window (OverwriteSession.hpp).
+// Esc / close means 取消: no conflict is written.
+//
+// No owner window: the extraction runs on a worker thread and must not touch
+// GalleryWindow state (CONTRACTS B9). A modal dialog is safe from any thread,
+// and if the window cannot be created at all the answer is Skip -- never a
+// silent overwrite.
 prism::app::ExtractionOptions LiveExtractionOptions(
     const prism::settings::SettingsStore& store) {
   prism::app::ExtractionOptions options =
       prism::app::ExtractionOptionsFromSettings(store);
-  options.prompt = [](const std::string& path) {
-    const std::wstring text =
-        L"\u76EE\u6807\u5DF2\u5B58\u5728\uFF1A\n" + prism::win::Utf8ToWide(path) +
-        L"\n\n\u662F = \u8986\u76D6\uFF0C\u5426 = \u8DF3\u8FC7\uFF0C"
-        L"\u53D6\u6D88 = \u53E6\u5B58\u4E3A (1)";
-    const int answer = MessageBoxW(nullptr, text.c_str(), L"PrismArchive",
-                                  MB_YESNOCANCEL | MB_ICONQUESTION);
-    if (answer == IDYES) return prism::overwrite::Choice::Replace;
-    if (answer == IDCANCEL) return prism::overwrite::Choice::Rename;
-    return prism::overwrite::Choice::Skip;  // No / dismissed
+  options.promptAll = [](const std::string& path) -> prism::overwrite::Reply {
+    prism::win::owdlg::ConflictResult result;
+    if (!prism::win::owdlg::AskConflict(path, &result)) {
+      // No window station / CreateWindowExW failed: consent was never given.
+      return prism::overwrite::ReplyOf(prism::overwrite::Answer::SkipAll);
+    }
+    return prism::overwrite::ReplyOf(result.answer, result.remember);
   };
   return options;
 }
@@ -394,6 +400,7 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
   // safe non-interactive answer.
   prism::app::ExtractionOptions options = app.extractOptions;
   options.prompt = {};
+  options.promptAll = {};  // C94: a shell verb has nobody to click the dialog
   const prism::app::ExtractionOutcome outcome = prism::app::RunExtraction(
       *app.ops, app.catalog, app.plan, app.archivePath, /*scanExecutables=*/true,
       prism::win::amsi::InitMode::LoadAmsi, options);
@@ -1350,7 +1357,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         bool ok = task->reader->ExtractWithPlan(
             app->catalog, app->plan.plan, app->plan.plan.baseTargetDir, nullptr, &result,
             app->extractOptions.overwrite, app->extractOptions.prompt,
-            app->extractOptions.exists, reportProgress);
+            app->extractOptions.exists, reportProgress,
+            app->extractOptions.promptAll);
         app->extractReader.store(nullptr);
         app->ops->Finish(*task, ok);
         outcome.ok = ok;

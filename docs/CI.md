@@ -56,3 +56,12 @@ benchmark 数字都在那里，不用翻日志。仍看不出再 `--log-failed`�
 Windows 的 ASan lane 必须带 `/DEBUG`（生成 PDB）。没有它，报告里每一帧都只有 `PrismArchive.exe+0x...`，
 内联帧和变量名一个都看不到——2026-11-05 的一次 `stack-use-after-scope` 因此花了 **4 轮 CI 红**才定位。
 `asan-msvc` preset 现在带 `/DEBUG /OPT:REF`；改动这个 preset 时**不要**把 `/DEBUG` 去掉。
+
+## 变异/回退脚本要锚 token id，不要锚颜色值（C102，2026-11-05）
+
+C102 要做"回退这四条 Daylight token 再重渲染"的差异统计，第一版按**颜色字面量** `(245,245,247)` 去匹配源码，
+结果**同时命中了 `--text-primary@Midnight`**（同一个 RGB 三元组），于是读到"Night 也变了 ≤5 级、集中在 chrome 字形"的**假结论**。
+改成按 `{TokenId::X, Variant::Daylight, ...}` 锚定后，Night 精确归 0（15/17 帧 byte-identical）。
+
+**规则**：变异注入与回退脚本必须以**标识符**（token id / 枚举 / 符号名）为锚点；颜色、尺寸这类**会漂移的值**不是锚点。
+这与上面"门禁阈值不得依赖可调材质参数"是同一类错误：**拿一个会变的东西当参照**。

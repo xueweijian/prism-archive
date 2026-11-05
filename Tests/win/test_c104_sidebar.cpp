@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -522,6 +523,153 @@ PRISM_TEST("c104 the 3 px accent rule survives on the rendered frame") {
     PRISM_CHECK(run <= 4);
   }
 }
+
+// C104: "did the list paint into the rail?" -- asked of the GEOMETRY and of the
+// PIXELS, both. gallery_snapshot's bleed probe fired on 134 accent pixels inside
+// the rail; the measurement below is what those pixels are (the rail's own
+// folder icon, a 14 x 11 blob), and these assertions are the ones that say so
+// first -- with a positive control proving the detector still finds a pill.
+PRISM_TEST("c104 the rail paints inside its column and its accent is an icon") {
+  const std::vector<ArchiveItem> items = SampleCatalog();
+  const Layout layout = BuildLayout(items, Variant::Midnight, static_cast<float>(kHeight),
+                                    FocusTarget{Section::Tree, 0});
+
+  // (a) GEOMETRY: no primitive of the rail leaves the rail. This is the
+  // assertion that would name an out-of-column rectangle before any pixel probe
+  // has to guess.
+  int outside = 0;
+  for (const Command& command : layout.commands) {
+    if (command.box.right > layout.panel.right || command.box.left < layout.panel.left ||
+        command.box.bottom > layout.panel.bottom) {
+      std::ostringstream os;
+      os << command.kind;
+      std::printf("  [c104] OFF-COLUMN %s box [%.1f,%.1f]-[%.1f,%.1f] panel [%.1f,%.1f]\n",
+                  os.str().c_str(),
+                  static_cast<double>(command.box.left), static_cast<double>(command.box.top),
+                  static_cast<double>(command.box.right),
+                  static_cast<double>(command.box.bottom),
+                  static_cast<double>(layout.panel.left),
+                  static_cast<double>(layout.panel.right));
+      ++outside;
+    }
+  }
+  std::printf("  [c104] panel [%.1f,%.1f] commands=%zu off-column=%d\n",
+              static_cast<double>(layout.panel.left),
+              static_cast<double>(layout.panel.right), layout.commands.size(), outside);
+  PRISM_CHECK_EQ(outside, 0);
+
+  // (b) PIXELS: inside the rail's band every accent pixel belongs to a rail
+  // primitive (a Glyph or the 3 px rule), and the longest horizontal accent run
+  // is ICON-sized. A list pill painted into the column would be a run of
+  // hundreds of pixels; an icon is <= 14.
+  const Command* bar = Find(layout, PrimKind::SelectionBar);
+  if (!PRISM_CHECK(bar != nullptr)) return;
+  prism::win::gallery::GalleryRenderer::Scene scene;
+  scene.listMode = true;
+  scene.sidebar = &layout;
+  scene.theme = Variant::Midnight;
+  Frame frame;
+  if (!PRISM_CHECK(RenderScene(scene, kWidth, kHeight, &frame))) return;
+
+  const auto insideOr = [&](const Command& c, int x, int y, int pad) {
+    return x >= static_cast<int>(c.box.left) - pad && x <= static_cast<int>(c.box.right) + pad &&
+           y >= static_cast<int>(c.box.top) - pad && y <= static_cast<int>(c.box.bottom) + pad;
+  };
+  const Command* pillCmd = Find(layout, PrimKind::Selection);
+  if (!PRISM_CHECK(pillCmd != nullptr)) return;
+  const int colLeft = static_cast<int>(layout.panel.left);
+  const int colRight = static_cast<int>(layout.panel.right);
+  // The SCROLLED content band, not the anchored telemetry capsule: the capsule's
+  // ratio bar is a legitimately long accent run that can never be "list content
+  // in the rail" (it is chrome, and it never scrolls).
+  const int panelTop = static_cast<int>(layout.contentTop);
+  const int panelBottom = static_cast<int>(layout.contentBottom);
+
+  // Every accent pixel in the WHOLE rail must belong to a rail primitive (the
+  // capsule's wash, the 3 px rule, or an icon). A list pill bleeding into the
+  // column is none of those, so it would land in "unowned".
+  int unowned = 0;
+  int longestRun = 0;
+  int accentOutsidePillBand = 0;
+  for (int y = panelTop; y < panelBottom; ++y) {
+    const bool inPillBand = y >= static_cast<int>(pillCmd->box.top) &&
+                            y < static_cast<int>(pillCmd->box.bottom);
+    int run = 0;
+    for (int x = colLeft; x <= colRight; ++x) {
+      bool isAccent = false;
+      if (x < colRight) {
+        const int red = static_cast<int>((frame.At(x, y) >> 16) & 0xFFu);
+        const int blue = static_cast<int>(frame.At(x, y) & 0xFFu);
+        isAccent = blue - red >= 40;
+      }
+      if (!isAccent) {
+        if (run > longestRun) longestRun = run;
+        run = 0;
+        continue;
+      }
+      bool owned = insideOr(*pillCmd, x, y, 1) || insideOr(*bar, x, y, 1);
+      for (const Command* glyph : All(layout, PrimKind::Glyph)) {
+        if (owned) break;
+        owned = insideOr(*glyph, x, y, 1);
+      }
+      if (!owned) ++unowned;
+      if (inPillBand) continue;  // the capsule's own wash is a legitimate fill
+      ++accentOutsidePillBand;
+      ++run;
+      if (run > longestRun) longestRun = run;
+    }
+    if (run > longestRun) longestRun = run;
+  }
+  std::printf("  [c104] rail accent outside the capsule band: %d px, longest run %d, "
+              "unowned %d\n",
+              accentOutsidePillBand, longestRun, unowned);
+  // The icons really are there, so the two numbers below are a measurement and
+  // not a blind detector...
+  PRISM_CHECK(accentOutsidePillBand > 40);
+  // ... an icon is at most 14 px wide, a list pill is hundreds...
+  PRISM_CHECK(longestRun <= 20);
+  // ... and no accent pixel in the rail came from anything but a rail primitive.
+  PRISM_CHECK_EQ(unowned, 0);
+
+  // (c) POSITIVE CONTROL for the same predicate: put a pill-shaped Selection
+  // INSIDE the column (the defect gallery_snapshot exists to catch) and the run
+  // measurement must see it. Without this, (b)'s "maxRun <= 20" could be blind.
+  Layout probe = layout;
+  Command pill{PrimKind::Selection, Box{20.0f, bar->box.top - 4.0f,
+                                        static_cast<float>(colRight) - 4.0f,
+                                        bar->box.top + 24.0f},
+               {}, {}, prism::win::sidebar::ColorToken::SelectedBackground, 1.0f, 0, Section::Tree};
+  probe.commands.insert(probe.commands.begin() + 1, pill);
+  prism::win::gallery::GalleryRenderer::Scene probeScene;
+  probeScene.listMode = true;
+  probeScene.sidebar = &probe;
+  probeScene.theme = Variant::Midnight;
+  Frame probeFrame;
+  if (!PRISM_CHECK(RenderScene(probeScene, kWidth, kHeight, &probeFrame))) return;
+  int probeRun = 0;
+  for (int y = static_cast<int>(pill.box.top) + 4; y < static_cast<int>(pill.box.bottom) - 4;
+       ++y) {
+    int run = 0;
+    for (int x = colLeft; x <= colRight; ++x) {
+      bool isAccent = false;
+      if (x < colRight) {
+        const int red = static_cast<int>((probeFrame.At(x, y) >> 16) & 0xFFu);
+        const int blue = static_cast<int>(probeFrame.At(x, y) & 0xFFu);
+        isAccent = blue - red >= 40;
+      }
+      if (isAccent) {
+        ++run;
+        if (run > probeRun) probeRun = run;
+      } else {
+        run = 0;
+      }
+    }
+  }
+  std::printf("  [c104] positive control: a pill inside the column measures maxRun=%d\n",
+              probeRun);
+  PRISM_CHECK(probeRun >= 100);
+}
+
 
 // ASSERTION 3 (the soft folder). Source scan + token + pixel, all three.
 PRISM_TEST("c104 the folder glyph is a soft two-tone, not an opaque plate") {

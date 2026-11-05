@@ -1706,6 +1706,21 @@ class GalleryRenderer {
 #else
     const bool drawGlyphs = !backdropPass;
 #endif
+    // C90 (follow-up): the same rule covers the row's STATE. A 32 px selection
+    // pill is 4 mini px of solid accent at 1/8 -- the blur turns it into a
+    // full-width band that outlives the selection (the cache key does not carry
+    // it) and reads as a rounded panel smeared down the list. Draw()'s own
+    // contract says the ghost is built "from the content only, never from the
+    // chrome, so a hover or a focus pill cannot make the wallpaper shimmer";
+    // the selected row is that pill. Icons and the ratio capsule stay: they
+    // are content and they are what C77-1 measures.
+#if defined(PRISM_C77_MUTANT_STATE_IN_BACKDROP)
+    // C90 MUTANT ACTIVE: state-in-backdrop -- the shipped tint, restored.
+    const bool drawRowState = true;
+    if (backdropPass) ++dbgBackdropStatePasses;
+#else
+    const bool drawRowState = !backdropPass;
+#endif
 
     // Header -- C81/A2: FLAT text on the canvas + a 1 px rule under it. No
     // panel, no ring. The band is repainted canvas-flat first: the C77
@@ -1768,7 +1783,7 @@ class GalleryRenderer {
         continue;
       }
       const D2D1_RECT_F rowRect = ToRectF(rr);
-      if (i == scene.selectedRow) {
+      if (drawRowState && i == scene.selectedRow) {
         // Selection highlight: G2 squircle R=10, accent fluid fill.
         D2D1_ROUNDED_RECT sel = D2D1::RoundedRect(
             D2D1::RectF(rowRect.left + 8.0f, top + 2.0f, rowRect.right - 8.0f, bottom - 2.0f),
@@ -2328,6 +2343,9 @@ class GalleryRenderer {
   int RatioBarsPainted() const { return ratioBarCount_; }
   const RatioBarPaint& RatioBarPainted(int index) const { return ratioBars_[index]; }
 
+  // C90 follow-up: list-mode backdrop passes that drew the selection pill
+  // (mutant arm only; zero in the clean build).
+  int dbgBackdropStatePasses = 0;
   // C60: proof that the TAB STRIP reached pixels. TabsPainted() == 0 while no
   // archive is open is the positive half of case 7 ("the band is not drawn"),
   // and > 0 with two tabs is what makes case 1 a paint assertion instead of a
@@ -2337,6 +2355,7 @@ class GalleryRenderer {
   int BackdropRebuilds() const { return dbgBackdropRebuilds; }
   int BackdropDraws() const { return dbgBackdropDraws; }
   int BackdropGlyphPasses() const { return dbgBackdropGlyphPasses; }
+  int BackdropStatePasses() const { return dbgBackdropStatePasses; }
   int BackdropBitmapPixels() const {
     if (!backdropBitmap_) return 0;
     const D2D1_SIZE_U size = backdropBitmap_->GetPixelSize();

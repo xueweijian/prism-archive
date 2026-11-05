@@ -155,3 +155,42 @@ ctest --test-dir E:\build\wt-c90 -R "c90" --output-on-failure
 
 No `<out-dir>` = assertions only, no files (the CI path).
 
+## C90 follow-up -- the band that survived the text fix (the selection pill)
+
+The user's second red circle: ONE file open, the first row selected, and a
+full-width light band around that row -- wider than the row, still there with
+the pointer parked elsewhere. Same scene as above (1920 x 1080, list mode, 14
+rows, Midnight), selection ON (`scene.selectedRow = 0`, which is what the
+window does after opening an archive).
+
+| file | what it shows |
+| --- | --- |
+| `c90-list-band-before.png` | the 32 px accent pill is 4 mini px of solid accent in the 1/8 source; blurred, it becomes a band that reaches ~40 px above and below the row. Its `BackdropKey` never carried `selectedRow`, so it also survived the selection moving on. |
+| `c90-list-band-after.png` | the pill is STATE, not content: out of the refraction source (same rule Draw() states for hover/focus pills). The row keeps its crisp pill; the ghost keeps the icons and the ratio capsules. |
+
+Measured at the same coordinate (x 400, 8 px below the selected row -- canvas in
+the backdrop-OFF frame), `maxChannelDelta`:
+
+```
+shipped / mutant : 74   (the band)
+this change      :  2   (rounding on the theme's presented canvas; limit is 4)
+```
+
+The scan is the reporter's: x 400..1400 every 100 px, every y of the rows band,
+4531 reference-canvas probes: `violations = 512 -> 0`, `worst = 74 -> 2`. It
+runs in BOTH states (no selection: 4839 probes, same 0 violations), so the
+assertion is a property of the layer and not of one selection.
+
+**The baseline is the theme's presented canvas, not the layer-OFF frame** (C91's
+`prism::chrome::CanvasPresentedColor`: the veil token composited over the
+canvas). The veil's own wash is 5 levels on the night canvas's blue channel --
+(16,17,23) -> (13,14,18) -- so a "within 4 of the OFF frame" rule counted every
+empty pixel as a violation and turned the Windows lane red with no band in the
+frame at all (PR #114). Against the canvas the pixel should be showing, the same
+scan reads 2 with the fix and 74 with the pill back in the source.
+
+`PRISM_C77_MUTANT_STATE_IN_BACKDROP` restores the pill in the 1/8 source and
+prints `C77 MUTATION CAUGHT: state-in-backdrop` (unselected: 0 violations,
+selected: 512).
+
+

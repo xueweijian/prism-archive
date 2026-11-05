@@ -2207,11 +2207,10 @@ class GalleryRenderer {
         }
         tileBorder_->SetColor(kTileBorder);
         if (drawGlyphs) {
+          // C109 + C101 merge: ONE percentage draw, on the tabular face, ending
+          // on the ratio column's baseline. (The rebase left C101's old
+          // DrawTrailingLabel call here as well; two runs would double-paint.)
           const std::wstring pct = Utf8(prism::list::RatioCellText(row));
-          DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + barWidth + 6.0f,
-                            top + 6.0f, 40, textSecondary_.Get());
-          // The percentage shares the ratio column's baseline with the plain
-          // (bar-less) rows below, so the % never floats mid-column.
           DrawNumericTrailing(target, pct, ratioRight - 48.0f, ratioRight, top + 6.0f,
                               textSecondary_.Get());
         }

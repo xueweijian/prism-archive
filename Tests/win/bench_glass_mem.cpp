@@ -810,7 +810,13 @@ int main(int argc, char** argv) {
   BM_CHECK(glass.transientAfterRelease == 0);
   BM_CHECK(glass.liveAfterReacquire);
   BM_CHECK(glass.identical);
-  BM_CHECK(glass.bandDiff >= 0.4);
+  // C102: the island's tint alpha went from .58 to .82 (ui-redesign-plan 2.1),
+  // and the refraction band's response is proportional to what the tint does
+  // NOT cover. Measured on this harness: bandDiff 0.86 at .58, 0.35 at .82
+  // (ratio .41 == (1-.82)/(1-.58)). The floor follows the material -- 0.30 is
+  // still far above a no-op chain's 0.00, which is what this check exists to
+  // catch. Only the number moved; the predicate is unchanged.
+  BM_CHECK(glass.bandDiff >= 0.30);
   BM_CHECK(glass.opaqueOutside == 0);
 
   // ---- verdicts: thumbnail capacity (D17) ----

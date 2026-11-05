@@ -391,7 +391,9 @@ PRISM_TEST("c91 the canvas and the status strip are the theme's") {
     PRISM_CHECK(Near("canvas (1200,500)", canvas,
                      ToPixel(prism::chrome::CanvasPresentedColor(variants[i])), 2));
     if (variants[i] == Variant::Daylight) {
-      PRISM_CHECK(Near("canvas day literal", canvas, Pixel{247, 249, 252}, 2));
+      // C102 moved the Daylight canvas to the plan's #F5F5F7; the assertion
+      // and its +-2 tolerance are unchanged, only the expected triple is.
+      PRISM_CHECK(Near("canvas day literal", canvas, Pixel{245, 245, 247}, 2));
     } else if (variants[i] == Variant::Midnight) {
       PRISM_CHECK(Near("canvas night literal", canvas, Pixel{13, 14, 18}, 2));
     } else {
@@ -408,7 +410,7 @@ PRISM_TEST("c91 the canvas and the status strip are the theme's") {
     wantStrip.b += 0.022f;
     PRISM_CHECK(Near("status strip", stripPixel, ToPixel(wantStrip), 3));
     if (variants[i] == Variant::Daylight) {
-      PRISM_CHECK(Near("status strip day literal", stripPixel, Pixel{251, 254, 255}, 3));
+      PRISM_CHECK(Near("status strip day literal", stripPixel, Pixel{249, 250, 253}, 3));
     } else if (variants[i] == Variant::HighContrast) {
       PRISM_CHECK(Near("status strip hc literal", stripPixel, Pixel{4, 5, 6}, 3));
     }
@@ -510,7 +512,7 @@ PRISM_TEST("c91 the tab plate, the rail and its rows follow the theme") {
     PRISM_CHECK(Near("info card", capsule,
                      ToPixel(prism::theme::CompositeOver(pane, PanelColor(variant))), 3));
     if (variant == Variant::Daylight) {
-      PRISM_CHECK(Near("info card day literal", capsule, Pixel{246, 248, 252}, 3));
+      PRISM_CHECK(Near("info card day literal", capsule, Pixel{242, 242, 245}, 3));
     }
   }
 }
@@ -541,7 +543,7 @@ PRISM_TEST("c91 the islands and the list ink follow the theme") {
         prism::chrome::ThemeSurfaceColor(TokenId::SurfaceFloatingIsland, variant));
     PRISM_CHECK(Near("action island", island, wantIsland, 2));
     if (variant == Variant::Daylight) {
-      PRISM_CHECK(Near("action island day literal", island, Pixel{252, 252, 254}, 2));
+      PRISM_CHECK(Near("action island day literal", island, Pixel{253, 253, 254}, 2));
     } else if (variant == Variant::Midnight) {
       PRISM_CHECK(Near("action island night literal", island, Pixel{26, 29, 37}, 2));
     }

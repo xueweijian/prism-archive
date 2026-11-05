@@ -83,11 +83,15 @@ PRISM_TEST("3.3: every token resolves for Daylight, Midnight and HighContrast") 
 }
 
 PRISM_TEST("3.3: blueprint values are verbatim, not approximations") {
-  // --surface-canvas-base
+  // --surface-canvas-base. C102 retuned the Daylight row from (246,248,252) to
+  // (241,241,244): the row is a 72 % sheet over the white backdrop reference,
+  // and (241,241,244)@.72 IS #F5F5F7 once composited -- which is the canvas the
+  // plan (ui-redesign-plan 2.1) and the user's report are about. The alpha, the
+  // reference and the whole Night/HighContrast table are unchanged.
   const Rgba dayCanvas = ColorOf(TokenId::SurfaceCanvasBase, Variant::Daylight);
-  PRISM_CHECK(Near(dayCanvas.r, ChannelFromByte(246)));
-  PRISM_CHECK(Near(dayCanvas.g, ChannelFromByte(248)));
-  PRISM_CHECK(Near(dayCanvas.b, ChannelFromByte(252)));
+  PRISM_CHECK(Near(dayCanvas.r, ChannelFromByte(241)));
+  PRISM_CHECK(Near(dayCanvas.g, ChannelFromByte(241)));
+  PRISM_CHECK(Near(dayCanvas.b, ChannelFromByte(244)));
   PRISM_CHECK(Near(dayCanvas.a, 0.72));
   const Rgba nightCanvas = ColorOf(TokenId::SurfaceCanvasBase, Variant::Midnight);
   PRISM_CHECK(Near(nightCanvas.r, ChannelFromByte(18)));
@@ -99,7 +103,9 @@ PRISM_TEST("3.3: blueprint values are verbatim, not approximations") {
   const Rgba dayIsland = ColorOf(TokenId::SurfaceFloatingIsland, Variant::Daylight);
   PRISM_CHECK(Near(dayIsland.r, 1.0) && Near(dayIsland.g, 1.0) &&
               Near(dayIsland.b, 1.0));
-  PRISM_CHECK(Near(dayIsland.a, 0.58));
+  // C102: plan 2.1 asks for .82 so the island stops reading as a flat white
+  // pill on the canvas; the row's colour (white) is untouched.
+  PRISM_CHECK(Near(dayIsland.a, 0.82));
   const Rgba nightIsland =
       ColorOf(TokenId::SurfaceFloatingIsland, Variant::Midnight);
   PRISM_CHECK(Near(nightIsland.r, ChannelFromByte(38)));

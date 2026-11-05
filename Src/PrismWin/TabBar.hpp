@@ -521,10 +521,10 @@ class Painter {
     const float height = static_cast<float>(tab.title.Height());
     ComPtr<IDWriteTextLayout> layout;
     IDWriteTextFormat* format = active && labelActive_ ? labelActive_.Get() : label_.Get();
-    if (FAILED(factory_->CreateTextLayout(item.title.c_str(),
-                                          static_cast<std::uint32_t>(item.title.size()),
-                                          format, width, height,
-                                          layout.ReleaseAndGetAddressOf()))) {
+    if (FAILED(prism::win::typography::CreateTextLayout(
+            factory_.Get(), item.title.c_str(),
+            static_cast<UINT32>(item.title.size()), format, width, height,
+            layout.ReleaseAndGetAddressOf()))) {
       return;
     }
     if (ellipsis_) layout->SetTrimming(&trimming_, ellipsis_.Get());

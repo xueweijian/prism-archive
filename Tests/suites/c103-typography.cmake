@@ -59,4 +59,18 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   add_test(NAME "mutation.c103.segoe" COMMAND win_c103_typography_mutant_segoe)
   set_tests_properties(mutation.c103.segoe PROPERTIES TIMEOUT 120
       PASS_REGULAR_EXPRESSION "C103 MUTATION CAUGHT: segoe")
+
+  # Arm: the CJK fallback mapping is never built (the pre-fallback state). The
+  # fallback-target and Chinese advance-width assertions MUST go red; the
+  # branch is hit-counted so the verdict cannot print without running.
+  add_executable(win_c103_typography_mutant_no_fallback win/test_c103_typography.cpp)
+  target_link_libraries(win_c103_typography_mutant_no_fallback PRIVATE prism_core
+                        prism_win_bridge user32.lib dwrite.lib)
+  target_compile_options(win_c103_typography_mutant_no_fallback PRIVATE /WX-)
+  target_compile_definitions(win_c103_typography_mutant_no_fallback
+                             PRIVATE PRISM_C103_MUTANT_NO_FALLBACK=1)
+  add_test(NAME "mutation.c103.no_fallback"
+           COMMAND win_c103_typography_mutant_no_fallback)
+  set_tests_properties(mutation.c103.no_fallback PROPERTIES TIMEOUT 120
+      PASS_REGULAR_EXPRESSION "C103 MUTATION CAUGHT: no_fallback")
 endif()

@@ -1291,9 +1291,9 @@ class GalleryRenderer {
         const std::wstring wide = Utf8(command.text);
         ComPtr<IDWriteTextLayout> layout;
         if (sidebarSmall_ && !wide.empty() &&
-            SUCCEEDED(writeFactory_->CreateTextLayout(
-                wide.c_str(), static_cast<UINT32>(wide.size()), sidebarSmall_.Get(),
-                box.right - box.left, box.bottom - box.top,
+            SUCCEEDED(prism::win::typography::CreateTextLayout(
+                writeFactory_.Get(), wide.c_str(), static_cast<UINT32>(wide.size()),
+                sidebarSmall_.Get(), box.right - box.left, box.bottom - box.top,
                 layout.ReleaseAndGetAddressOf()))) {
           ComPtr<IDWriteTextLayout1> tracked;
           if (SUCCEEDED(layout.As(&tracked))) {

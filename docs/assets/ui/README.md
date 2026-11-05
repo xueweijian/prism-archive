@@ -227,19 +227,29 @@ field: `Scene::theme`.
 the REAL renderer (`Tests/win/gallery_snapshot.cpp` -> `GalleryRenderer` -> a
 headless WIC target): 1600 px list mode, Midnight. `before` is origin/main,
 where all 18 DirectWrite call sites hardcoded `Segoe UI`; `after` is this card,
-where every `IDWriteTextFormat` is created through
-`Src/PrismWin/Typography.hpp`.
+where the base family resolves through
+`Src/PrismWin/Typography.hpp` and every layout carries the custom CJK fallback.
 
-**The two PNGs are byte-identical (sha256 `C2035DAF...95BB51E`), and that is the
-honest result on this machine.** The installed collection has no *SF Pro
-Display*, no *Inter*, no *PingFang SC* and no *HarmonyOS Sans* (checked with
-`System.Drawing.Text.InstalledFontCollection`: 192 families, none of the four
-preferred). `ResolveFamily` therefore walks the stack and lands on the
-documented fallback, `Segoe UI` -- the same family the old literal used. No
-pixel changed. What changed is that the family is now chosen from the system
-collection at run time instead of written into 21 places, and the suite proves
-the order with injected collections (`win.c103_typography`: {Inter, Segoe UI}
--> Inter; the mutation `PRISM_C103_MUTANT_SEGOE` makes that assertion red).
+**They now differ.** On this machine the resolver answers:
+
+```
+latin = Segoe UI Variable Display
+cjk   = Microsoft YaHei UI
+fallback = [Microsoft YaHei UI, Noto Sans SC]
+```
+
+so the "after" frame is painted with *Segoe UI Variable Display* (the Win11
+default) instead of the old hardcoded *Segoe UI*; 6,677 pixels differ, all of
+them in glyph runs (see `c103-font-diff.png`, where every changed pixel is red
+over a dimmed after frame). `c103-font-before-after-zoom.png` is the header +
+first rows at 2x for a side-by-side look.
+
+The earlier version of this card stopped at the Apple-only names, whose absence
+made the two frames byte-identical. The fix is the Windows-native middle step:
+Latin = SF Pro Display -> Inter -> Segoe UI Variable Display -> Segoe UI, CJK =
+PingFang SC -> HarmonyOS Sans SC -> Microsoft YaHei UI -> Noto Sans SC, and the
+CJK half is wired through `IDWriteFontFallbackBuilder` (one family name cannot
+cover both scripts).
 
 ## Reproduce
 

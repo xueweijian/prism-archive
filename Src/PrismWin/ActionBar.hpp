@@ -548,9 +548,10 @@ class ActionBarPainter {
   bool LabelOverflows(const std::wstring& label, int boxWidth) {
     if (!labelFormat_ || !writeFactory_ || boxWidth <= 0) return false;
     ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(writeFactory_->CreateTextLayout(
-            label.c_str(), static_cast<UINT32>(label.size()), labelFormat_.Get(),
-            static_cast<float>(boxWidth), static_cast<float>(prism::actionbar::kLabelHeight),
+    if (FAILED(prism::win::typography::CreateTextLayout(
+            writeFactory_.Get(), label.c_str(), static_cast<UINT32>(label.size()),
+            labelFormat_.Get(), static_cast<float>(boxWidth),
+            static_cast<float>(prism::actionbar::kLabelHeight),
             layout.ReleaseAndGetAddressOf()))) {
       return false;
     }

@@ -4705,10 +4705,9 @@ class GalleryWindow {
     const std::wstring wide = Utf8ToWide(text);
     if (wide.empty()) return 0;
     ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(writeFactory_->CreateTextLayout(wide.c_str(),
-                                               static_cast<UINT32>(wide.size()),
-                                               crumbFormat_.Get(), 8192.0f, 64.0f,
-                                               layout.GetAddressOf()))) {
+    if (FAILED(prism::win::typography::CreateTextLayout(
+            writeFactory_.Get(), wide.c_str(), static_cast<UINT32>(wide.size()),
+            crumbFormat_.Get(), 8192.0f, 64.0f, layout.GetAddressOf()))) {
       return 0;
     }
     DWRITE_TEXT_METRICS metrics{};

@@ -48,8 +48,14 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 using prism::win::typography::CreateTextFormat;
+using prism::win::typography::CjkFamilies;
+using prism::win::typography::DescribeResolution;
+using prism::win::typography::FallbackForFactory;
+using prism::win::typography::FallbackTargets;
 using prism::win::typography::FontStackFamilies;
+using prism::win::typography::LatinFamilies;
 using prism::win::typography::ResetResolveCacheForTests;
+using prism::win::typography::ResolveCjkFamily;
 using prism::win::typography::ResolveFamily;
 using prism::win::typography::SystemFamilyName;
 
@@ -142,6 +148,11 @@ int main(int argc, char** argv) {
   ::prism::test::SetMutationVerdict(
       "C103 MUTATION CAUGHT: segoe",
       [] { return ::prism::win::typography::MutationActive(); });
+#elif defined(PRISM_C103_MUTANT_NO_FALLBACK)
+  std::printf("C103 MUTANT ACTIVE: no_fallback\n");
+  ::prism::test::SetMutationVerdict(
+      "C103 MUTATION CAUGHT: no_fallback",
+      [] { return ::prism::win::typography::NoFallbackMutationActive(); });
 #endif
   const int failures = ::prism::test::RunAll(argc, argv);
   if (failures != 0) return failures;
@@ -149,15 +160,28 @@ int main(int argc, char** argv) {
   return 0;
 }
 
-PRISM_TEST("c103 the token is one ordered five-family stack") {
+PRISM_TEST("c103 the token is one ordered eight-family stack") {
   const std::vector<std::wstring>& families = FontStackFamilies();
-  PRISM_CHECK_EQ(families.size(), std::size_t{5});
-  if (families.size() == 5) {
+  PRISM_CHECK_EQ(families.size(), std::size_t{8});
+  if (families.size() == 8) {
     PRISM_CHECK(families[0] == L"SF Pro Display");
     PRISM_CHECK(families[1] == L"Inter");
-    PRISM_CHECK(families[2] == L"PingFang SC");
-    PRISM_CHECK(families[3] == L"HarmonyOS Sans");
-    PRISM_CHECK(families[4] == L"Segoe UI");
+    PRISM_CHECK(families[2] == L"Segoe UI Variable Display");
+    PRISM_CHECK(families[3] == L"Segoe UI");
+    PRISM_CHECK(families[4] == L"PingFang SC");
+    PRISM_CHECK(families[5] == L"HarmonyOS Sans SC");
+    PRISM_CHECK(families[6] == L"Microsoft YaHei UI");
+    PRISM_CHECK(families[7] == L"Noto Sans SC");
+  }
+  const std::vector<std::wstring>& latin = LatinFamilies();
+  PRISM_CHECK_EQ(latin.size(), std::size_t{4});
+  const std::vector<std::wstring>& cjk = CjkFamilies();
+  PRISM_CHECK_EQ(cjk.size(), std::size_t{4});
+  if (latin.size() == 4 && cjk.size() == 4) {
+    PRISM_CHECK(latin[0] == L"SF Pro Display");
+    PRISM_CHECK(latin[3] == L"Segoe UI");
+    PRISM_CHECK(cjk[0] == L"PingFang SC");
+    PRISM_CHECK(cjk[2] == L"Microsoft YaHei UI");
   }
 }
 
@@ -192,6 +216,13 @@ PRISM_TEST("c103 ResolveFamily returns the first family that really exists") {
   PRISM_CHECK(ResolveFamily(factory.Get(), topWins.Get()) == L"SF Pro Display");
   PRISM_CHECK(ResolveFamily(factory.Get(), neither.Get()) == L"Segoe UI");
 
+  // The Windows-native pair: the base family and the CJK fallback answer
+  // DIFFERENT questions and must never collapse into one name.
+  ComPtr<IDWriteFontCollection> win11Pair;
+  win11Pair.Attach(new FakeFontCollection({L"Segoe UI Variable Display", L"Microsoft YaHei UI"}));
+  PRISM_CHECK(ResolveFamily(factory.Get(), win11Pair.Get()) == L"Segoe UI Variable Display");
+  PRISM_CHECK(ResolveCjkFamily(factory.Get(), win11Pair.Get()) == L"Microsoft YaHei UI");
+
   // The cache: the first call walked the stack (>= 1 lookup); the second one
   // must not add a single FindFamilyName call.
   ComPtr<IDWriteFontCollection> cached;
@@ -202,6 +233,89 @@ PRISM_TEST("c103 ResolveFamily returns the first family that really exists") {
   PRISM_CHECK(afterFirst >= 1);
   PRISM_CHECK(ResolveFamily(factory.Get(), cached.Get()) == L"Inter");
   PRISM_CHECK_EQ(cachedRaw->FindCalls(), afterFirst);
+}
+
+PRISM_TEST("c103 the CJK fallback is wired and changes Chinese shaping") {
+  const ComPtr<IDWriteFactory> factory = MakeFactory();
+  PRISM_CHECK(factory != nullptr);
+  if (!factory) return;
+
+  ResetResolveCacheForTests();
+  ComPtr<IDWriteFontCollection> system;
+  if (FAILED(factory->GetSystemFontCollection(system.GetAddressOf(), FALSE)) || !system) {
+    PRISM_CHECK(false);
+    return;
+  }
+  const std::wstring& latin = ResolveFamily(factory.Get(), system.Get());
+  const std::wstring& cjk = ResolveCjkFamily(factory.Get(), system.Get());
+  PRISM_CHECK(std::find(LatinFamilies().begin(), LatinFamilies().end(), latin) !=
+              LatinFamilies().end());
+  PRISM_CHECK(std::find(CjkFamilies().begin(), CjkFamilies().end(), cjk) !=
+              CjkFamilies().end());
+
+  const std::vector<std::wstring>& targets = FallbackTargets(factory.Get());
+  const std::wstring description = DescribeResolution(factory.Get());
+  std::printf("  C103 RESOLUTION: latin=%ls cjk=%ls\n", latin.c_str(), cjk.c_str());
+  std::printf("  C103 DESCRIBE: %ls\n", description.c_str());
+  for (const std::wstring& target : targets) {
+    std::printf("    fallback target: %ls\n", target.c_str());
+  }
+
+  // ASSERTION: the fallback really carries the resolved CJK family, first.
+  PRISM_CHECK(!targets.empty());
+  if (!targets.empty()) PRISM_CHECK(targets.front() == cjk);
+
+  // Advance-width evidence: the same Chinese run must shape differently with the
+  // fallback than with an EMPTY fallback (which leaves Chinese on the Latin
+  // base). PRISM_C103_MUTANT_NO_FALLBACK makes the first case empty too, so
+  // this assertion goes red.
+  ComPtr<IDWriteTextFormat> format;
+  if (FAILED(CreateTextFormat(factory.Get(), 16.0f, DWRITE_FONT_WEIGHT_NORMAL,
+                              DWRITE_FONT_STYLE_NORMAL, L"zh-CN",
+                              format.GetAddressOf()))) {
+    PRISM_CHECK(false);
+    return;
+  }
+
+  ComPtr<IDWriteFontFallback> emptyFallback;
+  ComPtr<IDWriteFactory2> factory2;
+  if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(factory2.GetAddressOf()))) &&
+      factory2 != nullptr) {
+    ComPtr<IDWriteFontFallbackBuilder> builder;
+    if (SUCCEEDED(factory2->CreateFontFallbackBuilder(builder.GetAddressOf())) &&
+        builder != nullptr) {
+      builder->CreateFontFallback(emptyFallback.GetAddressOf());
+    }
+  }
+  PRISM_CHECK(emptyFallback != nullptr);
+
+  const wchar_t kChinese[] = L"压缩包子文件夹";
+  const UINT32 length = static_cast<UINT32>(sizeof(kChinese) / sizeof(kChinese[0]) - 1);
+  const auto measure = [&](IDWriteFontFallback* fallback) -> double {
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(factory->CreateTextLayout(kChinese, length, format.Get(), 4096.0f, 200.0f,
+                                         layout.GetAddressOf())) ||
+        layout == nullptr) {
+      return -1.0;
+    }
+    if (fallback != nullptr) {
+      ComPtr<IDWriteTextLayout2> layout2;
+      if (SUCCEEDED(layout.As(&layout2)) && layout2 != nullptr) {
+        layout2->SetFontFallback(fallback);
+      }
+    }
+    DWRITE_TEXT_METRICS metrics{};
+    if (FAILED(layout->GetMetrics(&metrics))) return -1.0;
+    return static_cast<double>(metrics.width);
+  };
+  const double withFallback = measure(FallbackForFactory(factory.Get()));
+  const double withoutFallback = measure(emptyFallback.Get());
+  std::printf("  C103 CJK advance: fallback=%.3f empty=%.3f\n", withFallback,
+              withoutFallback);
+  PRISM_CHECK(withFallback > 0.0);
+  PRISM_CHECK(withoutFallback > 0.0);
+  const double delta = withFallback - withoutFallback;
+  PRISM_CHECK(delta > 0.5 || delta < -0.5);
 }
 
 PRISM_TEST("c103 every TextFormat is created through the resolved family") {

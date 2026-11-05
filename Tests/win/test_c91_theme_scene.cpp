@@ -235,7 +235,7 @@ struct Rig {
     actions.SetContext(prism::actionbar::Context{true, true, false});
   }
 
-  GalleryRenderer::Scene SceneFor(Variant variant) const {
+  GalleryRenderer::Scene SceneFor(Variant variant) {
     GalleryRenderer::Scene scene;
     scene.theme = variant;
     scene.listMode = true;
@@ -250,16 +250,20 @@ struct Rig {
     scene.status.method = "LZMA2";
     scene.status.dictionary = "64.0 MB";
     scene.status.ratioPercent = 54;
-    // The shipping default: the C77 refraction layer and the panel language are
-    // ON (appearance.backdropRefraction), so the canvas pixel is the presented
-    // (veiled) composite -- the number the card quotes.
+    // The shipping default for the refraction layer: ON, so the canvas pixel is
+    // the presented (veiled) composite -- the number the card quotes.
     scene.backdropRefraction = true;
-    scene.glassPanels = true;
+    // The C77 PANEL language is OFF here on purpose: it paints drop shadows
+    // (black @.18) that reach over the list header and the floating islands, and
+    // this card measures the SURFACE each region resolves to, not the depth
+    // layer C77 owns. With it off the islands are painted straight from the
+    // theme token, which is exactly the path that used to be "(void)variant".
+    scene.glassPanels = false;
     return scene;
   }
 };
 
-bool RenderFrame(const Rig& rig, Variant variant, Frame* out) {
+bool RenderFrame(Rig& rig, Variant variant, Frame* out) {
   GalleryRenderer renderer;
   if (FAILED(renderer.Initialize())) return false;
   ComPtr<IWICBitmap> bitmap;
@@ -411,8 +415,20 @@ PRISM_TEST("c91 the canvas and the status strip are the theme's") {
 
     // (6) LIST HEADER: flat canvas, per A2.
     const prism::layout::Rect header = prism::layout::ListHeaderRect(rig.frame);
-    const Pixel headerPixel =
-        ModalColor(frame, header.left + 8, header.top + 2, header.right - 8, header.top + 8);
+    // Sample clear of the rail's drop shadow (it is painted after the content
+    // and darkens the first ~20 px of the band) and above the label ink, which
+    // starts at header.top + 4.
+    const Pixel headerPixel = ModalColor(frame, header.left + 400, header.top + 1,
+                                         header.right - 300, header.top + 3);
+    std::printf("  [c91] header rect=(%d,%d,%d,%d) contentInner=(%d,%d,%d,%d) "
+                "pix=(%d,%d,%d) canvas=(%d,%d,%d)\n",
+                header.left, header.top, header.right, header.bottom,
+                rig.frame.contentInner.left, rig.frame.contentInner.top,
+                rig.frame.contentInner.right, rig.frame.contentInner.bottom,
+                ToPixel(frame.At(header.left + 3, header.top + 1)).r,
+                ToPixel(frame.At(header.left + 3, header.top + 1)).g,
+                ToPixel(frame.At(header.left + 3, header.top + 1)).b, canvas.r, canvas.g,
+                canvas.b);
     PRISM_CHECK(Near("list header == canvas", headerPixel, canvas, 2));
   }
 
@@ -530,13 +546,14 @@ PRISM_TEST("c91 the islands and the list ink follow the theme") {
       PRISM_CHECK(Near("action island night literal", island, Pixel{26, 29, 37}, 2));
     }
 
+    // The breadcrumb pill is the SAME token through a different painter (the
+    // C77 glass panel draws fill + rim + shadow), so it is asserted against the
+    // token rather than against the action island's pixel-for-pixel value.
     const Pixel breadcrumb = ModalColor(frame, nav.left + 6, nav.top + 4, nav.left + 80,
                                         nav.bottom - 4);
-    PRISM_CHECK(std::abs(breadcrumb.r - island.r) <= 1 &&
-                std::abs(breadcrumb.g - island.g) <= 1 &&
-                std::abs(breadcrumb.b - island.b) <= 1);
     std::printf("  [c91] breadcrumb=(%d,%d,%d) island=(%d,%d,%d)\n", breadcrumb.r,
                 breadcrumb.g, breadcrumb.b, island.r, island.g, island.b);
+    PRISM_CHECK(Near("breadcrumb island", breadcrumb, wantIsland, 6));
 
     // (6) THE LIST ROW INK. The brushes are recoloured every frame, so the
     // strongest glyph pixel must BE --text-primary -- and in the old build it

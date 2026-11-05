@@ -20,7 +20,14 @@
 //        * the island pixel == SurfaceFloatingIsland (.52) over the canvas,
 //        * island-vs-canvas luminance is INSIDE the token's band (not the
 //          hand-lightened +.72 ribbon the user photographed),
-//        * the button label and its Alt mnemonic are >= 4.5:1 against it.
+//        * the button label is >= 4.5:1 against it.
+//      C100 UPDATE: the Alt mnemonic is no longer PAINTED (card C100 deleted the
+//      10 px corner letter; the chord itself lives in WM_SYSKEYDOWN ->
+//      Model::PressMnemonic and in the UIA node's shortcut field). The assertion
+//      that used to measure the letter's contrast therefore became the stronger
+//      one: that corner region is now BARE ISLAND on every button. It is still a
+//      real assertion -- put the letter back and it goes red (mutation.c100.
+//      mnemonic proves exactly that, on the same pixels).
 //
 // NEGATIVE CONTROLS (CONTRACTS D3 + D26/D27): two compile-time injections, each
 // lowering ONE rule, print "C64 MUTATION CAUGHT: <id>" at the first red
@@ -498,22 +505,25 @@ PRISM_TEST("c64 action island pixels: token fill, bounded canvas contrast, 4.5:1
               Channel(labelInk, 8), Channel(labelInk, 0), labelContrast);
   PRISM_CHECK(labelContrast >= 4.5);
 
-  // The Alt mnemonic (the "floating letter" in the screenshot): top-right of
-  // the same button. 0.60 alpha used to measure ~3.2:1.
-  const prism::actionbar::Rect& r = button.rect;
-  UINT32 mnemonicInk = islandPixel;
-  for (int y = r.top + 5; y < r.top + 17; ++y) {
-    for (int x = r.right - 18; x < r.right - 5; ++x) {
-      if (!frame.In(x, y)) continue;
-      if (RelativeLuminance(frame.At(x, y)) > RelativeLuminance(mnemonicInk)) {
-        mnemonicInk = frame.At(x, y);
+  // C100: the corner the 10 px Alt letter used to occupy is now BARE. That
+  // region (right-18 .. right-5, top+5 .. top+17) must carry no ink at all on
+  // any of the eight buttons -- the "single-letter psoriasis" the user asked to
+  // have removed. This replaced the old "the mnemonic is >= 4.5:1" assertion,
+  // which is unsatisfiable once the letter is gone BY DESIGN; the new one is
+  // still red if the glyph comes back (mutation.c100.mnemonic).
+  int cornerInk = 0;
+  for (std::size_t i = 0; i < band.buttons.size(); ++i) {
+    const prism::actionbar::Rect& br = band.buttons[i].rect;
+    for (int y = br.top + 5; y < br.top + 17; ++y) {
+      for (int x = br.right - 18; x < br.right - 5; ++x) {
+        if (!frame.In(x, y)) continue;
+        if (ColorDistance(frame.At(x, y), islandPixel) > 25) ++cornerInk;
       }
     }
   }
-  const double mnemonicContrast = ContrastRatio(mnemonicInk, islandPixel);
-  std::printf("  [mnemonic] ink=(%d,%d,%d) contrast=%.2f:1\n", Channel(mnemonicInk, 16),
-              Channel(mnemonicInk, 8), Channel(mnemonicInk, 0), mnemonicContrast);
-  PRISM_CHECK(mnemonicContrast >= 4.5);
+  std::printf("  [mnemonic] corner ink over %d buttons = %d\n",
+              static_cast<int>(band.buttons.size()), cornerInk);
+  PRISM_CHECK_EQ(cornerInk, 0);
 }
 
 int main(int argc, char** argv) {

@@ -227,3 +227,45 @@ UIA 的 textfield 可写、按钮可 Invoke）。负向控制 `mutation.c88.syst
 **要求**：zh-CN 表里的句子统一用全角标点（`：``（``）``，``。`），数字与斜杠保持半角；
 en-US 表保持半角。断言：zh-CN 的可见文本里不出现 `: ` / ` (` 这类半角组合（数字范围除外）。
 **状态**：记录，待修（打磨级，不影响功能）。
+
+---
+
+## A11 列表区"白色模糊底色"（backdrop 折射层把行文字也画进去了）
+
+**用户截图**：打开 zip 后，文件名格背后 + 大小/压缩后/压缩率三列背后各有一块浅灰模糊块。
+
+**实测**（隔离 profile，同一帧只切 `appearance.backdropRefraction`）：
+
+```
+画布 OFF            #0B0E13  lum 13.7
+白块① 430,340  ON   #54575B  lum 84.7   Δ +72.9
+白块② 1600,360 ON   #3F4145  lum 63.9   Δ +51.1
+压缩率列 1780,360 ON #0D3056（蓝）      Δ +29.6   ← 倒影带内容颜色，证明采样源是"内容"
+亮区 x：318–424（文件名）· 1520–1618 / 1658–1752 / 1820–1890（三列）
+```
+
+**根因**（`GalleryRenderer.hpp`）：`BuildBackdrop()` 把**整个列表含行文字**渲染进 1/8 target
+（`:490-497` 1/8 target / `:512` SetTransform / `:517` DrawListMode(backdropPass=true) / `:530-532` blur），
+再以 `DrawBitmap(ghost.a=1.0)` + veil 铺满全窗（`:477-483`）。`DrawListMode` 的 backdropPass **只排除了表头**
+（`:1500`，A2 的既有修法），**行文字照画**（`:1567-1619`）。
+
+**为什么是实心白板而不是淡字影**（量化，不是推断）：
+
+```
+名称列真实墨迹覆盖率 0.092  → 忠实模糊应得 lum 16.8（画布 +3，几乎看不见）
+实测              78.7  → 反推 1/8 图里源覆盖率 0.81（真实墨迹的 8.8 倍）
+```
+
+13 px 字在 1/8 图里只剩 ~1.6 px，光栅化后每个字形吃满整格；行距 4 mini px + blur 1.75 → 融成实心板。
+颜色来源：`TextPrimary@Midnight=(245,245,247)` 的 35%（1−veil.a）留在 #0B0E13 上 → +73 级。
+
+**CI 为什么绿**：`Tests/win/test_c77_glass.cpp:249-259` 只渲染网格场景，**从不设 `listItems`/`listMode`**，
+列表模式的倒影没有任何断言。
+
+**修法**：`const bool drawGlyphs = !backdropPass;`，行文字包进该分支；保留图标/压缩率条/选中 tint（层仍可测）。
+断言：名称区 `maxLum ≤ lum(canvas)+24`（今天 78.7 → 红）；压缩率列仍需 ≥8 级差且 ≥1500 px；
+负向控制 `PRISM_C77_MUTANT_TEXT_IN_BACKDROP`。
+**状态**：C90 修复中。
+
+**附带发现**：`glassTheme` 恒为 Midnight（`GalleryWindow.hpp:4013-4015`）——settings 里的主题对玻璃层不生效；
+mini 图按 DIP 算，真实下采样是 10× 而非注释里的 8×（白块羽化 16–20 px 与此吻合）。

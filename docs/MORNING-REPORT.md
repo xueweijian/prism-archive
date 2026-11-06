@@ -253,3 +253,68 @@ C116 用证据推翻了我上面的假设（第 12 节），三条：
 
 若在本机看到窗口全白：**先重启一次**（清掉虚拟显示器/驱动状态），或拔掉远程桌面/投屏会话；
 再用 `tools/d2d_present_probe` 判定。应用本身在 headless 渲染与无障碍树上都是完整的。
+## 15. 本机白屏的最终判定（可复现）
+
+C116 的探针进了 main，我在本机跑了一次：
+
+```
+D2D_PRESENT_PROBE (no PrismArchive code involved)
+  dwm_composition=1
+  adapter=Intel(R) UHD Graphics 620
+D2D_PRESENT {"enddraw":"0x00000000","paints":6,"d2d_pixel":"ffffff","gdi_pixel":"00ff00","verdict":"D2D_PRESENT_BROKEN"}
+```
+
+**结论：这台机器的 Direct2D HWND present 被丢弃了**——`EndDraw` 6 次全成功、GDI 绿块可见、D2D 输出纯白。
+与 PrismArchive 无关。本机 DXGI 有四个适配器（Intel UHD 620 / Radeon 530 / MS Basic Render Driver / **OrayIddDriver**），
+虚拟显示器/混合显卡是常见成因。
+
+**处置建议**：重启一次 → 再跑 `pwsh -File tools\d2d_present_probe.ps1`；
+若仍 `BROKEN`，更新/回滚显卡驱动，或换一个没有虚拟显示器的会话（断开远程桌面/投屏）。
+
+**这也解释了今晚两次误判**：
+1. 我以为是"首帧画在数据之前"（C116 用 trace 证伪：`set_items=265ms` < 首次 `WM_PAINT=373ms`）；
+2. 我以为是"产品 paint bug"（探针证伪：零 PrismArchive 代码同样白）。
+
+根因是我用**窗口/桌面截图**判断"画没画出来"——而在这台机器上，D2D HWND present 丢失时截图完全看不出来，
+DComp 合成的药丸却能截到。**验证手段本身失效，比 bug 更难发现。**
+## 16. 最终状态（2026-11-07 07:25）
+
+**`main = 44ad8cc`，24 张卡合并，0 个 open PR，两条 lane 全绿。**
+
+| 项 | 状态 |
+|---|---|
+| 本机安装 | 07:24 构建，`Assets` + `7z.dll` 齐备 |
+| 无障碍树验证 | 菜单 `文件 / 编辑 / 设置(S)... / 帮助`；动作按钮 8 个、tab、listbox、树、状态栏齐全 |
+| headless 渲染 | `ALL SNAPSHOT CHECKS PASSED`，网格/列表/进度胶囊/状态栏正常 |
+| D2D 探针 | `verdict=D2D_PRESENT_BROKEN`（本机驱动问题，非应用） |
+
+### 今晚合并的 24 张
+
+C100 图标曲线化 · C101 压缩率条 · C102 Day 分层 · C103 字体栈 · C104 侧栏胶囊 ·
+C105 信息卡+状态栏 · C106 菜单栏融合 · C107 光学链 · C108 验收矩阵 · C109 列表排版 ·
+C110 网格倒影+图块底色 · C111 图块文件夹图标 · C112 island 拥有文字 · C113 基准诚实性 ·
+C114 pool_lease 确定性 · C115 窄窗口 pill · C116 首帧重绘门 · C90 折射不吃药丸 ·
+C93 面包屑可点 · C93b Help 菜单 · C92 双击+右键 · C94 覆盖冲突 · C77/C79 既有修复
+
+### 五条规则（都写进了仓库）
+
+| 文件 | 规则 |
+|---|---|
+| `docs/CI.md` | 门禁阈值不得依赖可调材质参数（C102/C110） |
+| `docs/CI.md` | 变异/回退脚本要锚 token id，不要锚颜色值（C102） |
+| `docs/CI.md` | **断言不许钉住 bug 本身**（C115/C113） |
+| `docs/CI.md` | 断言"不是空帧"用 `painted`（最亮通道≥32）或 digest，不用"非黑像素数"（C113） |
+| `docs/TESTING.md` | 断言测契约，不测调度（C114） |
+
+### 三个工具
+
+- `tools/d2d_present_probe.ps1` —— 30 秒判定"窗口全白"是应用还是驱动；
+- `tools/visual_baseline.ps1`（C108）—— 13 条视觉主张的采集脚本；
+- `docs/MORNING-REPORT.md`（本文）—— 证据链 + 我的错误清单。
+
+### 仍未做
+
+1. **Liquid Glass 只覆盖面包屑岛**，动作岛/信息卡未接；
+2. **每帧 GDI 抓背景的开销未测**（C107 遗留）；
+3. **整窗改走 DirectComposition**：等本机 D2D present 在重启后仍 BROKEN 再评估；
+4. 启动耗时、最小化内存两项未碰。

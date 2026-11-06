@@ -64,6 +64,11 @@ PrismArchive：Windows 11 x64 归档管理器，引擎是运行时 `LoadLibraryW
   —— configure + build + ctest + preflight + manifest + headers + windows_tu，
   最后一行 `LOCAL GATES: PASS/FAIL`，日志在 `<build>/local-gates/`。
 - 部分跑：`-Only preflight,headers`；ASan 复现：`-Preset asan-msvc -SkipShell`。
+- **两个平台的构建与验证都以 GitHub CI 为准**（用户 2026-11-06 明确要求）：
+  Windows (`release-msvc` / `asan-msvc`) 与 Linux (`release-gcc` / `asan-clang`) 的构建、
+  全量 ctest、headers、windows_tu，**一律看 CI 的结论**；本地只做「快速自检」：
+  `clang++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only` + 与本卡相关的 `ctest -R <你的套件>`。
+  本机 7.9 GB / 8 线程，多卡并行时跑全量只会互相拖垮，且**本地绿不能替代 CI 绿**（D35）。
 - **本机 WSL 不必硬磕**（这台机器 7.9 GB，多卡并行时常因内存不足 `CreateVm/ERROR_TIMEOUT`）：
   `headers` / `windows_tu` 两步**由 CI 的 Linux lane 覆盖**（它就跑这两个），本地用
   `clang++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only` 做快速语法自检即可。

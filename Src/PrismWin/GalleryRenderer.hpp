@@ -52,6 +52,20 @@ namespace prism::win::gallery {
 
 using Microsoft::WRL::ComPtr;
 
+// ------------------------------------------------------------------- C111
+// The folder tile's negative controls (CONTRACTS D3). Each switch lives beside
+// the painter it mutates, and each armed branch increments a counter so a CTest
+// "MUTATION CAUGHT" verdict can be armed on the injection firing rather than on
+// a colour of red that might have come from somewhere else (D27).
+inline int& MutantTwoRectsHits() {
+  static int hits = 0;
+  return hits;
+}
+inline int& MutantNoHighlightHits() {
+  static int hits = 0;
+  return hits;
+}
+
 #if defined(PRISM_C27_MUTANT_NO_SIDEBAR_PAINT)
 inline constexpr bool kPaintSidebar = false;
 #else
@@ -1479,6 +1493,149 @@ class GalleryRenderer {
     DrawSelectionRing(target, scene, cell.rect, item.index, 10.0f);
   }
 
+  // C111: a cubic-bezier rounded rectangle. The control-point ratio is above
+  // the circular 0.5523 on purpose: the corner leaves the straight edge more
+  // gradually, which is the continuous-corner ("squircle") read of the macOS
+  // folder instead of four arcs welded to four lines.
+  static HRESULT CreateSquirclePath(ID2D1RenderTarget* target, const D2D1_RECT_F& rect,
+                                    float radius, ID2D1PathGeometry** out) {
+    ComPtr<ID2D1Factory> factory;
+    target->GetFactory(factory.ReleaseAndGetAddressOf());
+    if (!factory) return E_FAIL;
+    ComPtr<ID2D1PathGeometry> path;
+    HRESULT hr = factory->CreatePathGeometry(path.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    ComPtr<ID2D1GeometrySink> sink;
+    hr = path->Open(sink.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    const float halfMin =
+        (std::min)(rect.right - rect.left, rect.bottom - rect.top) / 2.0f;
+    const float r = (std::max)(0.0f, (std::min)(radius, halfMin));
+    constexpr float k = 0.62f;  // > 0.5523: continuous corner, no visible joint
+    const float l = rect.left;
+    const float t = rect.top;
+    const float rt = rect.right;
+    const float b = rect.bottom;
+    sink->BeginFigure(D2D1::Point2F(l + r, t), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(rt - r, t));
+    sink->AddBezier(D2D1::BezierSegment(
+        D2D1::Point2F(rt - r + k * r, t), D2D1::Point2F(rt, t + r - k * r),
+        D2D1::Point2F(rt, t + r)));
+    sink->AddLine(D2D1::Point2F(rt, b - r));
+    sink->AddBezier(D2D1::BezierSegment(
+        D2D1::Point2F(rt, b - r + k * r), D2D1::Point2F(rt - r + k * r, b),
+        D2D1::Point2F(rt - r, b)));
+    sink->AddLine(D2D1::Point2F(l + r, b));
+    sink->AddBezier(D2D1::BezierSegment(
+        D2D1::Point2F(l + r - k * r, b), D2D1::Point2F(l, b - r + k * r),
+        D2D1::Point2F(l, b - r)));
+    sink->AddLine(D2D1::Point2F(l, t + r));
+    sink->AddBezier(D2D1::BezierSegment(
+        D2D1::Point2F(l, t + r - k * r), D2D1::Point2F(l + r - k * r, t),
+        D2D1::Point2F(l + r, t)));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    hr = sink->Close();
+    if (FAILED(hr)) return hr;
+    *out = path.Detach();
+    return S_OK;
+  }
+
+  static D2D1_COLOR_F MixColor(const D2D1_COLOR_F& from, const D2D1_COLOR_F& to,
+                               float amount) {
+    const float t = (std::max)(0.0f, (std::min)(1.0f, amount));
+    D2D1_COLOR_F out;
+    out.r = from.r + (to.r - from.r) * t;
+    out.g = from.g + (to.g - from.g) * t;
+    out.b = from.b + (to.b - from.b) * t;
+    out.a = from.a + (to.a - from.a) * t;
+    return out;
+  }
+
+  // C111: the folder glyph, in TWO layers instead of two rectangles.
+  //   * a back tab: narrower than the face, slightly higher, a darker accent;
+  //   * a front face: full width, a 1 px rim one step brighter than its fill,
+  //     and a specular row along its top edge.
+  // Every dimension is a fraction of the CELL (56 % wide, 1.22:1), so the glyph
+  // scales with the tile; every colour is derived from the frame's accent token
+  // (the live AccentLiquidPrimary), the theme's TextPrimary and the frame's own
+  // island surface -- no colour literal is written here.
+  void DrawFolderGlyph(ID2D1RenderTarget* target, const Scene& scene,
+                       const D2D1_RECT_F& cellRect) {
+    const prism::theme::Variant theme = ThemeOf(scene);
+    const float cellW = cellRect.right - cellRect.left;
+    const float usableBottom = cellRect.bottom - 28.0f;  // DrawNamePlate's top
+    const float cx = (cellRect.left + cellRect.right) * 0.5f;
+    const float cy = (cellRect.top + usableBottom) * 0.5f - 2.0f;
+
+    const float iconW = cellW * 0.56f;
+    const float iconH = iconW / 1.22f;
+    // Snap the outline to whole pixels: the specular row must be a real row,
+    // not a half-covered anti-aliased smear (B2 measures exactly that row).
+    D2D1_RECT_F box;
+    box.left = std::floor(cx - iconW * 0.5f + 0.5f);
+    box.right = std::floor(cx + iconW * 0.5f + 0.5f);
+    box.top = std::floor(cy - iconH * 0.5f + 0.5f);
+    box.bottom = std::floor(cy + iconH * 0.5f + 0.5f);
+    const float w = box.right - box.left;
+    const float h = box.bottom - box.top;
+    const float frontTop = box.top + h * 0.08f;  // the tab reaches slightly higher
+    const float radius = h * 0.12f;
+
+    const D2D1_COLOR_F light = ToD2d(prism::chrome::ThemeSurfaceColor(
+        prism::theme::TokenId::TextPrimary, theme));
+    const D2D1_COLOR_F base = accentColor_;
+    D2D1_COLOR_F frontFill = MixColor(base, islandColor_, 0.16f);
+    frontFill = MixColor(frontFill, light, 0.10f);
+    frontFill.a = 1.0f;
+    // The back layer is the same accent, darker: 62 % of each channel. Scaling
+    // a token is a material operation, not a new colour authority.
+    const D2D1_COLOR_F tabFill = D2D1::ColorF(
+        base.r * 0.62f, base.g * 0.62f, base.b * 0.62f, 1.0f);
+    const D2D1_COLOR_F frontRim = MixColor(frontFill, light, 0.42f);
+    const D2D1_COLOR_F frontSheen = MixColor(frontFill, light, 0.85f);
+
+    // Back tab: narrower (5 % in from the left, 68 % of the width), darker, and
+    // its lower half hidden behind the face.
+    const D2D1_RECT_F tab = D2D1::RectF(box.left + w * 0.05f, box.top,
+                                        box.left + w * 0.68f, frontTop + h * 0.22f);
+    ComPtr<ID2D1PathGeometry> tabPath;
+    if (SUCCEEDED(CreateSquirclePath(target, tab, radius * 0.8f,
+                                     tabPath.ReleaseAndGetAddressOf()))) {
+      island_->SetColor(tabFill);
+      target->FillGeometry(tabPath.Get(), island_.Get());
+    }
+#if defined(PRISM_C111_MUTANT_NO_HIGHLIGHT)
+    // NEGATIVE CONTROL (D3): both 1 px specular rows are gone. B2 must go red.
+    ++MutantNoHighlightHits();
+#else
+    // 1 px specular on the tab's top edge, inset by the corner radius.
+    island_->SetColor(light);
+    target->FillRectangle(D2D1::RectF(tab.left + radius * 0.8f, box.top,
+                                      tab.right - radius * 0.8f, box.top + 1.0f),
+                          island_.Get());
+#endif
+
+    // Front face: full width, rim one step brighter than the fill, and a second
+    // specular row inside its top edge.
+    const D2D1_RECT_F face = D2D1::RectF(box.left, frontTop, box.right, box.bottom);
+    ComPtr<ID2D1PathGeometry> facePath;
+    if (SUCCEEDED(CreateSquirclePath(target, face, radius,
+                                     facePath.ReleaseAndGetAddressOf()))) {
+      island_->SetColor(frontFill);
+      target->FillGeometry(facePath.Get(), island_.Get());
+      island_->SetColor(frontRim);
+      target->DrawGeometry(facePath.Get(), island_.Get(), 1.0f);
+    }
+#if !defined(PRISM_C111_MUTANT_NO_HIGHLIGHT)
+    island_->SetColor(frontSheen);
+    target->FillRectangle(D2D1::RectF(face.left + radius, face.top + 0.5f,
+                                      face.right - radius, face.top + 1.5f),
+                          island_.Get());
+#endif
+    island_->SetColor(islandColor_);
+    accent_->SetColor(accentColor_);
+  }
+
   void DrawFolderTile(ID2D1RenderTarget* target, const Scene& scene,
                       const prism::layout::Rect& cell, const prism::ArchiveItem& item) {
     ++dbgTileCells;
@@ -1487,6 +1644,10 @@ class GalleryRenderer {
     const D2D1_ROUNDED_RECT pane = D2D1::RoundedRect(rect, kRadius, kRadius);
     target->FillRoundedRectangle(pane, tile_.Get());
     target->DrawRoundedRectangle(pane, tileBorder_.Get(), 1.0f);
+#if defined(PRISM_C111_MUTANT_TWO_RECTS)
+    // NEGATIVE CONTROL (D3): the pre-C111 glyph, unchanged -- two solid rounded
+    // rectangles in one accent, no rim, no specular. B1 must go red.
+    ++MutantTwoRectsHits();
     const float cx = (rect.left + rect.right) / 2.0f;
     const float cy = (rect.top + rect.bottom) / 2.0f - 14.0f;
     D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
@@ -1495,6 +1656,9 @@ class GalleryRenderer {
     folder = D2D1::RoundedRect(D2D1::RectF(cx - 34.0f, cy - 30.0f, cx + 6.0f, cy - 14.0f),
                                6.0f, 6.0f);
     target->FillRoundedRectangle(folder, accent_.Get());
+#else
+    DrawFolderGlyph(target, scene, rect);
+#endif
     DrawNamePlate(target, cell, item);
     DrawSelectionRing(target, scene, cell, item.index);
   }

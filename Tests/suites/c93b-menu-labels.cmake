@@ -17,6 +17,8 @@ target_link_libraries(win_c93b_menu_labels PRIVATE prism_core prism_win_bridge
   prism_shell_contract user32.lib gdi32.lib shell32.lib ole32.lib
   oleaut32.lib windowscodecs.lib d2d1.lib dwrite.lib bcrypt.lib)
 target_include_directories(win_c93b_menu_labels PRIVATE ${CMAKE_SOURCE_DIR}/Src/App ${CMAKE_SOURCE_DIR}/Tests)
+# SDK headers are not /W4-clean (AGENTS.md R7).
+target_compile_options(win_c93b_menu_labels PRIVATE /WX-)
 add_test(NAME "win.c93b_menu_labels" COMMAND win_c93b_menu_labels)
 set_tests_properties(win.c93b_menu_labels PROPERTIES TIMEOUT 60
   PASS_REGULAR_EXPRESSION "ALL C93B MENU-LABEL CHECKS PASSED")
@@ -29,7 +31,9 @@ target_link_libraries(win_c93b_menu_labels_mutant_no_help PRIVATE prism_core
   oleaut32.lib windowscodecs.lib d2d1.lib dwrite.lib bcrypt.lib)
 target_compile_definitions(win_c93b_menu_labels_mutant_no_help PRIVATE
   PRISM_C93B_MUTANT_NO_HELP)
-target_include_directories(win_c93b_menu_labels_mutant_no_help PRIVATE ${CMAKE_SOURCE_DIR}/Src/App)
+target_include_directories(win_c93b_menu_labels_mutant_no_help PRIVATE
+  ${CMAKE_SOURCE_DIR}/Src/App ${CMAKE_SOURCE_DIR}/Tests)
+target_compile_options(win_c93b_menu_labels_mutant_no_help PRIVATE /WX-)
 add_test(NAME "mutation.c93b.no_help" COMMAND win_c93b_menu_labels_mutant_no_help)
 set_tests_properties(mutation.c93b.no_help PROPERTIES TIMEOUT 60
   PASS_REGULAR_EXPRESSION "C93B MUTATION CAUGHT: no_help")

@@ -19,8 +19,13 @@ namespace {
 // table every label is the fallback -- exactly what a fresh install shows
 // before a catalog loads.
 prism::app::MenuLabels LabelsFor(const wchar_t* tag) {
+  // BuildMenuLabels takes Tr (a thin wrapper over a Translator pointer),
+  // not the Translator itself. An empty table is the state a fresh install
+  // shows before a catalog loads, so every label must fall back.
   prism::i18n::Translator tr;
-  return prism::app::BuildMenuLabels(tr, tag);
+  prism::app::Tr wrapper;
+  wrapper.translator = &tr;
+  return prism::app::BuildMenuLabels(wrapper, tag);
 }
 
 }  // namespace
@@ -44,10 +49,10 @@ PRISM_TEST("c93b the Help menu is translated like every other label") {
   PRISM_CHECK(zh.help != L"Help");
 }
 
-int main() {
+int main(int argc, char** argv) {
 #if defined(PRISM_C93B_MUTANT_NO_HELP)
   std::printf("C93B MUTANT ACTIVE: no_help\n");
   ::prism::test::SetMutationVerdict("C93B MUTATION CAUGHT: no_help");
 #endif
-  return prism::test::RunAll();
+  return ::prism::test::RunAll(argc, argv);
 }

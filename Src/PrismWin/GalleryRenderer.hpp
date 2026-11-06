@@ -265,6 +265,14 @@ class GalleryRenderer {
     // for the breadcrumb island, the action island's base, the rail's base and
     // the Quick Look card. Same opt-in rule as above.
     bool glassPanels = false;
+    // C112: WHO OWNS THE BREADCRUMB PILL. When true the island (a DComp visual
+    // ABOVE the window) paints the pill's fill, rim, hover capsule and TEXT, and
+    // the window paints only the drop shadow plus the geometry it hit-tests
+    // with. Painting the text here as well is the C107 defect: the island
+    // captures this frame as its backdrop, blurs it, and paints the blur back
+    // over the text -- a second, offset, blurred copy of every glyph.
+    // Opt-in like every other optional layer: a pre-C112 scene is unchanged.
+    bool pillOwnedByIsland = false;
     // A caller-side bump for "the items changed". The renderer ALSO fingerprints
     // the catalog (count + first/middle/last path), so a rename rebuilds even
     // when nobody bumps this; the field exists so a test can force the change.
@@ -287,6 +295,82 @@ class GalleryRenderer {
   // the painter actually draws with, not on a copy of the number.
   IDWriteTextFormat* CardLabelFormat() const { return sidebarCardLabel_.Get(); }
   IDWriteTextFormat* CardValueFormat() const { return sidebarStatus_.Get(); }
+
+  // ---------------------------------------------------------------- C112
+  // The pill's CONTENT, painted by the ISLAND into the island's own surface.
+  //
+  // Why it has to live here and not in the window: the pill's geometry, its
+  // panel language and its TEXT format are the renderer's (PillGeometryFor +
+  // title_ + the tokens). A second implementation in the window would be a
+  // second answer to "where does the breadcrumb start", which is the class of
+  // bug that burned six rounds on the crumb hit test (batch A).
+  //
+  // The surface is ISLAND-LOCAL: the island's bitmap origin is the pill's
+  // corner, so every rectangle is offset by the pill's origin. The caller has
+  // already drawn the optics underneath (PaintIslandInto -> chain_.Draw), so
+  // whatever this paints sits ON TOP of the glass and can never be fed back
+  // into it -- that is the whole fix.
+  bool PaintPillOnIsland(ID2D1RenderTarget* target, const std::wstring& text,
+                         const prism::layout::Layout& layout,
+                         const prism::actionbar::Model* actions, prism::theme::Variant theme,
+                         const prism::layout::Rect& hoverRect, bool glassMaterial) {
+    if (!target) return false;
+    const PillGeometry geometry = PillGeometryFor(layout, actions);
+    if (geometry.pill.Empty()) return false;
+    const float ox = static_cast<float>(geometry.pill.left);
+    const float oy = static_cast<float>(geometry.pill.top);
+    const float width = static_cast<float>(geometry.pill.Width());
+    const float height = static_cast<float>(geometry.pill.Height());
+
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(target->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
+                                             brush.GetAddressOf()))) {
+      return false;
+    }
+    if (glassMaterial) {
+      prism::win::glass::PanelPainter painter;
+      painter.Bind(target, brush.Get());
+      prism::win::glass::Parts parts;
+      parts.shadow = false;  // the drop shadow falls OUTSIDE: the window keeps it
+      painter.Paint(target, D2D1::RectF(0.0f, 0.0f, width, height), theme, parts, &glassStats_);
+      painter.Unbind();
+    } else {
+      // appearance.backdropRefraction OFF: the pill is the pre-C77 flat capsule,
+      // painted by whichever surface owns it. Without this arm the setting would
+      // stop reaching the pill the moment the island took it over.
+      const D2D1_ROUNDED_RECT shape = D2D1::RoundedRect(
+          D2D1::RectF(0.0f, 0.0f, width, height), height / 2.0f, height / 2.0f);
+      brush->SetColor(kIslandFill);
+      target->FillRoundedRectangle(shape, brush.Get());
+      brush->SetColor(kIslandBorder);
+      target->DrawRoundedRectangle(shape, brush.Get(), 1.0f);
+    }
+
+    // The crumb under the pointer goes UNDER the words (C93's order).
+    if (hoverRect.Width() > 0 && hoverRect.Height() > 0) {
+      const D2D1_ROUNDED_RECT hover = D2D1::RoundedRect(
+          D2D1::RectF(static_cast<float>(hoverRect.left) - ox,
+                      static_cast<float>(hoverRect.top) - oy,
+                      static_cast<float>(hoverRect.right) - ox,
+                      static_cast<float>(hoverRect.bottom) - oy),
+          8.0f, 8.0f);
+      brush->SetColor(kCrumbHover);
+      target->FillRoundedRectangle(hover, brush.Get());
+    }
+
+    if (!text.empty()) {
+      brush->SetColor(kTextPrimary);
+      DrawLabel(target, title_.Get(), text,
+                D2D1::RectF(static_cast<float>(geometry.text.left) - ox,
+                            static_cast<float>(geometry.text.top) - oy,
+                            static_cast<float>(geometry.text.right) - ox,
+                            static_cast<float>(geometry.text.bottom) - oy),
+                brush.Get());
+      ++dbgPillTextOnIsland;
+    }
+    ++dbgPillOnIsland;
+    return true;
+  }
 
   // Per-target brush creation (call once per render target).
   HRESULT CreateDeviceResources(ID2D1RenderTarget* target) {
@@ -2300,24 +2384,52 @@ class GalleryRenderer {
 
   // The breadcrumb pill: geometry from the action band (DESIGN.md §2), so it
   // can never overlap the title bar, the status bar or a content card.
-  void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,
-                            const prism::layout::Layout& layout) {
+  // C112: the pill and its text run, from ONE place. The window paints the pill
+  // (pre-C112) and the island paints it (C112) through the same numbers, so the
+  // text cannot move between the two arms -- which is exactly what the suite's
+  // "no second copy 1-3 px away" measurement would report as a ghost.
+  struct PillGeometry {
+    prism::layout::Rect pill;
+    prism::layout::Rect text;
+  };
+
+  static PillGeometry PillGeometryFor(const prism::layout::Layout& layout,
+                                      const prism::actionbar::Model* actions) {
     // C-V2: while an action band is present the pill is the SPLIT one -- the
     // toolbar may have taken width back, and the window hit-tests the same
     // rectangle (GalleryWindow::WindowLayoutForClient -> Compute -> navPill).
     // Without a band this is exactly V1's rect, so every pre-V2 scene (and the
     // snapshot) keeps its framing to the pixel.
-    const prism::actionbar::Layout band =
-        scene.actions != nullptr ? prism::actionbar::Compute(layout)
-                                 : prism::actionbar::Layout{};
-    const prism::layout::Rect pillRect =
-        scene.actions != nullptr ? band.navPill : prism::layout::NavPillRect(layout);
+    PillGeometry geometry;
+    if (actions != nullptr) {
+      const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+      geometry.pill = band.navPill;
+      geometry.text = prism::actionbar::NavTextRect(band);
+    } else {
+      geometry.pill = prism::layout::NavPillRect(layout);
+      geometry.text = prism::layout::NavTextRect(layout);
+    }
+    return geometry;
+  }
+
+  void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,
+                            const prism::layout::Layout& layout) {
+    const PillGeometry geometry = PillGeometryFor(layout, scene.actions);
+    const prism::layout::Rect pillRect = geometry.pill;
     if (pillRect.Empty()) return;
-    const prism::layout::Rect textRect =
-        scene.actions != nullptr ? prism::actionbar::NavTextRect(band)
-                                 : prism::layout::NavTextRect(layout);
+    const prism::layout::Rect textRect = geometry.text;
     const D2D1_RECT_F pill = ToRectF(pillRect);
     const float height = static_cast<float>(pillRect.Height());
+    if (scene.pillOwnedByIsland) {
+      // C112: the ISLAND owns the pill's content. The window keeps only the drop
+      // shadow -- it falls OUTSIDE the pill rectangle, on the canvas, so it is
+      // not part of what the island's own surface can show -- and the hit-test
+      // geometry (unchanged: WindowLayoutForClient -> actionbar::Compute).
+      if (scene.glassPanels) {
+        glassPanel_.PaintShadow(target, pill, scene.theme, &glassStats_);
+      }
+      return;
+    }
     if (scene.glassPanels) {
       // C77: fill + top specular rim + drop shadow + squircle 14, in one call.
       prism::win::glass::Parts parts;
@@ -2629,6 +2741,11 @@ class GalleryRenderer {
   // gradient). The suite's preview assertion keys on this counter, so a card
   // that silently fell back to the stand-in cannot pass on luck.
   int dbgQuickLookThumbDraws = 0;
+  // C112: how many times the ISLAND painted the pill's content / its text. The
+  // suite asserts the count, so "the text moved to the island" is a number, not
+  // a claim about intent.
+  int dbgPillOnIsland = 0;
+  int dbgPillTextOnIsland = 0;
   // C91: proof that a mutation arm's injected branch really ran. Each mutant
   // binary arms its CAUGHT verdict on one of these, so a red that came from an
   // unrelated assertion can never print a false verdict (CONTRACTS D3).

@@ -391,3 +391,67 @@ cmake --build E:\build\wt-c109 --parallel 2 --target win_c109_list_type
 ctest --test-dir E:\build\wt-c109 -R "c109" --output-on-failure
 & E:\build\wt-c109\Tests\win_c109_list_type.exe docs\assets\ui
 ```
+
+# C112 the island owns the pill -- fill, refraction AND text
+
+The breadcrumb pill's content moved from the WINDOW to the ISLAND. The frames
+below are the same pill (1280 x 800 window, root label `pack.7z`, empty catalog
+so the pill's background is one flat canvas), rendered by the REAL path:
+`Tests/win/test_c112_glass_owns_text.cpp` -> C113's `CaptureOffscreen`
+(`GalleryWindow::RenderSceneForCapture`, the same `DrawFrame` the shipping
+`WM_PAINT` runs) -> `ComposeIslandForTest` (the same `PaintIslandContent` the
+shipping `PresentGlassFrame` runs).
+
+The captures are REAL frames, and the suite says so before it measures a pixel:
+`frame[island-off]: rendered=1 hr=0x00000000 painted=176959/936624`,
+`frame[island-on]: rendered=1 hr=0x00000000 painted=151222/936624`. A frame D2D
+rejected would score `painted == 0` (C113) and every comparison below would be
+measuring nothing.
+
+| file | what it shows |
+| --- | --- |
+| `c112-pill-off.png` | the island switched OFF: the window paints the pill and its text (the pre-C107 reference) |
+| `c112-pill-on.png` | the island ON: the island paints the fill, the rim, the optics and the TEXT, over the same window frame |
+| `c112-pill-ghost-prefx.png` | the NEGATIVE CONTROL (`PRISM_C112_MUTANT_GLASS_OVER_TEXT`): text stays on the window, island composed on top -- the glyphs are gone under the glass |
+
+All three are 4x nearest-neighbour crops of the pill rectangle
+(`prism::layout::NavPillRect`), so the evidence is the pixels, not a resampled
+picture of them.
+
+## Pixel assertions (measured on the composited pill)
+
+- **S1 sharpness retention**: maximum horizontal luma gradient over the text band
+  is `216.2` with the island off and `200.1` with it on -- **92.6%**, against the
+  card's `>= 90%` line. The mutant arm measures **0.5%** (`on = 1.0`): the text
+  is not merely blurred, it is erased.
+- **S2 no ghost**: in the 1..3 px ring around the glyph mask derived from the
+  island-off frame, the mean deviation from the pill's own background is
+  `0.38` levels with the island on (`0.43` off) and the maximum `24.3`
+  (`26.3` off) -- the island's text lands where the window's text was, so there
+  is no second, offset copy. A drifting copy raises both numbers.
+- **S3 the window paints nothing there**: the glyph mask is taken from the
+  COMPOSITED island pill (the text the island paints, at the pill's own
+  coordinates) and the question is how many of those exact pixels the window's
+  own frame still paints -- `0 of 268`, at 1280x800 AND at CI's 1028x729 client
+  (`PRISM_C112_WINDOW=1044x788` reproduces that geometry). The band-wide counts
+  are printed as context only: at narrower widths the action band's island
+  reaches into the pill rectangle (184 pixels at band x 446..533), which the
+  window's pill used to cover and the island now covers on screen. That is a
+  layout question, not the text.
+- **S3b the handover is local**: `0` pixels change outside the pill rectangle and
+  its 1 px stroke (the stroke is the half of the window's centred border the
+  island's own surface cannot show; same colour, one pixel ring).
+- **Negative control**: `PRISM_C112_MUTANT_GLASS_OVER_TEXT` restores the pre-C112
+  ownership and the run prints `C112 MUTATION CAUGHT: glass_over_text`.
+
+## Reproduce
+
+```pwsh
+. E:\wg\env.ps1 -Card c112
+cmake --build E:\build\wt-c112 --parallel 2 --target win_c112_glass_owns_text
+ctest --test-dir E:\build\wt-c112 -R "c112" --output-on-failure
+$env:PRISM_C112_OUT = "docs\assets\ui"
+E:\build\wt-c112\Tests\win_c112_glass_owns_text.exe
+```
+
+Without `PRISM_C112_OUT` the suite asserts and writes nothing (the CI path).

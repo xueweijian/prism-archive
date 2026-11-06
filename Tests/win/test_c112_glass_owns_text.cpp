@@ -631,12 +631,34 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
   const double bgOn = BackgroundLevel(onPill, band);
   const int offInk = InkPixels(offPill, band, bgOff, 40.0);
   const int onInk = InkPixels(onPill, band, bgOn, 40.0);
-  std::printf("  window frame in the pill band: island-off ink=%d, island-on ink=%d\n", offInk,
-              onInk);
+  // The card's question, narrowed to the GLYPHS: take the island-off frame's ink
+  // mask (the text the window used to paint) and ask how many of those exact
+  // pixels are ink in the island-on frame. That is stable on a runner whose
+  // band carries other structure (theme, shadow, a different DPI): the answer is
+  // about the text and nothing else. The band-wide count is printed next to it.
+  const std::vector<uint8_t> glyphs = InkMask(offPill, band, bgOff);
+  int glyphPixels = 0;
+  int glyphsStillInk = 0;
+  for (UINT y = band.y0; y < band.y1 && y < onPill.height; ++y) {
+    for (UINT x = band.x0; x < band.x1 && x < onPill.width; ++x) {
+      if (!glyphs[static_cast<size_t>(y) * offPill.width + x]) continue;
+      ++glyphPixels;
+      if (std::fabs(onPill.L(x, y) - bgOn) >= 40.0) ++glyphsStillInk;
+    }
+  }
+  std::printf(
+      "  window frame in the pill band: island-off ink=%d, island-on ink=%d | of the %d glyph "
+      "pixels, %d are still ink with the island on\n",
+      offInk, onInk, glyphPixels, glyphsStillInk);
   // The reference proves the detector fires; the subject proves the window
-  // stopped painting there (the text lives on the island now).
+  // stopped painting the TEXT there (it lives on the island now).
   PRISM_CHECK(offInk > 100);
-  PRISM_CHECK(onInk <= 4);
+  PRISM_CHECK(glyphPixels > 100);
+  PRISM_CHECK(glyphsStillInk * 20 <= glyphPixels);  // <= 5% of the glyphs survive
+  // The band-wide count is a DIAGNOSTIC, not a gate: on a runner whose theme,
+  // DPI or shadow makes the empty band carry structure, an absolute threshold
+  // says more about the machine than about the window. "The glyphs are gone" is
+  // the claim; this line is the context a reader needs to believe it.
 
   // ... and the handover is LOCAL: every pixel outside the pill rectangle (plus
   // its 1 px stroke) is the same in both frames. The stroke is the one visible

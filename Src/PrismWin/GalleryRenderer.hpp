@@ -341,10 +341,13 @@ class GalleryRenderer {
     // the line ABOVE a value, per plan 3.2's "上行 10px 灰色小字". It is its own
     // IDWriteTextFormat (not a size passed at DrawText time) so a suite can read
     // the REAL format back through CardLabelFormat() and pin the size.
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    10.0f, L"en-US",
-                                    sidebarCardLabel_.ReleaseAndGetAddressOf());
+    // C103: this one came in with C105 after C103 branched, still carrying the
+    // literal family. Every format goes through the resolved stack -- that is
+    // what core.c103_font_literals asserts (Src/ carries no literal family name outside
+    // Typography.hpp).
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 10.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        L"en-US", sidebarCardLabel_.ReleaseAndGetAddressOf());
     if (sidebarCardLabel_) {
       sidebarCardLabel_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       sidebarCardLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);

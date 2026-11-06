@@ -526,7 +526,10 @@ inline constexpr int kButtonMaxWidth = 88;
 // C78: 24 px glyph, 11 px label, 6 px above and below the content stack. The
 // old 20 px box read as a 16 px icon after antialiasing inside a 56 px band.
 inline constexpr int kIconBox = 24;
-inline constexpr int kNavGap = 12;  // air between the path pill and the actions
+// C115: the gap is part of the SPLIT rule now and lives in WindowLayout with it;
+// this alias keeps every existing call site (and the band's own arithmetic)
+// reading the one number.
+inline constexpr int kNavGap = prism::layout::kNavActionGap;  // 12 px air
 inline constexpr int kDropdownGap = 4;
 inline constexpr int kDropdownRowHeight = 28;
 inline constexpr int kDropdownPad = 6;
@@ -648,29 +651,50 @@ inline constexpr int TotalGaps() {
   return total;
 }
 
+// C115: the band split is no longer decided HERE. The pill yields width inside
+// prism::layout::NavPillRect -- the authority the renderer, the hit test and the
+// glass island all read -- and this file hands it the number only it knows: the
+// narrowest island that can still show all eight buttons. That is what makes
+// "the pill I paint" and "the pill the layout publishes" one rectangle instead
+// of two that differ by 144 px at 1028. The static_assert keeps the two copies
+// of that number from drifting: if a ninth action lands, this line fails to
+// compile instead of the pill silently reserving the wrong width.
+static_assert(prism::layout::kActionIslandMinWidth ==
+                  2 * kIslandPad + kActionCount * kButtonMinWidth + TotalGaps(),
+              "C115: WindowLayout's action-island reserve must equal the band's own "
+              "floor (2*kIslandPad + kActionCount*kButtonMinWidth + TotalGaps())");
+
 inline Layout Compute(const prism::layout::Layout& window) {
   Layout out;
   out.band = window.actionIsland;
-  out.navPill = prism::layout::NavPillRect(window);
-  if (out.band.Empty()) return out;
-
-  const int inset = prism::layout::kContentPadding;
-  const int limit = out.band.right - inset;
   const int gaps = TotalGaps();
   // The eight buttons at their floor, plus the island's own padding: what the
   // band MUST leave free if the toolbar is to be complete.
   const int actionFloor = 2 * kIslandPad + kActionCount * kButtonMinWidth + gaps;
+  // The pill is V1's rectangle until the actions need the room; then it gives
+  // width back (its right edge moves left, its left edge and its height stay
+  // V1's). A path display truncates gracefully; a toolbar that silently loses
+  // its last three actions does not.
+  out.navPill = prism::layout::NavPillRect(window, actionFloor);
 
-  // Split the band. The pill is V1's rectangle until the actions need the room;
-  // then the pill gives width back (its right edge moves left, its left edge and
-  // its height stay V1's). A path display truncates gracefully; a toolbar that
-  // silently loses its last three actions does not.
+  const int inset = prism::layout::kContentPadding;
+  const int limit = out.band.right - inset;
+  if (out.band.Empty()) return out;
+
+#if defined(PRISM_C115_MUTANT_IGNORE_NARROW)
+  // D3: the pre-C115 split, reproduced exactly. NavPillRect above already
+  // returned V1's full 560 px (that is the injection); this is the SECOND,
+  // stale copy the old code kept -- the band squeezes its own rectangle while
+  // the authority (and the glass island that reads it) stays 560 px wide. The
+  // result is the 144 px of toolbar on top of the pill at 1028, which is what
+  // the suite's sweep must catch.
   if (!out.navPill.Empty()) {
     const int maxPillRight = limit - actionFloor - kNavGap;
     if (maxPillRight >= out.navPill.left) {
       out.navPill.right = (std::min)(out.navPill.right, maxPillRight);
     }
   }
+#endif
 
   int left = out.band.left + inset;
   if (!out.navPill.Empty()) left = out.navPill.right + kNavGap;
@@ -746,8 +770,12 @@ inline Rect DropdownRect(const Layout& layout, int buttonIndex) {
 // NavPillRect). Same 24 px inset and same 10 px vertical inset as V1.
 inline Rect NavTextRect(const Layout& bar) {
   if (bar.navPill.Empty()) return Rect{};
-  return Rect{bar.navPill.left + prism::layout::kNavTextInset, bar.navPill.top + 10,
-              bar.navPill.right - prism::layout::kNavTextInset, bar.navPill.bottom - 10};
+  // C115: same clamp as layout::NavTextRect. A pill squeezed below two insets
+  // (the 640 px window) must yield an empty text box, not an inverted one.
+  const int inset = (std::min)(prism::layout::kNavTextInset,
+                               (std::max)(0, bar.navPill.Width() / 2));
+  return Rect{bar.navPill.left + inset, bar.navPill.top + 10, bar.navPill.right - inset,
+              bar.navPill.bottom - 10};
 }
 
 inline int DropdownRowAt(const Rect& panel, int x, int y) {

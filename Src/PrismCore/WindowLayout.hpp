@@ -78,6 +78,14 @@ inline constexpr bool kRailInGridMode = false;
 #else
 inline constexpr bool kRailInGridMode = true;
 #endif
+// C115 negative control: the breadcrumb pill ignores the action island and keeps
+// V1's full 560 px at every width -- the pre-card behaviour, i.e. the 144 px of
+// toolbar on top of the pill at 1028. See NavPillRect.
+#if defined(PRISM_C115_MUTANT_IGNORE_NARROW)
+inline constexpr bool kNavPillYieldsToBand = false;
+#else
+inline constexpr bool kNavPillYieldsToBand = true;
+#endif
 
 
 // The runtime proof each mutant is REALLY armed (D3: a macro that stopped
@@ -85,6 +93,7 @@ inline constexpr bool kRailInGridMode = true;
 inline constexpr std::string_view ActiveMutation() {
   if (!kRowsSpanContent) return "cell-row";
   if (!kRailInGridMode) return "grid-no-sidebar";
+  if (!kNavPillYieldsToBand) return "ignore-narrow";
   return {};
 }
 
@@ -120,6 +129,39 @@ inline constexpr int kFallbackRowHeight = 32;  // P0-2: the row a tile-less item
 inline constexpr int kNavPillHeight = 44;
 inline constexpr int kNavPillMaxWidth = 560;
 inline constexpr int kNavTextInset = 24;
+// ------------------------------------------------- C115: the band's two tenants
+// The 56 px band holds the breadcrumb pill (left) and the action island (right).
+// They cannot both have their full width: 16 (inset) + 560 (pill) + 12 (gap) +
+// 580 (island) + 16 (inset) = 1184 px. Below that the band must give something
+// up, and BOTH sides have to agree about what -- the defect this constant
+// exists to end is that two functions each answered "the pill is 560 px wide"
+// and "the pill is 404 px wide" for the same 1028 px window (C112 measured the
+// 144 px of toolbar ink that landed inside the authority's rectangle).
+//
+// WHAT GIVES: the pill. A path display truncates gracefully (it is a string
+// with an ellipsis); a toolbar that silently loses 查看/搜索 does not, and C66
+// already decided that a band which cannot show all eight shows none. So the
+// pill yields width down to nothing before a single button is dropped.
+//
+// WHY NOT A FLOOR (kNavPillMinWidth): at the documented minimum window
+// (kMinWindowWidth = 640) a 160 px floor would leave 640 - 16 - 160 - 12 - 16 =
+// 436 px of band for a 580 px toolbar, i.e. the toolbar would have to disappear
+// at the smallest window the product supports. That trades a readable crumb for
+// the app's primary affordance at the exact size where the user has the least
+// room. Measured at 640 the pill is a 16 px nub with all eight buttons intact;
+// that is the existing (C78) contract and this card does not spend it.
+//
+// kActionIslandMinWidth is the island's own floor: 2 * kIslandPad (16) +
+// kActionCount * kButtonMinWidth (8 * 64) + TotalGaps (52). The number lives
+// here because it is CHROME geometry (how the band is split), while the table
+// that makes it true lives in ActionBarModel -- which static_asserts the two
+// against each other, so a ninth action or a new group cannot silently make the
+// pill reserve the wrong width.
+inline constexpr int kActionIslandMinWidth = 580;
+// The air between the pill's right edge and the island's left edge. It lives
+// here because the SPLIT is decided here (NavPillRect); actionbar::kNavGap is an
+// alias so the two cannot drift apart.
+inline constexpr int kNavActionGap = 12;
 inline constexpr int kProgressCapsuleWidth = 260;
 inline constexpr int kProgressCapsuleHeight = 46;
 inline constexpr int kQuickLookWidth = 380;
@@ -754,18 +796,44 @@ inline int ListRowAt(const Layout& layout, int x, int y, int scrollPx) {
 // ------------------------------------------------------------- floating chrome
 // The breadcrumb pill lives INSIDE the action band (44 px, the blueprint's nav
 // island height), so it can never overlap the title bar or the status bar.
-inline Rect NavPillRect(const Layout& layout) {
+//
+// C115: it also shares that band with the action island, so its right edge is
+// the FIRST thing the narrow window takes away. This function is the ONE place
+// that decides how much -- actionbar::Compute passes its own measured floor in,
+// and every other consumer takes the default (the same number). Before this
+// card the pill here was ALWAYS 560 px while Compute quietly used a narrower
+// one: the renderer painted the narrow pill, but the glass island panel (sized
+// from THIS function, GalleryWindow::GlassPanelRect) stayed 560 px, so the
+// acrylic island really did extend 144 px under the toolbar at 1028.
+inline Rect NavPillRect(const Layout& layout, int actionReserve) {
   const int available = (std::max)(0, layout.actionIsland.Width() - 2 * kContentPadding);
   const int width = (std::min)(kNavPillMaxWidth, available);
   const int height = (std::min)(kNavPillHeight, layout.actionIsland.Height());
   const int top = layout.actionIsland.top + (layout.actionIsland.Height() - height) / 2;
-  return Rect{kContentPadding, top, kContentPadding + width, top + height};
+  Rect pill{kContentPadding, top, kContentPadding + width, top + height};
+  if (kNavPillYieldsToBand && actionReserve > 0 && !pill.Empty()) {
+    // The right edge the island needs: band.right - inset - island - gap.
+    const int maxRight =
+        layout.actionIsland.right - kContentPadding - actionReserve - kNavActionGap;
+    // '>=' (not '>'): when the island eats the last pixel the pill becomes
+    // EMPTY rather than a 0-wide rounded rect with two borders on one column.
+    if (maxRight >= pill.left) pill.right = (std::min)(pill.right, maxRight);
+  }
+  return pill;
+}
+
+inline Rect NavPillRect(const Layout& layout) {
+  return NavPillRect(layout, kActionIslandMinWidth);
 }
 
 inline Rect NavTextRect(const Layout& layout) {
   const Rect pill = NavPillRect(layout);
-  return Rect{pill.left + kNavTextInset, pill.top + 10, pill.right - kNavTextInset,
-              pill.bottom - 10};
+  // C115: the 24 px inset must not invert the text box inside a pill that has
+  // been squeezed below 48 px (640 px window). Halving the inset keeps the box
+  // inside the pill and, at the floor, empty -- which reads as "no crumb text
+  // to click", not as a box running backwards through the toolbar.
+  const int inset = (std::min)(kNavTextInset, (std::max)(0, pill.Width() / 2));
+  return Rect{pill.left + inset, pill.top + 10, pill.right - inset, pill.bottom - 10};
 }
 
 // Quick Look: a card anchored to the content's top-right corner.

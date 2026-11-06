@@ -4,6 +4,8 @@
   "strings": {
     "menu.file": "&File",
     "menu.settings": "&Settings...",
+  "menu.help": "&Help",
+  "menu.about": "&About PrismArchive",
     "menu.smart.extract.here": "Smart Extract Here",
     "menu.extract.here": "Extract Here",
     "menu.extract.to.subfolder": "Extract to \"{name}\"",

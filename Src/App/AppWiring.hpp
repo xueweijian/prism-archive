@@ -2097,6 +2097,10 @@ struct MenuLabels {
   std::wstring rename;
   std::wstring newFolder;
   std::wstring settings;
+    // C93: the Help menu fell through to GalleryWindow's L"Help" default, so a
+    // zh-CN window showed "文件 编辑 设置(S)... Help". Measured on the real window.
+    std::wstring help;
+    std::wstring about;
 };
 
 // The fallbacks are the app's own words (C38's rule: real text, never an escape
@@ -2115,6 +2119,10 @@ inline MenuLabels BuildMenuLabels(const Tr& tr, const std::wstring& tag) {
       tr.Or("menu.edit.newFolder", chinese ? L"新建文件夹" : L"New &Folder");
   labels.settings =
       tr.Or("menu.settings", chinese ? L"设置(&S)..." : L"&Settings...");
+#if !defined(PRISM_C93B_MUTANT_NO_HELP)
+  labels.help = tr.Or("menu.help", chinese ? L"帮助" : L"&Help");
+  labels.about = tr.Or("menu.about", chinese ? L"关于 PrismArchive" : L"&About PrismArchive");
+#endif
   return labels;
 }
 
@@ -2126,6 +2134,7 @@ inline void ApplyMenuLabels(WindowLike& window, const MenuLabels& labels) {
   window.SetMenuLabels(labels.file, labels.compress, labels.exit);
   window.SetEditMenuLabels(labels.edit, labels.deleteItem, labels.rename, labels.newFolder);
   window.SetSettingsMenuLabel(labels.settings);
+    window.SetAboutMenuLabels(labels.help, labels.about);
 }
 
 // ---------------------------------------------------------------------------

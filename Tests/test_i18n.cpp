@@ -288,7 +288,12 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // became a label above a value and each label is a word of its own. The census
   // is 144 -- and the first push of C105 forgot this line too, which is exactly
   // what this number is for.
-  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{144});
+  // C93b: +2 for the Help and About items on the menu bar. Both were asked for
+  // via Tr::Or() with a code default, so a Chinese build shipped them in
+  // English and no audit could see the miss (the same hole C38 closed for
+  // menu.file). The census is 146 -- and this assertion is what caught the
+  // first push of C93b, exactly as designed.
+  PRISM_CHECK_EQ(prism::i18n::RequiredKeys().size(), std::size_t{146});
 }
 
 PRISM_TEST("catalog: the right-click menu's REAL verbs all resolve") {

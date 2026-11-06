@@ -649,6 +649,12 @@ inline const std::vector<std::string>& RequiredKeys() {
       // for it via Tr::Or() with a code default, so the miss was never recorded
       // and the English menu bar shipped in Chinese builds.
       "menu.file",
+      // C93b: the Help item and the About item. They were asked for via
+      // Tr::Or() with a code default, so the English menu bar shipped in a
+      // Chinese build exactly like menu.file did before C38 -- and the audit
+      // could not see the miss because no literal existed.
+      "menu.help",
+      "menu.about",
       // C64: the Settings item on the menu bar (it shipped as an English
       // literal in a Chinese build until this key existed).
       "menu.settings",

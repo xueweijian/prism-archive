@@ -87,6 +87,12 @@ constexpr const char* kMutationName = "status_divider";
 // NEGATIVE CONTROL (CONTRACTS D3): the air between segments collapses to 8 px,
 // so assertion (3) MUST go red.
 constexpr const char* kMutationName = "status_tight_gap";
+#elif defined(PRISM_C105_MUTANT_BAR_OVER_VALUE)
+// C105 MUTANT ACTIVE: bar_over_value
+// NEGATIVE CONTROL (CONTRACTS D3): the ratio bar is drawn back INSIDE the value
+// line -- the defect the integration build showed, a blue bar through the
+// percentage -- so assertion (7) MUST go red.
+constexpr const char* kMutationName = "bar_over_value";
 #else
 constexpr const char* kMutationName = nullptr;
 #endif
@@ -622,6 +628,53 @@ void CheckBandTwoTone(const Frame& frame, const GalleryRenderer& renderer,
   }
 }
 
+// (7) the ratio bar has a row of its own: it must not touch the value it
+// describes, and it sits BELOW it (the design's choice -- a bar to the RIGHT of
+// a right-aligned number would push the number out of the card's column).
+//
+// The integration build showed the pre-fix geometry: the bar was drawn inside
+// the value line (bottom-5 .. bottom-2), so a 12 px "95.0%" and a 3 px accent
+// bar shared one 16 px box and the bar ran through the glyphs. The fix reserves
+// the row in Metrics; this check measures the rectangles the painter received.
+void CheckCardBarRow(const Layout& layout, const Metrics& metrics) {
+  const Command* bar = nullptr;
+  const Command* ratioValue = nullptr;
+  for (const Command& command : layout.commands) {
+    if (command.kind == PrimKind::RatioBar) bar = &command;
+    if (command.kind == PrimKind::StatusText && command.payload == 3) ratioValue = &command;
+  }
+  if (bar == nullptr || ratioValue == nullptr) {
+    Fail("the card emitted no ratio bar / ratio value to compare");
+    return;
+  }
+  const bool overlap = bar->box.Intersects(ratioValue->box);
+  const bool below = bar->box.top >= ratioValue->box.bottom;
+  std::printf("C105 CARD BAR: bar=(%.0f,%.0f)-(%.0f,%.0f) value=(%.0f,%.0f)-(%.0f,%.0f) "
+              "overlap=%d below=%d\n",
+              static_cast<double>(bar->box.left), static_cast<double>(bar->box.top),
+              static_cast<double>(bar->box.right), static_cast<double>(bar->box.bottom),
+              static_cast<double>(ratioValue->box.left),
+              static_cast<double>(ratioValue->box.top),
+              static_cast<double>(ratioValue->box.right),
+              static_cast<double>(ratioValue->box.bottom), overlap ? 1 : 0,
+              below ? 1 : 0);
+  if (overlap) {
+    Fail("the ratio bar intersects the ratio VALUE text (the bar runs through the number)");
+  }
+  if (!below) {
+    Fail("the ratio bar is not below its value line");
+  }
+  if (!(bar->box.bottom <= layout.pill.bottom - metrics.statusPadding + 0.01f)) {
+    Fail("the ratio bar escaped the card's bottom padding");
+  }
+  if (!(std::fabs((bar->box.bottom - bar->box.top) - metrics.cardBarHeight) < 0.01f)) {
+    Fail("the ratio bar is not the height the layout reserved for it");
+  }
+  if (!prism::win::sidebar::kCardBarHasOwnRow) {
+    Fail("the bar's own-row switch is off in a build that must keep the row");
+  }
+}
+
 // (6) the i18n census, checked from the card that introduced the keys.
 //
 // test_i18n.cpp pins the census SIZE, and a size is a number somebody has to
@@ -707,6 +760,7 @@ int main(int argc, char** argv) {
   CheckStatusGaps(rig.frame, rig.scene.status);
   CheckBandHasNoVerticalRule(frame, rig.frame, rig.scene.status);
   CheckBandTwoTone(frame, harness.renderer, rig.frame, rig.scene.status);
+  CheckCardBarRow(rig.sidebar, rig.metrics);
   CheckI18nCensus();
 
   // The design artifacts: the same pixels, cropped to the two surfaces the card

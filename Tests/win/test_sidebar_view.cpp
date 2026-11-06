@@ -136,16 +136,18 @@ PRISM_TEST("TestColumnAndPillGeometry") {
   PRISM_CHECK(SameBox(layout.panel, Box{0.0f, 0.0f, 236.0f, 1080.0f}));
   // The card is anchored: its bottom edge sits paddingBottom above the viewport
   // bottom, regardless of how much content is scrolled.
-  // C105: the card is FOUR label/value pairs tall now (4*28 + 3*6 + 2*10 = 150)
-  // instead of three one-line readouts (86), so its top edge moved up by 64.
-  PRISM_CHECK(SameBox(layout.pill, Box{16.0f, 918.0f, 220.0f, 1068.0f}));
+  // C105: the card is FOUR label/value pairs tall (4*28 + 3*6 = 130) plus the
+  // ratio bar's own row (4 px gap + 3 px bar) plus 2*10 padding = 157, instead
+  // of three one-line readouts (86). The bar row is part of the height: a bar
+  // that has no row of its own is a bar drawn through the number.
+  PRISM_CHECK(SameBox(layout.pill, Box{16.0f, 911.0f, 220.0f, 1068.0f}));
   PRISM_CHECK(Near(layout.contentTop, 12.0f));
-  PRISM_CHECK(Near(layout.contentBottom, 906.0f));
+  PRISM_CHECK(Near(layout.contentBottom, 899.0f));
   PRISM_CHECK(layout.contentHeight > 0.0f);
   // This fixture fits: no scroll needed, and the clamp is explicit.
   PRISM_CHECK(Near(layout.maxScroll, 0.0f));
   // The card sits over the content area, so it reduces the scroll window.
-  PRISM_CHECK(Near(layout.contentBottom - layout.contentTop, 894.0f));
+  PRISM_CHECK(Near(layout.contentBottom - layout.contentTop, 887.0f));
   // First command is the panel background: paint order is part of the contract.
   PRISM_CHECK_EQ(layout.commands.front().kind, PrimKind::Panel);
 }
@@ -303,8 +305,9 @@ PRISM_TEST("TestScrollCullsRowsButKeepsContentHeight") {
 }
 
 // C105 (plan 3.2): the card is FOUR label/value pairs -- a 10 px label line
-// above a 12 px value line -- not three one-line readouts. The geometry below
-// is the contract: card top 918, 10 px padding, 28 px pairs 6 px apart.
+// above a 12 px value line -- not three one-line readouts, plus ONE reserved row
+// for the ratio bar under the last value. The geometry below is the contract:
+// card top 911, 10 px padding, 28 px pairs 6 px apart, then 4 px + 3 px bar.
 PRISM_TEST("TestStatusCapsuleLinesAndRatioBar") {
   std::vector<ArchiveItem> items = {File("payload.bin", 0, 1420, 608)};
   prism::sidebar::Model model(&items);
@@ -334,33 +337,38 @@ PRISM_TEST("TestStatusCapsuleLinesAndRatioBar") {
   // Card inner box: left 16+10, text after 16 px icon + 8 px gap, right 220-10.
   // The LABEL occupies the pair's first 12 px, the VALUE the next 16.
   if (cryptoLabel != nullptr) {
-    PRISM_CHECK(SameBox(cryptoLabel->box, Box{50.0f, 928.0f, 210.0f, 940.0f}));
+    PRISM_CHECK(SameBox(cryptoLabel->box, Box{50.0f, 921.0f, 210.0f, 933.0f}));
     PRISM_CHECK_EQ(cryptoLabel->color, ColorToken::SecondaryText);
     PRISM_CHECK(Near(cryptoLabel->fontSize, 10.0));
   }
   if (cipher != nullptr) {
-    PRISM_CHECK(SameBox(cipher->box, Box{50.0f, 940.0f, 210.0f, 956.0f}));
+    PRISM_CHECK(SameBox(cipher->box, Box{50.0f, 933.0f, 210.0f, 949.0f}));
     PRISM_CHECK_EQ(cipher->color, ColorToken::PrimaryText);
     PRISM_CHECK(Near(cipher->fontSize, 12.0));
   }
   if (dictionaryLabel != nullptr) {
-    PRISM_CHECK(SameBox(dictionaryLabel->box, Box{50.0f, 996.0f, 210.0f, 1008.0f}));
+    PRISM_CHECK(SameBox(dictionaryLabel->box, Box{50.0f, 989.0f, 210.0f, 1001.0f}));
   }
   if (dictionary != nullptr) {
-    PRISM_CHECK(SameBox(dictionary->box, Box{50.0f, 1008.0f, 210.0f, 1024.0f}));
+    PRISM_CHECK(SameBox(dictionary->box, Box{50.0f, 1001.0f, 210.0f, 1017.0f}));
   }
   if (ratioLabel != nullptr) {
-    PRISM_CHECK(SameBox(ratioLabel->box, Box{50.0f, 1030.0f, 210.0f, 1042.0f}));
+    PRISM_CHECK(SameBox(ratioLabel->box, Box{50.0f, 1023.0f, 210.0f, 1035.0f}));
   }
   if (ratio != nullptr) {
-    PRISM_CHECK(SameBox(ratio->box, Box{50.0f, 1042.0f, 210.0f, 1058.0f}));
+    PRISM_CHECK(SameBox(ratio->box, Box{50.0f, 1035.0f, 210.0f, 1051.0f}));
   }
   const auto bars = OfKind(layout, PrimKind::RatioBar);
   PRISM_CHECK_EQ(bars.size(), std::size_t{1});
-  if (!bars.empty()) {
+  if (!bars.empty() && ratio != nullptr) {
     // 42.8% of the 160 px inner width -> 68.48 px.
     PRISM_CHECK(Near(bars[0]->box.left, 50.0));
     PRISM_CHECK(Near(bars[0]->box.right, 50.0 + 160.0 * 0.428));
+    // C105: the bar has its OWN row -- 4 px under the ratio value, 3 px tall --
+    // so it can never be painted through the percentage it describes.
+    PRISM_CHECK(Near(bars[0]->box.top, ratio->box.bottom + 4.0));
+    PRISM_CHECK(Near(bars[0]->box.Height(), 3.0));
+    PRISM_CHECK(!bars[0]->box.Intersects(ratio->box));
   }
   // The capsule is drawn after the content: it is never overdrawn by rows.
   std::size_t pillIndex = 0;

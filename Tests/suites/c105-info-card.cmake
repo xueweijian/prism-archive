@@ -11,6 +11,8 @@
 #   4. the band paints no vertical rule column;
 #   5. the value run of the ratio segment is the PRIMARY role (>= 20 levels
 #      brighter than its label), at the x the painter actually used;
+#   5b. the ratio BAR does not intersect the ratio VALUE and sits below it -- the
+#      integration build showed the bar drawn straight through "95.0%";
 #   6. the four i18n keys this card added are in the census exactly once and the
 #      census carries no duplicate (a +N drift cannot hide behind a count).
 #
@@ -39,7 +41,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
       PASS_REGULAR_EXPRESSION "ALL C105 INFO-CARD CHECKS PASSED")
 
   # The verdict names the injection it caught; the regex IS the verdict.
-  foreach(mutant IN ITEMS UNDERLINE STATUS_DIVIDER STATUS_TIGHT_GAP)
+  foreach(mutant IN ITEMS UNDERLINE STATUS_DIVIDER STATUS_TIGHT_GAP BAR_OVER_VALUE)
     string(TOLOWER "${mutant}" mutant_lc)
     add_executable("win_c105_info_card_mutant_${mutant_lc}" win/test_c105_info_card.cpp)
     target_link_libraries("win_c105_info_card_mutant_${mutant_lc}"

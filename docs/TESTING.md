@@ -344,3 +344,32 @@ Windows lane（仪器化单独构建，~1.5 分钟）：
 - `tools/mutation/negctl.py` —— 一轮负向控制（注入 → 跑 → 红 → 对照）
 - `Tests/suites/c23-coverage-mutation.cmake` —— 6 条 ctest 自检
 - `Tests/c23_mutation_probe.cpp` —— D3 校准夹具（clean / active / typo）
+
+## 八、断言测契约，不测调度（C114 教训）
+
+`Tests/win/test_pool_lease.cpp` 曾在每轮结束断言 `stats().distinctSlotsUsed == capacity`，
+在 CI 并发下两次红成 `got '3' vs '4'`，本机串行却恒绿。结论：**这条断言测的是调度器，不是池子**。
+
+- `ReaderPool::State::Pick()` 返回**编号最小的空闲 slot**，`State::used[]` 一旦置位永不清零，
+  `distinctSlotsUsed` 就是 `used[]` 里 true 的个数。
+  ⇒ 它**不是**"用了几个槽"，而是"**从池创建到此刻，同时活着的槽的并集**"。
+  断言它等于容量，等于断言"OS 一定会让 kWorkers 个线程同时进入池子"——first-free 分配器做不到，
+  任何池子也做不到。
+- `stats().waits` 只在**所有** slot 都忙时 +1。capacity=1 上的三个线程若被调度成严格串行，
+  `waits == 0` 是**合法**结果；`waits > 0` 同样是在测调度。
+
+C114 在同一个文件里挖出的两条 flake（`distinctSlotsUsed == capacity`、`waits > 0`）是同一类错误：
+**把"某一时刻的采样"当成了"契约"**。
+
+规则：
+
+1. 要断言"容量能被用满"，就**造出**那个状态：用 rendezvous（barrier / latch / permit）让 kWorkers
+   个线程各自持有租约**同时**存活，再断言 `inUse == capacity`、每个 handler 指针互不相同，
+   以及"第 kWorkers+1 个请求被拒"。
+2. 要断言"阻塞路径真的走过"，就让**测试自己**持有唯一的槽，再等 `waits` 涨到预期值
+   （有界等待；不要指望三个线程自己撞上"忙"）。
+3. 计数类断言优先写成**精确值**（例如 `waits == cycles * waiters`），并在注释里写清这个精确值
+   由哪个 rendezvous 保证；`> 0` / `>= n` 是概率断言，负载一变就红。
+4. 一切等待有界（R3/D29）：等不到必须是 FAIL，不能是 INFINITE，也不能用 sleep 当断言。
+
+复现与修复证据见卡片 C114 的 PR：未改动的代码在 10 个忙等进程下 10/10 红，同一负载下修好后 20/20 绿。

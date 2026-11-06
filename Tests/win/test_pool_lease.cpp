@@ -732,9 +732,15 @@ PRISM_TEST("pool_lease.blocked_waiters_are_served_one_at_a_time") {
   PRISM_CHECK_EQ(duplicateLeases.load(), size_t(0));
   const win::ReaderPool::Stats st = pool->stats();
   PRISM_CHECK_EQ(st.acquired, st.returned);
-  // Deterministic, not "> 0": each of the kWaiters per cycle was refused
-  // exactly once by the main thread's lease. A pool that stopped refusing would
-  // score lower, a pool that double-counted would score higher.
+  // Deterministic, not "> 0": this EXACT value is guaranteed by the rendezvous,
+  // never by probability. In every cycle the main thread holds the pool's only
+  // slot and does not release it until stats().waits has risen by exactly
+  // kWaiters -- and waits only rises for a request that found EVERY slot busy.
+  // So each of the kWaiters must reach Acquire() while the slot is taken and be
+  // refused there; no waiter can slip through, because the slot is never free
+  // while the counter is being observed. Hence waits == kCycles * kWaiters on
+  // every schedule: a pool that stopped refusing scores lower, a pool that
+  // double-counted scores higher.
   PRISM_CHECK_EQ(st.waits, uint64_t(kCycles * kWaiters));
   SyncConflicts(*pool);
   PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));

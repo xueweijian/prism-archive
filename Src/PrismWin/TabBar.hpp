@@ -57,6 +57,7 @@
 
 #include "../PrismCore/ChromeTheme.hpp"  // C91: the canvas the strip sits on
 #include "../PrismCore/ThemeTokens.hpp"
+#include "Typography.hpp"  // C103: the ONE font stack + TextFormat entry (BLUEPRINT:170)
 #include "../PrismCore/WindowLayout.hpp"
 
 namespace prism::win::tabbar {
@@ -292,9 +293,9 @@ class Painter {
                                              brush_.ReleaseAndGetAddressOf()))) {
       return false;
     }
-    if (FAILED(factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         11.0f, L"en-US", label_.ReleaseAndGetAddressOf()))) {
+    if (FAILED(prism::win::typography::CreateTextFormat(
+            factory, 11.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+            label_.ReleaseAndGetAddressOf()))) {
       return false;
     }
     if (label_) {
@@ -305,9 +306,9 @@ class Painter {
     // C79: the ACTIVE tab's name is one step up the type scale (12 px
     // semibold) so the active/inactive hierarchy is a weight/size difference,
     // not only a plate difference.
-    if (FAILED(factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         12.0f, L"en-US", labelActive_.ReleaseAndGetAddressOf()))) {
+    if (FAILED(prism::win::typography::CreateTextFormat(
+            factory, 12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+            labelActive_.ReleaseAndGetAddressOf()))) {
       return false;
     }
     if (labelActive_) {
@@ -315,9 +316,9 @@ class Painter {
       labelActive_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
       labelActive_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
-    if (FAILED(factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                         12.0f, L"en-US", close_.ReleaseAndGetAddressOf()))) {
+    if (FAILED(prism::win::typography::CreateTextFormat(
+            factory, 12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+            close_.ReleaseAndGetAddressOf()))) {
       return false;
     }
     if (close_) {
@@ -520,10 +521,10 @@ class Painter {
     const float height = static_cast<float>(tab.title.Height());
     ComPtr<IDWriteTextLayout> layout;
     IDWriteTextFormat* format = active && labelActive_ ? labelActive_.Get() : label_.Get();
-    if (FAILED(factory_->CreateTextLayout(item.title.c_str(),
-                                          static_cast<std::uint32_t>(item.title.size()),
-                                          format, width, height,
-                                          layout.ReleaseAndGetAddressOf()))) {
+    if (FAILED(prism::win::typography::CreateTextLayout(
+            factory_.Get(), item.title.c_str(),
+            static_cast<UINT32>(item.title.size()), format, width, height,
+            layout.ReleaseAndGetAddressOf()))) {
       return;
     }
     if (ellipsis_) layout->SetTrimming(&trimming_, ellipsis_.Get());

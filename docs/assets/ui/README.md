@@ -221,6 +221,36 @@ field: `Scene::theme`.
   `.58`; the frame then measures `6` levels and the run prints
   `C102 MUTATION CAUGHT: flat`.
 
+# C103 font stack evidence -- the same list window before/after
+
+`c103-font-before.png` and `c103-font-after.png` are the SAME scene painted by
+the REAL renderer (`Tests/win/gallery_snapshot.cpp` -> `GalleryRenderer` -> a
+headless WIC target): 1600 px list mode, Midnight. `before` is origin/main,
+where all 18 DirectWrite call sites hardcoded `Segoe UI`; `after` is this card,
+where the base family resolves through
+`Src/PrismWin/Typography.hpp` and every layout carries the custom CJK fallback.
+
+**They now differ.** On this machine the resolver answers:
+
+```
+latin = Segoe UI Variable Display
+cjk   = Microsoft YaHei UI
+fallback = [Microsoft YaHei UI, Noto Sans SC]
+```
+
+so the "after" frame is painted with *Segoe UI Variable Display* (the Win11
+default) instead of the old hardcoded *Segoe UI*; 6,677 pixels differ, all of
+them in glyph runs (see `c103-font-diff.png`, where every changed pixel is red
+over a dimmed after frame). `c103-font-before-after-zoom.png` is the header +
+first rows at 2x for a side-by-side look.
+
+The earlier version of this card stopped at the Apple-only names, whose absence
+made the two frames byte-identical. The fix is the Windows-native middle step:
+Latin = SF Pro Display -> Inter -> Segoe UI Variable Display -> Segoe UI, CJK =
+PingFang SC -> HarmonyOS Sans SC -> Microsoft YaHei UI -> Noto Sans SC, and the
+CJK half is wired through `IDWriteFontFallbackBuilder` (one family name cannot
+cover both scripts).
+
 ## Reproduce
 
 ```pwsh
@@ -274,3 +304,11 @@ ctest --test-dir E:\build\wt-c104 -R "c104" --output-on-failure
 ```
 
 No `<out-dir>` = assertions only, no files (the CI path).
+. E:\wg\env.ps1 -Card c103
+cmake --build E:\build\wt-c103 --parallel 2 --target gallery_snapshot
+& E:\build\wt-c103\Tests\gallery_snapshot.exe <out-dir>   # writes prism_list.png
+```
+
+The `before` frame was produced from the same tree with the seven edited
+headers stashed back to origin/main, then rebuilt and restored -- the two sets
+differ only by this card.

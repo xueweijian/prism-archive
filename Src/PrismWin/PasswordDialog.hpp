@@ -91,6 +91,7 @@
 #include "../PrismCore/PasswordUiModel.hpp"
 #include "../PrismCore/ThemeTokens.hpp"
 #include "GlassPanel.hpp"
+#include "Typography.hpp"  // C103: the ONE font stack + TextFormat entry (BLUEPRINT:170)
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -747,10 +748,12 @@ class PasswordDialog {
     // One font family, three sizes from DESIGN.md's type scale (11/13/15/20).
     bodyFont_ = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                             OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                            DEFAULT_PITCH | FF_DONTCARE,
+                            prism::win::typography::SystemFamilyName().c_str());
     promptFont_ = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                               OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                              DEFAULT_PITCH | FF_DONTCARE,
+                              prism::win::typography::SystemFamilyName().c_str());
     if (bodyFont_ == nullptr) bodyFont_ = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     if (promptFont_ == nullptr) promptFont_ = bodyFont_;
 

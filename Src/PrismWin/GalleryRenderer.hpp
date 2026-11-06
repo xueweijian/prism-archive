@@ -42,6 +42,7 @@
 #include "../PrismCore/SidebarModel.hpp"
 #include "../PrismCore/ThemeTokens.hpp"
 #include "TabBar.hpp"  // C60: the tab strip (geometry + pixels)
+#include "Typography.hpp"  // C103: the ONE font stack + TextFormat entry (BLUEPRINT:170)
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "ActionBar.hpp"    // C-V2: the action-band painter (DESIGN.md §2)
@@ -299,15 +300,15 @@ class GalleryRenderer {
       if (FAILED(hr)) return hr;
     }
 
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    13.0f, L"en-US", caption_.ReleaseAndGetAddressOf());
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    15.0f, L"en-US", title_.ReleaseAndGetAddressOf());
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    12.0f, L"en-US", small_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 13.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        caption_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 15.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        title_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 12.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        small_.ReleaseAndGetAddressOf());
     if (caption_) caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     if (title_) title_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
@@ -316,12 +317,12 @@ class GalleryRenderer {
     // wrapped label would spill into its neighbour and be clipped mid-glyph.
     hr = target->CreateSolidColorBrush(kTextPrimary, sidebarBrush_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    13.0f, L"en-US", sidebarLabel_.ReleaseAndGetAddressOf());
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    11.0f, L"en-US", sidebarSmall_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 13.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        sidebarLabel_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 11.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        sidebarSmall_.ReleaseAndGetAddressOf());
     if (sidebarLabel_) {
       sidebarLabel_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       sidebarLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -329,9 +330,9 @@ class GalleryRenderer {
     if (sidebarSmall_) sidebarSmall_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     // C79: the status capsule's readout is 12 px secondary text (the group
     // headings reuse sidebarSmall_, the existing 11 px semibold format).
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    12.0f, L"en-US", sidebarStatus_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 12.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        sidebarStatus_.ReleaseAndGetAddressOf());
     if (sidebarStatus_) {
       sidebarStatus_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       sidebarStatus_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -340,19 +341,22 @@ class GalleryRenderer {
     // the line ABOVE a value, per plan 3.2's "上行 10px 灰色小字". It is its own
     // IDWriteTextFormat (not a size passed at DrawText time) so a suite can read
     // the REAL format back through CardLabelFormat() and pin the size.
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    10.0f, L"en-US",
-                                    sidebarCardLabel_.ReleaseAndGetAddressOf());
+    // C103: this one came in with C105 after C103 branched, still carrying the
+    // literal family. Every format goes through the resolved stack -- that is
+    // what core.c103_font_literals asserts (Src/ carries no literal family name outside
+    // Typography.hpp).
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 10.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        L"en-US", sidebarCardLabel_.ReleaseAndGetAddressOf());
     if (sidebarCardLabel_) {
       sidebarCardLabel_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       sidebarCardLabel_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     // V4/C79: the status band's readout format (12 px, one line, leading,
     // centred in its 20 px inner band so the six segments share one baseline).
-    writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    12.0f, L"en-US", statusFormat_.ReleaseAndGetAddressOf());
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 12.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        statusFormat_.ReleaseAndGetAddressOf());
     if (statusFormat_) {
       statusFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
       statusFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -1290,9 +1294,9 @@ class GalleryRenderer {
         const std::wstring wide = Utf8(command.text);
         ComPtr<IDWriteTextLayout> layout;
         if (sidebarSmall_ && !wide.empty() &&
-            SUCCEEDED(writeFactory_->CreateTextLayout(
-                wide.c_str(), static_cast<UINT32>(wide.size()), sidebarSmall_.Get(),
-                box.right - box.left, box.bottom - box.top,
+            SUCCEEDED(prism::win::typography::CreateTextLayout(
+                writeFactory_.Get(), wide.c_str(), static_cast<UINT32>(wide.size()),
+                sidebarSmall_.Get(), box.right - box.left, box.bottom - box.top,
                 layout.ReleaseAndGetAddressOf()))) {
           ComPtr<IDWriteTextLayout1> tracked;
           if (SUCCEEDED(layout.As(&tracked))) {

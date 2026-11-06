@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "../PrismCore/ThemeTokens.hpp"
+#include "Typography.hpp"  // C103: the ONE font stack + TextFormat entry (BLUEPRINT:170)
 
 // The C18/C31 suites have their own link lists (they were written for stock
 // controls); DialogChrome carries its own dependencies so a TU that only
@@ -549,11 +550,9 @@ class ChromePainter {
     if (text_ && bodySize_ == fontPx) return S_OK;
     text_.Reset();
     if (!writeFactory_) return E_FAIL;
-    HRESULT hr = writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                                 DWRITE_FONT_STYLE_NORMAL,
-                                                 DWRITE_FONT_STRETCH_NORMAL,
-                                                 static_cast<float>(fontPx), L"en-US",
-                                                 text_.ReleaseAndGetAddressOf());
+    HRESULT hr = prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), static_cast<float>(fontPx), DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, L"en-US", text_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
     bodySize_ = fontPx;
     static_cast<void>(target);

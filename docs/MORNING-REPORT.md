@@ -171,3 +171,85 @@ C113 H1 复现:       RenderSceneInto 失败, LastRenderError=0x88990012, 该帧
 3. **Liquid Glass 只覆盖面包屑岛**，动作岛/信息卡还没接。
 4. **每帧 GDI 抓背景的开销没测**（C107 遗留）。
 5. 启动耗时、最小化内存两项今晚没碰。
+## 12. 【未解决】装好的程序打开归档后内容区全白
+
+我在 04:53 把 main 装到本机后截图，发现窗口**只有标题栏和菜单栏**，内容区是 **Day 画布色 #F5F5F7**。
+
+### 已排除（每条都有证据）
+
+| 假设 | 排除方式 |
+|---|---|
+| 渲染器坏了 | 同一棵树跑 headless `gallery_snapshot` → `ALL SNAPSHOT CHECKS PASSED`，产出的 PNG 有完整网格/列表/状态栏 |
+| C107 玻璃层盖住 | 回退 C107 重建 → 窗口截图像素**字节完全相同**（sha256 `f6247999…`） |
+| 截图路径假象 | `--screen 0` 抓**合成后的桌面**：VS Code / 任务栏 / 桌面图标全正常，**只有该窗口矩形是白的** |
+| 合成岛铺满窗口 | C115 三条证明：首帧 `NavPillRect` 为空 → `GlassPanelRect` 0x0 → `PresentGlassFrame` 在 `ResizeIsland` 前 return；panel 恒等于 pill；11 个宽度实测 panel ≠ client |
+| 数据没加载 | 无障碍树列出全部控件（动作按钮、tab、listbox 的 `docs`/`readme.txt`、树、状态栏） |
+| 强制重绘能救 | `ShowWindow(SW_RESTORE)` + `MoveWindow` + `RedrawWindow(INVALIDATE\|UPDATENOW\|ALLCHILDREN)` 后全屏截图**仍然白** |
+
+### 白屏的形态
+
+- 白是 **Day 画布色 #F5F5F7**，不是纯白；
+- **菜单栏画出来了**（同一个 D2D 目标）⇒ `Clear` 和部分绘制执行了；
+- **内容带（侧栏/列表/动作岛/状态栏）一个都没画**；
+- 无障碍树完整 ⇒ **模型有数据，Scene 没有**（或内容带的矩形为空）。
+
+### 当前假设（C116 在验证）
+
+窗口在**扫描完成之前**画了首帧（`scene.items == nullptr`），之后**没有重建 Scene / 没有重绘**；
+强制重绘也画空帧 ⇒ 重绘读到的 Scene 仍是空的，或内容带矩形高度为 0。
+
+### 一个必须记住的验证陷阱
+
+`agent-desktop screenshot --window-id` 对 **DirectComposition 合成的窗口会返回空的重定向表面**。
+本仓库 `GlassIslandHost.hpp:971-990` 早就记了这件事（GDI 拿到 blank，要 `PrintWindow(PW_RENDERFULLCONTENT)`）。
+**验证手段本身也要被验证**：判断 UI 好坏必须用**桌面截图**（`--screen 0`）或 headless 渲染，不能用窗口截图。
+## 13. 一个还没查完的隐患：还有测试可能在读"空帧"
+
+C113 查实：窗口真实绘制过之后再 `RenderSceneInto(WIC)`，D2D 会以 `0x88990012` **整帧拒绝**，
+而 `DrawFrame` 曾经吞掉 `EndDraw` 的 HRESULT → 测试拿到的是"只有画布底色"的帧。
+
+C113 修了 `bench_c76_startup` 与 `test_c87_hud_lifecycle`（改用 `RenderSceneForCapture`），
+但我核到 **`Tests/win/test_c74_i18n_switch.cpp` 仍有自己的 `RenderWindow` helper**，
+没有看到它走 capture seam。如果它也读的是被拒帧，那它的"英文/中文像素不同"断言可能是**空帧对空帧**。
+
+**审计结果（2026-11-07 05:55）**：全仓 `Tests/` 里引用 `RenderSceneInto` 的只有 3 个文件
+（`BenchFrameCapture.hpp`、`bench_c76_startup.cpp`、`c113-bench-honesty.cmake`），都已被 C113 处理。
+`test_c74_i18n_switch.cpp` 有自己的 `RenderWindow`，但它是**自建 `GalleryRenderer` + 在 WIC target 上 `CreateDeviceResources`**，
+独立实例、不跨设备，**没有空帧风险**。所以这个隐患的范围是封闭的。
+
+**仍待办（下一张卡，非阻塞）**：
+1. 全仓扫 `RenderSceneInto` 在 `Tests/` 里的使用点；
+2. 每个使用点加**前置断言** `rendered == true && hr == S_OK && painted >= 5%`；
+3. 任何读空帧的测试，其历史结论都要重测（像 C76 那样列"作废/待重测"清单）。
+
+## 14. 白屏结案：**是这台机器的 D2D present 失效，不是应用**
+
+C116 用证据推翻了我上面的假设（第 12 节），三条：
+
+1. **首帧不在数据之前**：真实 exe + `PRISM_C76_TRACE=1` 的 trace 里 `set_items=265.2ms`、首次 `WM_PAINT=373.7ms`，
+   首帧内容带非空（`band width=1184 buttons=8`，`renderer_draw 21.97ms`），`EndDraw=S_OK`。
+2. **零依赖探针复现**：100 行、零 PrismArchive 代码（`CreateHwndRenderTarget → Clear(红) → EndDraw`），
+   连做 7 次 `EndDraw` 都 `S_OK`，窗口仍白；硬件/软件目标、两种 present、DPI-unaware/PMv2 **全白**。
+3. **同一窗口 GDI `FillRect` 红块可见**（截图 + `GetPixel=ff0000`）。
+
+环境：`DwmIsCompositionEnabled=1`、窗口 `ex=0x110`（非 layered/非 NOREDIRECTIONBITMAP）、`cloaked=0`；
+本机 DXGI 有 **Intel UHD 620 / Radeon 530 / MS Basic Render Driver / OrayIddDriver** 四个适配器——
+怀疑与虚拟显示器/混合显卡有关。
+
+### 这条发现的方法论价值
+
+> **"用全屏截图判断画没画出来"在本机不可靠**：DComp 药丸能截到，D2D HWND present 完全截不到。
+
+也就是说：**用户看到的白屏与截图白屏无法区分**。我先前的"桌面截图可见其真实颜色"这条推理，前提不成立。
+
+### 处置
+
+- C116 交付了真实的产品改进（`Invalidate()` 成为具名重绘门，`RebuildFolderView` 经它请求帧）+ 测试 + 变异臂；
+- 我要求它把零依赖探针落成 `tools/d2d_present_probe`，并在 `docs/TROUBLESHOOTING.md` 加一节"窗口全白"：
+  `verdict=D2D_PRESENT_BROKEN` ⇒ 指向显示驱动/虚拟显示器，不是应用；
+- **整窗改走 DirectComposition** 作为独立卡评估（量级大，CI 无法验证差异）。
+
+### 给用户的建议
+
+若在本机看到窗口全白：**先重启一次**（清掉虚拟显示器/驱动状态），或拔掉远程桌面/投屏会话；
+再用 `tools/d2d_present_probe` 判定。应用本身在 headless 渲染与无障碍树上都是完整的。

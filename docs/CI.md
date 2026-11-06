@@ -44,20 +44,6 @@ gh run download <run-id> -n ci-logs-windows        # 失败日志 artifact
 red 时先看 run 页面的 **step summary**：失败测试名、ccache/sccache 命中率、
 benchmark 数字都在那里，不用翻日志。仍看不出再 `--log-failed`。
 
-## 断言「不是空帧」必须用 painted / digest，不能用「非黑像素数」（C113，2026-11-07）
-
-C113 实测：`DrawFrame` 曾把 `target->EndDraw()` 的 HRESULT 丢掉，于是 D2D 以 `0x88990012`
-（`D2DERR_WRONG_RESOURCE_DOMAIN`）整帧拒绝的离屏帧被当成成功帧。**这张帧不是黑的**——
-它只剩画布底色，1264×741 下每像素 `B=19,G=14,R=11`、`maxChannel=18`，所以
-
-- `non_black`（任一通道非 0）**= 936624 / 936624**，全中；
-- 「至少 N 个像素非黑」这类断言**永远抓不到它**；
-- `painted`（最亮通道 >= 32）**= 0**，一次就抓到；digest 也会变（该帧是 `0af0b75bc5b12383`）。
-
-**规则**：门禁里写「帧里真的有东西」时，用 `painted`（阈值化亮度）或**记录的 digest**，
-不要用「非黑/非零像素数」——被拒绝的帧比黑帧亮。共享读取器是
-`Tests/win/BenchFrameCapture.hpp`：它记录 `EndDraw` 的 HRESULT，失败时打印
-`RENDER FAILED hr=0x%08X` 并让 `rendered == false`，且 `painted == 0`。
 ## 四、两条已知噪音（不是我们的 bug）
 
 - **D14**：runner 镜像自带的 `7z.dll` 是 ASan 构建，`SetCodecs` 会在它自己内部
@@ -98,3 +84,24 @@ C102 要做"回退这四条 Daylight token 再重渲染"的差异统计，第一
 
 反例：把 0.4 直接降到 0.30。判据被削弱，而且下一次再调 alpha 还会再红一次。
 
+
+## 断言不许钉住 bug 本身（C115，2026-11-07）
+
+C115 修窄窗口重叠时，C107 的测试红了。红的是这一行：
+
+```cpp
+PRISM_CHECK_EQ(panel.w, kNavPillMaxWidth);   // 560
+```
+
+它上面一行是真正的契约：`panel == NavPillRect(layout)`。
+两行**只在 pill 被错误地固定成 560 px 时才同时为真** —— 也就是说 788 行钉住的是 bug。
+
+**判据**：把已知的 bug 修掉之后，这条断言是否还该绿？
+- 还该绿 → 它测的是契约；
+- 必须跟着改 → 它测的是"当前实现恰好长什么样"，**它不是契约，是快照**。
+
+**做法**：把"值"改成"界"（`<=` 上限、`>=` 下限、区间），把"恒等式"留在原处当契约，
+并证明**修复不影响合法的输入**（C115 的例子里：≥1184 px 客户端上 1264/1482 逐像素不变）。
+
+**同类实例**：C113 发现 `c76.bench_startup` 的 digest 只有在"帧被 D2D 拒绝"时才等于常数 ——
+那不是契约，是一张空帧的哈希。

@@ -258,8 +258,11 @@ PRISM_TEST("TestSelectionFollowsKeyboardFocus") {
   const auto selection = OfKind(layout, PrimKind::Selection);
   PRISM_CHECK_EQ(selection.size(), std::size_t{1});
   if (!selection.empty()) {
-    // C79: the row's left edge is paddingX + indent = 32 (was 30 at 14 px).
-    PRISM_CHECK(SameBox(selection[0]->box, Box{32.0f, 206.0f, 220.0f, 234.0f}));
+    // C79 pinned the row's left edge at paddingX + indent = 32 (was 30 at 14 px).
+    // C104: the highlight is a CAPSULE, so the box is the row inset by 8 px at
+    // both ends -- [40, 212], not [32, 220] -- and carries its own 6 px corner.
+    PRISM_CHECK(SameBox(selection[0]->box, Box{40.0f, 206.0f, 212.0f, 234.0f}));
+    PRISM_CHECK(Near(selection[0]->cornerRadius, 6.0f));
     PRISM_CHECK_EQ(selection[0]->section, Section::Tree);
     PRISM_CHECK_EQ(selection[0]->payload, 1);
   }
@@ -411,7 +414,11 @@ PRISM_TEST("TestSelectionAccentRule") {
   PRISM_CHECK_EQ(fills.size(), std::size_t{1});
   if (!bars.empty() && !fills.empty()) {
     PRISM_CHECK(Near(bars[0]->box.Width(), 3.0f));  // 3 +/- 0: the token value
-    PRISM_CHECK(Near(bars[0]->box.left, fills[0]->box.left));
+    // C104: the capsule is inset 8 px from the row, and the rule deliberately
+    // stays on the ROW edge. At the capsule's inset edge the expander chevron's
+    // vertex cuts the 3 px rule down to ~1 px of accent (gallery_snapshot
+    // measured exactly that), so the two edges are no longer the same x.
+    PRISM_CHECK(Near(bars[0]->box.left, fills[0]->box.left - 8.0f));
     PRISM_CHECK(bars[0]->box.top > fills[0]->box.top);
     PRISM_CHECK(bars[0]->box.bottom < fills[0]->box.bottom);
     PRISM_CHECK_EQ(bars[0]->payload, 1);

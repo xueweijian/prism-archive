@@ -113,9 +113,25 @@ class GalleryRenderer {
   static constexpr bool kSidebarCollapseInverted = false;
 #endif
 
+  // C104 negative controls (CONTRACTS D3/D26). Each arm is the SHIPPED defect,
+  // not a lookalike: `square` paints the pre-C104 hard-edged selection
+  // rectangle, `folder-opaque` restores the solid accent plate for the icon.
+#if defined(PRISM_C104_MUTANT_SQUARE)
+  static constexpr bool kC104SquareSelection = true;
+#else
+  static constexpr bool kC104SquareSelection = false;
+#endif
+#if defined(PRISM_C104_MUTANT_FOLDER_OPAQUE)
+  static constexpr bool kC104FolderOpaque = true;
+#else
+  static constexpr bool kC104FolderOpaque = false;
+#endif
+
   static constexpr std::string_view ActiveMutation() {
     if (kSidebarPaintDisabled) return "no-sidebar-paint";
     if (kSidebarCollapseInverted) return "collapse-inverted";
+    if (kC104SquareSelection) return "square";
+    if (kC104FolderOpaque) return "folder-opaque";
     return {};
   }
 
@@ -1046,10 +1062,62 @@ class GalleryRenderer {
     target->FillGeometry(geometry.Get(), brush);
   }
 
+  // C104: the two-tone SOFT folder. Both tones are the ACCENT token mixed
+  // toward the panel (that lift is what makes them soft instead of raw accent) and
+  // both are painted at alpha < 1, so the row's selection wash reads through the
+  // icon. The numbers are the view's token (kFolderIcon), never literals here.
+  void DrawFolderGlyph(ID2D1RenderTarget* target, const prism::win::sidebar::Box& box,
+                       prism::theme::Variant variant) {
+    if (!sidebarBrush_ || box.Empty()) return;
+    const prism::win::sidebar::FolderIcon token = prism::win::sidebar::kFolderIcon;
+    const prism::theme::Rgba panel =
+        TokenColor(prism::win::sidebar::ColorToken::Panel, variant);
+    const auto tone = [variant, &panel](float alpha, float mix) {
+      prism::theme::Rgba c =
+          prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary, variant)
+              .gradient.from;
+      const auto blend = [mix](float a, float b) { return a + (b - a) * mix; };
+      c.r = blend(c.r, panel.r);
+      c.g = blend(c.g, panel.g);
+      c.b = blend(c.b, panel.b);
+      c.a = alpha;
+      return c;
+    };
+    float bodyAlpha = token.bodyAlpha;
+    float tabAlpha = token.tabAlpha;
+    float bodyMix = token.bodyMix;
+    float tabMix = token.tabMix;
+#if defined(PRISM_C104_MUTANT_FOLDER_OPAQUE)
+    // NEGATIVE CONTROL (CONTRACTS D3): the shipped plate -- the raw accent at
+    // full opacity, i.e. the hardcoded accent block. The translucency assertion
+    // MUST go red here.
+    ++dbgMutantFolder;
+    bodyAlpha = 1.0f;
+    tabAlpha = 1.0f;
+    bodyMix = 0.0f;
+    tabMix = 0.0f;
+#endif
+    const float l = box.left, t = box.top, r = box.right, b = box.bottom;
+    const float w = r - l, h = b - t;
+    sidebarBrush_->SetColor(ToD2d(tone(tabAlpha, tabMix)));
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.20f, l + w * 0.54f,
+                                      t + h * 0.40f),
+                          token.tabRadius, token.tabRadius),
+        sidebarBrush_.Get());
+    sidebarBrush_->SetColor(ToD2d(tone(bodyAlpha, bodyMix)));
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.30f, r - w * 0.10f,
+                                      b - h * 0.16f),
+                          token.bodyRadius, token.bodyRadius),
+        sidebarBrush_.Get());
+  }
+
   // Icon ids, not bitmaps (C12 contract): tiny vector geometry keeps the
   // snapshot crisp and needs no asset pipeline at 16 px.
   void DrawSidebarGlyph(ID2D1RenderTarget* target, const prism::win::sidebar::Box& box,
-                        std::string_view icon, const D2D1_COLOR_F& color) {
+                        std::string_view icon, const D2D1_COLOR_F& color,
+                        prism::theme::Variant variant) {
     if (!sidebarBrush_ || box.Empty()) return;
     sidebarBrush_->SetColor(color);
     ID2D1Brush* brush = sidebarBrush_.Get();
@@ -1072,12 +1140,7 @@ class GalleryRenderer {
       return;
     }
     if (icon == "folder") {
-      target->FillRoundedRectangle(
-          D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.20f, l + w * 0.54f,
-                                        t + h * 0.40f), 1.5f, 1.5f), brush);
-      target->FillRoundedRectangle(
-          D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.30f, r - w * 0.10f,
-                                        b - h * 0.16f), 2.5f, 2.5f), brush);
+      DrawFolderGlyph(target, box, variant);
       return;
     }
     if (icon == "clock") {
@@ -1242,10 +1305,20 @@ class GalleryRenderer {
         }
         return;
       }
-      case PrimKind::Selection:
-        // The focus pill: squircle radius 8 (blueprint 3.2 row highlight).
-        FillSquircleRoundedRect(target, box, 8.0f, sidebarBrush_.Get());
+      case PrimKind::Selection: {
+        // C104: a CAPSULE, not a plate. The radius travels with the command
+        // (the view owns geometry -- blueprint 3.2's squircle, now at the
+        // sidebar's own 6 px token instead of a renderer-side 8).
+#if defined(PRISM_C104_MUTANT_SQUARE)
+        ++dbgMutantSquare;  // the injection ran and painted the shipped rectangle
+        target->FillRectangle(box, sidebarBrush_.Get());
+#else
+        const float radius =
+            command.cornerRadius > 0.0f ? command.cornerRadius : 6.0f;
+        FillSquircleRoundedRect(target, box, radius, sidebarBrush_.Get());
+#endif
         return;
+      }
       case PrimKind::SelectionBar:
         // C79: the 3 px accent rule. A squircle is the wrong shape for a 3 px
         // bar, so this is a plain rounded rect whose radius is half its width.
@@ -1256,7 +1329,7 @@ class GalleryRenderer {
       case PrimKind::Chevron:
       case PrimKind::StatusIcon:
         DrawSidebarGlyph(target, command.box, command.icon,
-                         ToD2d(TokenColor(command.color, variant)));
+                         ToD2d(TokenColor(command.color, variant)), variant);
         return;
       case PrimKind::Label:
       case PrimKind::EmptyState:
@@ -2277,6 +2350,9 @@ class GalleryRenderer {
   static inline int dbgMutantTheme = 0;
   static inline int dbgMutantBrushes = 0;
   static inline int dbgMutantIsland = 0;
+  // C104: proof that each negative control's paint branch really executed.
+  static inline int dbgMutantSquare = 0;
+  static inline int dbgMutantFolder = 0;
   // C27: proof that the sidebar command list reached pixels. dbgSidebarCommands
   // counts every non-hit command considered, dbgSidebarPrimitives the ones
   // actually painted, dbgSidebarLabels the text runs, dbgSidebarPanels the

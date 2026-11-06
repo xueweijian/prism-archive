@@ -376,10 +376,15 @@ inline constexpr ColorRow kColorRows[] = {
     // Midnight keep the Liquid Glass materials (semi-opaque accent/surface);
     // HighContrast is opaque enough to stay legible on pure black.
     // Sidebar selected row: the accent at 14% (blueprint 3.2's wash).
+    // C104: Midnight used to sit at 16%. The pill is a capsule now, and the wash
+    // has to stay under 15% in BOTH design themes -- above that the rounded row
+    // reads as a filled plate again, which is the XP report this card answers.
+    // HighContrast is deliberately NOT in that band: on pure black a 14% wash is
+    // invisible, so it keeps the accessibility lift (asserted as its own floor).
     {TokenId::SelectionTint, Variant::Daylight,
      Rgba(ChannelFromByte(0), ChannelFromByte(122), ChannelFromByte(255), 0.14f)},
     {TokenId::SelectionTint, Variant::Midnight,
-     Rgba(ChannelFromByte(10), ChannelFromByte(132), ChannelFromByte(255), 0.16f)},
+     Rgba(ChannelFromByte(10), ChannelFromByte(132), ChannelFromByte(255), 0.14f)},
     {TokenId::SelectionTint, Variant::HighContrast,
      Rgba(ChannelFromByte(102), ChannelFromByte(179), ChannelFromByte(255), 0.24f)},
     // Raised tab plate: brighter than the canvas, still a translucent material

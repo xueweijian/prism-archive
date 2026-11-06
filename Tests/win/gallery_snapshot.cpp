@@ -274,6 +274,35 @@ int CountAccent(const std::vector<UINT32>& pixels, UINT32 width, int left, int t
   return count;
 }
 
+// C104: "blue-dominant" stopped meaning "the list's selection pill" the moment
+// the sidebar's folder glyph became a soft blue -- a 16 px icon is blue-dominant
+// too. The pill is a horizontal RUN of hundreds of pixels; an icon is at most
+// ~14 px. This counts only run pixels, so the bleed detector keeps its intent
+// (no list pill inside the rail) without mistaking the rail's own glyphs for
+// one.
+int CountAccentRuns(const std::vector<UINT32>& pixels, UINT32 width, int left, int top,
+                    int right, int bottom, int minRun) {
+  int count = 0;
+  for (int y = top; y < bottom; ++y) {
+    int run = 0;
+    for (int x = left; x <= right; ++x) {
+      bool accent = false;
+      if (x < right) {
+        const UINT32 value = pixels[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
+        accent = (static_cast<int>(value & 0xFFu) -
+                  static_cast<int>((value >> 16) & 0xFFu)) >= 40;
+      }
+      if (accent) {
+        ++run;
+        continue;
+      }
+      if (run >= minRun) count += run;
+      run = 0;
+    }
+  }
+  return count;
+}
+
 // Mean absolute per-channel difference over a pixel predicate.
 template <typename Predicate>
 double MeanAbsDiff(const std::vector<UINT32>& a, const std::vector<UINT32>& b, Predicate inside,
@@ -1215,6 +1244,25 @@ int main(int argc, char** argv) {
     prism::win::sidebar::Box otherPillBox{};
     const bool focusPillFound = selectionBox(sidebarLayout, &pillBox);
     const bool otherPillFound = selectionBox(otherFocusLayout, &otherPillBox);
+    // C104: the highlight is the CAPSULE **plus** its 3 px accent rule. The
+    // capsule is inset 8 px from the row and the rule stays on the row's edge
+    // (putting it on the inset edge notches it against the expander chevron), so
+    // the rule now lives OUTSIDE the capsule's box. The locality check has to
+    // treat the pair as one highlight, or it counts the rule itself -- which
+    // moves with the focus, by design -- as "a change outside the pill".
+    const auto ruleBox = [](const prism::win::sidebar::Layout& layout,
+                            prism::win::sidebar::Box* out) {
+      for (const auto& command : layout.commands) {
+        if (command.kind != prism::win::sidebar::PrimKind::SelectionBar) continue;
+        *out = command.box;
+        return true;
+      }
+      return false;
+    };
+    prism::win::sidebar::Box ruleBoxSidebar{};
+    prism::win::sidebar::Box ruleBoxOther{};
+    const bool ruleFound = ruleBox(sidebarLayout, &ruleBoxSidebar);
+    const bool otherRuleFound = ruleBox(otherFocusLayout, &ruleBoxOther);
     const int pillLeft = static_cast<int>(pillBox.left);
     const int pillRight = static_cast<int>(pillBox.right);
     const int pillTop = static_cast<int>(pillBox.top);
@@ -1279,7 +1327,10 @@ int main(int argc, char** argv) {
           int count = 0;
           for (int y = 0; y < static_cast<int>(kH); ++y) {
             for (int x = 0; x < static_cast<int>(kW); ++x) {
-              if (inner(pillBox, x, y) || inner(otherPillBox, x, y)) continue;
+              if (inner(pillBox, x, y) || inner(otherPillBox, x, y) ||
+                  inner(ruleBoxSidebar, x, y) || inner(ruleBoxOther, x, y)) {
+                continue;
+              }
               const size_t i = static_cast<size_t>(y) * kW + static_cast<size_t>(x);
               if (a[i] != b[i]) {
                 ++count;
@@ -1296,8 +1347,10 @@ int main(int argc, char** argv) {
         const int outsideDiff =
             countOutside(pairReady ? pairSidebar : frameSidebar,
                          pairReady ? pairOtherFocus : frameOtherFocus, true);
-        std::printf("SIDEBAR: focusPillDiff=%.2f outsidePillPixels=%d noise=%d otherPill=%d\n",
-                    pillDiff, outsideDiff, noiseDiff, otherPillFound ? 1 : 0);
+        std::printf("SIDEBAR: focusPillDiff=%.2f outsidePillPixels=%d noise=%d otherPill=%d "
+                    "rules=%d/%d\n",
+                    pillDiff, outsideDiff, noiseDiff, otherPillFound ? 1 : 0,
+                    ruleFound ? 1 : 0, otherRuleFound ? 1 : 0);
         if (pillDiff < 6.0) {
           std::printf("FAIL: the focused row is not highlighted (diff=%.2f)\n", pillDiff);
           ++sidebarFailures;
@@ -1312,9 +1365,11 @@ int main(int argc, char** argv) {
 
       // 3. Folded: the list starts at the 16 px inset instead of after the
       //    column -- a full 220 px of extra row width, measured in pixels.
+      // C104: run-based (see CountAccentRuns) -- the rail's folder glyphs are
+      // soft blue now, and they are not a list pill.
       const int accentLeftExpanded =
-          CountAccent(frameSidebar, kW, 16, selectedRowTop + 2, kColumnRight + 4,
-                      selectedRowBottom - 2);
+          CountAccentRuns(frameSidebar, kW, 16, selectedRowTop + 2, kColumnRight + 4,
+                          selectedRowBottom - 2, 40);
       const int accentLeftFolded =
           CountAccent(frameFolded, kW, 16, selectedRowTop + 2, kColumnRight + 4,
                       selectedRowBottom - 2);

@@ -49,14 +49,16 @@ inline constexpr bool kCullEnabled = false;
 #else
 inline constexpr bool kCullEnabled = true;
 #endif
-// C105 (plan 3.2 "移除刺眼的下划线"): the info card used to carry a full-width
-// 1 px hairline between the tree and the capsule. The SHIPPING value is false --
-// the line is gone -- so the switch reads "enabled" only in the mutation build,
-// where it must turn the "no horizontal rule inside the card" assertion RED.
 #if defined(PRISM_C105_MUTANT_UNDERLINE)
 inline constexpr bool kCardUnderlineEnabled = true;
 #else
 inline constexpr bool kCardUnderlineEnabled = false;
+#endif
+
+#if defined(PRISM_C104_MUTANT_SQUARE)
+inline constexpr bool kSelectionPill = false;
+#else
+inline constexpr bool kSelectionPill = true;
 #endif
 
 enum class PrimKind : std::uint8_t {
@@ -167,6 +169,11 @@ struct Command {
   // (10 px label / 12 px value) so the two sizes are a LAYOUT fact the geometry
   // suite can read, not a number buried in the painter.
   float fontSize = 0.0f;
+  // C104: the corner radius of a filled primitive, in DIPs (0 = square). It
+  // travels with the command because the VIEW owns the geometry -- a radius the
+  // renderer had to guess would be a second design source, and the pill's
+  // roundness could not be asserted without rendering.
+  float cornerRadius = 0.0f;
 };
 
 // Tokens from blueprint 3.3, translated to a 236 px column. Every number is an
@@ -186,9 +193,10 @@ struct Metrics {
   // rule is exactly 3 px wide.
   float indent = 16.0f;
   float selectionBarWidth = 3.0f;
+  // C104: the selection pill is inset 8 px at BOTH ends so the wash never
+  float selectionInset = 8.0f;
+  float selectionRadius = 6.0f;
   // C105: the card is FOUR label/value pairs stacked (plan 3.2). Each pair is
-  // a 12 px label line above a 16 px value line (28 px), the pairs are 6 px
-  // apart, and the card keeps 10 px of padding -- 4*28 + 3*6 + 2*10 = 150.
   // The numbers are integral floats so the pixel assertions are exact.
   float statusHeight = 150.0f;
   float statusGapAbove = 12.0f;
@@ -325,6 +333,22 @@ inline std::string RowLabel(std::string_view label, std::string_view path) {
   return leaf.empty() ? std::string("?") : std::string(leaf);
 }
 
+// ------------------------------------------------------- C104 folder icon
+// The tree's folder glyph is a piece of DESIGN, not a tint borrowed from the
+// text role: a rounded two-tone blue (a softer back tab behind a deeper body),
+// both TRANSLUCENT so the row's wash reads through, and both DERIVED from the
+// accent TOKEN instead of a hardcoded accent literal. The numbers live here,
+// next to the geometry, so the renderer and the pixel suite read one source.
+struct FolderIcon {
+  float bodyAlpha = 0.88f;   // <= 0.9 by contract: never an opaque plate
+  float tabAlpha = 0.62f;
+  float bodyMix = 0.22f;     // fraction of the PANEL mixed into the accent
+  float tabMix = 0.45f;
+  float bodyRadius = 2.5f;
+  float tabRadius = 1.5f;
+};
+inline constexpr FolderIcon kFolderIcon{};
+
 namespace detail {
 
 inline Box RowBox(const Metrics& m, float y, int depth) {
@@ -400,12 +424,27 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
       push(Command{PrimKind::RowHit, row, {}, {}, ColorToken::Panel, 0.0f, index,
                    section});
       if (focused) {
-        push(Command{PrimKind::Selection, row, {}, {},
-                     ColorToken::SelectedBackground, 1.0f, index, section});
-        // C79: the 3 px accent rule at the highlight's left edge. It is a
-        // separate primitive (not a border on Selection) so the width is a
-        // number the pixel suite can measure, and so the fill's alpha stays the
-        // token's (14%) instead of being fused with an opaque edge.
+        // C104: the highlight is a CAPSULE inset 8 px from both ends of the
+        // row, with a 6 px corner (the square arm is the negative control). The
+        // inset is applied here, in the view, because the view owns geometry:
+        // the renderer must not shrink a box it was handed.
+        const float inset = kSelectionPill ? metrics.selectionInset : 0.0f;
+        const Box pill{row.left + inset, row.top, row.right - inset, row.bottom};
+        Command selection{PrimKind::Selection, pill, {}, {},
+                          ColorToken::SelectedBackground, 1.0f, index, section};
+        selection.cornerRadius = kSelectionPill ? metrics.selectionRadius : 0.0f;
+        push(std::move(selection));
+        // C79: the 3 px accent rule at the ROW's left edge. It is a separate
+        // primitive (not a border on Selection) so the width is a number the
+        // pixel suite can measure, and so the fill's alpha stays the token's
+        // (14%) instead of being fused with an opaque edge.
+        // C104: it stays on the ROW edge and does NOT follow the capsule's
+        // inset. On a tree row the capsule's inset left edge (row.left + 8) is
+        // exactly where the expander chevron's vertex lands, so a bar there is
+        // notched by the chevron down to ~1 px of accent -- gallery_snapshot
+        // measured exactly that ("the midnight selection rule is 1 px wide")
+        // before this line moved back. The rule leads the capsule: the row owns
+        // the rule, the capsule is inset from it.
         const float barTop = row.top + 2.0f;
         const float barBottom = row.bottom - 2.0f;
         push(Command{PrimKind::SelectionBar,

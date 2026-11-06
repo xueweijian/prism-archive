@@ -97,21 +97,26 @@ inline TitleBarRecord Apply(HWND hwnd, prism::theme::Variant variant) {
   if (hwnd == nullptr || ::IsWindow(hwnd) == FALSE) return record;
   record.attempted = true;
 
+  // C106: the caption colour is prism::chrome::ShellSurface -- the SAME call the
+  // owner-drawn menu plate makes (GalleryWindow::RebuildMenu). Two APIs, one
+  // colour, one function: the pixel gate that compares the two surfaces is
+  // measuring a property of the source, not a coincidence of two lookups.
+  const prism::chrome::Rgba surface = prism::chrome::ShellSurface(variant);
   const prism::chrome::Palette palette = prism::chrome::PaletteFor(variant);
-  const bool dark = prism::chrome::IsDarkSurface(palette.background);
+  const bool dark = prism::chrome::IsDarkSurface(surface);
 
 #if defined(PRISM_C83_MUTANT_NO_DWM)
   // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix state in one line -- no DWM
   // call at all, so the caption keeps the system's light chrome. The suite's
   // brightness assertion must go red; 'probes' stays 0, which is the "the
   // injection really ran" predicate the mutation verdict is armed on.
-  record.caption = ToColorRef(palette.background);
+  record.caption = ToColorRef(surface);
   record.border = ToColorRef(palette.rim);
   (void)dark;
   return record;
 #else
   SetDarkModeAttribute(hwnd, dark, &record);
-  record.caption = ToColorRef(palette.background);
+  record.caption = ToColorRef(surface);
   record.border = ToColorRef(palette.rim);
   const HRESULT captionResult = ::DwmSetWindowAttribute(
       hwnd, kCaptionColorAttribute, &record.caption, sizeof(record.caption));

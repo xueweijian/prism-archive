@@ -185,6 +185,10 @@ inline std::ostream& operator<<(std::ostream& os, LogLevel level) {
 inline constexpr char kLanguageKey[] = "language.tag";
 inline constexpr char kThemeKey[] = "appearance.theme";
 inline constexpr char kHighContrastKey[] = "appearance.highContrast";
+// C106: "auto-hide the menu bar" -- the bar starts down and Alt brings it back.
+// Read like kHighContrastKey (a document key this dialog has no control for
+// yet): absent means false, which is what every earlier build did.
+inline constexpr char kMenuAutoHideKey[] = "appearance.menuAutoHide";
 inline constexpr char kExtractDirKey[] = "paths.lastExtractDir";
 inline constexpr char kThumbnailKey[] = "cache.thumbnailLimitMb";
 inline constexpr char kLogLevelKey[] = "logging.level";

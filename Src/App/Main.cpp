@@ -1270,6 +1270,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       window.SetChromeVariant(prism::chrome::ShellVariantFor(
           settings.store.GetString(prism::win::settingsui::kThemeKey, "system"),
           settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false)));
+      // C106: the auto-hide preference is live too -- a document that turned it
+      // on withdraws the bar on save, without a restart.
+      window.SetMenuAutoHide(
+          settings.store.GetBool(prism::win::settingsui::kMenuAutoHideKey, false));
       app->extractOptions = LiveExtractionOptions(settings.store);
       InvalidateRect(window.Hwnd(), nullptr, FALSE);
       window.SetStatus(L"\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
@@ -2097,6 +2101,25 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
   });
 #endif
+
+  // ---- C106: Ctrl+O, and the auto-hide preference -------------------------
+  //
+  // Ctrl+O is a CHORD, not a menu item: the table resolves it (PrismCore
+  // Shortcuts.hpp) and the window asks here. It deliberately goes through the
+  // same PickArchive + PostArchiveChanged pair the action island's Open button
+  // uses, so a chord-opened archive takes the one switch/tab/session path
+  // (C34/C60) instead of a second implementation of "open".
+  window.SetOpenArchiveHandler([&window]() {
+    const std::wstring picked = PickArchive();
+    if (!picked.empty()) window.PostArchiveChanged(picked);
+  });
+  // The setting (appearance.menuAutoHide) is applied BEFORE the first
+  // ShowWindow: a bar that is painted once and then withdrawn is a visible
+  // flash, and the window is created hidden for exactly this kind of decision.
+  // Read exactly like appearance.highContrast -- a document key; absent means
+  // "the bar stays", which is what every earlier build did.
+  window.SetMenuAutoHide(
+      settings.store.GetBool(prism::win::settingsui::kMenuAutoHideKey, false));
 
   // C86 (S3-4): the breadcrumb's count segment belongs to the window now (the
   // folder's own count, with the archive total in parentheses), so the app does

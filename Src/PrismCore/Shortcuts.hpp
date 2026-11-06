@@ -74,6 +74,11 @@ enum class Command : uint8_t {
   // C62: Ctrl+F -> the archive list's search box (the field itself is a
   // non-modal filter; the window owns the text buffer it edits).
   OpenSearch,
+  // C106: Ctrl+O -> open another archive. The chord existed in the blueprint's
+  // 9.1 table and in the users' fingers, but NOT in this table: it resolved to
+  // None, so Ctrl+O did nothing at all. It is a chord, not a menu item, which is
+  // the point -- it must work while the menu bar is hidden.
+  OpenArchive,
   // 9.1 row 4: Ctrl+E / Alt+double-click -> smart extract, no dialog.
   SmartExtract,
   // 9.1 row 5: Ctrl+Shift+N -> virtual folder in the archive (CoW transaction).
@@ -110,6 +115,7 @@ inline std::ostream& operator<<(std::ostream& os, Command command) {
     case Command::OpenPalette: return os << "OpenPalette";
     case Command::ClosePalette: return os << "ClosePalette";
     case Command::OpenSearch: return os << "OpenSearch";
+    case Command::OpenArchive: return os << "OpenArchive";
     case Command::SmartExtract: return os << "SmartExtract";
     case Command::NewFolder: return os << "NewFolder";
     case Command::DeleteSelected: return os << "DeleteSelected";
@@ -170,6 +176,7 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
     switch (key) {
       case 'K': return Command::OpenPalette;   // 9.1 row 3
       case 'F': return Command::OpenSearch;    // C62: find in the list
+      case 'O': return Command::OpenArchive;   // C106: open another archive
       case 'E': return Command::SmartExtract;  // 9.1 row 4
       case 'A': return Command::SelectAll;     // C67: select every row
       case '1': return Command::ToggleGrid;    // batch A, kept in the table

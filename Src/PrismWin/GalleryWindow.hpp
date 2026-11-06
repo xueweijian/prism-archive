@@ -1293,19 +1293,8 @@ class GalleryWindow {
   // The device context the island's frames are composed on (the test creates an
   // offscreen target there; a cross-device target is D2DERR_WRONG_RESOURCE_DOMAIN).
   ID2D1DeviceContext* GlassContext() const { return glass_ ? glass_->Context() : nullptr; }
-  // Present ONE island frame through the product's own PresentGlassFrame, without
-  // waiting for a WM_PAINT. A suite needs the steady state (the pill belongs to
-  // the island) BEFORE it renders the window's frame offscreen: after a real
-  // paint the renderer's cached C77 backdrop bitmap lives on the window's device,
-  // and D2D refuses to sample it from a WIC target (D2DERR_WRONG_RESOURCE_DOMAIN,
-  // measured on this box). The seam keeps the production path -- capture,
-  // constant buffer, chain, pill content -- and only changes who calls it.
-  bool PresentGlassFrameForTest() {
-    if (!glass_) return false;
-    const int before = glassComposedFrames_;
-    PresentGlassFrame();
-    return glassComposedFrames_ > before;
-  }
+  // (PresentGlassFrameForTest lives with the other C113 capture seams further
+  // down; the two cards defined it independently and the merge keeps ONE.)
   // One island frame, with the content underneath supplied by the caller instead
   // of captured from the window. This is the SAME composition the product
   // presents (PresentGlassFrame -> PaintIslandContent); a suite that painted a

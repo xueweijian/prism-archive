@@ -47,6 +47,7 @@
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
 #include "ActionBar.hpp"    // C-V2: the action-band painter (DESIGN.md §2)
 #include "GlassPanel.hpp"   // C77: the ONE glass-panel helper (fill/rim/shadow)
+#include "ListType.hpp"     // C109: the numeric-column format + tnum, one authority
 #include "SidebarView.hpp"  // C12 draw commands -- painted since C27, refined by C29
 
 namespace prism::win::gallery {
@@ -335,6 +336,12 @@ class GalleryRenderer {
     prism::win::typography::CreateTextFormat(
         writeFactory_.Get(), 12.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
         small_.ReleaseAndGetAddressOf());
+    // C109: the numeric columns (size / packed / ratio). One format, trailing
+    // alignment, tabular advances -- see ListType.hpp for why the family is
+    // monospaced instead of "the proportional face + tnum".
+    hr = prism::win::listtype::CreateNumericFormat(
+        writeFactory_.Get(), numbers_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
     if (caption_) caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     if (title_) title_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
@@ -1633,8 +1640,11 @@ class GalleryRenderer {
               D2D1::RectF(band.left + 32.0f, band.top + 7.0f, nameRight, band.bottom - 6.0f),
               textPrimary_.Get());
     if (showSize) {
-      DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(item.size)),
-                        band.right - 100.0f, band.top + 7.0f, 92.0f, textSecondary_.Get());
+      // C109: the grid's fallback band shows the same numeric cell as the list,
+      // on the same tabular face and aligned to the same box edge.
+      DrawNumericTrailing(target, Utf8(prism::list::FormatBytes(item.size)),
+                          band.right - 100.0f, band.right - 8.0f, band.top + 7.0f,
+                          textSecondary_.Get());
     }
     DrawSelectionRing(target, scene, cell.rect, item.index, 10.0f);
   }
@@ -1978,7 +1988,7 @@ class GalleryRenderer {
   }
 
   // The main-window file list (blueprint ch. 3.2): 名称 | 原始大小 | 压缩后 |
-  // 压缩率, 32 px virtualized rows from WindowLayout, semantic micro-capsule
+  // 压缩率, 36 px virtualized rows from WindowLayout (C109), micro-capsule
   // bars, folders first. Every rectangle is anchored to the layout's list body,
   // which is already inset by the rail (C29's column, V1's geometry).
   void DrawListMode(ID2D1RenderTarget* target, const Scene& scene,
@@ -1996,11 +2006,18 @@ class GalleryRenderer {
     const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
     const prism::layout::Rect body = prism::layout::ListBodyRect(layout);
     const int scroll = static_cast<int>(scene.listScroll);
-    const float right = static_cast<float>(body.right);
-    const float nameRight = right - cols.sizeW - cols.packedW - cols.ratioW - 12.0f;
-    const float sizeX = right - cols.sizeW - cols.packedW - cols.ratioW + 6.0f;
-    const float packedX = right - cols.packedW - cols.ratioW + 6.0f;
-    const float ratioX = right - cols.ratioW + 6.0f;
+    // C109: three explicit boxes with a >= 16 px gutter, each ending on its own
+    // column baseline. Every numeric cell is drawn trailing-aligned against
+    // these edges, so a 1-digit and a 4-digit size share a right edge by
+    // construction rather than by font luck.
+    const uint32_t canvasW = static_cast<uint32_t>(body.right);
+    const float nameRight = static_cast<float>(cols.nameRight(canvasW));
+    const float sizeLeft = static_cast<float>(cols.sizeLeft(canvasW));
+    const float sizeRight = static_cast<float>(cols.sizeRight(canvasW));
+    const float packedLeft = static_cast<float>(cols.packedLeft(canvasW));
+    const float packedRight = static_cast<float>(cols.packedRight(canvasW));
+    const float ratioLeft = static_cast<float>(cols.ratioLeft(canvasW));
+    const float ratioRight = static_cast<float>(cols.ratioRight(canvasW));
     const float textTop = static_cast<float>(header.top) + 4.0f;
 
     // C90: GLYPHS ARE NOT A REFRACTION SOURCE. At 1/8 a 13 px run of near-white
@@ -2050,12 +2067,12 @@ class GalleryRenderer {
                 D2D1::RectF(static_cast<float>(header.left) + prism::layout::kListIndent,
                             textTop, nameRight, textTop + 24.0f),
                 textSecondary_.Get());
-      DrawTrailingLabel(target, L"\x539F\x59CB\x5927\x5C0F", sizeX, textTop, cols.sizeW - 18,
-                        textSecondary_.Get());
-      DrawTrailingLabel(target, L"\x538B\x7F29\x540E", packedX, textTop, cols.packedW - 18,
-                        textSecondary_.Get());
-      DrawTrailingLabel(target, L"\x538B\x7F29\x7387", ratioX, textTop, cols.ratioW - 18,
-                        textSecondary_.Get());
+      DrawTrailingLabel(target, caption_.Get(), L"\x539F\x59CB\x5927\x5C0F", sizeLeft,
+                        sizeRight, textTop, textSecondary_.Get());
+      DrawTrailingLabel(target, caption_.Get(), L"\x538B\x7F29\x540E", packedLeft,
+                        packedRight, textTop, textSecondary_.Get());
+      DrawTrailingLabel(target, caption_.Get(), L"\x538B\x7F29\x7387", ratioLeft, ratioRight,
+                        textTop, textSecondary_.Get());
       // The one 1 px separator (DESIGN: flat text + a rule, nothing else).
       island_->SetColor(ToD2d(prism::theme::Lookup(prism::theme::TokenId::DividerSubtle,
                                                    scene.theme)
@@ -2121,20 +2138,20 @@ class GalleryRenderer {
           DrawLabel(target, caption_.Get(), name,
                     D2D1::RectF(nameLeft + 28.0f, top + 5.0f, nameRight, bottom - 4.0f),
                     textPrimary_.Get());
-          DrawTrailingLabel(target, L"--", sizeX, top + 6.0f, cols.sizeW - 18,
-                            textSecondary_.Get());
-          DrawTrailingLabel(target, L"--", packedX, top + 6.0f, cols.packedW - 18,
-                            textSecondary_.Get());
+          DrawNumericTrailing(target, L"--", sizeLeft, sizeRight, top + 6.0f,
+                              textSecondary_.Get());
+          DrawNumericTrailing(target, L"--", packedLeft, packedRight, top + 6.0f,
+                              textSecondary_.Get());
         }
       } else {
         if (drawGlyphs) {
           DrawLabel(target, caption_.Get(), name,
                     D2D1::RectF(nameLeft, top + 5.0f, nameRight, bottom - 4.0f),
                     textPrimary_.Get());
-          DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.size)), sizeX,
-                            top + 6.0f, cols.sizeW - 18, textPrimary_.Get());
-          DrawTrailingLabel(target, Utf8(prism::list::FormatBytes(row.packedSize)), packedX,
-                            top + 6.0f, cols.packedW - 18, textPrimary_.Get());
+          DrawNumericTrailing(target, Utf8(prism::list::FormatBytes(row.size)), sizeLeft,
+                              sizeRight, top + 6.0f, textPrimary_.Get());
+          DrawNumericTrailing(target, Utf8(prism::list::FormatBytes(row.packedSize)),
+                              packedLeft, packedRight, top + 6.0f, textPrimary_.Get());
         }
       }
 
@@ -2145,7 +2162,7 @@ class GalleryRenderer {
       // the longer honest string fits.
       if (prism::list::RatioBarVisible(row)) {
         const auto bar = prism::list::RatioBar(row);
-        const float trackX = right - cols.ratioW + 8.0f;
+        const float trackX = ratioLeft + 8.0f;   // C109: the ratio column owns its origin
         // C101 (ui-redesign-plan §2.2): the bar is a READOUT, not a rule. The
         // shipped one was 6 px of full-alpha #007AFF across the entire 130 px
         // ratio column -- the user's "刺眼荧光绿厚条". This one is 4 px tall with
@@ -2190,24 +2207,47 @@ class GalleryRenderer {
         }
         tileBorder_->SetColor(kTileBorder);
         if (drawGlyphs) {
+          // C109 + C101 merge: ONE percentage draw, on the tabular face, ending
+          // on the ratio column's baseline. (The rebase left C101's old
+          // DrawTrailingLabel call here as well; two runs would double-paint.)
           const std::wstring pct = Utf8(prism::list::RatioCellText(row));
-          DrawTrailingLabel(target, pct, right - cols.ratioW + 8.0f + barWidth + 6.0f,
-                            top + 6.0f, 40, textSecondary_.Get());
+          DrawNumericTrailing(target, pct, ratioRight - 48.0f, ratioRight, top + 6.0f,
+                              textSecondary_.Get());
         }
       } else if (drawGlyphs) {
-        DrawTrailingLabel(target, Utf8(prism::list::RatioCellText(row)),
-                          right - cols.ratioW + 8.0f, top + 6.0f, cols.ratioW - 16,
-                          textSecondary_.Get());
+        DrawNumericTrailing(target, Utf8(prism::list::RatioCellText(row)), ratioLeft + 8.0f,
+                            ratioRight, top + 6.0f, textSecondary_.Get());
       }
     }
   }
 
-  void DrawTrailingLabel(ID2D1RenderTarget* target, const std::wstring& text, float x,
-                         float y, float w, ID2D1Brush* brush) {
-    if (!caption_ || text.empty()) return;
-    caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-    DrawLabel(target, caption_.Get(), text, D2D1::RectF(x, y, x + w, y + 24.0f), brush);
-    caption_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+  // C109: trailing alignment against a BOX [left, right]; the box's right edge
+  // is the column baseline. The format is passed in because the header keeps the
+  // proportional system face (CJK labels) while the numbers use numbers_.
+  void DrawTrailingLabel(ID2D1RenderTarget* target, IDWriteTextFormat* format,
+                         const std::wstring& text, float left, float right, float y,
+                         ID2D1Brush* brush) {
+    if (!format || text.empty() || right <= left) return;
+    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawLabel(target, format, text, D2D1::RectF(left, y, right, y + 24.0f), brush);
+    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+  }
+
+  // C109: a numeric cell. The layout is the SAME object CreateNumericFormat and
+  // ApplyTabularFigures describe -- the suite builds its advance probe with
+  // those very functions, so "the renderer is tabular" is measured, not hoped.
+  void DrawNumericTrailing(ID2D1RenderTarget* target, const std::wstring& text, float left,
+                           float right, float y, ID2D1Brush* brush) {
+    if (!numbers_ || text.empty() || right <= left) return;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(prism::win::listtype::CreateNumericLayout(
+            writeFactory_.Get(), numbers_.Get(), text.c_str(),
+            static_cast<UINT32>(text.size()), right - left, 24.0f,
+            layout.ReleaseAndGetAddressOf()))) {
+      return;
+    }
+    target->DrawTextLayout(D2D1::Point2F(left, y), layout.Get(), brush,
+                           D2D1_DRAW_TEXT_OPTIONS_CLIP);
   }
 
   // C-V2: the band itself. The model decides how V1's actionIsland is shared
@@ -2466,6 +2506,7 @@ class GalleryRenderer {
     if (caption_) ++n;
     if (title_) ++n;
     if (small_) ++n;
+    if (numbers_) ++n;  // C109
     if (sidebarLabel_) ++n;
     if (sidebarSmall_) ++n;
     if (sidebarStatus_) ++n;
@@ -2505,6 +2546,7 @@ class GalleryRenderer {
     caption_.Reset();
     title_.Reset();
     small_.Reset();
+    numbers_.Reset();  // C109
     sidebarLabel_.Reset();
     sidebarSmall_.Reset();
     sidebarStatus_.Reset();
@@ -2548,6 +2590,7 @@ class GalleryRenderer {
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
   // C29 sidebar: one recolourable brush + the two single-line text formats.
   ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
+  ComPtr<IDWriteTextFormat> numbers_;  // C109: size/packed/ratio columns
   ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
   // C79: the capsule readout (12 px); headings reuse sidebarSmall_. C105: it is
   // the card's VALUE line (primary role), and sidebarCardLabel_ is the 10 px

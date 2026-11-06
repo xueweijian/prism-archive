@@ -303,6 +303,45 @@ int CountAccentRuns(const std::vector<UINT32>& pixels, UINT32 width, int left, i
   return count;
 }
 
+// C109: the list row pitch moved 32 -> 36, which slid the selected-row probe band
+// onto the sidebar's OWN focus pill. That pill is legitimate sidebar content, not
+// the list, so the "list painted inside the sidebar column" guard counts the band
+// OUTSIDE it. A real leak is still caught: the list can only paint across the
+// whole column, so the corners the pill does not cover light up.
+// C109 + C104: two false positives had to be removed from this probe before it
+// measured a LEAK: (a) the sidebar's own focus pill (C109 moved the row pitch,
+// which slid the band onto it) and (b) the rail's folder glyphs, which C104
+// legitimately made blue. A real leak is a horizontal RUN across the column --
+// an icon is at most ~14 px -- so the counter skips the pill box AND only
+// counts runs of at least kMinLeakRun. Measured on the integrated build: the
+// glyph produced 104 "accent" pixels and zero runs >= 40.
+inline constexpr int kMinLeakRun = 40;
+int CountAccentOutside(const std::vector<UINT32>& pixels, UINT32 width, int left, int top,
+                       int right, int bottom, const prism::win::sidebar::Box& skip) {
+  int count = 0;
+  for (int y = top; y < bottom; ++y) {
+    int run = 0;
+    for (int x = left; x <= right; ++x) {
+      bool accent = false;
+      if (x < right &&
+          !(x >= static_cast<int>(skip.left) && x < static_cast<int>(skip.right) &&
+            y >= static_cast<int>(skip.top) && y < static_cast<int>(skip.bottom))) {
+        const UINT32 value = pixels[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
+        const int blue = static_cast<int>(value & 0xFFu);
+        const int red = static_cast<int>((value >> 16) & 0xFFu);
+        accent = (blue - red) >= 40;
+      }
+      if (accent) {
+        ++run;
+        continue;
+      }
+      if (run >= kMinLeakRun) count += run;
+      run = 0;
+    }
+  }
+  return count;
+}
+
 // Mean absolute per-channel difference over a pixel predicate.
 template <typename Predicate>
 double MeanAbsDiff(const std::vector<UINT32>& a, const std::vector<UINT32>& b, Predicate inside,
@@ -1368,8 +1407,8 @@ int main(int argc, char** argv) {
       // C104: run-based (see CountAccentRuns) -- the rail's folder glyphs are
       // soft blue now, and they are not a list pill.
       const int accentLeftExpanded =
-          CountAccentRuns(frameSidebar, kW, 16, selectedRowTop + 2, kColumnRight + 4,
-                          selectedRowBottom - 2, 40);
+          CountAccentOutside(frameSidebar, kW, 16, selectedRowTop + 2, kColumnRight + 4,
+                             selectedRowBottom - 2, pillBox);
       const int accentLeftFolded =
           CountAccent(frameFolded, kW, 16, selectedRowTop + 2, kColumnRight + 4,
                       selectedRowBottom - 2);

@@ -340,20 +340,25 @@ PRISM_TEST("v4.flow: the grid holds only directories and real thumbnails") {
 // ---------------------------------------------------------------------------
 // 5. density
 // ---------------------------------------------------------------------------
-PRISM_TEST("v4.density: 1200x800 shows at least 18 list rows") {
+// C109 changed the number below from 18 to 16 ON PURPOSE. The list row is now
+// 36 px (was 32) so a data-dense listing breathes; (800 - 88 - 28 - 32 - 32) /
+// 36 = 17.22, i.e. 17 full rows instead of 19. The V4 property this case exists
+// for -- "the list is not a handful of giant pills" -- still holds at 17; the
+// exact 19 was a consequence of the old pitch, not a design promise.
+PRISM_TEST("v4.density: 1200x800 shows at least 16 list rows") {
   const Layout layout = prism::layout::Compute(static_cast<int>(kWidth),
                                                static_cast<int>(kHeight), false, true);
-  PRISM_CHECK_EQ(prism::layout::kListRowHeight, 32);
+  PRISM_CHECK_EQ(prism::layout::kListRowHeight, 36);
   const Rect body = prism::layout::ListBodyRect(layout);
   const int rows = body.Height() / prism::layout::kListRowHeight;
-  PRISM_CHECK_EQ(rows, 19);  // (800 - 88 - 28 - 32 - 32) / 32
-  PRISM_CHECK(rows >= 18);
-  // Every one of those rows is anchored to the same 32 px pitch, and the hit
+  PRISM_CHECK_EQ(rows, 17);  // (800 - 88 - 28 - 32 - 32) / 36
+  PRISM_CHECK(rows >= 16);
+  // Every one of those rows is anchored to the same 36 px pitch, and the hit
   // test agrees with the first and the last of them.
   for (int i = 0; i < rows; ++i) {
     const Rect row = prism::layout::ListRowRect(layout, i, 0);
-    PRISM_CHECK_EQ(row.Height(), 32);
-    PRISM_CHECK_EQ(row.top, body.top + i * 32);
+    PRISM_CHECK_EQ(row.Height(), 36);
+    PRISM_CHECK_EQ(row.top, body.top + i * 36);
     PRISM_CHECK_EQ(prism::layout::ListRowAt(layout, row.left + 4, row.top + 8, 0), i);
   }
   PRISM_CHECK(prism::layout::ListRowRect(layout, rows - 1, 0).bottom <= body.bottom);

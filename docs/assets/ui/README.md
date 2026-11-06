@@ -220,6 +220,38 @@ field: `Scene::theme`.
 - **Negative control**: `PRISM_C102_MUTANT_FLAT` puts the island alpha back to
   `.58`; the frame then measures `6` levels and the run prints
   `C102 MUTATION CAUGHT: flat`.
+# C109 list typography -- tabular numerals, one baseline, 36 px rows
+
+`c109-list-type.png` is a full 1920 x 1080 frame of the real window (Midnight,
+list mode, rail shown, 20 rows), rendered by the REAL renderer
+(`Tests/win/test_c109_list_type.cpp` -> `GalleryRenderer` -> a headless WIC
+target). It is not a mock-up: the same `DrawListMode` paints the shipping list.
+
+## What changed
+
+- The three numeric columns are right-anchored BOXES separated by a 16 px
+  gutter (`prism::list::ColumnLayout`); a cell's text is trailing-aligned to its
+  box's right edge, the column baseline.
+- Size / packed / ratio use one tabular numeric face (`ListType.hpp`). On the
+  shipping Segoe UI the digits are already tabular but `.` advances 2.818 px vs
+  7.008 px, so decimal points could not align; the numeric column now uses
+  Consolas (every glyph 7.147 px at 13 px) with OpenType `tnum` set on the run.
+- The list row is 36 px (was 32), so the pitch and the hit test both moved by
+  the same constant (`kListRowHeight`); the grid's tile-less fallback band is
+  deliberately still 32 px.
+
+## Measured on the rendered frame
+
+- **Advances** via DirectWrite on the same format the renderer paints with:
+  `1 = 7.147`, `8 = 7.147`, `0 = 7.147`, `. = 7.147`, spread `0.000 px`.
+- **Right edges** of the size cells for `6.3 KB` / `11.2 KB` / `123.4 MB`:
+  `1621 / 1621 / 1621`, spread `0 px` (limit 1).
+- **Hit test**: a click at y = 218 in a 1200 x 800 window is item 2 -- the third
+  36 px row.
+- **Negative control**: `PRISM_C109_MUTANT_PROPORTIONAL` restores proportional
+  Segoe UI with no tnum; the advances become `7.008 / 7.008 / 7.008 / 2.818`
+  (spread `4.189 px`) and the suite prints
+  `C109 MUTATION CAUGHT: proportional`.
 
 # C103 font stack evidence -- the same list window before/after
 
@@ -354,3 +386,8 @@ two negative controls are the same source compiled with
 `PRISM_C110_MUTANT_TILES_IN_BACKDROP` (A1 red -> `C110 MUTATION CAUGHT:
 tiles-in-backdrop`) and `PRISM_C110_MUTANT_FLAT_TILE` (A3 red ->
 `C110 MUTATION CAUGHT: flat-tile`).
+. E:\wg\env.ps1 -Card c109
+cmake --build E:\build\wt-c109 --parallel 2 --target win_c109_list_type
+ctest --test-dir E:\build\wt-c109 -R "c109" --output-on-failure
+& E:\build\wt-c109\Tests\win_c109_list_type.exe docs\assets\ui
+```

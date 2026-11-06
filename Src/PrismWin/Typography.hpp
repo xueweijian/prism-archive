@@ -91,6 +91,15 @@ inline const std::vector<std::wstring>& CjkFamilies() {
 // The one fallback literal in the product: every other file asks this header.
 inline constexpr wchar_t kFallbackFamily[] = L"Segoe UI";
 
+// C109: the numeric columns need a family whose every glyph advances the same
+// (tabular figures equalize DIGITS, not punctuation -- "." still drifts in the
+// proportional face). The brief allows a mono family for the columns, so the
+// numbers use Consolas and the proportional case (the mutation arm) uses the
+// system UI face. They live HERE because this is the ONE file allowed to
+// spell a family name (core.c103_font_literals scans every other source line).
+inline constexpr const wchar_t* kMonoFamily = L"Consolas";
+inline constexpr const wchar_t* kProportionalFamily = L"Segoe UI";
+
 inline const std::wstring& FallbackFamilyName() {
   static const std::wstring fallback = kFallbackFamily;
   return fallback;
@@ -324,6 +333,18 @@ inline HRESULT CreateTextFormat(IDWriteFactory* factory, float size,
       locale != nullptr ? locale : L"en-US", out);
 }
 
+// C109: a format for a family the caller NAMES (the numeric columns pin a mono
+// face). It still goes through this file so no other source line calls DWrite
+// directly -- core.c103_font_literals asserts that.
+inline HRESULT CreateTextFormatInFamily(IDWriteFactory* factory, const wchar_t* family,
+                                        float size, DWRITE_FONT_WEIGHT weight,
+                                        DWRITE_FONT_STYLE style, const wchar_t* locale,
+                                        IDWriteTextFormat** out) {
+  if (factory == nullptr || out == nullptr || family == nullptr) return E_INVALIDARG;
+  *out = nullptr;
+  return factory->CreateTextFormat(family, nullptr, weight, style, DWRITE_FONT_STRETCH_NORMAL,
+                                   size, locale != nullptr ? locale : L"en-US", out);
+}
 // The only way a new IDWriteTextLayout is created in PrismWin. The custom
 // fallback is attached BEFORE the caller draws, so CJK runs take the resolved
 // CJK family while Latin stays on the format's base family.

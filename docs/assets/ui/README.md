@@ -193,4 +193,42 @@ scan reads 2 with the fix and 74 with the pill back in the source.
 prints `C77 MUTATION CAUGHT: state-in-backdrop` (unselected: 0 violations,
 selected: 512).
 
+# C102 Daylight layered material -- canvas #F5F5F7 + island contrast
+
+Two frames of the SAME scene (1280 x 800, list mode, rail shown, action island,
+breadcrumb), rendered by the REAL renderer (`Tests/win/test_c102_daylight.cpp`
+-> `GalleryRenderer` -> a headless WIC target). They differ by exactly one
+field: `Scene::theme`.
+
+| file | what it shows |
+| --- | --- |
+| `c102-day.png` | C102 Daylight: canvas #F5F5F7, content plates #FFFFFF, island `rgba(255,255,255,.82)` -- the island now stands 8 levels off the paper instead of 5 |
+| `c102-night.png` | Midnight, deliberately UNCHANGED: canvas (13,14,18), island (26,29,37) |
+
+## Pixel assertions (measured on the rendered frame)
+
+- **Daylight canvas** at (1200,500): `(245,245,247)` == #F5F5F7 (the card's
+  tolerance is +-2). Before C102 the same pixel was `(247,249,252)`.
+- **Island vs canvas**: island `(253,253,254)` - canvas `(245,245,247)` =
+  **8 levels** (largest single-channel gap, the metric the card quotes). Before
+  C102 it was `5` -- the "plastic pill on a washed-out white page".
+- **Night / HighContrast**: rendered canvas `(12,13,16)` / `(0,0,0)`; the token
+  rows themselves are compared verbatim in `core.c102_daylight`, so "only Day
+  moved" is a statement about the table, not about one composited pixel.
+- **HighContrast text**: `21.00:1` body and `14.45:1` selected row, both
+  `>= 4.5:1` (the C83/C91 contrast gate).
+- **Negative control**: `PRISM_C102_MUTANT_FLAT` puts the island alpha back to
+  `.58`; the frame then measures `6` levels and the run prints
+  `C102 MUTATION CAUGHT: flat`.
+
+## Reproduce
+
+```pwsh
+. E:\wg\env.ps1 -Card c102
+cmake --build E:\build\wt-c102 --parallel 2 --target win_c102_daylight_test
+ctest --test-dir E:\build\wt-c102 -R "c102" --output-on-failure
+& E:\build\wt-c102\Tests\win_c102_daylight_test.exe docs\assets\ui
+```
+
+No output directory = assertions only, no files (the CI path).
 

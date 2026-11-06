@@ -109,8 +109,10 @@ PRISM_TEST("day and night tints carry the blueprint token values") {
   float cd[20], cn[20];
   day.WriteCbuffer(IslandId::Nav, 1600, 1000, cd);
   night.WriteCbuffer(IslandId::Nav, 1600, 1000, cn);
-  // Daylight island tint rgba(255,255,255,0.58); Midnight rgba(38,42,54,0.52)
-  PRISM_CHECK(std::abs(cd[12] - 1.0f) < 0.01f && std::abs(cd[15] - 0.58f) < 0.01f);
+  // Daylight island tint rgba(255,255,255,0.82) -- C102: the plan's .82, up
+  // from the blueprint's .58, so the island can stand off the #F5F5F7 canvas.
+  // Midnight rgba(38,42,54,0.52) is untouched.
+  PRISM_CHECK(std::abs(cd[12] - 1.0f) < 0.01f && std::abs(cd[15] - 0.82f) < 0.01f);
   PRISM_CHECK(std::abs(cn[12] - 38.0f / 255.0f) < 0.01f);
   PRISM_CHECK(std::abs(cn[13] - 42.0f / 255.0f) < 0.01f);
   PRISM_CHECK(std::abs(cn[15] - 0.52f) < 0.01f);

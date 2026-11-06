@@ -493,13 +493,28 @@ int VerifyGlassOptics(IWICImagingFactory* wic, const char* outDir) {
   // bevel 8 px -> bandDiff ~0.9 / bandMax ~32 / bandMoved ~1e3 pixels.
   // The pure-blur baseline (u_iorStrength = 0) measures exactly 0 / 0 / 0, and
   // the interior must not move at all: refraction is a band, not a filter.
-  if (bandDiff < 0.4) {
+  //
+  // C102: the band can only show as much as the tint lets through, so the two
+  // magnitude floors are expressed PER UNIT OF TRANSMISSION and no longer
+  // depend on --surface-floating-island's alpha (docs/CI.md, "门禁阈值不得依赖
+  // 可调材质参数"). Measured at the old alpha .58: 0.9 / 32 -> 2.14 / 76;
+  // at C102's .82: 0.35 / 14 -> 1.94 / 78. A chain that stopped refracting
+  // still measures 0 / 0 at ANY alpha, which is what these two checks are for.
+  const double penetrable = (std::max)(0.05, 1.0 - static_cast<double>(liquid.v[15]));
+  const double bandDiffPerTransmission = bandDiff / penetrable;
+  const double bandMaxPerTransmission = static_cast<double>(bandMax) / penetrable;
+  std::printf("GLASS OPTICS: per unit transmission bandDiff=%.2f bandMax=%.2f "
+              "(penetrable=%.2f)\n", bandDiffPerTransmission, bandMaxPerTransmission,
+              penetrable);
+  if (bandDiffPerTransmission < 1.50) {
     std::printf("FAIL: refraction band is indistinguishable from the pure-blur baseline "
-                "(bandDiff=%.2f < 0.4)\n", bandDiff);
+                "(bandDiff=%.2f -> %.2f per unit transmission < 1.50)\n", bandDiff,
+                bandDiffPerTransmission);
     ++failures;
   }
-  if (bandMax < 16) {
-    std::printf("FAIL: no pixel in the refraction band moved (bandMax=%d < 16)\n", bandMax);
+  if (bandMaxPerTransmission < 40.0) {
+    std::printf("FAIL: no pixel in the refraction band moved (bandMax=%d -> %.1f per unit "
+                "transmission < 40)\n", bandMax, bandMaxPerTransmission);
     ++failures;
   }
   if (bandMoved < 120) {

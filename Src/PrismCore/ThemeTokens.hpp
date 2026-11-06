@@ -290,11 +290,27 @@ struct FontRow {
 // --surface-canvas-base, --surface-floating-island, the two EXT text roles and
 // the EXT backdrop reference.
 inline constexpr ColorRow kColorRows[] = {
-    // Daylight (blueprint 3.3 verbatim)
+    // Daylight: the plan's layered material (ui-redesign-plan 2.1) -- canvas
+    // #F5F5F7, content plates #FFFFFF, floating island rgba(255,255,255,.82).
+    //
+    // WHY THE BASE ROW IS (241,241,244) AND NOT (245,245,247). The canvas is a
+    // 72 % sheet over the opaque --surface-backdrop-reference (white), and C77's
+    // veil then washes it again; the PIXEL a resting canvas region shows is the
+    // presented composite, not this row. (241,241,244)@.72 over white IS (245,245,247),
+    // and the veil+ghost below are the same #F5F5F7, so the presented pixel lands
+    // on #F5F5F7 exactly and the flat/presented pair cannot disagree.
+    // The old row, (246,248,252)@.72, presented as (247,249,252): 2..5 levels
+    // lighter and blue-tinted, which is the "hospital white" the plan names.
     {TokenId::SurfaceCanvasBase, Variant::Daylight,
-     Rgba(ChannelFromByte(246), ChannelFromByte(248), ChannelFromByte(252), 0.72f)},
+     Rgba(ChannelFromByte(241), ChannelFromByte(241), ChannelFromByte(244), 0.72f)},
+    // #FFFFFF at .82 (plan 2.1), up from .58. At .58 the island resolved to
+    // (252,252,254) against a (247,249,252) canvas -- 5 levels, i.e. no body at
+    // all: only the rim and the shadow were visible ("a plastic pill on a
+    // washed-out white"). .82 puts the island 8 levels off the canvas, which is
+    // the card's floor, while staying a translucent material (the rim still
+    // reads over the 18 % of canvas that shows through).
     {TokenId::SurfaceFloatingIsland, Variant::Daylight,
-     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.58f)},
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.82f)},
     {TokenId::TextPrimary, Variant::Daylight,
      Rgba(ChannelFromByte(29), ChannelFromByte(29), ChannelFromByte(31), 1.0f)},
     {TokenId::TextSecondary, Variant::Daylight,
@@ -307,10 +323,15 @@ inline constexpr ColorRow kColorRows[] = {
     // much of it survives: .65 leaves 35 % of the chroma -- "desaturate to
     // ~0.35", and it is the veil (not a second alpha) that the pixel suite
     // measures, because a veil is a colour and an alpha is not.
+    // C102: the ghost and the veil are the canvas colour (#F5F5F7), so the
+    // backdrop layer cannot tint an empty region away from the canvas the
+    // renderer cleared to. They used to be (246,248,252) -- the blue-white that
+    // made the veil (65 % of the pixel!) the authority on the canvas colour
+    // while --surface-canvas-base was nominally something else.
     {TokenId::SurfaceBackdropGhost, Variant::Daylight,
-     Rgba(ChannelFromByte(246), ChannelFromByte(248), ChannelFromByte(252), 1.0f)},
+     Rgba(ChannelFromByte(245), ChannelFromByte(245), ChannelFromByte(247), 1.0f)},
     {TokenId::SurfaceBackdropVeil, Variant::Daylight,
-     Rgba(ChannelFromByte(246), ChannelFromByte(248), ChannelFromByte(252), 0.65f)},
+     Rgba(ChannelFromByte(245), ChannelFromByte(245), ChannelFromByte(247), 0.65f)},
     {TokenId::ShadowFloatingPanel, Variant::Daylight,
      Rgba(0.0f, 0.0f, 0.0f, 0.18f)},
     // Midnight (blueprint 3.3 verbatim)
@@ -770,11 +791,29 @@ inline double GlassIntensityScale() {
 // setting and the pixels cannot disagree.
 inline bool BackdropRefractionEnabled() { return live::Current().backdropRefraction; }
 
+#if defined(PRISM_C102_MUTANT_FLAT)
+// NEGATIVE CONTROL (CONTRACTS D3 / D26): put the Daylight island's alpha back
+// to the pre-C102 .58 on the ONE path every painter of "glass" uses, so the
+// "island stands off the canvas" assertion has nothing left to measure. The
+// counter proves the injected branch ran (D27): a red that came from anywhere
+// else cannot print the CAUGHT verdict.
+inline int& MutantFlatHits() {
+  static int hits = 0;
+  return hits;
+}
+#endif
+
 // The floating-island surface with the saved glass intensity folded into its
 // alpha. Every consumer that paints "glass" must come through here; a literal
 // .52/.58 at a call site is the defect this function exists to prevent.
 inline Rgba EffectiveGlassSurface(Variant variant) {
   Rgba surface = Lookup(TokenId::SurfaceFloatingIsland, variant).color;
+#if defined(PRISM_C102_MUTANT_FLAT)
+  if (variant == Variant::Daylight) {
+    ++MutantFlatHits();
+    surface.a = 0.58f;
+  }
+#endif
 #if defined(PRISM_C71_MUTANT_IGNORE_GLASS)
   ++live::MutantGlassHits();
 #else

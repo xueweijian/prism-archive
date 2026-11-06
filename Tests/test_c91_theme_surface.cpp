@@ -12,13 +12,13 @@
 // asked for all three variants and compared with the values the Windows pixel
 // suite samples from a real rendered frame:
 //
-//   canvas      day (247,249,252)  night (13,14,18)  high-contrast (0,0,0)
-//   island      day (252,252,254)  night (26,29,37)
+//   canvas      day (245,245,247)  night (13,14,18)  high-contrast (0,0,0)
+//   island      day (253,253,254)  night (26,29,37)
 //   rail panel  day (255,255,255)  high-contrast (26,26,28)
 //   tab plate   day (254,254,255)  high-contrast (40,40,44)
 //   selected    day (219,236,255)
-//   info card   day (246,248,252)
-//   status strip day (251,254,255) high-contrast (4,5,6)
+//   info card   day (242,242,245)
+//   status strip day (249,250,253) high-contrast (4,5,6)
 //
 // NEGATIVE CONTROL (CONTRACTS D3, one binary):
 //   PRISM_C91_MUTANT_CORE_MIDNIGHT  every variant resolves to Midnight -> the
@@ -124,7 +124,9 @@ PRISM_TEST("c91 the canvas is the theme's composite") {
   // The card's three numbers, verbatim. High contrast is EXACT: an opaque black
   // canvas has no arithmetic left in it, so a tolerance there would only hide a
   // fallback to a Midnight row.
-  const Pixel wantDay{247, 249, 252};
+  // C102 moved the Daylight canvas to the plan's #F5F5F7; the assertion and
+  // its +-2 tolerance are unchanged, only the expected triple is.
+  const Pixel wantDay{245, 245, 247};
   const Pixel wantNight{13, 14, 18};
   const Pixel wantHighContrast{0, 0, 0};
 
@@ -182,12 +184,12 @@ PRISM_TEST("c91 every content surface resolves from the theme") {
     const Pixel strip = ToPixel(StatusStripColor(variant));
 
     if (variant == Variant::Daylight) {
-      PRISM_CHECK(Near("island (day)", island, Pixel{252, 252, 254}, 2));
+      PRISM_CHECK(Near("island (day)", island, Pixel{253, 253, 254}, 2));
       PRISM_CHECK(Near("rail panel (day)", panel, Pixel{255, 255, 255}, 2));
       PRISM_CHECK(Near("tab plate (day)", tab, Pixel{254, 254, 255}, 2));
       PRISM_CHECK(Near("selected row (day)", selected, Pixel{219, 236, 255}, 2));
-      PRISM_CHECK(Near("info card (day)", infoCard, Pixel{246, 248, 252}, 3));
-      PRISM_CHECK(Near("status strip (day)", strip, Pixel{251, 254, 255}, 3));
+      PRISM_CHECK(Near("info card (day)", infoCard, Pixel{242, 242, 245}, 3));
+      PRISM_CHECK(Near("status strip (day)", strip, Pixel{249, 250, 253}, 3));
     } else if (variant == Variant::Midnight) {
       PRISM_CHECK(Near("island (night)", island, Pixel{26, 29, 37}, 2));
     } else {

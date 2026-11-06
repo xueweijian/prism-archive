@@ -8,7 +8,7 @@
 #
 # TWO LAYERS, because the fix has two halves:
 #   core.c91_theme_surface  the canvas/surface arithmetic as pure numbers:
-#                           canvas day (247,249,252) / night (13,14,18) /
+#                           canvas day (245,245,247) / night (13,14,18) /
 #                           high-contrast (0,0,0), the island, the rail panel,
 #                           the tab plate, the selection wash, the info card and
 #                           the status strip -- plus C83's shell-continuity rule

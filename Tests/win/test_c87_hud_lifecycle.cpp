@@ -157,7 +157,13 @@ bool RenderWindow(GalleryWindow& window, Frame* out) {
                                                 target.GetAddressOf()))) {
     return false;
   }
-  if (!window.RenderSceneInto(target.Get())) return false;
+  // C113: the CAPTURE seam, not the raw one. The raw seam paints with the
+  // renderer's cached device objects, so on a window whose first capture already
+  // bound them to a WIC device the SECOND capture is rejected by D2D
+  // (D2DERR_WRONG_RESOURCE_DOMAIN) -- this test renders eight frames. The
+  // capture seam rebuilds them on the target it is given; the frames this file
+  // measures are then the scene instead of a bare canvas.
+  if (!window.RenderSceneForCapture(target.Get())) return false;
 
   WICRect lockRect{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
   ComPtr<IWICBitmapLock> lock;

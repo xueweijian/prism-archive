@@ -785,7 +785,13 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
   PRISM_CHECK_EQ(panel.y, static_cast<uint32_t>(pill.top));
   PRISM_CHECK_EQ(panel.w, static_cast<uint32_t>(pill.Width()));
   PRISM_CHECK_EQ(panel.h, static_cast<uint32_t>(pill.Height()));
-  PRISM_CHECK_EQ(panel.w, static_cast<uint32_t>(prism::layout::kNavPillMaxWidth));
+  // C115: the panel is the pill the LAYOUT publishes -- which is 560 px only on a
+  // client wide enough to hold the full pill beside a complete toolbar (>= 1184).
+  // This runner's default window is 1028 px wide, and there the pill is 404 px by
+  // design: the toolbar owns the rest of the band. Pinning the 560 constant here
+  // was pinning the pre-C115 disagreement, so the bound is now "never wider than
+  // V1's pill" and the identity above (panel == pill) carries the real meaning.
+  PRISM_CHECK(panel.w <= static_cast<uint32_t>(prism::layout::kNavPillMaxWidth));
   PRISM_CHECK_EQ(panel.h, static_cast<uint32_t>(prism::layout::kNavPillHeight));
 
   // Frames: the deferral presents on the second paint, so pump bounded (D29)

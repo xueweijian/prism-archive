@@ -2449,7 +2449,12 @@ class GalleryRenderer {
       target->FillRoundedRectangle(hover, islandBorder_.Get());
       islandBorder_->SetColor(kIslandBorder);
     }
-    DrawLabel(target, title_.Get(), scene.breadcrumb, ToRectF(textRect), textPrimary_.Get());
+    // C115: a crumb run wider than the box is TRIMMED (U+2026), not spilled.
+    // The run is centre-aligned, so an over-wide string used to overflow BOTH
+    // edges of the text box: the trailing half was clipped by D2D, the leading
+    // half was not -- the first crumb could start 12 px left of the box and, on
+    // a deep path, well past the pill. Now the layout itself is the box.
+    DrawBreadcrumbRun(target, scene.breadcrumb, textRect);
     if (scene.islands) {
       // Pointer-tracked specular rim (blueprint ch. 3.1 Layer 5): a bright
       // segment flows along the top edge toward the cursor. In the real
@@ -2580,6 +2585,35 @@ class GalleryRenderer {
               D2D1::RectF(card.left + 18.0f, card.top + height - 36.0f, card.right - 18.0f,
                           card.top + height - 12.0f),
               textSecondary_.Get());
+  }
+
+  // C115: the breadcrumb's text run, trimmed to its box. Kept next to DrawLabel
+  // because it is the same paint, with one extra promise: the LAST visible glyph
+  // is an ellipsis when the string does not fit, and no glyph may leave the box.
+  // Falling back to DrawLabel on a layout failure keeps the pre-C115 behaviour
+  // rather than dropping the breadcrumb entirely.
+  void DrawBreadcrumbRun(ID2D1RenderTarget* target, const std::wstring& text,
+                         const prism::layout::Rect& box) {
+    if (!title_ || text.empty() || box.Width() <= 0 || box.Height() <= 0) return;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(prism::win::typography::CreateTextLayout(
+            writeFactory_.Get(), text.c_str(), static_cast<UINT32>(text.size()),
+            title_.Get(), static_cast<FLOAT>(box.Width()), static_cast<FLOAT>(box.Height()),
+            layout.ReleaseAndGetAddressOf()))) {
+      DrawLabel(target, title_.Get(), text, ToRectF(box), textPrimary_.Get());
+      return;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    ComPtr<IDWriteInlineObject> ellipsis;
+    if (SUCCEEDED(writeFactory_->CreateEllipsisTrimmingSign(
+            title_.Get(), ellipsis.ReleaseAndGetAddressOf())) &&
+        ellipsis != nullptr) {
+      const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+      layout->SetTrimming(&trimming, ellipsis.Get());
+    }
+    target->DrawTextLayout(D2D1::Point2F(static_cast<float>(box.left),
+                                        static_cast<float>(box.top)),
+                           layout.Get(), textPrimary_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
   }
 
   static void DrawLabel(ID2D1RenderTarget* target, IDWriteTextFormat* format,

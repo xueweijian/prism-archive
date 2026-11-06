@@ -443,6 +443,52 @@ picture of them.
   island's own surface cannot show; same colour, one pixel ring).
 - **Negative control**: `PRISM_C112_MUTANT_GLASS_OVER_TEXT` restores the pre-C112
   ownership and the run prints `C112 MUTATION CAUGHT: glass_over_text`.
+# C115 narrow-window evidence -- the action island never sits on the breadcrumb
+
+Two frames of the REAL renderer (`Tests/win/test_c115_narrow_render.cpp` ->
+`GalleryRenderer::Draw` -> a headless WIC target), 729 px tall, grid mode, rail
+shown, tabs open -- i.e. the exact shape the defect was measured on
+(`prism::layout::Compute(w, 729, sidebar=true, listMode=false, tabs=true)`).
+Not mockups: the same code path paints the shipping window.
+
+| file | what it shows |
+| --- | --- |
+| `c115-1028.png` | The squeeze. The pill is 16..420 (not V1's 560), the action island is 432..1012, and the crumb run ends in an ellipsis INSIDE the pill. Before this card the authority still called the pill 16..576, so 144 px of it sat under the first four buttons -- and the glass island panel (sized from that authority) really was 560 px wide. |
+| `c115-1264.png` | The baseline, unchanged to the pixel: pill 16..576, island 588..1248, full-size buttons. The crumb run is longer than the 512 px text box here too, so the ellipsis rule is exercised on both frames. |
+
+## The boundary (measured, 900 -> 1400 at 1 px steps)
+
+The overlap was not born at 1028. On the pre-fix code it exists at every client
+width from 900 up to **1171** and is exactly `1172 - w` px:
+
+| w | NavPillRect (pre-fix) | action island | overlap |
+| --- | --- | --- | --- |
+| 1028 | 16..576 | 432..1012 | 144 px |
+| 1168 | 16..576 | 572..1152 | 4 px |
+| 1172 | 16..576 | 576..1156 | 0 px (touching, half-open) |
+| 1264 | 16..576 | 588..1248 | 0 px |
+
+The pill only regains its full 560 px at **1184** (`16 + 560 + 12 + 580 + 16`);
+1172..1183 squeeze it by 1..11 px while the island still clears it.
+
+## Measured on the rendered frame
+
+- **Geometry**, 900..1920 step 4 (256 widths): `pill n island = 0` at every
+  width, `island.left == pill.right + 12` at every width, and
+  `NavPillRect == actionbar::Compute(...).navPill` at every width.
+- **Baselines**: 1264 and 1482 produce the pre-card rectangles to the pixel
+  (`1264: pill 16..576 / island 588..1248`, `1482: pill 16..576 / island
+  588..1360`, text box 40..552 in both).
+- **Paint vs geometry at 1028**: the pill body's fill is still present 8 px
+  inside 420 and is the drop shadow 4 px past it -- the painted pill really ends
+  at 420, not at V1's 576.
+- **Crumb containment at 1028**: glyph ink spans `42..394` inside the text box
+  `40..396`; zero ink in `397..414`, i.e. nothing spills toward the toolbar and
+  the leading overflow (which D2D's clip did not hold) is gone.
+- **Negative control**: `PRISM_C115_MUTANT_IGNORE_NARROW` restores "the pill
+  never yields" and prints `C115 MUTATION CAUGHT: ignore_narrow` at the first
+  failed width (the sweep then reports 68 of 256 widths overlapping, max 272 px,
+  and 1028 = 144 px).
 
 ## Reproduce
 
@@ -455,3 +501,38 @@ E:\build\wt-c112\Tests\win_c112_glass_owns_text.exe
 ```
 
 Without `PRISM_C112_OUT` the suite asserts and writes nothing (the CI path).
+. E:\wg\env.ps1 -Card c115
+cmake --build E:\build\wt-c115 --parallel 2 --target win_c115_narrow_render
+ctest --test-dir E:\build\wt-c115 -R "c115" --output-on-failure
+& E:\build\wt-c115\Tests\win_c115_narrow_render.exe docs\assets\ui
+```
+
+No <out-dir> = assertions only, no files (the CI path).
+
+
+## The C116 white-content hypothesis: NOT this card, and not this panel
+
+C116 reported the content area showing only the canvas colour (the menu bar
+draws; the content bands do not) while the accessibility tree stayed complete.
+One hypothesis was that the topmost composition island
+(GalleryWindow::GlassPanelRect -> AddIsland -> a DComp visual layered ABOVE the
+window) had been sized to the whole client. It cannot be:
+
+- before the first WM_SIZE the layout is empty, NavPillRect is empty, and
+  GlassPanelRect returns 0x0 -- PresentGlassFrame returns before ResizeIsland,
+  so nothing is ever sized;
+- afterwards the panel is EXACTLY NavPillRect (404x44 at 1028, 560x44 at 1264),
+  bounded by kNavPillMaxWidth / kNavPillHeight on every path;
+- at the documented 640 px minimum it is 16x44 = 704 px, 0.23 % of the client.
+
+win.c115_narrow_render asserts all three on a real GalleryWindow at 640, 700,
+784, 800, 900, 1028, 1172, 1184, 1264, 1482 and 1920 px: the panel equals the
+pill, never equals the client, and never exceeds 15 % of its area.
+
+So the white content is NOT the nav island and NOT this card. It is a separate
+defect (C116): the content would have to be painted by the scene the window
+hands the renderer after the scan lands, and it is not. A desktop capture (not
+a window capture) shows the window's real colour, so it is not a capture
+artefact either -- the window really paints the canvas and the menu bar and
+nothing else. Recorded here so the next reader does not mistake the two bugs
+for one.

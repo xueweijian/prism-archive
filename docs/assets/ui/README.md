@@ -508,3 +508,31 @@ ctest --test-dir E:\build\wt-c115 -R "c115" --output-on-failure
 ```
 
 No <out-dir> = assertions only, no files (the CI path).
+
+
+## The C116 white-content hypothesis: NOT this card, and not this panel
+
+C116 reported the content area showing only the canvas colour (the menu bar
+draws; the content bands do not) while the accessibility tree stayed complete.
+One hypothesis was that the topmost composition island
+(GalleryWindow::GlassPanelRect -> AddIsland -> a DComp visual layered ABOVE the
+window) had been sized to the whole client. It cannot be:
+
+- before the first WM_SIZE the layout is empty, NavPillRect is empty, and
+  GlassPanelRect returns 0x0 -- PresentGlassFrame returns before ResizeIsland,
+  so nothing is ever sized;
+- afterwards the panel is EXACTLY NavPillRect (404x44 at 1028, 560x44 at 1264),
+  bounded by kNavPillMaxWidth / kNavPillHeight on every path;
+- at the documented 640 px minimum it is 16x44 = 704 px, 0.23 % of the client.
+
+win.c115_narrow_render asserts all three on a real GalleryWindow at 640, 700,
+784, 800, 900, 1028, 1172, 1184, 1264, 1482 and 1920 px: the panel equals the
+pill, never equals the client, and never exceeds 15 % of its area.
+
+So the white content is NOT the nav island and NOT this card. It is a separate
+defect (C116): the content would have to be painted by the scene the window
+hands the renderer after the scan lands, and it is not. A desktop capture (not
+a window capture) shows the window's real colour, so it is not a capture
+artefact either -- the window really paints the canvas and the menu bar and
+nothing else. Recorded here so the next reader does not mistake the two bugs
+for one.

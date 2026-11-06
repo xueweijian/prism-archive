@@ -47,6 +47,7 @@
 #include "../../Src/PrismCore/SidebarModel.hpp"
 #include "../../Src/PrismCore/WindowLayout.hpp"
 #include "../../Src/PrismWin/GalleryRenderer.hpp"
+#include "../../Src/PrismWin/GalleryWindow.hpp"
 #include "../../Src/PrismWin/SidebarView.hpp"
 
 using Microsoft::WRL::ComPtr;
@@ -397,6 +398,63 @@ PRISM_TEST("c115.render: 1264 is pixel-identical to the pre-card baseline") {
   PRISM_CHECK(run.maxX >= text.right - 12);
   const int stripInk = InkIn(frame, text.right + 1, text.top, pill.right - 6, text.bottom, fill);
   PRISM_CHECK_EQ(stripInk, 0);
+}
+
+// ---------------------------------------------------------------------------
+// 4. THE COMPOSITION PANEL IS THE PILL, AND CANNOT BE THE WINDOW.
+//
+// GalleryWindow::GlassPanelRect() sizes the COMPOSITION (topmost) island -- the
+// surface that is layered ABOVE the window's D2D content. C116's white-content
+// report asked whether that surface can ever be sized to the whole client (an
+// opaque island would then cover the window while the a11y tree stayed
+// complete). This case answers it with the window itself, at every width the
+// card covers:
+//   * before the first WM_SIZE the layout is empty -> the panel is EMPTY, which
+//     PresentGlassFrame treats as "present nothing" (rect.w == 0 -> return);
+//   * at every width the panel IS NavPillRect (the C115 agreement);
+//   * its area never exceeds 15 % of the client, and it is never the client.
+// The 15 % bound is checked from the DOCUMENTED minimum window (640 px): at
+// 320 px a 288 x 44 pill would be 16.5 %, but 320 is not a window the product
+// allows (kMinWindowWidth = 640).
+// ---------------------------------------------------------------------------
+PRISM_TEST("c115.glass_panel: the composition island is the pill, never the window") {
+  prism::win::gallery::GalleryWindow window;
+  // (a) BEFORE Create: no layout has ever been computed. An empty panel is the
+  // only safe answer -- and PresentGlassFrame bails on it, so nothing is sized.
+  const prism::glass::IslandRect cold = window.GlassPanelRect();
+  std::printf("C115 glass panel before layout: %ux%u\n", cold.w, cold.h);
+  PRISM_CHECK_EQ(cold.w, 0u);
+  PRISM_CHECK_EQ(cold.h, 0u);
+
+  if (!PRISM_CHECK(window.Create(L"PrismArchive c115 glass panel", GetModuleHandleW(nullptr)))) {
+    return;
+  }
+  const int widths[] = {640, 700, 784, 800, 900, 1028, 1172, 1184, 1264, 1482, 1920};
+  for (const int w : widths) {
+    const int h = (std::max)(480, kHeight);
+    window.Dispatch(WM_SIZE, SIZE_RESTORED, MAKELPARAM(w, h));
+    const prism::layout::Layout layout = window.LayoutForTest();
+    const prism::layout::Rect pill = prism::layout::NavPillRect(layout);
+    const prism::glass::IslandRect panel = window.GlassPanelRect();
+    const long long clientArea = static_cast<long long>(w) * h;
+    const long long panelArea = static_cast<long long>(panel.w) * panel.h;
+    if (w == 1028) {
+      std::printf("C115 glass panel at 1028: %u,%u %ux%u (pill %d,%d %dx%d, client %dx%d)\n",
+                  panel.x, panel.y, panel.w, panel.h, pill.left, pill.top, pill.Width(),
+                  pill.Height(), w, h);
+    }
+    // (b) the panel IS the layout's pill -- the C115 agreement, on the real window.
+    PRISM_CHECK_EQ(panel.w, static_cast<uint32_t>(pill.Width()));
+    PRISM_CHECK_EQ(panel.h, static_cast<uint32_t>(pill.Height()));
+    PRISM_CHECK_EQ(panel.x, static_cast<uint32_t>(pill.left));
+    PRISM_CHECK_EQ(panel.y, static_cast<uint32_t>(pill.top));
+    // (c) bounded: never the client, never more than 15 % of it.
+    PRISM_CHECK(!(panel.w == static_cast<uint32_t>(w) && panel.h == static_cast<uint32_t>(h)));
+    PRISM_CHECK(panelArea * 100 <= clientArea * 15);
+    PRISM_CHECK(panel.w <= static_cast<uint32_t>(prism::layout::kNavPillMaxWidth));
+    PRISM_CHECK(panel.h <= static_cast<uint32_t>(prism::layout::kNavPillHeight));
+  }
+  window.Dispatch(WM_DESTROY, 0, 0);
 }
 
 int main(int argc, char** argv) {

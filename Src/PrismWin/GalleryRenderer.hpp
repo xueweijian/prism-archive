@@ -83,7 +83,19 @@ class GalleryRenderer {
   // action band and the list header now resolve from the theme through
   // prism::chrome::CanvasColor / CanvasPresentedColor / ThemeSurfaceColor, the
   // ONE entry point in PrismCore. A literal here would be a second authority.
-  static constexpr D2D1_COLOR_F kTileFill = {1.0f, 1.0f, 1.0f, 0.06f};        // glass pane
+  // C110: THE TILE BODY IS A MATERIAL, NOT A LITERAL.
+  //
+  // It used to be this one value -- white at 6 % -- in every theme. On the
+  // Midnight canvas (16,17,23) that reads as a glass card (+14 levels). On the
+  // #F5F5F7 Day canvas it composites to 246 on 245: ONE level, i.e. no card at
+  // all, which is why the folder tiles "float in the air" on the Day theme. A
+  // tile has to be a material in both directions: DARKER than the canvas on Day
+  // (black 5 %), LIGHTER on Night (white 6 %, unchanged) and on High Contrast
+  // (white 10 % on black). TileFillFor() below is the ONE place that decides.
+  static constexpr D2D1_COLOR_F kTileFill = {1.0f, 1.0f, 1.0f, 0.06f};  // = Night (pre-C110 literal)
+  static constexpr D2D1_COLOR_F kTileFillDay = {0.0f, 0.0f, 0.0f, 0.05f};
+  static constexpr D2D1_COLOR_F kTileFillNight = {1.0f, 1.0f, 1.0f, 0.06f};
+  static constexpr D2D1_COLOR_F kTileFillHighContrast = {1.0f, 1.0f, 1.0f, 0.10f};
   static constexpr D2D1_COLOR_F kTileBorder = {1.0f, 1.0f, 1.0f, 0.12f};
   static constexpr D2D1_COLOR_F kIslandFill = {0.10f, 0.12f, 0.16f, 0.72f};   // floating glass
   static constexpr D2D1_COLOR_F kCardFill = {0.086f, 0.10f, 0.13f, 0.90f};    // Quick Look body
@@ -409,6 +421,10 @@ class GalleryRenderer {
     // used to be built once from two literals, so even a scene that knew the
     // variant painted midnight text on a daylight canvas.
     ApplyThemeBrushes(theme);
+    // C110: the tile body follows the THEME, every frame. It used to be built
+    // once from the white-6 % literal, so every tile on every canvas was a
+    // +1-level ghost of a card.
+    if (tile_) tile_->SetColor(TileFillFor(theme));
     // V1: ONE layout for the whole frame -- bands, grid metrics, list body and
     // chrome. A component that wants a rectangle asks this object.
     // V4: the rail is CHROME (DESIGN.md §2 lists it as a band beside the
@@ -607,7 +623,8 @@ class GalleryRenderer {
     if (scene.listMode) {
       DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
     } else if (scene.items != nullptr) {
-      DrawGrid(content.Get(), scene, layout);
+      // C110: the grid takes the same backdrop pass the list has had since C90.
+      DrawGrid(content.Get(), scene, layout, /*backdropPass=*/true);
     }
     dbgTileCells = savedTiles;
     dbgRowCells = savedRows;
@@ -875,6 +892,28 @@ class GalleryRenderer {
     accent.a = 1.0f;
     return ToD2d(accent);
   }
+  // C110: THE TILE BODY'S material, per theme (see the kTileFill* tokens).
+  // The three values are the design's own separation lifts: a card has to be
+  // visible as a surface, and "visible" is a different direction on a light
+  // canvas than on a dark one. Returning a literal here is the defect this card
+  // removes -- the negative control restores exactly that.
+  static D2D1_COLOR_F TileFillFor(prism::theme::Variant variant) {
+#if defined(PRISM_C110_MUTANT_FLAT_TILE)
+    // C110 MUTANT ACTIVE: flat-tile -- the pre-C110 white 6 % in every theme.
+    // A3 (Day body >= 6 levels off the canvas) MUST go red.
+    ++dbgMutantFlatTile;
+    (void)variant;
+    return kTileFill;
+#else
+    switch (variant) {
+      case prism::theme::Variant::Daylight: return kTileFillDay;
+      case prism::theme::Variant::HighContrast: return kTileFillHighContrast;
+      case prism::theme::Variant::Midnight: break;
+    }
+    return kTileFillNight;
+#endif
+  }
+
   // C91: the island fill (breadcrumb pill, progress capsule) is the FLOATING
   // ISLAND token, composited over THIS theme's canvas by the one PrismCore
   // entry. The old body was "a literal, and (void)variant" -- which is why the
@@ -1478,8 +1517,25 @@ class GalleryRenderer {
   // The grid: every rectangle comes from WindowLayout. The renderer decides
   // NOTHING about position, and it never paints a loading skeleton for an item
   // the classification rule did not hand it as a tile (P0-2).
+  //
+  // C110: `backdropPass` is DrawListMode's argument, which the grid never had.
+  // C77 builds the refraction layer by re-rendering the CONTENT into a 1/8
+  // target and blurring it; in grid mode that pass used to re-draw every tile --
+  // its fill, its accent folder mark, its name glyphs. A 120x220 tile is 15x27
+  // mini pixels there, so the tile became a solid washed RECTANGLE, the 28 px
+  // blur spread it into its neighbours, and the veil left 35 % of it: the user's
+  // "large grey smear" (measured 30+ levels above the canvas where a tile sits,
+  // with nothing on the canvas at all).
+  //
+  // THE RULE: the ghost carries PIXELS THAT CAME FROM THE ARCHIVE (a decoded
+  // thumbnail -- "the content is the wallpaper"), never the chrome we drew
+  // around them (the fill, the folder mark, the label, the skeleton, the
+  // selection ring). That is the same split C90 made in list mode: glyphs and
+  // the selection pill left the source, the folder icon and the ratio capsule
+  // stayed. Folders and 32 px rows therefore contribute NOTHING to the ghost,
+  // and a grid of folders has no smear at all -- which is assertion A1.
   void DrawGrid(ID2D1RenderTarget* target, const Scene& scene,
-                const prism::layout::Layout& layout) {
+                const prism::layout::Layout& layout, bool backdropPass = false) {
     if (!scene.items) return;
     const int count = static_cast<int>(scene.items->size());
     if (count <= 0) return;
@@ -1515,17 +1571,30 @@ class GalleryRenderer {
         maxScroll);
     const std::vector<prism::layout::FlowCell> cells =
         prism::layout::VisibleFlowCells(layout, flow, scroll);
+#if defined(PRISM_C110_MUTANT_TILES_IN_BACKDROP)
+    // C110 MUTANT ACTIVE: tiles-in-backdrop -- the shipped behaviour: the grid's
+    // refraction pass re-draws the tile chrome. A1 MUST go red. The counter is
+    // the runtime half of the verdict (CONTRACTS D3), so a red for an unrelated
+    // reason can never print CAUGHT.
+    const bool drawChrome = true;
+    if (backdropPass) ++dbgBackdropTilePasses;
+#else
+    const bool drawChrome = !backdropPass;
+#endif
     for (const prism::layout::FlowCell& cell : cells) {
       if (cell.index < 0 || cell.index >= count) continue;
       const prism::ArchiveItem& item = (*scene.items)[static_cast<size_t>(cell.index)];
       if (cell.kind == prism::layout::CellKind::Row) {
-        DrawFallbackRow(target, scene, cell, item);
+        if (drawChrome) DrawFallbackRow(target, scene, cell, item);
       } else if (item.isDir) {
-        DrawFolderTile(target, scene, cell.rect, item);
+        if (drawChrome) DrawFolderTile(target, scene, cell.rect, item);
       } else {
+        // The thumbnail itself stays (it IS archive content); DrawThumbTile
+        // drops everything it painted around the pixels.
         DrawThumbTile(target, scene, cell.rect, item,
                       !scene.debugForceSkeleton &&
-                          flow[static_cast<size_t>(cell.index)].thumbnailAvailable);
+                          flow[static_cast<size_t>(cell.index)].thumbnailAvailable,
+                      drawChrome);
       }
     }
   }
@@ -1740,10 +1809,13 @@ class GalleryRenderer {
     DrawSelectionRing(target, scene, cell, item.index);
   }
 
+  // C110: `drawChrome` false = the refraction pass. The DECODED PIXELS are
+  // archive content and stay; the fill behind them, the name plate and the
+  // selection ring are chrome and do not reach the ghost.
   void DrawThumbTile(ID2D1RenderTarget* target, const Scene& scene,
                      const prism::layout::Rect& cell, const prism::ArchiveItem& item,
-                     bool hasThumb) {
-    ++dbgTileCells;
+                     bool hasThumb, bool drawChrome = true) {
+    if (drawChrome) ++dbgTileCells;
     constexpr float kRadius = 16.0f;
     const D2D1_RECT_F rect = CellRectF(cell);
     const D2D1_RECT_F photoRect =
@@ -1752,6 +1824,7 @@ class GalleryRenderer {
         (hasThumb && scene.thumbs) ? scene.thumbs->Lookup(item.index) : nullptr;
     if (thumb) ++dbgThumbLookupHits;
     if (!thumb) {
+      if (!drawChrome) return;  // no skeleton, no plate in the ghost
       DrawSkeletonTile(target, photoRect);
       DrawNamePlate(target, cell, item);
       DrawSelectionRing(target, scene, cell, item.index);
@@ -1776,12 +1849,13 @@ class GalleryRenderer {
       const D2D1_RECT_F fit = D2D1::RectF(
           photoRect.left + (areaW - drawW) / 2.0f, photoRect.top + (areaH - drawH) / 2.0f,
           photoRect.left + (areaW + drawW) / 2.0f, photoRect.top + (areaH + drawH) / 2.0f);
-      target->FillRectangle(photoRect, tile_.Get());
+      if (drawChrome) target->FillRectangle(photoRect, tile_.Get());
       ++dbgThumbDraws;
       target->DrawBitmap(it->second.Get(), fit, 1.0f,
                          D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
     if (clipGeometry) target->PopLayer();
+    if (!drawChrome) return;
     DrawNamePlate(target, cell, item);
     DrawSelectionRing(target, scene, cell, item.index);
   }
@@ -2567,6 +2641,11 @@ class GalleryRenderer {
   // runtime half of the negative control's verdict (CONTRACTS D3): a mutant
   // that never reached the injected branch must not print CAUGHT.
   int dbgBackdropGlyphPasses = 0;
+  // C110: grid-mode backdrop passes that re-drew the tile chrome -- the runtime
+  // half of the tiles-in-backdrop verdict, zero in every clean build.
+  int dbgBackdropTilePasses = 0;
+  // C110: tile fills produced by the pre-C110 flat literal (flat-tile mutant).
+  static inline int dbgMutantFlatTile = 0;
   // C101: how many ratio bars the LOUD mutant arm painted. Zero in every clean
   // build (the increment is compiled in only under PRISM_C101_MUTANT_LOUD), so a
   // mutant that never reached the injected branch cannot print CAUGHT (D3).
@@ -2600,6 +2679,10 @@ class GalleryRenderer {
   int BackdropDraws() const { return dbgBackdropDraws; }
   int BackdropGlyphPasses() const { return dbgBackdropGlyphPasses; }
   int BackdropStatePasses() const { return dbgBackdropStatePasses; }
+  // C110: grid backdrop passes that re-drew the TILE chrome (mutant arm only;
+  // zero in the clean build) and tile fills produced by the flat-literal mutant.
+  int BackdropTilePasses() const { return dbgBackdropTilePasses; }
+  int FlatTileMutantHits() const { return dbgMutantFlatTile; }
   int BackdropBitmapPixels() const {
     if (!backdropBitmap_) return 0;
     const D2D1_SIZE_U size = backdropBitmap_->GetPixelSize();

@@ -1,4 +1,4 @@
-// PrismArchive -- Windows integration test (card C50)
+// PrismArchive -- Windows integration test (cards C50 + C114)
 // ONE LEASE == ONE HANDLER. Two threads must never hold the same ArchiveReader.
 //
 // WHY THIS FILE EXISTS
@@ -31,13 +31,61 @@
 //   Zero operationConflicts() is a CONTRACT on a clean run, not a diagnostic:
 //   every round asserts it, so a lease regression fails here first.
 //
-// Negative control (CONTRACTS D3 + D27): the same source is built with
-// PRISM_C50_MUTANT_SHARED_LEASE, which removes the lease mutual exclusion in
-// ReaderPool::Acquire (no slot is marked busy, everybody is handed slot 0).
-// That build must go RED and print "C50 MUTATION CAUGHT: shared_lease" -- and
-// the verdict is gated on the D3 predicate (operationConflicts > 0), so a run
-// that goes red for an unrelated reason can never print the marker. The marker
-// is the CTest verdict (D26: no WILL_FAIL stacked on a regex).
+// C114 -- WHY THOSE TWO ASSERTIONS WERE REPLACED (verdict: the TEST was wrong,
+// not the pool)
+//   This file used to end every round of case 1 with
+//       PRISM_CHECK_EQ(st.distinctSlotsUsed, kWorkers);
+//   and case 2 with
+//       PRISM_CHECK(st.waits > 0);
+//   Both went red on CI under concurrent load (twice: "expected
+//   (st.distinctSlotsUsed) == (kWorkers) got '3' vs '4'") and green locally.
+//   Reproduced on the unmodified code -- 10 runs under CPU contention, 10 red,
+//   including the exact '3' vs '4' and a "expected true: st.waits > 0" the
+//   report never mentioned.
+//
+//   Neither number is a property of ReaderPool. Read the implementation
+//   (Src/PrismWin/ReaderPool.hpp):
+//     * Pick() returns the LOWEST free slot. distinctSlotsUsed counts slots that
+//       have EVER been handed out (State::used, never cleared, State::RefreshDerived).
+//       It reaches capacity only if the OS scheduler happens to keep all
+//       kWorkers leases alive at one instant -- a thread that is late by a
+//       single timeslice never touches the highest slot and the counter reads 3
+//       forever. That is the CI number.
+//     * stats().waits counts requests that FOUND EVERY SLOT BUSY. Three threads
+//       on a capacity-1 pool can be scheduled so strictly one at a time that no
+//       request ever finds the slot busy; the counter is then 0 even though the
+//       pool is perfect and every lease was exclusive.
+//   The pool's contract is "at most capacity concurrent leases, every lease is
+//   its own handler". It never promised "the scheduler will overlap kWorkers
+//   threads", and no implementation of a first-free picker can promise it.
+//   So the assertion was measuring the scheduler, not the pool. What replaced
+//   them FORCES the state it asserts on:
+//     * capacity_is_a_hard_ceiling_and_slots_are_exclusive holds
+//       kWorkers-1 leases across a rendezvous, asserts distinctSlotsUsed ==
+//       kWorkers-1 right there (the retired assertion's "failure" is a legal,
+//       byte-verified state), then adds the kWorkers-th lease, asserts
+//       inUse == capacity and kWorkers DISTINCT handler pointers, and proves the
+//       next request is refused: Acquire(0) returns nothing (timeout counted)
+//       and a blocking Acquire(500ms) gets nothing while every slot is held.
+//       Finally it proves a release WAKES the blocked request and hands it the
+//       freed slot (recycling notifies).
+//     * blocked_waiters_are_served_one_at_a_time now holds the only slot itself
+//       and waits until stats().waits proves all three waiters reached the pool
+//       and were refused, instead of hoping three threads trip over each other.
+//   Nothing here sleeps its way to green: every wait is a bounded rendezvous
+//   (R3/D29), and every assertion is on a stale-proof count or pointer identity.
+//
+// Negative controls (CONTRACTS D3 + D27):
+//   * PRISM_C50_MUTANT_SHARED_LEASE removes the lease mutual exclusion in
+//     ReaderPool::Acquire (no slot is marked busy, everybody is handed slot 0).
+//     That build must go RED and print "C50 MUTATION CAUGHT: shared_lease".
+//   * PRISM_C114_MUTANT_OVERSELL removes the CEILING: a request that finds every
+//     slot busy is handed slot 0 instead of blocking, so inUse climbs past
+//     capacity. That build must go RED and print
+//     "C114 MUTATION CAUGHT: oversell". The marker is gated on the D3 predicate
+//     "a lease was observed that took inUse past capacity", so a run that goes
+//     red for an unrelated reason can never print it. The marker is the CTest
+//     verdict (D26: no WILL_FAIL stacked on a regex).
 //
 // No silent skip: a missing 7z.dll/7z.exe is a FAIL with a loud message (D1).
 #include <windows.h>
@@ -46,12 +94,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -79,10 +129,24 @@ constexpr size_t kRounds = 40;        // the card's 40-round budget
 constexpr size_t kCyclesPerRound = 4; // acquire/release cycles per worker per round
 constexpr uint32_t kSeedBase = 0xC50u;
 
+// Every rendezvous below is bounded (R3/D29): a hang in CI is worse than a red.
+constexpr std::chrono::milliseconds kRendezvousBudget = std::chrono::milliseconds(60000);
+constexpr std::chrono::milliseconds kCounterBudget = std::chrono::milliseconds(30000);
+// How long the (capacity+1)-th request is allowed to sit inside Acquire before
+// we insist it came back empty-handed. It cannot be served: every slot is held
+// by a thread that is parked on a permit we own.
+constexpr std::chrono::milliseconds kRefusedBudget = std::chrono::milliseconds(500);
+
 // The D27 predicate's input: the freshest operationConflicts() total we have
 // observed. Set BEFORE every assertion that could report, so ReportFailure can
 // decide "the injected shared lease really fired" instead of guessing.
 std::atomic<uint64_t> g_conflictsSeen{0};
+
+// The C114 predicate: set the moment a lease is observed that took inUse PAST
+// capacity -- the only state a correct pool can never produce, and the exact
+// state the PRISM_C114_MUTANT_OVERSELL injection creates. D3: a red for any
+// other reason leaves this false and must not print CAUGHT.
+std::atomic<bool> g_ceilingViolated{false};
 
 std::string Sha256Hex(const std::vector<uint8_t>& data) {
   BCRYPT_ALG_HANDLE alg = nullptr;
@@ -126,11 +190,20 @@ uint64_t SyncConflicts(const win::ReaderPool& pool) {
   return total;
 }
 
+// C114: the ceiling observation. Called after EVERY Acquire in this file, before
+// any assertion that acquire feeds, so a CAUGHT verdict can only be printed on a
+// run where the pool really did hand out more leases than it has handlers.
+void NoteCeiling(const win::ReaderPool& pool) {
+  const win::ReaderPool::Stats s = pool.stats();
+  if (s.inUse > s.capacity) g_ceilingViolated.store(true);
+}
+
 // One compact, greppable block. Every failure path prints this, so the next CI
 // red says WHICH handler conflicted instead of only "ok[i] was false".
 void DumpPool(const win::ReaderPool& pool, const std::string& why) {
   const win::ReaderPool::Stats s = pool.stats();
   const std::vector<uint64_t> bySlot = pool.operationConflictsBySlot();
+  if (s.inUse > s.capacity) g_ceilingViolated.store(true);
   uint64_t total = 0;
   std::string slots;
   for (size_t i = 0; i < bySlot.size(); ++i) {
@@ -154,6 +227,69 @@ void DumpPool(const win::ReaderPool& pool, const std::string& why) {
   std::lock_guard<std::mutex> guard(dumpMutex);
   std::cout << line.str() << std::endl;
   std::cout.flush();
+}
+
+// C114: a rendezvous, not a sleep. This is the difference between "the pool let
+// four threads hold four handlers" (a fact the test creates) and "the scheduler
+// happened to run four threads at once" (what used to be asserted).
+class Gate {
+ public:
+  explicit Gate(size_t parties) : parties_(parties) {}
+
+  bool ArriveAndWait(std::chrono::milliseconds budget) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++arrived_;
+    if (arrived_ >= parties_) {
+      open_ = true;
+      cv_.notify_all();
+      return true;
+    }
+    return cv_.wait_for(lock, budget, [this] { return open_; });
+  }
+
+  bool WaitForArrivals(size_t want, std::chrono::milliseconds budget) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, budget, [this, want] { return arrived_ >= want; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  size_t parties_;
+  size_t arrived_ = 0;
+  bool open_ = false;
+};
+
+// One-shot "you may release the lease now" permit, bounded.
+class Permit {
+ public:
+  void Open() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    open_ = true;
+    cv_.notify_all();
+  }
+  bool Wait(std::chrono::milliseconds budget) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, budget, [this] { return open_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool open_ = false;
+};
+
+// Bounded wait for a POOL COUNTER to reach a state (e.g. "all three waiters are
+// inside Acquire and were refused"). The counter, not the clock, is the
+// assertion; the deadline only keeps a broken pool from hanging the lane.
+template <class Pred>
+bool WaitForPool(win::ReaderPool& pool, Pred pred, std::chrono::milliseconds budget) {
+  const auto deadline = std::chrono::steady_clock::now() + budget;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred(pool)) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return pred(pool);
 }
 
 struct Fixture {
@@ -307,11 +443,301 @@ int main(int argc, char** argv) {
   prism::test::SetMutationVerdict("C50 MUTATION CAUGHT: shared_lease",
                                   [] { return g_conflictsSeen.load() > 0; });
 #endif
+#if defined(PRISM_C114_MUTANT_OVERSELL)
+  std::cout << "C114 MUTANT ACTIVE: ReaderPool::Acquire no longer refuses a request while every "
+               "slot is busy"
+            << std::endl;
+  // D27 + D3: only a lease that took inUse PAST capacity proves this injection
+  // fired. A run that goes red without ever observing that stays red WITHOUT
+  // the marker (CTest then fails on the missing regex -- that is the point).
+  prism::test::SetMutationVerdict("C114 MUTATION CAUGHT: oversell",
+                                  [] { return g_ceilingViolated.load(); });
+#endif
   const int rc = prism::test::RunAll(argc, argv);
   CoUninitialize();
   if (rc != 0) return rc;
   std::cout << "ALL POOL-LEASE CHECKS PASSED" << std::endl;
   return 0;
+}
+
+// THE CARD, as an executable contract: kWorkers-1 threads are INSIDE their
+// leases at the same time (they park on a rendezvous), so the pool state below
+// is created by the test instead of sampled from a race. Then:
+//   * distinctSlotsUsed is exactly kWorkers-1 -- the number the retired
+//     assertion called a failure, produced while every lease is exclusive and
+//     every extraction returns the right bytes;
+//   * the kWorkers-th lease lands on its own handler: capacity really is
+//     usable, not just declared;
+//   * the (kWorkers+1)-th request is REFUSED twice: non-blocking Acquire(0)
+//     returns nothing (and is counted as a timeout), and a blocking
+//     Acquire(500ms) comes back empty because every slot is held;
+//   * releasing one slot WAKES that blocked request and hands it exactly the
+//     freed handler (a pool that recycles without notifying hangs here).
+PRISM_TEST("pool_lease.capacity_is_a_hard_ceiling_and_slots_are_exclusive") {
+  if (!PRISM_CHECK(SetupFixture())) return;
+  auto pool = MakePool(kWorkers);
+  if (!PRISM_CHECK(pool != nullptr)) return;
+  if (!PRISM_CHECK_EQ(pool->capacity(), kWorkers)) return;
+  // Create() promised one independent handler per slot; a pool that opened
+  // fewer would hand one handler to two threads (the C50 bug).
+  if (!PRISM_CHECK_EQ(pool->stats().handlers, kWorkers)) return;
+
+  constexpr size_t kHeld = kWorkers - 1;  // the "only 3 of 4" CI state, on purpose
+  struct Holder {
+    bool got = false;
+    size_t slot = static_cast<size_t>(-1);
+    win::ArchiveReader* reader = nullptr;
+  };
+  Holder holders[kHeld];
+  std::mutex holdersMutex;
+  Gate allHeld(kHeld);
+  Permit letGo[kHeld];
+
+  std::vector<std::thread> threads;
+  for (size_t w = 0; w < kHeld; ++w) {
+    threads.emplace_back([&, w] {
+      auto lease = pool->Acquire(win::kWaitForever);
+      NoteCeiling(*pool);
+      {
+        std::lock_guard<std::mutex> lock(holdersMutex);
+        holders[w].got = lease.has_value();
+        if (lease.has_value()) {
+          holders[w].slot = lease->slot();
+          holders[w].reader = lease->get();
+        }
+      }
+      // A real extraction while the OTHER holders are also inside their leases:
+      // exclusivity is proven by the bytes (D2), not by the pool's bookkeeping.
+      if (lease.has_value()) RunEngineOp(*pool, lease->get(), w % kWorkers, "held engine op");
+      // Even a failed Acquire arrives here, so main never waits out the whole
+      // budget on a thread that bailed out early.
+      if (!allHeld.ArriveAndWait(kRendezvousBudget)) PRISM_CHECK(false);
+      if (!lease.has_value()) return;
+      if (!letGo[w].Wait(kRendezvousBudget)) PRISM_CHECK(false);
+      lease->Release();
+    });
+  }
+
+  const bool allArrived = allHeld.WaitForArrivals(kHeld, kRendezvousBudget);
+  if (!allArrived) DumpPool(*pool, "holders never rendezvoused");
+  if (!PRISM_CHECK(allArrived)) {
+    for (auto& permit : letGo) permit.Open();
+    for (std::thread& thread : threads) thread.join();
+    return;
+  }
+
+  // --- the state the retired assertion called a failure ---------------------
+  const win::ReaderPool::Stats three = pool->stats();
+  if (three.distinctSlotsUsed != kHeld || three.inUse != kHeld) {
+    DumpPool(*pool, "three simultaneous leases");
+  }
+  std::cout << "    C114 EVIDENCE: " << three.inUse << " simultaneous leases on a capacity-"
+            << three.capacity << " pool -> distinctSlotsUsed=" << three.distinctSlotsUsed
+            << " (this is a legal, exclusive, byte-verified state)" << std::endl;
+  PRISM_CHECK_EQ(three.distinctSlotsUsed, kHeld);
+  PRISM_CHECK_EQ(three.inUse, kHeld);
+  PRISM_CHECK_EQ(three.maxConcurrent, kHeld);
+  {
+    std::lock_guard<std::mutex> lock(holdersMutex);
+    for (size_t i = 0; i < kHeld; ++i) {
+      if (!PRISM_CHECK(holders[i].got)) continue;
+      for (size_t j = i + 1; j < kHeld; ++j) {
+        if (!holders[j].got) continue;
+        // Pointer identity IS the C50 contract: one lease, one handler.
+        PRISM_CHECK(holders[i].reader != holders[j].reader);
+        PRISM_CHECK(holders[i].slot != holders[j].slot);
+      }
+    }
+  }
+
+  // --- capacity is real: the last slot is usable ----------------------------
+  auto extra = pool->Acquire(std::chrono::milliseconds(0));
+  NoteCeiling(*pool);
+  if (!PRISM_CHECK(extra.has_value())) {
+    DumpPool(*pool, "the last free slot was refused");
+    for (auto& permit : letGo) permit.Open();
+    for (std::thread& thread : threads) thread.join();
+    return;
+  }
+  PRISM_CHECK_EQ(pool->inUse(), kWorkers);
+  PRISM_CHECK_EQ(pool->stats().distinctSlotsUsed, kWorkers);
+  PRISM_CHECK_EQ(pool->stats().maxConcurrent, kWorkers);
+  {
+    std::lock_guard<std::mutex> lock(holdersMutex);
+    for (const Holder& holder : holders) {
+      if (holder.got) PRISM_CHECK(holder.reader != extra->get());
+    }
+    PRISM_CHECK(extra->slot() < kWorkers);
+  }
+
+  // --- the ceiling: request kWorkers+1 must NOT be served -------------------
+  const uint64_t timeoutsBefore = pool->stats().timeouts;
+  auto refused = pool->Acquire(std::chrono::milliseconds(0));
+  NoteCeiling(*pool);
+  const bool oversold = refused.has_value();
+  if (oversold) {
+    // Only reachable in the mutation build (or a real regression): the pool
+    // handed out a lease while every slot was held. Release it so the rest of
+    // this case can still run and report the whole picture.
+    refused->Release();
+    DumpPool(*pool, "a full pool granted a non-blocking lease");
+  }
+  PRISM_CHECK(!oversold);
+  PRISM_CHECK_EQ(pool->stats().timeouts, timeoutsBefore + 1);
+
+  // Blocking path: it cannot be served either. The counter proves it reached
+  // the pool and found every slot busy; the lease must NOT arrive.
+  const uint64_t waitsBefore = pool->stats().waits;
+  const uint64_t timeoutsBeforeWait = pool->stats().timeouts;
+  std::atomic<bool> blockedWaiterGranted{false};
+  std::thread blockedWaiter([&] {
+    auto lease = pool->Acquire(kRefusedBudget);
+    NoteCeiling(*pool);
+    if (lease.has_value()) {
+      blockedWaiterGranted.store(true);
+      lease->Release();
+    }
+  });
+  const bool waiterQueued = WaitForPool(
+      *pool, [waitsBefore](win::ReaderPool& p) { return p.stats().waits >= waitsBefore + 1; },
+      kCounterBudget);
+  if (!waiterQueued) DumpPool(*pool, "the rejected request never reached the wait path");
+  PRISM_CHECK(waiterQueued);
+  PRISM_CHECK_EQ(pool->inUse(), kWorkers);
+  blockedWaiter.join();
+  PRISM_CHECK(!blockedWaiterGranted.load());
+  PRISM_CHECK_EQ(pool->stats().timeouts, timeoutsBeforeWait + 1);
+  PRISM_CHECK_EQ(pool->inUse(), kWorkers);
+
+  // --- recycling notifies: the blocked request gets the freed slot ----------
+  const size_t freedSlot = extra->slot();
+  win::ArchiveReader* freedReader = extra->get();
+  std::atomic<bool> woken{false};
+  std::atomic<size_t> wokenSlot{static_cast<size_t>(-1)};
+  std::atomic<win::ArchiveReader*> wokenReader{nullptr};
+  const uint64_t waitsBeforeWake = pool->stats().waits;
+  std::thread waker([&] {
+    auto lease = pool->Acquire(win::kWaitForever);
+    NoteCeiling(*pool);
+    if (!lease.has_value()) {
+      PRISM_CHECK(lease.has_value());
+      return;
+    }
+    wokenSlot.store(lease->slot());
+    wokenReader.store(lease->get());
+    woken.store(true);
+    lease->Release();
+  });
+  const bool wakerQueued = WaitForPool(
+      *pool, [waitsBeforeWake](win::ReaderPool& p) { return p.stats().waits >= waitsBeforeWake + 1; },
+      kCounterBudget);
+  if (!wakerQueued) DumpPool(*pool, "the wake-up request never blocked");
+  PRISM_CHECK(wakerQueued);
+  PRISM_CHECK_EQ(pool->inUse(), kWorkers);
+  extra->Release();  // no notify at all here would hang the waker forever
+  extra.reset();
+  const bool wokenUp = WaitForPool(*pool, [&woken](win::ReaderPool&) { return woken.load(); },
+                                   kCounterBudget);
+  if (!wokenUp) DumpPool(*pool, "release did not wake the blocked request");
+  PRISM_CHECK(wokenUp);
+  PRISM_CHECK_EQ(wokenSlot.load(), freedSlot);
+  PRISM_CHECK(wokenReader.load() == freedReader);
+  waker.join();
+
+  // --- teardown: every lease returned, every counter consistent -------------
+  for (auto& permit : letGo) permit.Open();
+  for (std::thread& thread : threads) thread.join();
+  NoteCeiling(*pool);
+  const win::ReaderPool::Stats final = pool->stats();
+  if (final.inUse != 0 || final.acquired != final.returned) DumpPool(*pool, "teardown");
+  PRISM_CHECK_EQ(final.inUse, size_t(0));
+  PRISM_CHECK_EQ(final.acquired, final.returned);
+  PRISM_CHECK_EQ(final.distinctSlotsUsed, kWorkers);
+  SyncConflicts(*pool);
+  PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
+}
+
+// Hypothesis 2 from the card, made executable -- and, since C114, made
+// DETERMINISTIC: the main thread holds the pool's only slot, so a waiter that
+// increments stats().waits provably found it busy and was refused. Waiting for
+// that counter (bounded) replaces the old hope that three racing threads would
+// happen to collide: under CPU load they ran strictly one at a time and the
+// retired assertion "st.waits > 0" failed on a perfectly healthy pool.
+PRISM_TEST("pool_lease.blocked_waiters_are_served_one_at_a_time") {
+  if (!PRISM_CHECK(SetupFixture())) return;
+  auto pool = MakePool(1);
+  if (!PRISM_CHECK(pool != nullptr)) return;
+  if (!PRISM_CHECK_EQ(pool->capacity(), size_t(1))) return;
+
+  constexpr size_t kWaiters = 3;
+  constexpr size_t kCycles = 12;
+  std::atomic<bool> held{false};
+  std::atomic<size_t> duplicateLeases{0};
+
+  for (size_t cycle = 0; cycle < kCycles; ++cycle) {
+    // The main thread IS the holder: capacity 1, so every waiter below must be
+    // refused until we let go. Nothing about that depends on the scheduler.
+    auto owner = pool->Acquire(std::chrono::milliseconds(0));
+    NoteCeiling(*pool);
+    if (!PRISM_CHECK(owner.has_value())) {
+      DumpPool(*pool, "the single slot was not free at cycle start");
+      return;
+    }
+    // NOTE: 'held' tracks the WAITERS only. The main thread's own lease is not a
+    // duplicate when a waiter later inherits the slot.
+    const uint64_t waitsBefore = pool->stats().waits;
+
+    std::vector<std::thread> waiters;
+    waiters.reserve(kWaiters);
+    for (size_t w = 0; w < kWaiters; ++w) {
+      waiters.emplace_back([&, w] {
+        auto lease = pool->Acquire(win::kWaitForever);
+        NoteCeiling(*pool);
+        if (!PRISM_CHECK(lease.has_value())) {
+          DumpPool(*pool, "waiter got no lease");
+          return;
+        }
+        PRISM_CHECK_EQ(lease->slot(), size_t(0));
+        const bool alreadyHeld = held.exchange(true);
+        if (alreadyHeld) {
+          duplicateLeases.fetch_add(1);
+          std::cout << "    DUPLICATE WAITER cycle=" << cycle << " waiter=" << w << std::endl;
+          DumpPool(*pool, "duplicate waiter");
+        }
+        PRISM_CHECK(!alreadyHeld);
+        if (cycle % 4 == 0) RunEngineOp(*pool, lease->get(), w % kWorkers, "waiter engine op");
+        held.store(false);
+        lease->Release();
+      });
+    }
+
+    // Proof that all three are queued AND refused: stats().waits only rises for
+    // a request that found every slot busy, and we are still holding the slot,
+    // so each of the three must have reached Acquire and been turned away.
+    const bool allBlocked = WaitForPool(
+        *pool, [waitsBefore](win::ReaderPool& p) { return p.stats().waits >= waitsBefore + kWaiters; },
+        kCounterBudget);
+    if (!allBlocked) DumpPool(*pool, "waiters were not all queued behind the held slot");
+    PRISM_CHECK(allBlocked);
+    PRISM_CHECK_EQ(pool->inUse(), size_t(1));
+
+    owner->Release();
+    owner.reset();
+    for (std::thread& waiter : waiters) waiter.join();
+    SyncConflicts(*pool);
+    PRISM_CHECK_EQ(pool->inUse(), size_t(0));
+    PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
+  }
+
+  PRISM_CHECK_EQ(duplicateLeases.load(), size_t(0));
+  const win::ReaderPool::Stats st = pool->stats();
+  PRISM_CHECK_EQ(st.acquired, st.returned);
+  // Deterministic, not "> 0": each of the kWaiters per cycle was refused
+  // exactly once by the main thread's lease. A pool that stopped refusing would
+  // score lower, a pool that double-counted would score higher.
+  PRISM_CHECK_EQ(st.waits, uint64_t(kCycles * kWaiters));
+  SyncConflicts(*pool);
+  PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
 }
 
 // THE CARD, as an executable contract: 40 rounds x 4 threads, every Acquire
@@ -337,6 +763,7 @@ PRISM_TEST("pool_lease.forty_rounds_four_threads_never_share_a_handler") {
       workers.emplace_back([&, w] {
         for (size_t cycle = 0; cycle < kCyclesPerRound; ++cycle) {
           auto lease = pool->Acquire(win::kWaitForever);
+          NoteCeiling(*pool);
           if (!lease.has_value()) {
             DumpPool(*pool, "Acquire(kWaitForever) returned nothing");
             PRISM_CHECK(lease.has_value());
@@ -380,7 +807,19 @@ PRISM_TEST("pool_lease.forty_rounds_four_threads_never_share_a_handler") {
     const win::ReaderPool::Stats st = pool->stats();
     PRISM_CHECK_EQ(st.acquired, st.returned);
     PRISM_CHECK(st.maxConcurrent <= kWorkers);
-    PRISM_CHECK_EQ(st.distinctSlotsUsed, kWorkers);
+    PRISM_CHECK(st.maxConcurrent >= 1);
+    // C114: this used to be PRISM_CHECK_EQ(st.distinctSlotsUsed, kWorkers), which
+    // is a claim about the OS scheduler, not about the pool: distinctSlotsUsed
+    // counts slots EVER handed out, and Pick() always takes the lowest free one,
+    // so a worker that is late by one timeslice leaves the highest slot untouched
+    // (CI: got '3' vs '4'). The claim that every slot is usable is proven
+    // deterministically, with all of them held at once, in
+    // pool_lease.capacity_is_a_hard_ceiling_and_slots_are_exclusive.
+    PRISM_CHECK(st.distinctSlotsUsed <= kWorkers);
+    PRISM_CHECK_EQ(st.handlers, kWorkers);
+    if (st.distinctSlotsUsed > kWorkers || st.maxConcurrent > kWorkers) {
+      DumpPool(*pool, "round stats");
+    }
   }
 
   PRISM_CHECK_EQ(duplicateLeases.load(), size_t(0));
@@ -391,55 +830,4 @@ PRISM_TEST("pool_lease.forty_rounds_four_threads_never_share_a_handler") {
   const std::vector<uint64_t> bySlot = pool->operationConflictsBySlot();
   PRISM_CHECK_EQ(bySlot.size(), kWorkers);
   for (const uint64_t conflicts : bySlot) PRISM_CHECK_EQ(conflicts, uint64_t(0));
-}
-
-// Hypothesis 2 from the card, made executable: the window between a lease
-// being released and a blocked Acquire waking up. One slot, three waiters --
-// if a slot flag can be overwritten in that window, two waiters hold it.
-PRISM_TEST("pool_lease.blocked_waiters_are_served_one_at_a_time") {
-  if (!PRISM_CHECK(SetupFixture())) return;
-  auto pool = MakePool(1);
-  if (!PRISM_CHECK(pool != nullptr)) return;
-  PRISM_CHECK_EQ(pool->capacity(), size_t(1));
-
-  constexpr size_t kWaiters = 3;
-  constexpr size_t kCycles = 12;
-  std::atomic<bool> held{false};
-  std::atomic<size_t> duplicateLeases{0};
-
-  for (size_t cycle = 0; cycle < kCycles; ++cycle) {
-    std::vector<std::thread> waiters;
-    waiters.reserve(kWaiters);
-    for (size_t w = 0; w < kWaiters; ++w) {
-      waiters.emplace_back([&, w] {
-        auto lease = pool->Acquire(win::kWaitForever);
-        if (!PRISM_CHECK(lease.has_value())) {
-          DumpPool(*pool, "waiter got no lease");
-          return;
-        }
-        PRISM_CHECK_EQ(lease->slot(), size_t(0));
-        const bool alreadyHeld = held.exchange(true);
-        if (alreadyHeld) {
-          duplicateLeases.fetch_add(1);
-          std::cout << "    DUPLICATE WAITER cycle=" << cycle << " waiter=" << w << std::endl;
-          DumpPool(*pool, "duplicate waiter");
-        }
-        PRISM_CHECK(!alreadyHeld);
-        if (cycle % 4 == 0) RunEngineOp(*pool, lease->get(), w % kWorkers, "waiter engine op");
-        held.store(false);
-        lease->Release();
-      });
-    }
-    for (std::thread& waiter : waiters) waiter.join();
-    SyncConflicts(*pool);
-    PRISM_CHECK_EQ(pool->inUse(), size_t(0));
-    PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
-  }
-
-  PRISM_CHECK_EQ(duplicateLeases.load(), size_t(0));
-  const win::ReaderPool::Stats st = pool->stats();
-  PRISM_CHECK_EQ(st.acquired, st.returned);
-  PRISM_CHECK(st.waits > 0);  // the blocking path really was exercised
-  SyncConflicts(*pool);
-  PRISM_CHECK_EQ(pool->operationConflicts(), uint64_t(0));
 }

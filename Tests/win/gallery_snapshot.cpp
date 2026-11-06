@@ -298,6 +298,10 @@ int CountAccentRuns(const std::vector<UINT32>& pixels, UINT32 width, int left, i
       }
       if (run >= minRun) count += run;
       run = 0;
+    }
+  }
+  return count;
+}
 
 // C109: the list row pitch moved 32 -> 36, which slid the selected-row probe band
 // onto the sidebar's OWN focus pill. That pill is legitimate sidebar content, not

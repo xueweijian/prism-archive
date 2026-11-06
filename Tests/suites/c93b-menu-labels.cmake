@@ -6,6 +6,12 @@
 # L"Help" default, because SetAboutMenuLabels was never called. This suite
 # pins all five labels to the one source the app already uses.
 
+# This suite compiles Src/App/AppWiring.hpp, which includes <windows.h>: it can
+# only exist on the Windows lane. Every other win suite carries the same guard
+# (c104 line 25); without it the Linux lane tries to build it and dies on
+# "windows.h: No such file or directory" (measured on PR #132).
+if(WIN32 AND PRISM_BUILD_WIN_LAYER)
+
 add_executable(win_c93b_menu_labels win/test_c93b_menu_labels.cpp)
 target_link_libraries(win_c93b_menu_labels PRIVATE prism_core prism_win_bridge
   prism_shell_contract user32.lib gdi32.lib shell32.lib ole32.lib
@@ -27,3 +33,5 @@ target_include_directories(win_c93b_menu_labels_mutant_no_help PRIVATE ${CMAKE_S
 add_test(NAME "mutation.c93b.no_help" COMMAND win_c93b_menu_labels_mutant_no_help)
 set_tests_properties(mutation.c93b.no_help PROPERTIES TIMEOUT 60
   PASS_REGULAR_EXPRESSION "C93B MUTATION CAUGHT: no_help")
+
+endif()

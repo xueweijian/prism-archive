@@ -430,13 +430,28 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
   int farCount = 0;
   // The band is measured ABOVE the top edge: the panel is offset +6 px down, so
   // its halo reaches ~18 px up, and that is where the backdrop still carries the
-  // refracted content (luma ~39) -- a shadow measured on the bare canvas at
-  // luma 13 cannot be 3 levels dark without being a black halo, and the card's
-  // own design number is alpha .18.
+  // refracted content -- a shadow measured on the bare canvas at luma 13 cannot
+  // be 3 levels dark without being a black halo, and the card's own design
+  // number is alpha .18.
+  //
+  // C110: THE FLOOR IS NOW MATERIAL-INDEPENDENT (see the ratio check below).
+  // This band sits over a PHOTO tile's letterboxed fill area (the decoded 8x8
+  // thumb covers only the middle 131 px of the 190 px plate, so y 104..133 is the
+  // tile's 6 % white fill). In the 1/8 refraction source that fill is a solid
+  // mini rectangle, and -- because it is drawn over a TRANSPARENT target, not
+  // over the canvas -- it contributed ~+5 levels to this band. C110 took the
+  // tile chrome out of the grid's ghost (that fill WAS the user's "large grey
+  // smear": the tile rectangle moved 34.5 levels between layer OFF and ON), so
+  // the band's backdrop fell from 38.4 to 28.1 and the same, unchanged shadow
+  // (effective alpha .105 both before and after -- measured) now reads 2.96
+  // instead of 4.17. An absolute floor therefore measures the BACKDROP, not the
+  // shadow; the shadow is asserted as a ratio to the band it darkens.
+  double referenceSum = 0.0;  // C110: the band's own backdrop, for the ratio
   for (int y = top - 10; y < top - 6; ++y) {
     for (int x = card.left + 60; x < card.right - 60; ++x) {
       if (!with.In(x, y) || !without.In(x, y)) continue;
       bandSum += without.Luminance(x, y) - with.Luminance(x, y);
+      referenceSum += without.Luminance(x, y);
       ++bandCount;
     }
   }
@@ -450,10 +465,27 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
   PRISM_CHECK(bandCount > 1000);
   const double bandDarkness = bandCount > 0 ? bandSum / bandCount : 0.0;
   const double farDarkness = farCount > 0 ? farSum / farCount : 0.0;
-  std::printf("C77 panel: shadowBand=%.2f farBand=%.2f bgLuma=%d\n", bandDarkness, farDarkness,
+  const double referenceBand = bandCount > 0 ? referenceSum / bandCount : 0.0;
+  // C110: the shadow's EFFECTIVE ALPHA over the band it lands on. This is the
+  // material-independent form of "the panel casts a shadow": the absolute levels
+  // move with whatever the backdrop is carrying, the ratio does not. Measured
+  // .109 with the tile ghost in the source (band darkening 4.17 over a 38.37
+  // backdrop) and .106 with it taken out (2.96 over 28.06): the shadow itself
+  // did not change, which is exactly what this case is supposed to pin. A
+  // missing shadow reads 0.
+  const double shadowAlpha = referenceBand > 1.0 ? bandDarkness / referenceBand : 0.0;
+  std::printf("C77 panel: shadowBand=%.2f referenceBand=%.2f shadowAlpha=%.3f farBand=%.2f "
+              "samples=%d bgLuma=%d\n",
+              bandDarkness, referenceBand, shadowAlpha, farDarkness, bandCount,
               without.Luminance(cx, bottom + 8));
-  PRISM_CHECK(bandDarkness >= 3.0);
+  // The upper bound is a FLOOD guard: a shadow that blackens the band is as
+  // wrong as one that is absent.
   PRISM_CHECK(bandDarkness <= 10.0);
+  // The shadow is alpha .18 at its peak and this band sits ~6-10 px away from
+  // the edge, so the visible alpha is ~.10. The window is wide enough for the
+  // theme and the blur, narrow enough that a missing or a flooded shadow fails.
+  PRISM_CHECK(shadowAlpha >= 0.06);
+  PRISM_CHECK(shadowAlpha <= 0.30);
   // The shadow is a gradient: 40 px out it is gone.
   PRISM_CHECK(std::abs(farDarkness) < 1.5);
   if (kShadowMutation) ++MutationReached();

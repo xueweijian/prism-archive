@@ -312,3 +312,45 @@ cmake --build E:\build\wt-c103 --parallel 2 --target gallery_snapshot
 The `before` frame was produced from the same tree with the seven edited
 headers stashed back to origin/main, then rebuilt and restored -- the two sets
 differ only by this card.
+
+
+# C110 grid evidence -- no tiles in the refraction layer, a tile body on every theme
+
+Two frames of the REAL renderer (`Tests/win/test_c110_grid_backdrop.cpp` ->
+`GalleryRenderer::Draw` -> a headless WIC target), 1482 x 991, grid mode, nine
+folder tiles and six 32 px rows, `appearance.backdropRefraction` ON (the
+shipping default). Not mockups: the same code path paints the shipping window.
+
+| file | what it shows |
+| --- | --- |
+| `c110-day.png` | Daylight: every tile is a CARD -- black 5 % over the #F5F5F7 canvas = 233 on 245, a 12-level body. Before this card the fill was white 6 % in every theme, which composites to 246 on 245: the folder tiles floated in the air. |
+| `c110-night.png` | Midnight: the same tiles as glass cards (+14 levels, unchanged), and the canvas around them carries NO blurred copy of the tiles -- the 1/8 refraction source no longer contains the tile fill, the folder mark or the label. |
+
+## What the two frames measure (assertions in the suite)
+
+- **A1 the tiles are out of the ghost.** Backdrop OFF vs ON, mean luminance
+  inside every tile rectangle: Midnight `+34.56` before -> `+0.70` after
+  (limit 4, wash-normalised); Daylight `-7.46` before -> `+0.00` after. The
+  6 % fill drawn over the TRANSPARENT 1/8 target was the "large grey smear": at
+  1/8 a 120 x 220 tile is a solid 15 x 27 mini rectangle.
+- **A2 the layer is still there.** Daylight canvas region (below the flow):
+  `0.00` levels between the two frames, with `BackdropDraws() == 1` and
+  `BackdropRebuilds() == 1` -- the fix removes the tiles, not the layer.
+- **A3 the Day tile has a body.** Tile body patch vs its canvas: `+1.86`
+  before -> `-12.33` after (floor 6).
+- **A4 Night / High Contrast do not regress.** Body delta Midnight
+  `+14.00` (band 8..24), High Contrast `+26.00` (band 12..40).
+
+## Reproduce
+
+```pwsh
+. E:\wg\env.ps1 -Card c110
+cmake --build E:\build\wt-c110 --target win_c110_grid_backdrop
+E:\build\wt-c110\Tests\win_c110_grid_backdrop.exe <out-dir>
+```
+
+Without `<out-dir>` the suite only asserts (CI's path) and writes no file. The
+two negative controls are the same source compiled with
+`PRISM_C110_MUTANT_TILES_IN_BACKDROP` (A1 red -> `C110 MUTATION CAUGHT:
+tiles-in-backdrop`) and `PRISM_C110_MUTANT_FLAT_TILE` (A3 red ->
+`C110 MUTATION CAUGHT: flat-tile`).

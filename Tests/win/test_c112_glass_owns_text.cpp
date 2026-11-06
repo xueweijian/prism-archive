@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "../mini_test.hpp"
+#include "BenchFrameCapture.hpp"
 #include "../../Src/PrismCore/WindowLayout.hpp"
 #include "../../Src/PrismCore/ActionBarModel.hpp"
 #include "../../Src/PrismWin/GalleryWindow.hpp"
@@ -203,7 +204,11 @@ bool MakeWindow(GalleryWindow& window, const wchar_t* title, bool glass) {
   // The REAL client size, handed to the window's own WM_SIZE: a synthetic size
   // that the client rectangle does not have would leave layout_ and the frame
   // disagreeing, and the two arms would then differ everywhere.
-  SetWindowPos(window.Hwnd(), HWND_TOP, 40, 40, 1280, 800, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+  int outerW = 1280, outerH = 800;
+  if (const char* size = std::getenv("PRISM_C112_WINDOW")) {
+    std::sscanf(size, "%dx%d", &outerW, &outerH);
+  }
+  SetWindowPos(window.Hwnd(), HWND_TOP, 40, 40, outerW, outerH, SWP_SHOWWINDOW | SWP_NOACTIVATE);
   RECT client{};
   if (!GetClientRect(window.Hwnd(), &client)) return false;
   window.Dispatch(WM_SIZE, 0, MAKELPARAM(client.right - client.left, client.bottom - client.top));
@@ -221,54 +226,46 @@ bool MakeWindow(GalleryWindow& window, const wchar_t* title, bool glass) {
   return true;
 }
 
-// The frame the window paints, rendered through the SAME DrawFrame the window's
-// own WM_PAINT uses (GalleryWindow::RenderSceneInto), into a software target.
-bool RenderWindow(GalleryWindow& window, Frame* out) {
+// The frame the window paints, through C113's capture seam
+// (GalleryWindow::RenderSceneForCapture): the renderer's DEVICE objects are
+// rebuilt on the WIC target, so the picture is the scene and not a frame D2D
+// threw away. The reader also reports `painted` -- a canvas-only frame scores 0 --
+// which every test below asserts BEFORE it compares a single pixel.
+prism::win::benchframe::Frame CaptureWindow(GalleryWindow& window, const char* label, Frame* out) {
+  using namespace prism::win::benchframe;
+  // NOT static: an ASan run on CI caught the static factories being released
+  // after D2D's own teardown (access violation in
+  // ComPtr<ID2D1RenderTarget>::InternalRelease, at exit). Four captures pay four
+  // factory creations; a process that crashes on the way out pays for every
+  // future run.
+  ComPtr<IWICImagingFactory> wic;
+  ComPtr<ID2D1Factory> d2d;
+  if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(wic.GetAddressOf())))) {
+    return prism::win::benchframe::Frame{};
+  }
+  if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d.GetAddressOf()))) {
+    return prism::win::benchframe::Frame{};
+  }
   RECT rc{};
-  if (!GetClientRect(window.Hwnd(), &rc)) return false;
-  const UINT width = static_cast<UINT>(rc.right - rc.left);
-  const UINT height = static_cast<UINT>(rc.bottom - rc.top);
-  if (width == 0 || height == 0) return false;
-
-  static ComPtr<IWICImagingFactory> wic;
-  static ComPtr<ID2D1Factory> d2d;
-  if (!wic && FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                      IID_PPV_ARGS(wic.GetAddressOf())))) {
-    return false;
+  if (!GetClientRect(window.Hwnd(), &rc)) return prism::win::benchframe::Frame{};
+  const uint32_t width = static_cast<uint32_t>(rc.right - rc.left);
+  const uint32_t height = static_cast<uint32_t>(rc.bottom - rc.top);
+  const prism::win::benchframe::Frame captured =
+      CaptureOffscreen(window, wic.Get(), d2d.Get(), width, height, label, Seam::kProduct);
+  std::printf("  frame[%s]: rendered=%d hr=0x%08lX painted=%zu/%zu digest=%s\n", label,
+              static_cast<int>(captured.rendered), static_cast<unsigned long>(captured.hr),
+              captured.painted, captured.total, Hex(captured.digest).c_str());
+  if (!captured.rendered || out == nullptr) return captured;
+  out->width = captured.width;
+  out->height = captured.height;
+  out->pixels.assign(captured.total, 0u);
+  for (size_t i = 0; i < captured.total; ++i) {
+    const uint8_t* px = &captured.bgra[i * 4u];
+    out->pixels[i] = (0xFFu << 24) | (static_cast<UINT32>(px[2]) << 16) |
+                     (static_cast<UINT32>(px[1]) << 8) | static_cast<UINT32>(px[0]);
   }
-  if (!d2d && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                                       d2d.GetAddressOf()))) {
-    return false;
-  }
-  ComPtr<IWICBitmap> bitmap;
-  if (FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA,
-                               WICBitmapCacheOnLoad, bitmap.GetAddressOf()))) {
-    return false;
-  }
-  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-      D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-  ComPtr<ID2D1RenderTarget> target;
-  if (FAILED(d2d->CreateWicBitmapRenderTarget(bitmap.Get(), props, target.GetAddressOf()))) {
-    return false;
-  }
-  if (!window.RenderSceneInto(target.Get())) return false;
-
-  WICRect lockRect{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
-  ComPtr<IWICBitmapLock> lock;
-  if (FAILED(bitmap->Lock(&lockRect, WICBitmapLockRead, lock.GetAddressOf()))) return false;
-  UINT stride = 0;
-  UINT bytes = 0;
-  BYTE* data = nullptr;
-  if (FAILED(lock->GetStride(&stride)) || FAILED(lock->GetDataPointer(&bytes, &data))) return false;
-  out->width = width;
-  out->height = height;
-  out->pixels.resize(static_cast<size_t>(width) * height);
-  for (UINT y = 0; y < height; ++y) {
-    std::memcpy(out->pixels.data() + static_cast<size_t>(y) * width, data + static_cast<size_t>(y) * stride,
-                static_cast<size_t>(width) * 4u);
-  }
-  return true;
+  return captured;
 }
 
 // Reads a bitmap that lives on the glass device back to the CPU: same device,
@@ -331,6 +328,32 @@ bool UploadBackdrop(ID2D1DeviceContext* dc, const Frame& frame, ComPtr<ID2D1Bitm
   props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
   return SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(frame.width, frame.height), frame.pixels.data(),
                                     frame.width * 4u, props, out->ReleaseAndGetAddressOf()));
+}
+
+// The pill as the USER sees it: the island's own content (ComposeIslandForTest
+// -> PaintIslandContent, the shipping PresentGlassFrame body) composited over
+// the window's frame at the pill rectangle. Both arms of every comparison below
+// go through this, so "island off" and "island on" differ by WHO paints the
+// pill and by nothing else.
+bool ComposePillOn(GalleryWindow& window, const Frame& windowFrame, Frame* pill) {
+  const IslandRect rect = window.GlassPanelRect();
+  if (rect.w == 0 || rect.h == 0 || pill == nullptr) return false;
+  ID2D1DeviceContext* dc = window.GlassContext();
+  if (dc == nullptr) return false;
+  ComPtr<ID2D1Bitmap1> backdrop;
+  if (!UploadBackdrop(dc, windowFrame, &backdrop)) return false;
+  D2D1_BITMAP_PROPERTIES1 props = {};
+  props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+  props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+  ComPtr<ID2D1Bitmap1> target;
+  if (FAILED(dc->CreateBitmap(D2D1::SizeU(rect.w, rect.h), nullptr, 0, props, target.GetAddressOf()))) {
+    return false;
+  }
+  if (!window.ComposeIslandForTest(target.Get(), backdrop.Get())) return false;
+  Frame island;
+  if (!ReadBitmap(dc, target.Get(), &island)) return false;
+  *pill = CompositeOver(island, Crop(windowFrame, rect.x, rect.y, rect.w, rect.h));
+  return true;
 }
 
 // ---- the metrics ----------------------------------------------------------
@@ -474,7 +497,12 @@ PRISM_TEST("c112_pill_text_is_sharp_and_has_no_ghost") {
   GalleryWindow offWindow;
   if (!PRISM_CHECK(MakeWindow(offWindow, L"c112 island off", /*glass=*/false))) return;
   Frame offFrame;
-  if (!PRISM_CHECK(RenderWindow(offWindow, &offFrame))) return;
+  const prism::win::benchframe::Frame offCapture = CaptureWindow(offWindow, "island-off", &offFrame);
+  if (!PRISM_CHECK(offCapture.rendered)) return;
+  // "This is a REAL frame" (C113): a canvas-only, D2D-rejected frame scores
+  // painted == 0 -- and every pixel comparison below would then be measuring
+  // nothing at all.
+  PRISM_CHECK(offCapture.painted * 20 >= offCapture.total);  // >= 5% painted
 
   // The SUBJECT: the same window with the island on.
   GalleryWindow onWindow;
@@ -495,39 +523,23 @@ PRISM_TEST("c112_pill_text_is_sharp_and_has_no_ghost") {
 #endif
   PRISM_CHECK(onWindow.GlassOpticsReady());
   Frame onFrame;
-  if (!PRISM_CHECK(RenderWindow(onWindow, &onFrame))) return;
+  const prism::win::benchframe::Frame onCapture = CaptureWindow(onWindow, "island-on", &onFrame);
+  if (!PRISM_CHECK(onCapture.rendered)) return;
+  PRISM_CHECK(onCapture.painted * 20 >= onCapture.total);
 
   const IslandRect rect = onWindow.GlassPanelRect();
   if (!PRISM_CHECK(rect.w > 0 && rect.h > 0)) return;
   std::printf("  island rect: %u,%u %ux%u\n", rect.x, rect.y, rect.w, rect.h);
   if (!PRISM_CHECK(rect.w <= offFrame.width && rect.y + rect.h <= offFrame.height)) return;
 
-  // Compose the island over the window's frame through the PRODUCT's own island
-  // paint (ComposeIslandForTest -> PaintIslandContent), with the window frame as
-  // the content underneath (what the capture would read).
-  ID2D1DeviceContext* dc = onWindow.GlassContext();
-  if (!PRISM_CHECK(dc != nullptr)) return;
-  ComPtr<ID2D1Bitmap1> backdrop;
-  if (!PRISM_CHECK(UploadBackdrop(dc, onFrame, &backdrop))) return;
-  D2D1_BITMAP_PROPERTIES1 targetProps = {};
-  targetProps.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                              D2D1_ALPHA_MODE_PREMULTIPLIED);
-  targetProps.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
-  ComPtr<ID2D1Bitmap1> islandTarget;
-  if (!PRISM_CHECK(SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(rect.w, rect.h), nullptr, 0, targetProps,
-                                              islandTarget.GetAddressOf())))) {
-    return;
-  }
-  if (!PRISM_CHECK(onWindow.ComposeIslandForTest(islandTarget.Get(), backdrop.Get()))) return;
-  if (!PRISM_CHECK(onWindow.GlassLastFrameOptical())) return;
-  Frame islandFrame;
-  if (!PRISM_CHECK(ReadBitmap(dc, islandTarget.Get(), &islandFrame))) return;
-
   // The two things the user compares: the pill with the island off, and the pill
-  // with the island on (island composited over the window's frame).
+  // with the island on -- the product's island content composited over the
+  // window's frame (what DirectComposition does with the premultiplied
+  // swapchain).
   const Frame pillOff = Crop(offFrame, rect.x, rect.y, rect.w, rect.h);
-  const Frame pillOn =
-      CompositeOver(islandFrame, Crop(onFrame, rect.x, rect.y, rect.w, rect.h));
+  Frame pillOn;
+  if (!PRISM_CHECK(ComposePillOn(onWindow, onFrame, &pillOn))) return;
+  if (!PRISM_CHECK(onWindow.GlassLastFrameOptical())) return;
 
   if (!PRISM_CHECK(onWindow.BreadcrumbText() == L"pack.7z")) {
     std::printf("  breadcrumb: '");
@@ -593,7 +605,9 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
   GalleryWindow offWindow;
   if (!PRISM_CHECK(MakeWindow(offWindow, L"c112 s3 off", /*glass=*/false))) return;
   Frame offFrame;
-  if (!PRISM_CHECK(RenderWindow(offWindow, &offFrame))) return;
+  const prism::win::benchframe::Frame offCapture = CaptureWindow(offWindow, "s3-off", &offFrame);
+  if (!PRISM_CHECK(offCapture.rendered)) return;
+  PRISM_CHECK(offCapture.painted * 20 >= offCapture.total);
 
   GalleryWindow onWindow;
   if (!PRISM_CHECK(MakeWindow(onWindow, L"c112 s3 on", /*glass=*/true))) return;
@@ -603,7 +617,9 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
     return;
   }
   Frame onFrame;
-  if (!PRISM_CHECK(RenderWindow(onWindow, &onFrame))) return;
+  const prism::win::benchframe::Frame onCapture = CaptureWindow(onWindow, "s3-on", &onFrame);
+  if (!PRISM_CHECK(onCapture.rendered)) return;
+  PRISM_CHECK(onCapture.painted * 20 >= onCapture.total);
 
   // Each window's OWN pill rectangle: the two arms must be the same panel, and
   // saying so explicitly keeps a layout drift from silently cropping the wrong
@@ -621,6 +637,10 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
   PRISM_CHECK_EQ(rectOff.h, rect.h);
   const Frame offPill = Crop(offFrame, rectOff.x, rectOff.y, rectOff.w, rectOff.h);
   const Frame onPill = Crop(onFrame, rect.x, rect.y, rect.w, rect.h);
+  // The island's pill for the SAME frame: the glyph reference below is the text
+  // the island paints, not "whatever is inked in the island-off band".
+  Frame pillOn;
+  if (!PRISM_CHECK(ComposePillOn(onWindow, onFrame, &pillOn))) return;
 
   Band band;
   band.x0 = 26;
@@ -631,34 +651,38 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
   const double bgOn = BackgroundLevel(onPill, band);
   const int offInk = InkPixels(offPill, band, bgOff, 40.0);
   const int onInk = InkPixels(onPill, band, bgOn, 40.0);
-  // The card's question, narrowed to the GLYPHS: take the island-off frame's ink
-  // mask (the text the window used to paint) and ask how many of those exact
-  // pixels are ink in the island-on frame. That is stable on a runner whose
-  // band carries other structure (theme, shadow, a different DPI): the answer is
-  // about the text and nothing else. The band-wide count is printed next to it.
-  const std::vector<uint8_t> glyphs = InkMask(offPill, band, bgOff);
+  // THE TEXT, and nothing else. The reference mask comes from the COMPOSITED
+  // island frame -- the text the island paints at the pill's own coordinates --
+  // and the question is how many of those exact pixels the WINDOW still paints.
+  //
+  // Why not the island-off frame's mask: at narrower client widths the action
+  // band's island can reach into the pill rectangle. The window's pill used to
+  // cover it; with the pill on the island, the window's frame shows it -- a real
+  // pixel difference that has nothing to do with the text (measured on CI's
+  // 1028x729 runner: 184 such pixels, all at band x 446..533, far from the
+  // centred run). Keying on the ISLAND's glyphs keeps the assertion about the
+  // breadcrumb on every window size.
+  const std::vector<uint8_t> glyphs = InkMask(pillOn, band, bgOn);
   int glyphPixels = 0;
   int glyphsStillInk = 0;
   for (UINT y = band.y0; y < band.y1 && y < onPill.height; ++y) {
     for (UINT x = band.x0; x < band.x1 && x < onPill.width; ++x) {
-      if (!glyphs[static_cast<size_t>(y) * offPill.width + x]) continue;
+      if (!glyphs[static_cast<size_t>(y) * pillOn.width + x]) continue;
       ++glyphPixels;
       if (std::fabs(onPill.L(x, y) - bgOn) >= 40.0) ++glyphsStillInk;
     }
   }
   std::printf(
       "  window frame in the pill band: island-off ink=%d, island-on ink=%d | of the %d glyph "
-      "pixels, %d are still ink with the island on\n",
+      "pixels the ISLAND paints, %d are also painted by the window\n",
       offInk, onInk, glyphPixels, glyphsStillInk);
-  // The reference proves the detector fires; the subject proves the window
-  // stopped painting the TEXT there (it lives on the island now).
+  // The reference proves the detector fires (there IS a run of glyphs in the
+  // band); the subject proves the window stopped painting them.
   PRISM_CHECK(offInk > 100);
   PRISM_CHECK(glyphPixels > 100);
-  PRISM_CHECK(glyphsStillInk * 20 <= glyphPixels);  // <= 5% of the glyphs survive
-  // The band-wide count is a DIAGNOSTIC, not a gate: on a runner whose theme,
-  // DPI or shadow makes the empty band carry structure, an absolute threshold
-  // says more about the machine than about the window. "The glyphs are gone" is
-  // the claim; this line is the context a reader needs to believe it.
+  PRISM_CHECK(glyphsStillInk * 20 <= glyphPixels);  // <= 5% of the glyphs
+  // The band-wide counts stay as context, not as gates: they measure the
+  // runner's width (the band's island reach) as much as the window.
 
   // ... and the handover is LOCAL: every pixel outside the pill rectangle (plus
   // its 1 px stroke) is the same in both frames. The stroke is the one visible

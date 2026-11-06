@@ -54,6 +54,15 @@ inline constexpr bool kCardUnderlineEnabled = true;
 #else
 inline constexpr bool kCardUnderlineEnabled = false;
 #endif
+// C105: the ratio bar's own row exists only in the shipping build. The mutation
+// arm draws the bar where it used to be -- INSIDE the value line, straight
+// through the percentage -- which must turn the "the bar does not intersect its
+// value" assertion red.
+#if defined(PRISM_C105_MUTANT_BAR_OVER_VALUE)
+inline constexpr bool kCardBarHasOwnRow = false;
+#else
+inline constexpr bool kCardBarHasOwnRow = true;
+#endif
 
 #if defined(PRISM_C104_MUTANT_SQUARE)
 inline constexpr bool kSelectionPill = false;
@@ -197,8 +206,17 @@ struct Metrics {
   float selectionInset = 8.0f;
   float selectionRadius = 6.0f;
   // C105: the card is FOUR label/value pairs stacked (plan 3.2). Each pair is
+  // a 12 px label line above a 16 px value line (28 px), the pairs are 6 px
+  // apart, and the card keeps 10 px of padding.
+  //
+  // The RATIO BAR HAS ITS OWN ROW. It used to be drawn INSIDE the value line
+  // (bottom-5 .. bottom-2 of that box), which is where the integration build
+  // showed it: a blue bar straight through the "95.0%" glyphs. A bar that shares
+  // a row with text cannot be positioned correctly at every font/DPI, so the row
+  // is reserved by the layout arithmetic that also places the text:
+  //   4*28 + 3*6 + (cardBarGap + cardBarHeight) + 2*10 = 137 + 20 = 157.
   // The numbers are integral floats so the pixel assertions are exact.
-  float statusHeight = 150.0f;
+  float statusHeight = 157.0f;
   float statusGapAbove = 12.0f;
   float statusPadding = 10.0f;
   float statusLineHeight = 22.0f;
@@ -207,8 +225,12 @@ struct Metrics {
   float cardRowGap = 6.0f;
   float cardLabelFontSize = 10.0f;
   float cardValueFontSize = 12.0f;
+  // C105: the ratio bar's own row: 3 px tall, 4 px below the value it belongs to.
+  float cardBarHeight = 3.0f;
+  float cardBarGap = 4.0f;
 
   float CardRowHeight() const { return cardLabelHeight + cardValueHeight; }
+  float CardBarRowHeight() const { return cardBarGap + cardBarHeight; }
   float scrollY = 0.0f;
   float viewportTop = 0.0f;
   float viewportBottom = 1080.0f;
@@ -613,17 +635,31 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
     push(std::move(value));
     rowTop += rowPitch;
   }
-  // The micro ratio bar closes the ratio pair: 3 px tall, the canonical
-  // fraction wide, inside the value line's box (so it can never cross the
-  // card's bottom padding).
+  // The micro ratio bar closes the ratio pair. C105: it gets its OWN row, taken
+  // from the same arithmetic that placed the label and the value above it --
+  // cardBarGap below the value's bottom, cardBarHeight tall. The pre-fix bar was
+  // drawn INSIDE the value line (bottom-5 .. bottom-2), which is a bar straight
+  // through the "95.0%" glyphs: the integration build showed exactly that, and
+  // the suite now asserts the two rectangles are disjoint.
   const float fraction =
       (std::min)(1.0f, static_cast<float>(status.ratioPermille) / 1000.0f);
-  const float barBottom = rowTop - metrics.cardRowGap;
-  const Box lastValue{textLeft, barBottom - metrics.cardValueHeight, cardRight, barBottom};
-  push(Command{PrimKind::RatioBar,
-               Box{lastValue.left, lastValue.bottom - 5.0f,
-                   lastValue.left + lastValue.Width() * fraction, lastValue.bottom - 2.0f},
-               {}, {}, ColorToken::Accent, 0.9f, -1, Section::None});
+  const Box ratioValueBox{textLeft, rowTop - rowPitch + metrics.cardLabelHeight, cardRight,
+                          rowTop - rowPitch + rowHeight};
+  Box barBox;
+  if (kCardBarHasOwnRow) {
+    const float barTop = ratioValueBox.bottom + metrics.cardBarGap;
+    barBox = Box{ratioValueBox.left, barTop,
+                 ratioValueBox.left + ratioValueBox.Width() * fraction,
+                 barTop + metrics.cardBarHeight};
+  } else {
+    // NEGATIVE CONTROL (CONTRACTS D3): the pre-fix position, inside the value
+    // line. The intersection assertion MUST go red here.
+    barBox = Box{ratioValueBox.left, ratioValueBox.bottom - 5.0f,
+                 ratioValueBox.left + ratioValueBox.Width() * fraction,
+                 ratioValueBox.bottom - 2.0f};
+  }
+  push(Command{PrimKind::RatioBar, barBox, {}, {}, ColorToken::Accent, 0.9f, -1,
+               Section::None});
   return layout;
 }
 

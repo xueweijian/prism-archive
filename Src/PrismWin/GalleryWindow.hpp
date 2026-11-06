@@ -280,6 +280,19 @@ inline constexpr bool kHudPublishedToA11y = false;
 inline constexpr bool kHudPublishedToA11y = true;
 #endif
 
+// C116 (CONTRACTS D3/D26): the repaint door, as one named predicate. Every
+// path that REBUILDS the scene (attaching a catalog, changing folder) asks for
+// a frame through Invalidate(), so "the model changed and the window was never
+// dirtied" is a state this window cannot be put in -- unless the mutant below
+// closes the door. The suite asserts the WINDOW'S UPDATE REGION (GetUpdateRect),
+// which is the platform's own answer to "is a WM_PAINT pending?", not a counter
+// this window could keep for itself.
+#if defined(PRISM_C116_MUTANT_NO_REPAINT)
+inline constexpr bool kRepaintRequestsArmed = false;
+#else
+inline constexpr bool kRepaintRequestsArmed = true;
+#endif
+
 class GalleryWindow {
  public:
   // Monotonic millisecond clock -- public because Main.cpp drives HUD phases
@@ -1810,6 +1823,10 @@ class GalleryWindow {
     int clippedLabels = 0;
     int disabled = 0;
   };
+  // C116: what the last GRID paint actually put on screen, from the renderer's
+  // own counter. "The model has nine rows" and "nine rows reached the device"
+  // are two different facts; this seam is the second one.
+  int RowCellsPainted() const { return renderer_.dbgRowCells; }
   ActionPaintCounters PaintedActionCounters() const {
     return ActionPaintCounters{renderer_.dbgActionButtons, renderer_.dbgActionIcons,
                                renderer_.dbgActionLabels,  renderer_.dbgActionIslands,
@@ -4580,7 +4597,12 @@ class GalleryWindow {
     viewport_.SetScroll(0.0);
     scrollSpring_ = SpringAnimator(kScrollSpring, 0.0);  // snap, no glide back
     RebuildBreadcrumbText();
-    Invalidate();
+    // C116: a rebuilt scene asks for the frame that shows it. A window whose
+    // rows were just replaced but that is not dirty keeps the previous frame on
+    // screen until something unrelated invalidates it; that is the "the model
+    // is complete, the pixels are stale" state the card is about. The request
+    // goes through Invalidate(), the one door the mutant closes.
+    if (kRepaintRequestsArmed) Invalidate();
   }
 
   void AdvanceScrollSpring() {
@@ -5446,7 +5468,15 @@ class GalleryWindow {
 
   int ItemsCount() const { return static_cast<int>(folderItems_.size()); }
 
-  void Invalidate() { if (host_.hwnd) InvalidateRect(host_.hwnd, nullptr, FALSE); }
+  // C116: the ONE door every repaint request goes through, so "this window was
+  // told its pixels are stale" is a single, inspectable fact. The mutant below
+  // closes the door: the model still changes and WM_PAINT still paints whatever
+  // is in the scene -- but no frame is ever requested, which is the reported
+  // "the model is complete and the screen is empty" state.
+  void Invalidate() {
+    if (!kRepaintRequestsArmed) return;
+    if (host_.hwnd) InvalidateRect(host_.hwnd, nullptr, FALSE);
+  }
 
   // ---------- card C52: the drop-in implementation --------------------------
   //

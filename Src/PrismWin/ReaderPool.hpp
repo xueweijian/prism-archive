@@ -28,6 +28,12 @@
 // NEVER SHARE. A test that sees two leases pointing at the same ArchiveReader
 // has caught the bug; a mutation build (PRISM_C11_MUTANT_SHARED_HANDLER) makes
 // that literal so the concurrency suite can prove it goes red.
+//
+// NEVER OVERSELL. capacity is a CEILING: request kWorkers+1 must wait until a
+// lease comes back, never borrow a busy handler. PRISM_C114_MUTANT_OVERSELL
+// removes that ceiling (a full pool hands slot 0 to the next caller) so the
+// concurrency suite can prove its "refused while all slots are held" assertion
+// really goes red -- see Tests/win/test_pool_lease.cpp.
 #pragma once
 
 #include <windows.h>
@@ -254,6 +260,22 @@ class ReaderPool {
 #else
     std::unique_lock<std::mutex> lock(state->mutex);
     if (state->closed) return std::nullopt;
+#if defined(PRISM_C114_MUTANT_OVERSELL)
+    // Negative control for C114 (CONTRACTS D3/D27): the CEILING is gone. A
+    // request that finds every slot busy is handed slot 0 instead of waiting, so
+    // the pool runs kWorkers+1 operations on kWorkers handlers and inUse climbs
+    // past capacity. That is exactly what
+    // pool_lease.capacity_is_a_hard_ceiling_and_slots_are_exclusive refuses; the
+    // suite prints "C114 MUTATION CAUGHT: oversell" only while it has really
+    // observed inUse > capacity, so a red for another reason keeps no marker.
+    if (!state->FreeExist()) {
+      ++state->stats.acquired;
+      ++state->inUse;
+      if (!state->used.empty()) state->used[0] = true;
+      state->RefreshDerived();
+      return std::optional<Lease>(Lease(state, state->slots.empty() ? kNoSlot : 0));
+    }
+#endif
     if (!state->FreeExist()) {
       ++state->stats.waits;
       if (timeout == std::chrono::milliseconds(0)) {

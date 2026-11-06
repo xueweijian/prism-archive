@@ -4,7 +4,7 @@
 //
 // WHY A MONOSPACED FAMILY (and not just tnum):
 //   BLUEPRINT.md requires OpenType tnum for size/ratio/offset columns. On the
-//   shipping Segoe UI family the DIGITS are already tabular (1/8/0 all advance
+//   shipping system UI face the DIGITS are already tabular (1/8/0 all advance
 //   7.008 px) and tnum changes nothing -- but '.' advances only 2.818 px.
 //   Tabular figures equalize FIGURES, not punctuation, so "6.3 KB" and
 //   "11.2 KB" still put their decimal point on different pixels. The card's
@@ -16,20 +16,20 @@
 //   the negative control removes both halves of the fix.
 //
 // PRISM_C109_MUTANT_PROPORTIONAL restores the shipped behaviour exactly:
-// proportional Segoe UI with no typography, so 1/8/0/. diverge and the
+// the proportional system face with no typography, so 1/8/0/. diverge and the
 // suite's advance assertion goes red.
 #pragma once
 
-#include <dwrite.h>
+#include "Typography.hpp"  // C103: the ONE file that may spell a family name
 
 namespace prism::win::listtype {
 
 #if defined(PRISM_C109_MUTANT_PROPORTIONAL)
 inline constexpr bool kTabularNumbers = false;
-inline constexpr const wchar_t* kNumericFamily = L"Segoe UI";
+inline constexpr const wchar_t* kNumericFamily = prism::win::typography::kProportionalFamily;
 #else
 inline constexpr bool kTabularNumbers = true;
-inline constexpr const wchar_t* kNumericFamily = L"Consolas";
+inline constexpr const wchar_t* kNumericFamily = prism::win::typography::kMonoFamily;
 #endif
 
 inline constexpr float kNumericFontSize = 13.0f;
@@ -39,9 +39,11 @@ inline constexpr float kNumericFontSize = 13.0f;
 inline HRESULT CreateNumericFormat(IDWriteFactory* factory, IDWriteTextFormat** out) {
   if (factory == nullptr || out == nullptr) return E_POINTER;
   *out = nullptr;
-  HRESULT hr = factory->CreateTextFormat(
-      kNumericFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-      DWRITE_FONT_STRETCH_NORMAL, kNumericFontSize, L"en-US", out);
+  // C103: created through the typography entry so this file never calls DWrite
+  // directly (core.c103_font_literals asserts exactly that).
+  HRESULT hr = prism::win::typography::CreateTextFormatInFamily(
+      factory, kNumericFamily, kNumericFontSize, DWRITE_FONT_WEIGHT_NORMAL,
+      DWRITE_FONT_STYLE_NORMAL, L"en-US", out);
   if (FAILED(hr)) return hr;
   (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
   (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);

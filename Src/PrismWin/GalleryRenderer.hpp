@@ -338,7 +338,7 @@ class GalleryRenderer {
         small_.ReleaseAndGetAddressOf());
     // C109: the numeric columns (size / packed / ratio). One format, trailing
     // alignment, tabular advances -- see ListType.hpp for why the family is
-    // monospaced instead of "Segoe UI + tnum".
+    // monospaced instead of "the proportional face + tnum".
     hr = prism::win::listtype::CreateNumericFormat(
         writeFactory_.Get(), numbers_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) return hr;
@@ -2223,7 +2223,7 @@ class GalleryRenderer {
 
   // C109: trailing alignment against a BOX [left, right]; the box's right edge
   // is the column baseline. The format is passed in because the header keeps the
-  // proportional Segoe UI face (CJK labels) while the numbers use numbers_.
+  // proportional system face (CJK labels) while the numbers use numbers_.
   void DrawTrailingLabel(ID2D1RenderTarget* target, IDWriteTextFormat* format,
                          const std::wstring& text, float left, float right, float y,
                          ID2D1Brush* brush) {

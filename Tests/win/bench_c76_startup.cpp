@@ -115,7 +115,33 @@ using prism::win::benchframe::Seam;
 // and this bench now asserts rendered + hr == S_OK + painted >= 5% BEFORE the
 // digest is allowed to mean anything. Only a frame that passes those three may
 // be recorded here again.
-uint64_t g_baselineDigest = 0xe735eb87a09d4f84ull;  // C113 capture, 1264x741 client
+//
+// C112 LANDS ON TOP OF C113 AND RE-RECORDS IT ONCE MORE -- and this time the
+// frame is provably real, because C113's content assertions run first:
+// rendered == 1, enddraw_hr == 0x0, painted == 164668/936624 (17.6%).
+//
+// THE VALUE BELOW WAS MEASURED ON 42d7026 (main with C109's type and C110's
+// grid). It is a hash of the WHOLE FRAME's bytes, so changing the base changes
+// it -- re-measure, never copy.
+//
+// WHY THIS MOVE IS LEGITIMATE (all three are measured, not claimed):
+//   1. the frame is still REAL -- see the painted figure above, asserted before
+//      the digest is allowed to mean anything;
+//   2. the change is CONFINED TO THE PILL -- C112's S3b measures 0 changed
+//      pixels outside the pill rectangle plus its 1 px stroke, at 1280x800 AND
+//      at the CI runner's 1028x729;
+//   3. the pill's fill and TEXT moved from the window's frame to the island BY
+//      DESIGN: what changed is the OWNERSHIP of those pixels, not the success
+//      of the render.
+//
+// WHY THE VALUE IS NOT e735eb87a09d4f84 ANY MORE, in one line: main moved under
+// it. C113 measured e735 on ITS tree; since then C109 re-typed the list rows
+// (typography is pixels) and C112 moved the pill's fill and TEXT to the island,
+// so the same window paints different bytes. The frame is still real -- painted
+// == 164668/936624 (17.6%), the three preconditions above run first -- and
+// C112's own delta is confined to the pill (S3b: 0 pixels outside it).
+// 0af0b75bc5b12383 was a frame D2D had REJECTED and stays dead.
+uint64_t g_baselineDigest = 0x3c2271cbab6069a1ull;  // C112 + current main, 1264x741
 // The digest is a function of the CLIENT SIZE (the layout is width-driven), so
 // the equality is only meaningful at the geometry it was recorded at. On another
 // display the bench prints the digest and says so instead of pretending a

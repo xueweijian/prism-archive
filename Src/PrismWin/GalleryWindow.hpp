@@ -1267,6 +1267,51 @@ class GalleryWindow {
   int GlassComposedFrames() const { return glassComposedFrames_; }
   int GlassDroppedBackdrops() const { return glass_ ? glass_->DroppedBackdrops() : 0; }
   bool GlassLastFrameOptical() const { return glassLastFrameOptical_; }
+
+  // ---- card C112: WHO paints the pill's content -----------------------------
+  //
+  // The defect C112 exists for: the island is a CreateTargetForHwnd(topmost)
+  // visual ABOVE the window, and its backdrop is a capture of the window's own
+  // pixels -- which, pre-C112, already contained the breadcrumb text. The
+  // optics then blurred that text and painted the blur back OVER it, so every
+  // glyph got a second, offset, blurred copy of itself (the user's "重影").
+  //
+  // The fix is ownership, not a tuning knob: while the island is composited the
+  // pill (fill, rim, hover capsule and TEXT) belongs to the ISLAND, and the
+  // window keeps only the geometry it hit-tests with.
+  bool GlassPillOwnsContent() const {
+#if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
+    // NEGATIVE CONTROL (CONTRACTS D3/D27): the pre-C112 arm -- the window keeps
+    // painting the pill's text and the island is composed on top of it. The
+    // suite's sharpness assertion MUST go red, and the verdict it prints names
+    // this mutant.
+    return false;
+#else
+    return glass_ && glass_->UsesComposition() && glass_->Visible();
+#endif
+  }
+  // The device context the island's frames are composed on (the test creates an
+  // offscreen target there; a cross-device target is D2DERR_WRONG_RESOURCE_DOMAIN).
+  ID2D1DeviceContext* GlassContext() const { return glass_ ? glass_->Context() : nullptr; }
+  // (PresentGlassFrameForTest lives with the other C113 capture seams further
+  // down; the two cards defined it independently and the merge keeps ONE.)
+  // One island frame, with the content underneath supplied by the caller instead
+  // of captured from the window. This is the SAME composition the product
+  // presents (PresentGlassFrame -> PaintIslandContent); a suite that painted a
+  // lookalike would not be asserting the frames the user gets.
+  bool ComposeIslandForTest(ID2D1Bitmap1* target, ID2D1Bitmap* backdrop) {
+    if (!glass_ || !target) return false;
+    const prism::glass::IslandRect rect = GlassPanelRect();
+    if (rect.w == 0 || rect.h == 0) return false;
+    prism::win::glass::GlassConstants constants{};
+    BuildGlassConstants(rect, &constants);
+    glassLastFrameOptical_ = backdrop != nullptr && glass_->OpticsLive();
+    return glass_->PaintIslandInto(
+        target, rect, backdrop, constants,
+        [this](ID2D1DeviceContext* dc, float width, float height) {
+          PaintIslandContent(dc, width, height);
+        });
+  }
   // The bytes the last release ACTUALLY returned (C33's accounting, derived
   // from live COM pointers): 0 while nothing was held, 0 again on a second
   // release -- which is how the negative control proves the call really ran.
@@ -4848,6 +4893,20 @@ class GalleryWindow {
     // have shipped the pre-C77 look (a translucent panel over a flat colour).
     scene.glassPanels = prism::theme::BackdropRefractionEnabled();
     scene.backdropRefraction = scene.glassPanels;
+    // C112: WHO PAINTS THE BREADCRUMB. While the island is composited, the pill
+    // -- fill, rim, hover capsule and TEXT -- belongs to it. The window keeps
+    // the drop shadow and the hit-test geometry; it must NOT paint the text,
+    // because the island's backdrop is a capture of THIS frame and the optics
+    // would blur that text and paint the blur back over it (the C107 ghost).
+    //
+    // ... but only once the island has actually PRESENTED a frame (C76 defers
+    // the composition's first present to the second paint). Ownership that
+    // started one frame early would leave the pill EMPTY on the first frame -- a
+    // hole where the breadcrumb is -- because the window would have stopped
+    // painting it while the island above it was not there yet. Both arms paint
+    // the same pixels, so the handover frame is invisible (C76's "every
+    // differing pixel sits inside the island" invariant).
+    scene.pillOwnedByIsland = GlassPillOwnsContent() && glassPresents_ > 0;
     // C91: the frame's ONE theme input. It is the same field the shell paints
     // from (chromeVariant_), so a theme switch can no longer reach the caption
     // and stop there.
@@ -4960,13 +5019,24 @@ class GalleryWindow {
   // offscreen digest path): report the first frame once, and present the glass
   // island on the SECOND frame when the deferral is on.
   void AfterWindowFrame() {
-    if (glassPresentPending_ && paintMessages_ >= 2) {
-      glassPresentPending_ = false;
-      PresentGlassFrame();
+    if (glass_ && glass_->Visible()) {
+      if (glassPresentPending_ && paintMessages_ < 2) {
+        // Ask for the frame that carries the glass. Without this the island
+        // would wait for the next unrelated repaint -- "deferred" must mean
+        // "next frame", not "eventually".
+        Invalidate();
+      } else {
+        // C112: EVERY window frame re-composes the island, not just the first
+        // one. The pill's TEXT lives in this surface now; a one-shot present
+        // would freeze the breadcrumb at whatever it said the first time the
+        // window painted (navigate into a folder and the bar would never
+        // change). The backdrop is captured and the chain re-run per frame,
+        // which is what C107's "captured every frame" already described; the
+        // capture bitmap is reused, so this is not an allocation per frame.
+        glassPresentPending_ = false;
+        PresentGlassFrame();
+      }
     } else if (glassPresentPending_) {
-      // Ask for the frame that carries the glass. Without this the island would
-      // wait for the next unrelated repaint -- "deferred" must mean "next
-      // frame", not "eventually".
       Invalidate();
     }
     if (!firstFrameReported_) {
@@ -5182,13 +5252,34 @@ class GalleryWindow {
     // 3. THE COMPOSITION: backdrop -> Kawase -> Kawase -> LiquidGlass -> panel
     //    chrome, into the island's premultiplied swapchain.
     glassLastFrameOptical_ = captured && glass_->OpticsLive();
-    const prism::theme::Variant variant = chromeVariant_;
-    const bool composed = glass_->PaintIsland(
-        0, rect, constants, captured ? glass_->Backdrop() : nullptr,
-        [this, variant](ID2D1DeviceContext* dc, float width, float height) {
-          PaintGlassPanelChrome(dc, width, height, variant);
-        });
+    const bool composed =
+        glass_->PaintIsland(0, rect, constants, captured ? glass_->Backdrop() : nullptr,
+                            [this](ID2D1DeviceContext* dc, float width, float height) {
+                              PaintIslandContent(dc, width, height);
+                            });
     if (composed) ++glassComposedFrames_;
+  }
+
+  // C112: EVERYTHING the island shows for one frame, in island-local pixels.
+  // The order is the contract: the optics are already on the surface when this
+  // runs (PaintIslandInto draws the chain first), so whatever this paints is on
+  // top of the glass and is never fed back into it. That is why the TEXT can be
+  // sharp here and can never be blurred by the backdrop capture.
+  void PaintIslandContent(ID2D1DeviceContext* dc, float width, float height) {
+    if (!dc || width <= 0.0f || height <= 0.0f) return;
+    if (GlassPillOwnsContent()) {
+      // C112: the whole pill, into the island's own surface. The optics are
+      // already underneath (PaintIslandInto draws the chain first), so this text
+      // is painted OVER the glass and stays sharp -- and because it is painted
+      // AFTER the chain ran, it can never become part of the next backdrop.
+      renderer_.PaintPillOnIsland(dc, breadcrumbText_, layout_, &actionBar_, chromeVariant_,
+                                  CrumbHoverRect(), prism::theme::BackdropRefractionEnabled());
+      return;
+    }
+    // Without composition there is no island above the window: the window still
+    // paints the pill (its own DrawBreadcrumbIsland), and this call only has the
+    // rim to add to the transparent surface.
+    PaintGlassPanelChrome(dc, width, height, chromeVariant_);
   }
 
   // C107: the island's own chrome -- the specular rim and the hairline border,

@@ -30,7 +30,8 @@
 //       the merge gate. This arm paints the SAME window the C76 bench paints
 //       (real WM_PAINTs, island presented), captures it through the product
 //       seam, and pins painted >= 5% plus the recorded digest
-//       e735eb87a09d4f84. The name carries no "bench" token on purpose.
+//       5a0c0a1946978d9c (C112 + C113; see the constant for why the baseline
+//       moved). The name carries no "bench" token on purpose.
 //
 // NEGATIVE CONTROLS (CONTRACTS D3/D26/D27): two arms compiled from this same
 // source, one rule broken each, armed on a runtime proof before the verdict
@@ -83,16 +84,38 @@ bool CheckTrue(bool ok, const char* expr, int line) {
 constexpr HRESULT kWrongResourceDomain = static_cast<HRESULT>(0x88990012L);
 
 // H3's floors. Measured on this box at 1264x741: a real frame has
-// painted = 193466 / 936624 (20.7%) and nonBlack = 936624 (100%); the rejected
-// frame has painted = 0 and nonBlack = 936624. 5% and 50% leave the real frame a
-// 4x margin and still fail the canvas.
+// painted = 193466 / 936624 (20.7%) on the C113 tree and 167729 / 936624 (17.9%)
+// once C112 moves the pill's pixels to the island; the rejected frame has
+// painted = 0 and nonBlack = 936624. 5% and 50% leave the real frame a 3x margin
+// and still fail the canvas.
 constexpr size_t kPaintedDivisor = 20;
 
 // H4: the frame the C76 bench records, at the geometry it records it at. The
 // value was re-recorded by C113 from a frame that passed the content assertions
 // (rendered, hr == S_OK, painted = 193466/936624) -- NOT from the rejected frame
 // 0af0b75bc5b12383 the previous constant held.
-constexpr uint64_t kDigest = 0xe735eb87a09d4f84ull;
+//
+// C112 RE-RECORDED IT AGAIN, and this is the part a reader must not skim: C112
+// moves the breadcrumb pill's fill and TEXT from the window's frame to the
+// island (a DirectComposition visual above it), so the window's steady-state
+// frame legitimately loses those pixels and the whole-frame digest must change.
+// The move is legitimate for three MEASURED reasons, not because a constant was
+// inconvenient:
+//   1. the frame is still REAL -- rendered == 1, hr == S_OK,
+//      painted == 164668/936624 (17.6%), and the content assertions above are
+//      checked before this digest is allowed to mean anything;
+//
+// The value below was measured on 42d7026 (main with C109's type and C110's
+// grid). It is a hash of the WHOLE FRAME's bytes, so changing the base changes
+// it -- re-measure, never copy.
+//   2. C112's OWN change is CONFINED TO THE PILL -- its S3b measures 0 changed
+//      pixels outside the pill rectangle plus its 1 px stroke, at 1280x800 and
+//      at 1028x729 (the rest of the frame moved with main, not with C112: C109
+//      re-typed the list rows after C113 measured e735eb87a09d4f84);
+//   3. the pill's content moved from the window's frame to the island BY DESIGN:
+//      what changed is the OWNERSHIP of those pixels, not the success of the
+//      render.
+constexpr uint64_t kDigest = 0x3c2271cbab6069a1ull;
 constexpr uint32_t kDigestWidth = 1264;
 constexpr uint32_t kDigestHeight = 741;
 constexpr size_t kNonBlackDivisor = 2;

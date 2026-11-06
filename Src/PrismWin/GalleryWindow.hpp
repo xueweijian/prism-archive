@@ -4927,7 +4927,19 @@ class GalleryWindow {
     // one drag). It is painted over the same target, in the same frame, from
     // C15 tokens -- so it can never drift from the window's palette.
     if (target == target_.Get()) DrawDropHint();
-    target->EndDraw();
+#if defined(PRISM_C113_MUTANT_BLACK_FRAME)
+    // NEGATIVE CONTROL (CONTRACTS D3/D26/D27): a frame EndDraw ACCEPTS that
+    // carries no scene at all. The honesty suite's non-empty assertion
+    // (painted >= N, digest != 0) MUST go red; the verdict names this mutant.
+    target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f));
+#endif
+    // C113: EndDraw IS the verdict. For an HwndRenderTarget it is the submit;
+    // for a WIC target it is where D2D reports that the frame was rejected
+    // (D2DERR_WRONG_RESOURCE_DOMAIN). Dropping this HRESULT is what let a
+    // rejected frame travel on as frame.rendered == true (see RenderSceneInto).
+    const HRESULT endDraw = target->EndDraw();
+    lastRenderError_ = endDraw;
+    if (FAILED(endDraw)) return false;
     // C76: the first frame's own render cost, on the same clock as every other
     // stage. EndDraw is the submit for an HwndRenderTarget.
     trace.Add("first_frame_render", "BeginDraw+draw+EndDraw", frameStart,
@@ -4993,14 +5005,83 @@ class GalleryWindow {
   // brush drawn on a target that did not create it is undefined behaviour, and
   // the digest would be a picture of the wrong thing.
   bool RenderSceneInto(ID2D1RenderTarget* target) {
-    if (!target) return false;
+    lastRenderError_ = S_OK;
+    if (!target) {
+      lastRenderError_ = E_POINTER;
+      return false;
+    }
+#if defined(PRISM_C113_MUTANT_SILENT_FAILURE)
+    // NEGATIVE CONTROL (CONTRACTS D3/D26/D27): the pre-C113 product, restored.
+    // EndDraw's HRESULT is dropped, DrawFrame always answers "true", and a
+    // target from another D2D device gets an EMPTY frame that claims it
+    // rendered. The honesty suite's "a painted window's offscreen frame is
+    // either honestly failed or really painted" predicate MUST go red here.
+    renderer_.CreateDeviceResources(target);
+    renderer_.ReleaseDeviceResources();
+    if (target_) renderer_.CreateDeviceResources(target_.Get());
+    return true;
+#else
+    // C113: the failure is REPORTED, never absorbed. When this window has
+    // painted for real, the renderer's cached C77 backdrop bitmap belongs to
+    // the HWND target's device; a WIC target is a different device, and D2D
+    // rejects the frame at EndDraw with D2DERR_WRONG_RESOURCE_DOMAIN
+    // (0x88990012). That is a KNOWN, ADMITTED fact, not an occasional glitch:
+    // H1 of the C113 suite pins it, and the C76 bench renders its digest frame
+    // BEFORE the first WM_PAINT for exactly this reason.
     renderer_.CreateDeviceResources(target);
     const bool drawn = DrawFrame(target);
+    // The round trip is part of the seam: the cache now belongs to the
+    // target's device, so drop it before the window paints again -- otherwise
+    // the NEXT window frame would sample the foreign backdrop and fail one
+    // frame late.
+    renderer_.ReleaseDeviceResources();
+    if (target_) renderer_.CreateDeviceResources(target_.Get());
+    return drawn;
+#endif
+  }
+  // C113: the CAPTURE seam -- the one a digest/screenshot caller must use.
+  //
+  // RenderSceneInto above deliberately keeps its pre-C113 shape (paint with the
+  // renderer's CURRENT device cache) so the cross-device failure stays
+  // observable: that is H1 of the C113 suite, a measured 0x88990012. A capture
+  // is a different contract -- the picture must be the scene, not a rejection
+  // -- so this seam builds the renderer's device objects on the target it is
+  // given, paints, and then hands the device back to the window. Without the
+  // release/re-create, the SECOND capture into a fresh WIC target is rejected
+  // too (the C113 probe measured 0x88990012 on every render after the first),
+  // which is how a digest ends up hashing a frame D2D threw away.
+  bool RenderSceneForCapture(ID2D1RenderTarget* target) {
+    lastRenderError_ = S_OK;
+    if (!target) {
+      lastRenderError_ = E_POINTER;
+      return false;
+    }
+    renderer_.ReleaseDeviceResources();
+    renderer_.CreateDeviceResources(target);
+    const bool drawn = DrawFrame(target);
+    renderer_.ReleaseDeviceResources();
     if (target_) renderer_.CreateDeviceResources(target_.Get());
     return drawn;
   }
+  // C113: the HRESULT the last render really returned from EndDraw. S_OK for a
+  // frame that was accepted; D2DERR_WRONG_RESOURCE_DOMAIN for the cross-device
+  // case RenderSceneInto documents; E_POINTER for a null target.
+  HRESULT LastRenderError() const { return lastRenderError_; }
   int GlassPresents() const { return glassPresents_; }
   int GlassPresentsAtFirstFrame() const { return glassPresentsAtFirstFrame_; }
+  // C113: present ONE island frame through the product's own PresentGlassFrame,
+  // without waiting for a WM_PAINT. A capture suite needs the steady state (the
+  // island composited) BEFORE it renders the window's frame offscreen: after a
+  // real paint the renderer's cached C77 backdrop lives on the window's device
+  // and D2D refuses to sample it from a WIC target (D2DERR_WRONG_RESOURCE_DOMAIN,
+  // measured -- see RenderSceneInto). The seam keeps the production path --
+  // capture, constants, chain, panel chrome -- and only changes who calls it.
+  bool PresentGlassFrameForTest() {
+    if (!glass_) return false;
+    const int before = glassComposedFrames_;
+    PresentGlassFrame();
+    return glassComposedFrames_ > before;
+  }
   bool FirstFrameReported() const { return firstFrameReported_; }
   // C87: how many Quick Look frames painted DECODED pixels (see the renderer's
   // counter). The suite asserts this alongside the pixel variance so "the card
@@ -6063,6 +6144,14 @@ class GalleryWindow {
   std::function<void()> onFirstFrame_;  // C76: post-first-frame work (app-owned)
   int glassPresents_ = 0;               // every PresentGlassFrame call, counted
   int glassPresentsAtFirstFrame_ = -1;  // the count when the first frame reported
+  // ---- card C113: a failed frame may never look like a successful one ----
+  // The HRESULT the last DrawFrame really got from EndDraw. Until C113 the
+  // value was dropped on the floor ("target->EndDraw();" and then "return
+  // true"), so a frame D2D rejected -- D2DERR_WRONG_RESOURCE_DOMAIN above all,
+  // when a cached device object from the HWND target is sampled by a WIC target
+  // -- came back as a SUCCESS carrying nothing but the canvas clear. Render
+  // paths now hand it to LastRenderError() and callers must assert on it.
+  HRESULT lastRenderError_ = S_OK;
   std::function<void()> onIdle_;   // the app's companion-preview poll
   bool idleTimer_ = false;
 

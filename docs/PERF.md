@@ -1135,10 +1135,22 @@ C65 给出的数字是 **164.5 ms 进程内首帧 / 208.4 ms p95 / 193.5 ms 黑�
 
 | 测试 | 断言 |
 |---|---|
-| `c76.bench_startup` | 首帧像素 **digest == 改前 baseline**（`79a56a1305dd98de`，1264×741 客户区）；`hlsl_runtime_compiles == 0`；`hlsl_precompiled >= 2`；**首帧玻璃呈现次数 == 0**；第二帧 ≥ 1；第一/二帧**差异像素在玻璃岛矩形之外为 0**；首帧 < 1500 ms（防挂死，不是 60 ms 门） |
-| `c76.bench_baseline` | 改前行为（运行时编译 + 首帧上玻璃）的参考数字与参考 digest：`C76_BASELINE {"first_frame_digest":"79a56a1305dd98de",...}` |
+| `c76.bench_startup` | **先证明帧是真的**（`rendered == 1`、`enddraw_hr == 0x0`、`painted >= 5%`、`digest != 0`，C113 新增），再比 digest：**`e735eb87a09d4f84` @1264×741**（C113 重录，见下方“作废/待重测”）；`hlsl_runtime_compiles == 0`；`hlsl_precompiled >= 2`；**首帧玻璃呈现次数 == 0**；第二帧 ≥ 1；首帧 < 1500 ms（防挂死，不是 60 ms 门）。~~第一/二帧差异像素在玻璃岛之外为 0~~ **待重测**（C113 之前它比较的两帧是同一张被 D2D 拒绝的空帧，这条恒真） |
+| `c76.bench_baseline` | 改前行为（运行时编译 + 首帧上玻璃）的参考数字与参考 digest。旧值 `79a56a1305dd98de` **作废**（C113 之前的镜头里混入了设备域失败的帧），C113 之后这台机器读出 `e735eb87a09d4f84`，**待重测**并重录 |
 | `mutation.c76.runtime_shaders` | 注掉 .cso 路径 → `runtime_compiles=2` → 同一条 `== 0` 谓词变红，打印 `C76 MUTATION CAUGHT: runtime_shaders`（D27：注入先被运行期观测到，才允许宣告捕获） |
 | `mutation.c76.glass_on_first_frame` | 恢复"首帧上玻璃" → `presents_frame1=2` → `presents_frame1 == 0` 变红，打印 `C76 MUTATION CAUGHT: glass_on_first_frame` |
+
+**C113 作废/待重测清单（2026-11-07，feat/c113-bench-honesty）**。C113 查实：`DrawFrame` 把 `target->EndDraw()` 的 HRESULT 丢掉了，
+于是窗口真实绘制过之后的离屏渲染被 D2D 以 **0x88990012（D2DERR_WRONG_RESOURCE_DOMAIN）** 整帧拒绝，而 bench 照旧把这张
+**只有画布底色、`painted == 0`** 的帧当成功帧求 digest。下面这些数字因此不能再当证据，**待重测**（本卡不改数字，只作标记）：
+
+1. 本节所有 C76 **首帧像素 digest**（`79a56a1305dd98de`）——旧值来自改卡前的构建，无法再由真实帧产生；C113 重录为 `e735eb87a09d4f84`。
+2. 本节 `c76.bench_baseline` 的参考 digest（同上）。
+3. 本节“第一/二帧差异像素在玻璃岛矩形之外为 0”——C113 之前它比较的两帧都是同一张被拒绝的空帧，所以**恒真**；真实帧上的值**待重测**。
+4. C112 在 `docs/PERF.md` 里把 digest 改录成 `0af0b75bc5b12383` 的那一行：该值正是被拒绝的空帧（C113 的 H1 在本机复现出同一串数字，`painted == 0/936624`），**作废**。
+5. `C76_BENCH.first_frame_digest` / `C76_PIXELS.frame1|frame2` 的历史引用值——**待重测**。
+
+毫秒数（cold/warm/inproc 首帧）走的是另一条路径（真实 WM_PAINT），本卡没有发现它们被污染，保留。
 
 **为什么 60 ms 不写成断言**：契约 R2（AGENTS.md）——共享机器上的秒表不可复现，同一份二进制在这里读出 274/307/325/375 ms。
 门是**计数与像素**（`hlsl_runtime_compiles==0`、`presents_frame1==0`、digest 相等、差异只在玻璃区），

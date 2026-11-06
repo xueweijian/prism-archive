@@ -50,6 +50,7 @@
 #include <utility>
 #include <vector>
 
+#include "BenchFrameCapture.hpp"
 #include "GalleryWindow.hpp"
 #include "StartupTrace.hpp"
 
@@ -92,27 +93,29 @@ bool CheckEq(const A& a, const B& b, const char* exprA, const char* exprB, const
 
 namespace {
 
-// FNV-1a over the frame BGRA bytes. A digest is the assertion; it is never
-// compared against a stopwatch or against another machine.
-uint64_t Fnv1a(const std::vector<uint8_t>& bytes) {
-  uint64_t hash = 1469598103934665603ull;
-  for (uint8_t byte : bytes) {
-    hash ^= byte;
-    hash *= 1099511628211ull;
-  }
-  return hash;
-}
+// C113: the digest is read through Tests/win/BenchFrameCapture.hpp -- the SAME
+// reader the honesty suite asserts on, so this bench cannot quietly disagree
+// with it about what a rendered frame is. It prints RENDER FAILED hr=0x%08X and
+// leaves rendered == false whenever EndDraw rejected the frame.
+using prism::win::benchframe::CaptureOffscreen;
+using prism::win::benchframe::Frame;
+using prism::win::benchframe::Hex;
+using prism::win::benchframe::Seam;
 
-std::string Hex(uint64_t value) {
-  char text[24]{};
-  std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(value));
-  return std::string(text);
-}
-
-// The digest of the PRE-CARD first frame (PRISM_C76_BASELINE build; the value is
-// recorded in docs/PERF.md). Changing a pixel must break this equality -- that
-// is the whole point of storing it.
-uint64_t g_baselineDigest = 0x79a56a1305dd98deull;  // PRE-CARD build, 1264x741 client
+// The digest of the frame this bench captures at 1264x741.
+//
+// C113 RE-RECORDED IT, and this is the part a reader must not skim: the old
+// value (0x79a56a1305dd98de) could never be matched again by a REAL frame,
+// because every card since C76 changed pixels. What the bench was hashing
+// instead was a frame D2D had REJECTED: 0af0b75bc5b12383, the canvas clear plus
+// nothing (painted == 0 of 936624 pixels). C112 re-recorded the constant to that
+// value and called it "the pill moved to the island" -- a failed picture became
+// the baseline. The C113 suite pins both halves of that story (H1 reproduces
+// 0x88990012 and the empty frame; H3 refuses a frame with no painted pixels),
+// and this bench now asserts rendered + hr == S_OK + painted >= 5% BEFORE the
+// digest is allowed to mean anything. Only a frame that passes those three may
+// be recorded here again.
+uint64_t g_baselineDigest = 0xe735eb87a09d4f84ull;  // C113 capture, 1264x741 client
 // The digest is a function of the CLIENT SIZE (the layout is width-driven), so
 // the equality is only meaningful at the geometry it was recorded at. On another
 // display the bench prints the digest and says so instead of pretending a
@@ -120,52 +123,19 @@ uint64_t g_baselineDigest = 0x79a56a1305dd98deull;  // PRE-CARD build, 1264x741 
 constexpr uint32_t kBaselineWidth = 1264;
 constexpr uint32_t kBaselineHeight = 741;
 
-struct Frame {
-  std::vector<uint8_t> bgra;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  uint64_t digest = 0;
-  bool rendered = false;
-};
+// Frame now comes from BenchFrameCapture.hpp (C113).
+
 
 // Renders the window scene into an offscreen WIC target and digests it.
+//
+// C113: this used to read `if (!window.RenderSceneInto(...)) return frame;` -- a
+// guard that could not fire, because the product dropped EndDraw's HRESULT. The
+// seam is now RenderSceneForCapture (device objects rebuilt on the WIC target,
+// so the picture really is the scene) and the digest is only a digest when
+// rendered && hr == S_OK && painted > 0. The caller asserts all three.
 Frame RenderOffscreen(GalleryWindow& window, IWICImagingFactory* wic, ID2D1Factory* d2d,
                       uint32_t width, uint32_t height) {
-  Frame frame;
-  if (!wic || !d2d || width == 0 || height == 0) return frame;
-  ComPtr<IWICBitmap> bitmap;
-  if (FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
-                               bitmap.GetAddressOf()))) {
-    return frame;
-  }
-  const D2D1_RENDER_TARGET_PROPERTIES props =
-      D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                                   D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                                     D2D1_ALPHA_MODE_PREMULTIPLIED));
-  ComPtr<ID2D1RenderTarget> target;
-  if (FAILED(d2d->CreateWicBitmapRenderTarget(bitmap.Get(), props, target.GetAddressOf()))) {
-    return frame;
-  }
-  if (!window.RenderSceneInto(target.Get())) return frame;
-  WICRect lock{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
-  ComPtr<IWICBitmapLock> locked;
-  if (FAILED(bitmap->Lock(&lock, WICBitmapLockRead, locked.GetAddressOf()))) return frame;
-  UINT stride = 0;
-  UINT size = 0;
-  BYTE* data = nullptr;
-  if (FAILED(locked->GetStride(&stride)) || FAILED(locked->GetDataPointer(&size, &data))) {
-    return frame;
-  }
-  frame.bgra.resize(static_cast<size_t>(width) * height * 4u);
-  for (uint32_t y = 0; y < height; ++y) {
-    std::memcpy(frame.bgra.data() + static_cast<size_t>(y) * width * 4u,
-                data + static_cast<size_t>(y) * stride, static_cast<size_t>(width) * 4u);
-  }
-  frame.width = width;
-  frame.height = height;
-  frame.digest = Fnv1a(frame.bgra);
-  frame.rendered = true;
-  return frame;
+  return CaptureOffscreen(window, wic, d2d, width, height, "C76 first frame", Seam::kProduct);
 }
 
 std::vector<prism::ArchiveItem> MakeItems(size_t count) {
@@ -510,10 +480,13 @@ int main(int argc, char** argv) {
   C76_CHECK(run.frame2.rendered);
 
   std::printf("C76_PIXELS {\"frame1\":\"%s\",\"frame2\":\"%s\",\"width\":%u,\"height\":%u,"
-              "\"outside_island_diff\":%zu,\"glass_ready\":%d,\"presents_frame1\":%d,"
+              "\"rendered\":%d,\"enddraw_hr\":\"0x%08lX\",\"painted\":%zu,\"non_black\":%zu,"
+              "\"total\":%zu,\"outside_island_diff\":%zu,\"glass_ready\":%d,\"presents_frame1\":%d,"
               "\"presents_frame2\":%d,\"runtime_compiles\":%d,\"precompiled\":%d}\n",
               Hex(run.frame1.digest).c_str(), Hex(run.frame2.digest).c_str(), run.frame1.width,
-              run.frame1.height,
+              run.frame1.height, static_cast<int>(run.frame1.rendered),
+              static_cast<unsigned long>(run.frame1.hr), run.frame1.painted, run.frame1.nonBlack,
+              run.frame1.total,
               DifferingPixelsOutside(run.frame1, run.frame2, kIslandLeft, kIslandTop, kIslandRight,
                                      kIslandBottom),
               static_cast<int>(run.glassReady), run.presentsAtFirstFrame, run.presentsAfterSecond,
@@ -523,6 +496,14 @@ int main(int argc, char** argv) {
                                                     kIslandRight, kIslandBottom);
 
   // ---- the predicates, in one place so a mutant breaks the SAME ones ------
+  // C113: BEFORE any pixel equality, the frames must be frames. A digest of a
+  // rejected capture (rendered == false) is not a picture of anything: the old
+  // bench compared it to a "baseline" and called a match a pass.
+  const bool framesAccepted = run.frame1.rendered && run.frame1.hr == S_OK &&
+                              run.frame2.rendered && run.frame2.hr == S_OK;
+  const bool framesPainted = run.frame1.painted >= run.frame1.total / 20 &&
+                             run.frame2.painted >= run.frame2.total / 20;
+  const bool digestsReal = run.frame1.digest != 0 && run.frame2.digest != 0;
   const bool contentStable = run.frame1.digest == run.frame2.digest;
   const bool noFlickerOutsideIsland = outsideDiff == 0;
   const bool baselineGeometry =
@@ -586,6 +567,10 @@ int main(int argc, char** argv) {
     _Exit(0);
   }
 
+  // C113: an empty frame can never reach the digest comparison below.
+  C76_CHECK(framesAccepted);
+  C76_CHECK(framesPainted);
+  C76_CHECK(digestsReal);
   C76_CHECK(contentStable);
   C76_CHECK(noFlickerOutsideIsland);
   C76_CHECK(digestMatchesBaseline);

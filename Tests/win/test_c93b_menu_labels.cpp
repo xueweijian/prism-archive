@@ -54,5 +54,9 @@ int main(int argc, char** argv) {
   std::printf("C93B MUTANT ACTIVE: no_help\n");
   ::prism::test::SetMutationVerdict("C93B MUTATION CAUGHT: no_help");
 #endif
-  return ::prism::test::RunAll(argc, argv);
+  const int failures = ::prism::test::RunAll(argc, argv);
+  // The ctest regex is the contract: a suite that runs but prints nothing is a
+  // SILENT PASS (D1), so the marker is printed only when every check passed.
+  if (failures == 0) std::printf("ALL C93B MENU-LABEL CHECKS PASSED\n");
+  return failures;
 }

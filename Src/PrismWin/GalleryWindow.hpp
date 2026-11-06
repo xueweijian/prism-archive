@@ -4937,9 +4937,18 @@ class GalleryWindow {
     // for a WIC target it is where D2D reports that the frame was rejected
     // (D2DERR_WRONG_RESOURCE_DOMAIN). Dropping this HRESULT is what let a
     // rejected frame travel on as frame.rendered == true (see RenderSceneInto).
+#if defined(PRISM_C113_MUTANT_SILENT_FAILURE)
+    // NEGATIVE CONTROL (CONTRACTS D3/D26/D27): the pre-C113 product, restored --
+    // the HRESULT is dropped and EVERY frame, accepted or rejected, answers
+    // true. The digest arm of the C113 suite reads an empty frame through this
+    // and MUST go red; so does H1 of the honesty arm.
+    target->EndDraw();
+    lastRenderError_ = S_OK;
+#else
     const HRESULT endDraw = target->EndDraw();
     lastRenderError_ = endDraw;
     if (FAILED(endDraw)) return false;
+#endif
     // C76: the first frame's own render cost, on the same clock as every other
     // stage. EndDraw is the submit for an HwndRenderTarget.
     trace.Add("first_frame_render", "BeginDraw+draw+EndDraw", frameStart,
@@ -5010,17 +5019,6 @@ class GalleryWindow {
       lastRenderError_ = E_POINTER;
       return false;
     }
-#if defined(PRISM_C113_MUTANT_SILENT_FAILURE)
-    // NEGATIVE CONTROL (CONTRACTS D3/D26/D27): the pre-C113 product, restored.
-    // EndDraw's HRESULT is dropped, DrawFrame always answers "true", and a
-    // target from another D2D device gets an EMPTY frame that claims it
-    // rendered. The honesty suite's "a painted window's offscreen frame is
-    // either honestly failed or really painted" predicate MUST go red here.
-    renderer_.CreateDeviceResources(target);
-    renderer_.ReleaseDeviceResources();
-    if (target_) renderer_.CreateDeviceResources(target_.Get());
-    return true;
-#else
     // C113: the failure is REPORTED, never absorbed. When this window has
     // painted for real, the renderer's cached C77 backdrop bitmap belongs to
     // the HWND target's device; a WIC target is a different device, and D2D
@@ -5037,7 +5035,6 @@ class GalleryWindow {
     renderer_.ReleaseDeviceResources();
     if (target_) renderer_.CreateDeviceResources(target_.Get());
     return drawn;
-#endif
   }
   // C113: the CAPTURE seam -- the one a digest/screenshot caller must use.
   //
@@ -5056,12 +5053,26 @@ class GalleryWindow {
       lastRenderError_ = E_POINTER;
       return false;
     }
+#if defined(PRISM_C113_MUTANT_SILENT_FAILURE)
+    // NEGATIVE CONTROL (CONTRACTS D3/D26/D27): the pre-C113 capture, restored --
+    // paint with whatever device cache the renderer already holds (after a real
+    // WM_PAINT that cache lives on the window's device, so the WIC frame is
+    // rejected with D2DERR_WRONG_RESOURCE_DOMAIN), and DrawFrame drops that
+    // HRESULT like it used to. The pixel arm must then read an empty frame and
+    // go red; nothing here is allowed to be reported as a picture.
+    renderer_.CreateDeviceResources(target);
+    (void)DrawFrame(target);
+    renderer_.ReleaseDeviceResources();
+    if (target_) renderer_.CreateDeviceResources(target_.Get());
+    return true;
+#else
     renderer_.ReleaseDeviceResources();
     renderer_.CreateDeviceResources(target);
     const bool drawn = DrawFrame(target);
     renderer_.ReleaseDeviceResources();
     if (target_) renderer_.CreateDeviceResources(target_.Get());
     return drawn;
+#endif
   }
   // C113: the HRESULT the last render really returned from EndDraw. S_OK for a
   // frame that was accepted; D2DERR_WRONG_RESOURCE_DOMAIN for the cross-device

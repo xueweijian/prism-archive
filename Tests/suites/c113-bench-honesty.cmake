@@ -45,6 +45,17 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties(c113.render_honesty PROPERTIES TIMEOUT 120
       PASS_REGULAR_EXPRESSION "ALL C113 HONESTY CHECKS PASSED")
 
+  # H4: the C76 PIXEL claim in a test CI actually runs. c76.bench_startup is
+  # excluded from the merge gate by PRISM_CTEST_EXCLUDE="bench|fuzz", so its
+  # digest assertion has never executed in CI -- the name below deliberately
+  # carries no "bench" token. Same window as the bench (same labels, two real
+  # WM_PAINTs), captured through the product seam: painted >= 5% AND the
+  # recorded digest, at the geometry it was recorded at.
+  add_test(NAME "c113.render_digest" COMMAND c113_bench_honesty --digest
+           --shaders "${C113_SHADERS}")
+  set_tests_properties(c113.render_digest PROPERTIES TIMEOUT 120
+      PASS_REGULAR_EXPRESSION "ALL C113 DIGEST CHECKS PASSED")
+
   # D3 control 1: EndDraw's HRESULT is dropped again -- a rejected frame reports
   # success with painted == 0, so H1 MUST go red.
   c113_add(c113_bench_honesty_mutant_silent_failure)
@@ -65,4 +76,12 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
                    --mutant black_frame --shaders "${C113_SHADERS}")
   set_tests_properties(mutation.c113.black_frame PROPERTIES TIMEOUT 120
       PASS_REGULAR_EXPRESSION "C113 MUTATION CAUGHT: black_frame")
+
+  # D3 control 3: the pre-C113 product (EndDraw's HRESULT dropped) read through
+  # the SAME pixel arm -- the rejected frame must not satisfy painted/digest.
+  add_test(NAME "mutation.c113.drop_enddraw"
+           COMMAND c113_bench_honesty_mutant_silent_failure --mutant drop_enddraw
+                   --digest --shaders "${C113_SHADERS}")
+  set_tests_properties(mutation.c113.drop_enddraw PROPERTIES TIMEOUT 120
+      PASS_REGULAR_EXPRESSION "C113 MUTATION CAUGHT: drop_enddraw")
 endif()

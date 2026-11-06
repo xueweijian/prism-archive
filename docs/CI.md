@@ -44,6 +44,20 @@ gh run download <run-id> -n ci-logs-windows        # 失败日志 artifact
 red 时先看 run 页面的 **step summary**：失败测试名、ccache/sccache 命中率、
 benchmark 数字都在那里，不用翻日志。仍看不出再 `--log-failed`。
 
+## 断言「不是空帧」必须用 painted / digest，不能用「非黑像素数」（C113，2026-11-07）
+
+C113 实测：`DrawFrame` 曾把 `target->EndDraw()` 的 HRESULT 丢掉，于是 D2D 以 `0x88990012`
+（`D2DERR_WRONG_RESOURCE_DOMAIN`）整帧拒绝的离屏帧被当成成功帧。**这张帧不是黑的**——
+它只剩画布底色，1264×741 下每像素 `B=19,G=14,R=11`、`maxChannel=18`，所以
+
+- `non_black`（任一通道非 0）**= 936624 / 936624**，全中；
+- 「至少 N 个像素非黑」这类断言**永远抓不到它**；
+- `painted`（最亮通道 >= 32）**= 0**，一次就抓到；digest 也会变（该帧是 `0af0b75bc5b12383`）。
+
+**规则**：门禁里写「帧里真的有东西」时，用 `painted`（阈值化亮度）或**记录的 digest**，
+不要用「非黑/非零像素数」——被拒绝的帧比黑帧亮。共享读取器是
+`Tests/win/BenchFrameCapture.hpp`：它记录 `EndDraw` 的 HRESULT，失败时打印
+`RENDER FAILED hr=0x%08X` 并让 `rendered == false`，且 `painted == 0`。
 ## 四、两条已知噪音（不是我们的 bug）
 
 - **D14**：runner 镜像自带的 `7z.dll` 是 ASan 构建，`SetCodecs` 会在它自己内部

@@ -25,6 +25,12 @@
 //   H3  a frame that claims to be rendered carries the scene: digest != 0, at
 //       least half the pixels non-black (weak, the canvas passes it) and at
 //       least 5% of the pixels PAINTED -- which the canvas-only frame fails at 0.
+//   H4  (--digest) the C76 pixel claim, reachable from CI: ci.yml sets
+//       PRISM_CTEST_EXCLUDE="bench|fuzz", so c76.bench_startup has never run in
+//       the merge gate. This arm paints the SAME window the C76 bench paints
+//       (real WM_PAINTs, island presented), captures it through the product
+//       seam, and pins painted >= 5% plus the recorded digest
+//       e735eb87a09d4f84. The name carries no "bench" token on purpose.
 //
 // NEGATIVE CONTROLS (CONTRACTS D3/D26/D27): two arms compiled from this same
 // source, one rule broken each, armed on a runtime proof before the verdict
@@ -81,6 +87,14 @@ constexpr HRESULT kWrongResourceDomain = static_cast<HRESULT>(0x88990012L);
 // frame has painted = 0 and nonBlack = 936624. 5% and 50% leave the real frame a
 // 4x margin and still fail the canvas.
 constexpr size_t kPaintedDivisor = 20;
+
+// H4: the frame the C76 bench records, at the geometry it records it at. The
+// value was re-recorded by C113 from a frame that passed the content assertions
+// (rendered, hr == S_OK, painted = 193466/936624) -- NOT from the rejected frame
+// 0af0b75bc5b12383 the previous constant held.
+constexpr uint64_t kDigest = 0xe735eb87a09d4f84ull;
+constexpr uint32_t kDigestWidth = 1264;
+constexpr uint32_t kDigestHeight = 741;
 constexpr size_t kNonBlackDivisor = 2;
 
 struct Fixture {
@@ -88,7 +102,11 @@ struct Fixture {
   std::vector<prism::ArchiveItem> items;
 };
 
-bool Configure(Fixture& fixture, const std::wstring& shaderDir) {
+// The labels are parameters because H4 must paint the EXACT scene the C76 bench
+// paints: the breadcrumb text is pixels, so a different root name is a different
+// digest.
+bool Configure(Fixture& fixture, const std::wstring& shaderDir,
+               const wchar_t* rootLabel = L"c113.7z") {
   fixture.items.clear();
   for (size_t i = 0; i < 1000; ++i) {
     prism::ArchiveItem item;
@@ -102,7 +120,7 @@ bool Configure(Fixture& fixture, const std::wstring& shaderDir) {
     return false;
   }
   fixture.window.SetItems(&fixture.items);
-  fixture.window.SetRootLabel(L"c113.7z");
+  fixture.window.SetRootLabel(rootLabel);
   fixture.window.SetStatus(L"1000 items");
   fixture.window.SetSidebarRailVisible(true);
   fixture.window.SetListMode(true);
@@ -128,12 +146,15 @@ const char* HexHr(HRESULT hr, char* buffer, size_t size) {
 int main(int argc, char** argv) {
   std::wstring shaderDir;
   std::string mutant;
+  bool digestArm = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--shaders" && i + 1 < argc) {
       shaderDir = prism::win::Utf8ToWide(argv[++i]);
     } else if (arg == "--mutant" && i + 1 < argc) {
       mutant = argv[++i];
+    } else if (arg == "--digest") {
+      digestArm = true;
     }
   }
   std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -148,6 +169,80 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::printf("C113_INFO {\"mutant\":\"%s\"}\n", mutant.c_str());
+
+  if (digestArm) {
+    // ---- H4: the C76 pixel claim, reachable from CI ------------------------
+    // The SAME window the C76 bench paints (same labels, two real WM_PAINTs,
+    // the island presented on the second), captured through the PRODUCT seam.
+    Fixture fixture;
+    if (!Configure(fixture, shaderDir, L"c76.7z")) {
+      std::printf("C113 CANNOT START: the digest fixture window could not be created\n");
+      return 1;
+    }
+    ShowWindow(fixture.window.Hwnd(), SW_SHOWNORMAL);
+    InvalidateRect(fixture.window.Hwnd(), nullptr, FALSE);
+    UpdateWindow(fixture.window.Hwnd());
+    InvalidateRect(fixture.window.Hwnd(), nullptr, FALSE);
+    UpdateWindow(fixture.window.Hwnd());
+    uint32_t digestWidth = 0;
+    uint32_t digestHeight = 0;
+    if (!ClientSize(fixture.window, &digestWidth, &digestHeight)) {
+      std::printf("C113 CANNOT START: the digest window has no client area\n");
+      return 1;
+    }
+    const Frame frame = CaptureOffscreen(fixture.window, wic.Get(), d2d.Get(), digestWidth,
+                                         digestHeight, "H4 digest", Seam::kProduct);
+    const bool framePainted = frame.rendered && frame.hr == S_OK &&
+                              frame.painted >= frame.total / kPaintedDivisor;
+    const bool digestGeometry = frame.width == kDigestWidth && frame.height == kDigestHeight;
+    // The digest is only meaningful at the geometry it was recorded at (the
+    // layout is width-driven); elsewhere the CONTENT assertions still run and
+    // the bench says so instead of pretending another window is a regression.
+    const bool digestOk = !digestGeometry || frame.digest == kDigest;
+    char digestHr[16]{};
+    std::printf("C113_DIGEST {\"digest\":\"%s\",\"expected\":\"%016llx\",\"painted\":%zu,"
+                "\"non_black\":%zu,\"total\":%zu,\"rendered\":%d,\"hr\":\"%s\","
+                "\"width\":%u,\"height\":%u,\"geometry_matches\":%d}\n",
+                prism::win::benchframe::Hex(frame.digest).c_str(),
+                static_cast<unsigned long long>(kDigest), frame.painted, frame.nonBlack,
+                frame.total, static_cast<int>(frame.rendered),
+                HexHr(frame.hr, digestHr, sizeof(digestHr)), frame.width, frame.height,
+                static_cast<int>(digestGeometry));
+    if (mutant == "drop_enddraw") {
+      // The pre-C113 product: EndDraw's HRESULT is dropped, so the rejected
+      // frame reports rendered == true and carries nothing. Observed, then
+      // judged -- the digest MUST NOT match when nothing was painted.
+      const bool injected = frame.rendered && frame.painted == 0;
+      std::printf("C113 MUTANT drop_enddraw: rendered=%d painted=%zu digest=%s injected=%d\n",
+                  static_cast<int>(frame.rendered), frame.painted,
+                  prism::win::benchframe::Hex(frame.digest).c_str(), static_cast<int>(injected));
+      if (injected && !(framePainted && digestOk)) {
+        std::printf("C113 MUTATION CAUGHT: drop_enddraw\n");
+        std::fflush(stdout);
+        _Exit(0);
+      }
+      if (!injected) {
+        std::printf("    FAIL the injection did not apply: the rejected frame was reported honestly\n");
+        return 1;
+      }
+      std::printf("    FAIL the pixel claim stayed green on an empty frame\n");
+      return 1;
+    }
+    CheckTrue(framePainted, "H4: the C76 window's frame is accepted and PAINTED", __LINE__);
+    CheckTrue(digestOk, "H4: the C76 window's digest is the recorded one", __LINE__);
+    if (!digestGeometry) {
+      std::printf("C113 NOTE: client %ux%u is not the %ux%u the digest was recorded at; the "
+                  "digest equality is skipped, this frame is %s\n",
+                  frame.width, frame.height, kDigestWidth, kDigestHeight,
+                  prism::win::benchframe::Hex(frame.digest).c_str());
+    }
+    if (g_failures != 0) {
+      std::printf("C113 DIGEST FAILURES: %d\n", g_failures);
+      return 1;
+    }
+    std::printf("ALL C113 DIGEST CHECKS PASSED\n");
+    return 0;
+  }
 
   // ---------------- H1: the rejection is a named, admitted fact --------------
   // The window paints for REAL first: that is what puts the renderer's backdrop

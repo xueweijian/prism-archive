@@ -16,6 +16,47 @@ $cls = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes')
 [Environment]::GetEnvironmentVariable('PRISM_7Z_DLL', 'User')
 ```
 
+## 窗口一片空白（标题栏和菜单栏在，内容区全白）
+
+**症状**：打开归档后窗口只有标题栏和菜单栏，内容区一片白。用屏幕阅读器或 UI 自动化
+（例如 `agent-desktop snapshot`）却能看到**完整的**控件树：按钮、标签页、列表、
+状态栏的每个字段都在。
+
+**原因**：先别急着找「少了一次重绘」。PrismArchive 的内容区由 Direct2D 画在一个
+HWND 渲染目标上，**画完还要由系统把这一帧呈现到屏幕上**。这台机器如果丢掉了
+Direct2D 的窗口呈现，代码照样一路成功（`EndDraw()` 返回 `S_OK`），窗口却还是白的。
+用下面这个探针 30 秒判定——它**不含 PrismArchive 的任何代码**，只用 Direct2D 画一个
+纯红窗口，再用 GDI 在同一窗口画一块绿色做对照。
+
+**解决**：
+
+1. 跑探针（需要有 VS 2022 / Build Tools 的 C++ 工具链；脚本自己找，不需要先配 PATH）：
+
+   ```pwsh
+   pwsh -NoProfile -ExecutionPolicy Bypass -File tools\d2d_present_probe.ps1
+   ```
+
+2. 看最后一行：
+
+   ```text
+   D2D_PRESENT {"enddraw":"0x00000000","paints":6,"d2d_pixel":"ff0000","gdi_pixel":"00ff00","verdict":"D2D_PRESENT_OK"}
+   D2D_PRESENT {"enddraw":"0x00000000","paints":6,"d2d_pixel":"ffffff","gdi_pixel":"00ff00","verdict":"D2D_PRESENT_BROKEN"}
+   ```
+
+3. 按 verdict 处理：
+
+   | verdict | 含义 | 下一步 |
+   |---|---|---|
+   | `D2D_PRESENT_OK` | 两条呈现路径都正常 | 白屏是应用的问题：带上 `%LOCALAPPDATA%\PrismArchive\logs` 里当天的日志开 issue |
+   | `D2D_PRESENT_BROKEN` | GDI 能看见、Direct2D 看不见 | **应用是好的，这台机器丢了 D2D 呈现**：更新/回滚显卡驱动；远程桌面、向日葵/ToDesk 之类的虚拟显示驱动（IDD）、双显卡外接屏切换是常见原因；换一个会话/显示器再试 |
+   | `D2D_AND_GDI_BROKEN` | 两条都看不见 | 先查显示驱动和桌面会话本身，与应用无关 |
+   | `D2D_PROBE_FAILED` | 连渲染目标都建不出来 | 显卡驱动未装好，或会话没有可用的显示设备 |
+
+**为什么截图不可靠**：DirectComposition 的内容（例如导航药丸）能被普通屏幕截图截到，
+Direct2D 的 HWND 呈现被丢掉时截出来的就是白色——所以「截图是白的」既可能是应用没画，
+也可能是机器没显示。探针用「D2D 红 + GDI 绿」这一对像素把两种情况分开；只看截图会把
+机器问题误判成应用 bug。
+
 ## 右键菜单里没有 PrismArchive
 
 **症状**：任意文件上右键，无论一级菜单还是「显示更多选项」里，都找不到

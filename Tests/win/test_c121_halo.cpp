@@ -387,6 +387,13 @@ GapProbe FindGap(const Fixture& fixture) {
     if (a.kind != prism::layout::CellKind::Tile || b.kind != prism::layout::CellKind::Tile) {
       continue;
     }
+    // PHOTO tiles on both sides: a folder tile carries no decoded pixels, so the
+    // gap next to it would measure half the effect and the control patch (which
+    // asserts the tile is saturated) would be measuring a folder glyph.
+    if (fixture.items[static_cast<size_t>(a.index)].isDir ||
+        fixture.items[static_cast<size_t>(b.index)].isDir) {
+      continue;
+    }
     if (a.rect.top != b.rect.top) continue;  // same row only
     const int gapWidth = b.rect.left - a.rect.right;
     if (gapWidth <= 0) continue;
@@ -406,6 +413,7 @@ Box LastRowTile(const Fixture& fixture) {
   int bestBottom = -1;
   for (const prism::layout::FlowCell& cell : cells) {
     if (cell.kind != prism::layout::CellKind::Tile) continue;
+    if (fixture.items[static_cast<size_t>(cell.index)].isDir) continue;
     if (cell.rect.bottom > fixture.layout.contentInner.bottom) continue;
     if (cell.rect.bottom > bestBottom) {
       bestBottom = cell.rect.bottom;

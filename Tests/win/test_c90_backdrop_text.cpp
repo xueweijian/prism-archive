@@ -26,10 +26,15 @@
 //      space between glyphs, which is what the audit measured -- the ON frame's
 //      max luminance may not exceed canvas + 24. Today it reads ~91 vs a limit
 //      of 38: RED before the fix, and the mutant arm below re-prints it.
-//   2. POSITIVE CONTROL, ratio column (the audit's x 1730..1830): the capsule
-//      bar is still in the refraction source, so ON and OFF differ by >= 8
-//      levels on >= 1500 pixels. Anyone who "fixes" this by switching the whole
-//      layer off turns this red.
+//   2. POSITIVE CONTROL, re-based by C121: the refraction source carries the
+//      PAGE -- the rail's panel inside the ghost reads >= 8 levels off the
+//      canvas -- and the ratio column carries ZERO item pixels (the ghost there
+//      is the canvas, within 4). This used to assert the opposite: "the capsule
+//      bar is still in the refraction source, so ON and OFF differ by >= 8 on
+//      >= 1500 px". That assertion was the twin of C77-1 and both were WRONG for
+//      the same reason: they required ITEM pixels in the source, and the item
+//      pixels are exactly the coloured halo C121 removes. The layer's presence
+//      is still proven, by a PAGE surface instead of by the capsule.
 //   3. NEGATIVE CONTROL (CONTRACTS D3/D26/D27): the same source compiled with
 //      PRISM_C77_MUTANT_TEXT_IN_BACKDROP -- drawGlyphs forced back to true --
 //      MUST print "C77 MUTATION CAUGHT: text-in-backdrop" at the first failing
@@ -105,9 +110,10 @@ constexpr int kRatioStripRight = 1830;
 constexpr int kCanvasTolerance = 4;
 // The card's limit: maxLum(ON) <= lum(canvas) + 24.
 constexpr int kPlateLimit = 24;
-// The positive control's floor (card: >= 8 levels on >= 1500 pixels).
-constexpr int kRatioMinDelta = 8;
-constexpr int kRatioMinPixels = 1500;
+// C121: the positive control's floor -- a page panel must stand this far off the
+// canvas in the refraction source (the rail's panel is +21/+24/+29 on Midnight,
+// and the blur of a 220 px wide panel leaves its middle at full strength).
+constexpr int kPagePanelMinDelta = 8;
 
 #if defined(PRISM_C77_MUTANT_TEXT_IN_BACKDROP)
 // C90 MUTANT ACTIVE: text-in-backdrop -- DrawListMode's drawGlyphs is forced
@@ -194,9 +200,14 @@ struct Harness {
     return SUCCEEDED(renderer.CreateDeviceResources(target.Get()));
   }
 
-  bool Paint(const GalleryRenderer::Scene& scene, Frame* out) {
+  bool Paint(const GalleryRenderer::Scene& scene, Frame* out, bool ghost = false) {
     target->BeginDraw();
     renderer.Draw(target.Get(), scene);
+    // C121: the refraction SOURCE alone (opaque, so it replaces the frame).
+    if (ghost && !renderer.PaintRefractionSource(target.Get())) {
+      target->EndDraw();
+      return false;
+    }
     if (FAILED(target->EndDraw())) return false;
 #if defined(PRISM_C77_MUTANT_TEXT_IN_BACKDROP)
     gGlyphPasses += renderer.BackdropGlyphPasses();
@@ -453,23 +464,6 @@ BandStats MeasureBand(const Frame& on, const Frame& off, const Box& box, int can
   return stats;
 }
 
-struct StripStats {
-  int over = 0;      // pixels where ON and OFF differ by >= kRatioMinDelta
-  int maxDelta = 0;
-};
-
-StripStats MeasureStrip(const Frame& on, const Frame& off, const Box& box) {
-  StripStats stats;
-  for (int y = box.top; y < box.bottom; ++y) {
-    for (int x = box.left; x < box.right; ++x) {
-      if (!on.In(x, y) || !off.In(x, y)) continue;
-      const int delta = MaxChannelDelta(on.At(x, y), off.At(x, y));
-      if (delta >= kRatioMinDelta) ++stats.over;
-      stats.maxDelta = (std::max)(stats.maxDelta, delta);
-    }
-  }
-  return stats;
-}
 
 
 // The band scan, shared by both states (no selection / first row selected).
@@ -605,14 +599,58 @@ PRISM_TEST("c90.list_name_band_is_not_a_white_plate") {
   // with the glyphs out of the refraction source it reads the canvas.
   PRISM_CHECK(band.maxLum <= canvasLum + kPlateLimit);
 
-  // ASSERTION 2, the positive control: the ratio capsule is still content, so
-  // the layer still refracts it. If someone switches the layer off wholesale,
-  // this goes red while assertion 1 stays green.
-  const StripStats strip = MeasureStrip(lit, reference, ratioStrip);
-  std::printf("C90 ratio strip: over8=%d maxChannelDelta=%d (need >=%d on >=%d px)\n",
-              strip.over, strip.maxDelta, kRatioMinDelta, kRatioMinPixels);
-  PRISM_CHECK(strip.maxDelta >= kRatioMinDelta);
-  PRISM_CHECK(strip.over >= kRatioMinPixels);
+  // ASSERTION 2, the positive control, RE-BASED BY C121. The old form required
+  // the ratio capsule to be inside the refraction source -- i.e. it required
+  // ITEM pixels in the background, the same wrong premise C77-1 carried, and
+  // the reason the ghost ever contained a thumbnail. The source is the PAGE
+  // now, so the proof that the layer is real moves to a page surface: the rail.
+  //   (a) the rail's panel is IN the source (>= 8 levels off the canvas);
+  //   (b) the ratio column is NOT (the ghost there is the canvas, within 4) --
+  //       the item-pixel half, which is what this suite is about.
+  // Switching the layer off wholesale turns (a) red while assertion 1 stays
+  // green, which is the job the old control had.
+  Harness ghostHarness;
+  PRISM_CHECK(ghostHarness.Open(kWidth, kHeight));
+  if (ghostHarness.bitmap != nullptr) {
+    Frame ghost;
+    PRISM_CHECK(ghostHarness.Paint(fixture.On(), &ghost, /*ghost=*/true));
+    if (!ghost.pixels.empty()) {
+      const UINT32 canvasPixel = PresentedCanvasPixel();
+      double panelDelta = 0.0;
+      int panelSamples = 0;
+      int panelMin = 1000;
+      for (int y = static_cast<int>(fixture.rail.panel.top) + 40;
+           y < static_cast<int>(fixture.rail.panel.bottom) - 40; y += 3) {
+        for (int x = static_cast<int>(fixture.rail.panel.left) + 40;
+             x < static_cast<int>(fixture.rail.panel.right) - 40; x += 3) {
+          if (!ghost.In(x, y)) continue;
+          const int delta = MaxChannelDelta(ghost.At(x, y), canvasPixel);
+          panelDelta += delta;
+          panelMin = (std::min)(panelMin, delta);
+          ++panelSamples;
+        }
+      }
+      PRISM_CHECK(panelSamples > 1000);
+      const double meanPanelDelta = panelSamples > 0 ? panelDelta / panelSamples : 0.0;
+      std::printf("C90 source: rail panel meanDelta=%.2f minDelta=%d samples=%d (floor %d)\n",
+                  meanPanelDelta, panelMin, panelSamples, kPagePanelMinDelta);
+      PRISM_CHECK(meanPanelDelta >= kPagePanelMinDelta);
+
+      int worstItemDelta = 0;
+      int itemSamples = 0;
+      for (int y = ratioStrip.top; y < ratioStrip.bottom; ++y) {
+        for (int x = ratioStrip.left; x < ratioStrip.right; ++x) {
+          if (!ghost.In(x, y)) continue;
+          worstItemDelta = (std::max)(worstItemDelta, MaxChannelDelta(ghost.At(x, y), canvasPixel));
+          ++itemSamples;
+        }
+      }
+      PRISM_CHECK(itemSamples > 1000);
+      std::printf("C90 source: ratio column worstDelta=%d samples=%d (limit 4)\n",
+                  worstItemDelta, itemSamples);
+      PRISM_CHECK(worstItemDelta <= 4);   // ZERO item pixels in the reflection
+    }
+  }
 
   // ASSERTION 5 in the UNSELECTED state: the same wide scan (x 400..1400 every
   // 100 px) must also hold with no pill in the scene. The assertion has to be a

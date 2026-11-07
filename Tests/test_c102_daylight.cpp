@@ -16,7 +16,7 @@
 //   1. the Daylight canvas presents as (245,245,247) +-2;
 //   2. the island stands at least 8 levels off that canvas (max channel
 //      difference, the metric the card quotes: today it is 5);
-//   3. Midnight (13,14,18) and HighContrast (0,0,0) are UNCHANGED -- the
+//   3. Midnight (16,17,23) and HighContrast (0,0,0) are UNCHANGED -- the
 //      regression arm: their rows are compared verbatim, not just re-composited,
 //      because "the dark themes did not move" is a statement about the table;
 //   4. HighContrast text still clears WCAG 4.5:1 (the C83/C91 contrast gate);
@@ -188,8 +188,10 @@ PRISM_TEST("c102 night and high-contrast rows are untouched") {
                     255, 1.0f));
 
   // ... and the presented pixels the C91 suite pins.
+  // C121: the veil is the canvas colour in every theme now; Midnight's
+  // presented pixel is its plain canvas composite (16,17,23).
   PRISM_CHECK(Near("canvas presented (night)",
-                   ToPixel(ch::CanvasPresentedColor(Variant::Midnight)), Pixel{13, 14, 18}, 2));
+                   ToPixel(ch::CanvasPresentedColor(Variant::Midnight)), Pixel{16, 17, 23}, 2));
   PRISM_CHECK(Near("canvas presented (hc)",
                    ToPixel(ch::CanvasPresentedColor(Variant::HighContrast)), Pixel{0, 0, 0},
                    0));

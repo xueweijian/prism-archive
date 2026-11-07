@@ -497,8 +497,10 @@ PRISM_TEST("c106 Ctrl+O and Ctrl+E still fire while the bar is hidden") {
 
   int opened = 0;
   int activated = 0;
+  int asked = 0;  // C125: Ctrl+E raises the extract dialog, it does not write
   window.SetOpenArchiveHandler([&opened]() { ++opened; });
   window.SetActivateHandler([&activated](int) { ++activated; });
+  window.SetExtractDialogHandler([&asked]() { ++asked; });
 
   // The bar goes away FIRST: a chord that only worked with a menu would fail
   // here, and that is the whole assertion.
@@ -507,8 +509,10 @@ PRISM_TEST("c106 Ctrl+O and Ctrl+E still fire while the bar is hidden") {
 
   PressCtrl(&window, 'O');
   PRISM_CHECK_EQ(opened, 1);
+  // C125: Ctrl+E asks (dialog seam), it never reaches the extract door directly.
   PressCtrl(&window, 'E');
-  PRISM_CHECK_EQ(activated, 1);
+  PRISM_CHECK_EQ(asked, 1);
+  PRISM_CHECK_EQ(activated, 0);
 
   // Both chords were claimed by the key table, not by a menu loop: the bar is
   // still down afterwards, and nothing was posted to it.
@@ -522,7 +526,8 @@ PRISM_TEST("c106 Ctrl+O and Ctrl+E still fire while the bar is hidden") {
   PressCtrl(&window, 'O');
   PRISM_CHECK_EQ(opened, 2);
   PressCtrl(&window, 'E');
-  PRISM_CHECK_EQ(activated, 2);
+  PRISM_CHECK_EQ(asked, 2);
+  PRISM_CHECK_EQ(activated, 0);
 
   Dismiss(&window);
 }

@@ -37,6 +37,11 @@ inline constexpr uint32_t kKeyReturn = 0x0D;
 // wParam straight through, so these values are the Win32 contract, not a guess.
 inline constexpr uint32_t kKeyDelete = 0x2E;
 inline constexpr uint32_t kKeyF2 = 0x71;
+// C125: VK_F5 = 0x74. Bandizip 6.29's OPTIONS menu reads "设置(&S)  F5", so a
+// migrated user's F5 means SETTINGS. It is deliberately NOT extraction (that is
+// Ctrl+E) and not refresh: binding it to the disk would turn "I want to change a
+// setting" into an unexpected write.
+inline constexpr uint32_t kKeyF5 = 0x74;
 inline constexpr uint32_t kKeyEscape = 0x1B;
 inline constexpr uint32_t kKeySpace = 0x20;
 inline constexpr uint32_t kKeyEnd = 0x23;
@@ -79,7 +84,17 @@ enum class Command : uint8_t {
   // None, so Ctrl+O did nothing at all. It is a chord, not a menu item, which is
   // the point -- it must work while the menu bar is hidden.
   OpenArchive,
-  // 9.1 row 4: Ctrl+E / Alt+double-click -> smart extract, no dialog.
+  // C125: F5 -> the settings dialog. Bandizip's OPTIONS menu binds 设置(&S) to F5
+  // and nothing else, so this is the one thing a migrated user's F5 may do.
+  OpenSettings,
+  // C125: Ctrl+E -> ASK before writing. Bandizip's 解压文件(&E) opens an extract
+  // dialog (target path, file count, bytes) whose Cancel writes nothing. The
+  // command only says "raise the dialog"; the plan and the engine stay in the app.
+  OpenExtractDialog,
+  // 9.1 row 4: Ctrl+Alt+E / Alt+double-click -> smart extract, no dialog. C125
+  // moved this chord off Ctrl+E: same finger gesture as Bandizip's dialog would
+  // have written disk unasked, which is the one consequence a shortcut may not
+  // change silently.
   SmartExtract,
   // 9.1 row 5: Ctrl+Shift+N -> virtual folder in the archive (CoW transaction).
   NewFolder,
@@ -116,6 +131,8 @@ inline std::ostream& operator<<(std::ostream& os, Command command) {
     case Command::ClosePalette: return os << "ClosePalette";
     case Command::OpenSearch: return os << "OpenSearch";
     case Command::OpenArchive: return os << "OpenArchive";
+    case Command::OpenSettings: return os << "OpenSettings";
+    case Command::OpenExtractDialog: return os << "OpenExtractDialog";
     case Command::SmartExtract: return os << "SmartExtract";
     case Command::NewFolder: return os << "NewFolder";
     case Command::DeleteSelected: return os << "DeleteSelected";
@@ -148,6 +165,9 @@ struct Stroke {
 inline bool CtrlOnly(const Stroke& s) { return s.ctrl && !s.shift && !s.alt; }
 inline bool CtrlShiftOnly(const Stroke& s) { return s.ctrl && s.shift && !s.alt; }
 inline bool AltOnly(const Stroke& s) { return s.alt && !s.ctrl && !s.shift; }
+// C125: the SILENT extraction chord. Ctrl+Alt is the documented "stricter" set,
+// not a superset of CtrlOnly: Ctrl+E now raises the dialog and this one writes.
+inline bool CtrlAltOnly(const Stroke& s) { return s.ctrl && s.alt && !s.shift; }
 
 // Default scope is Gallery; overlays pass their own.
 inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
@@ -177,12 +197,28 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
       case 'K': return Command::OpenPalette;   // 9.1 row 3
       case 'F': return Command::OpenSearch;    // C62: find in the list
       case 'O': return Command::OpenArchive;   // C106: open another archive
-      case 'E': return Command::SmartExtract;  // 9.1 row 4
+      // C125: Ctrl+E ASKS. Bandizip binds 解压文件(&E) to the same chord and opens
+      // a dialog; resolving to the silent writer here made one keystroke write a
+      // dozen files with no undo. The negative control proves this line is the
+      // one under test.
+      case 'E':
+#if defined(PRISM_C125_MUTANT_CTRL_E_SMART)
+        return Command::SmartExtract;  // MUTANT: the shipped, silent-with-disk binding
+#else
+        return Command::OpenExtractDialog;
+#endif
       case 'A': return Command::SelectAll;     // C67: select every row
       case '1': return Command::ToggleGrid;    // batch A, kept in the table
       case '2': return Command::ToggleList;
       default: return Command::None;
     }
+  }
+  // C125: Ctrl+Alt+E is where the silent smart-extract went. Nothing else in the
+  // table claims this modifier set, so the move adds a chord instead of stealing
+  // one -- and Alt+double-click keeps working as the pointer spelling of it.
+  if (CtrlAltOnly(stroke)) {
+    if (key == 'E') return Command::SmartExtract;
+    return Command::None;
   }
   if (CtrlShiftOnly(stroke)) {
     switch (key) {
@@ -207,6 +243,14 @@ inline Command Resolve(const Stroke& stroke, Scope scope = Scope::Gallery) {
     case kKeyReturn: return Command::ActivateSelection;
     case kKeyDelete: return Command::DeleteSelected;  // C54: delete the selection
     case kKeyF2: return Command::RenameSelected;      // C54: rename the selection
+    // C125: F5 is SETTINGS (Bandizip's OPTIONS menu: 设置(&S)  F5). The negative
+    // control binds it to extraction -- the accident this card exists to stop.
+    case kKeyF5:
+#if defined(PRISM_C125_MUTANT_F5_EXTRACT)
+      return Command::SmartExtract;  // MUTANT: F5 writes disk instead of opening settings
+#else
+      return Command::OpenSettings;
+#endif
     case kKeyBack: return Command::GoUp;
     case kKeyHome: return Command::SelectFirst;
     case kKeyEnd: return Command::SelectLast;

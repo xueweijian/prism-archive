@@ -978,10 +978,16 @@ PRISM_TEST("wiring.key_table_changes_window_state") {
   window.DispatchKeyStroke({prism::keys::kKeyEscape, false, false, false});
   PRISM_CHECK(!window.PaletteOpen());
 
-  // (c) Ctrl+E = smart extract of the selection: the app's activate door with the
-  // CATALOG index (4 == root.png), so the app can plan over it.
+  // (c) C125: Ctrl+E ASKS -- it reaches the app's dialog seam, not the extract
+  // door; Ctrl+Alt+E is the silent smart extract (the catalog index 4 ==
+  // root.png still travels, so the app can plan over it).
   window.SetSelection(RowOf(window, "root.png"));
+  int asked = 0;
+  window.SetExtractDialogHandler([&asked]() { ++asked; });
   window.DispatchKeyStroke({static_cast<uint32_t>('E'), true, false, false});
+  PRISM_CHECK_EQ(asked, 1);
+  PRISM_CHECK_EQ(activated, -1);
+  window.DispatchKeyStroke({static_cast<uint32_t>('E'), true, false, true});
   PRISM_CHECK_EQ(activated, 4);
 
   // (d) Enter drills into a folder; Alt+Left walks the history back; Alt+Right

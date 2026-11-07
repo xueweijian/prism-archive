@@ -25,6 +25,8 @@
 // --text-primary, the selected row is --selection-tint over that surface.
 #pragma once
 
+#include <cstdint>
+#include <ostream>
 #include <string_view>
 
 #include "ThemeTokens.hpp"
@@ -228,18 +230,57 @@ inline bool MnemonicMatches(std::wstring_view text, wchar_t letter) {
   return false;
 }
 
+// C125: the OS's own light/dark answer, as far as PrismCore may know it.
+//
+// THE MEASURED DEFECT. "system" (the schema default) resolved to Midnight. On a
+// light Windows desktop (this machine: AppsUseLightTheme=1) the window was black
+// while every other app was white -- and Tests/test_chrome_theme.cpp pinned that
+// deliberate bug, so a correct implementation could not pass.
+//
+// WHY THE VALUE IS PASSED IN. PrismCore is header-only and may not include
+// <windows.h> (preflight check_arch_no_windows), so the registry read lives one
+// layer up (PrismWin/SystemTheme.hpp) and the DECISION stays here, where it can
+// be tested on the Linux lane without a hive.
+//
+// Unknown is a real state, not a synonym for dark: no readable value means no
+// evidence, and guessing "light" would paint a white shell on a dark desktop.
+// The honest answer is the previous behaviour, which is what Unknown returns.
+enum class SystemTheme : uint8_t { Unknown, Dark, Light };
+
+inline std::ostream& operator<<(std::ostream& os, SystemTheme theme) {
+  switch (theme) {
+    case SystemTheme::Unknown: return os << "Unknown";
+    case SystemTheme::Dark: return os << "Dark";
+    case SystemTheme::Light: return os << "Light";
+  }
+  return os << "?";
+}
+
 // Which shell a saved appearance document asks for.
 //
-// "light" and "dark" are the user's explicit choices. "system" (the schema
-// default) resolves to the window's OWN palette -- Midnight -- because the
-// canvas this shell must be continuous with is #0B0E13 today: following a light
-// OS desktop would paint a white bar over a black canvas, which is the defect
-// this card closes, not a fix for it. When the canvas learns to follow the OS
-// (a later card), this is the one function that changes.
-inline Variant ShellVariantFor(std::string_view themeKey, bool highContrast) {
+// "light" and "dark" are the user's explicit choices and win over the OS.
+// "system" follows SystemTheme: the SAME variant drives the shell AND the canvas
+// (GalleryWindow::SetChromeVariant -> Scene::theme), so "system" can no longer
+// paint a white bar over a black canvas -- the two halves move together.
+inline Variant ShellVariantFor(std::string_view themeKey, bool highContrast,
+                               SystemTheme systemTheme) {
   if (highContrast) return Variant::HighContrast;
   if (themeKey == "light") return Variant::Daylight;
+  if (themeKey == "dark") return Variant::Midnight;
+#if defined(PRISM_C125_MUTANT_SYSTEM_ALWAYS_MIDNIGHT)
+  // NEGATIVE CONTROL (CONTRACTS D3): the pre-card rule -- "system" is Midnight
+  // whatever the desktop says. S3 (a light OS must be Daylight) MUST go red.
+  // The parameter is deliberately ignored HERE and only here; (void) keeps
+  // -Werror=unused-parameter clean on the Linux lane, which compiles this mutant
+  // build too.
+  (void)systemTheme;
   return Variant::Midnight;
+#else
+  if (themeKey == "system") {
+    return systemTheme == SystemTheme::Light ? Variant::Daylight : Variant::Midnight;
+  }
+  return Variant::Midnight;  // an unknown key keeps the previous shell
+#endif
 }
 
 }  // namespace prism::chrome

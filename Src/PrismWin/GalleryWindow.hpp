@@ -112,6 +112,7 @@
 #include "StartupTrace.hpp"              // C34: the composition/glass layer (C33)
 #include "SettingsDialog.hpp"               // C53: the Settings... menu item (C31/V3)
 #include "SidebarView.hpp"                  // sidebar draw commands (C12)
+#include "SystemTheme.hpp"                   // C125: the OS light/dark probe + WM_SETTINGCHANGE area
 #include "WindowFrame.hpp"                  // C66: visible frame, work area, clamp
 #include "WindowChrome.hpp"                  // C83: DWM dark caption + rim
 #include "../PrismCore/ChromeTheme.hpp"      // C83: the shell palette (tokens only)
@@ -680,6 +681,24 @@ class GalleryWindow {
   void SetSettingsLauncher(std::function<void()> launcher) {
     settingsLauncher_ = std::move(launcher);
   }
+
+  // C125: Ctrl+E asks before it writes. Like the settings launcher, the dialog
+  // itself is the APP's (it owns the plan, the catalog and the engine), so the
+  // window owns only the chord -> seam hop. A window with no seam installed
+  // does NOTHING on Ctrl+E: a test window must never write disk by accident.
+  void SetExtractDialogHandler(std::function<void()> handler) {
+    extractDialogHandler_ = std::move(handler);
+  }
+
+  // C125: the OS light/dark switch is broadcast as WM_SETTINGCHANGE with
+  // lParam == "ImmersiveColorSet". The window cannot re-resolve its variant on
+  // its own -- the saved appearance document ("light" / "dark" / "system")
+  // belongs to the app -- so it reports the event and the app re-applies.
+  void SetSystemThemeHandler(std::function<void()> handler) {
+    systemThemeHandler_ = std::move(handler);
+  }
+  // Test/observability seam: how many times the OS reported the switch.
+  int SystemThemeNotifications() const { return systemThemeNotifications_; }
   size_t HistoryBackCount() const { return history_.BackCount(); }
   size_t HistoryForwardCount() const { return history_.ForwardCount(); }
 
@@ -2881,6 +2900,19 @@ class GalleryWindow {
         if (onMenuCommand_) onMenuCommand_(command);
         return 0;
       }
+      // C125: "跟随系统" must FOLLOW. Windows broadcasts the light/dark switch
+      // (Settings > Personalization > Colors) as WM_SETTINGCHANGE with
+      // lParam == "ImmersiveColorSet"; other areas (fonts, metrics, wallpaper)
+      // are not a re-theme. The window cannot resolve the saved key itself, so
+      // it counts the event and tells the app to re-apply the variant.
+      case WM_SETTINGCHANGE: {
+        if (!prism::win::systemtheme::IsImmersiveColorSetChange(lparam)) {
+          return DefWindowProcW(host_.hwnd, message, wparam, lparam);
+        }
+        ++systemThemeNotifications_;
+        if (systemThemeHandler_) systemThemeHandler_();
+        return 0;
+      }
       case WM_CLOSE:
         // Closing is a two-step contract, and both steps belong in one place:
         //   1. capture the frame size the user chose, so the app can persist it
@@ -3767,6 +3799,18 @@ class GalleryWindow {
       case prism::keys::Command::OpenArchive:
         if (onOpenArchive_) onOpenArchive_();
         return;
+      // CARD C125: F5 -> the SAME door the Options menu item uses. One gate
+      // (settingsModalOpen_), one launcher, so a future fix to the dialog cannot
+      // reach the menu path and miss the key.
+      case prism::keys::Command::OpenSettings:
+        RunSettingsCommand();
+        return;
+      // CARD C125: Ctrl+E raises the ask-before-writing dialog. The window does
+      // not build the plan (the app does) and does NOT fall back to extracting:
+      // a missing seam means "not wired here", not "write silently instead".
+      case prism::keys::Command::OpenExtractDialog:
+        if (extractDialogHandler_) extractDialogHandler_();
+        return;
       case prism::keys::Command::ClosePalette:
         // C53: one close closes both halves (Esc reaching the shell directly is
         // still one surface going away, never a dead card left painted).
@@ -3776,9 +3820,10 @@ class GalleryWindow {
         Invalidate();
         return;
       case prism::keys::Command::SmartExtract:
-        // Ctrl+E (blueprint 9.1 row 4). The window still does not know what
-        // extraction means: it hands the CATALOG index to the app, exactly like
-        // Enter on a file. Same door, same plan, one code path.
+        // Ctrl+Alt+E / Alt+double-click (C125 moved the silent path off Ctrl+E).
+        // The window still does not know what extraction means: it hands the
+        // CATALOG index to the app, exactly like Enter on a file. Same door,
+        // same plan, one code path.
         if (selection_ >= 0 && selection_ < count && onActivate_) {
           if (!OperationAllowed(L"\u89E3\u538B")) return;  // 解压
           onActivate_(static_cast<int>(folderItems_[static_cast<size_t>(selection_)].index));
@@ -6299,6 +6344,12 @@ class GalleryWindow {
   // settings gate in RunSettingsCommand (and read by CurrentOverlay()).
   bool settingsModalOpen_ = false;
   std::function<void()> settingsLauncher_;
+  // C125: the two seams the card adds. Both default to "not wired" -- a window
+  // with no app behind it must not write disk (Ctrl+E) and must not pretend the
+  // OS told it something (WM_SETTINGCHANGE counts only real notifications).
+  std::function<void()> extractDialogHandler_;
+  std::function<void()> systemThemeHandler_;
+  int systemThemeNotifications_ = 0;
   int overlayViolations_ = 0;
   prism::layout::Rect dropHintRect_;
   std::wstring dropHintTitle_;

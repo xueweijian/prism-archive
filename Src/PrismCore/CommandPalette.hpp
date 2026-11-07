@@ -70,7 +70,9 @@ struct CommandSpec {
 
 inline const std::vector<CommandSpec>& DefaultCommands() {
   static const std::vector<CommandSpec> commands = {
-      {prism::keys::Command::SmartExtract, "Extract Smart", "Ctrl+E"},
+      // C125: the silent smart extract moved off Ctrl+E (which now asks). The
+      // hint must name the chord that still writes without a dialog.
+      {prism::keys::Command::SmartExtract, "Extract Smart", "Ctrl+Alt+E"},
       {prism::keys::Command::NewFolder, "New Folder", "Ctrl+Shift+N"},
       {prism::keys::Command::ToggleGrid, "Grid View", "Ctrl+1"},
       {prism::keys::Command::ToggleList, "List View", "Ctrl+2"},

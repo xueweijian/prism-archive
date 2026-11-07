@@ -159,16 +159,37 @@ PRISM_TEST("c83 a mnemonic is read from the painted label") {
 // ---------------------------------------------------------------------------
 // 5. THE APPEARANCE DOCUMENT -> ONE SHELL VARIANT.
 // ---------------------------------------------------------------------------
-PRISM_TEST("c83 the saved theme key maps to exactly one shell variant") {
-  PRISM_CHECK(prism::chrome::ShellVariantFor("dark", false) == Variant::Midnight);
-  PRISM_CHECK(prism::chrome::ShellVariantFor("light", false) == Variant::Daylight);
-  // "system" is the schema default. The canvas this shell must be continuous
-  // with is Midnight today, so "system" resolves to Midnight -- a white bar over
-  // a black canvas would be the A4 defect, not a fix.
-  PRISM_CHECK(prism::chrome::ShellVariantFor("system", false) == Variant::Midnight);
-  PRISM_CHECK(prism::chrome::ShellVariantFor("", false) == Variant::Midnight);
-  PRISM_CHECK(prism::chrome::ShellVariantFor("nonsense", false) == Variant::Midnight);
+PRISM_TEST("c83/c125 the saved theme key maps to exactly one shell variant") {
+  using prism::chrome::SystemTheme;
+  // An explicit choice wins over the desktop: a light-OS user who picked dark
+  // stays dark, and vice versa.
+  PRISM_CHECK(prism::chrome::ShellVariantFor("dark", false, SystemTheme::Light) ==
+              Variant::Midnight);
+  PRISM_CHECK(prism::chrome::ShellVariantFor("light", false, SystemTheme::Dark) ==
+              Variant::Daylight);
+  // C125: "system" (the schema default) FOLLOWS the OS appearance. This
+  // assertion used to read ShellVariantFor("system", false) == Variant::Midnight
+  // with a comment defending it -- and it pinned the BUG: on a light desktop
+  // (AppsUseLightTheme=1, this machine) shell and canvas were black while the
+  // desktop was white. The value now comes from PrismWin/SystemTheme.hpp.
+  PRISM_CHECK(prism::chrome::ShellVariantFor("system", false, SystemTheme::Light) ==
+              Variant::Daylight);
+  PRISM_CHECK(prism::chrome::ShellVariantFor("system", false, SystemTheme::Dark) ==
+              Variant::Midnight);
+  // No readable preference is NOT "dark by default": Unknown keeps the previous
+  // shell rather than guessing about a desktop we cannot see.
+  PRISM_CHECK(prism::chrome::ShellVariantFor("system", false, SystemTheme::Unknown) ==
+              Variant::Midnight);
+  // A key that is neither light, dark nor system is not the OS's decision.
+  PRISM_CHECK(prism::chrome::ShellVariantFor("", false, SystemTheme::Light) ==
+              Variant::Midnight);
+  PRISM_CHECK(prism::chrome::ShellVariantFor("nonsense", false, SystemTheme::Light) ==
+              Variant::Midnight);
   // High contrast wins over the light/dark choice: it is an accessibility mode.
-  PRISM_CHECK(prism::chrome::ShellVariantFor("light", true) == Variant::HighContrast);
-  PRISM_CHECK(prism::chrome::ShellVariantFor("dark", true) == Variant::HighContrast);
+  PRISM_CHECK(prism::chrome::ShellVariantFor("light", true, SystemTheme::Dark) ==
+              Variant::HighContrast);
+  PRISM_CHECK(prism::chrome::ShellVariantFor("dark", true, SystemTheme::Light) ==
+              Variant::HighContrast);
+  PRISM_CHECK(prism::chrome::ShellVariantFor("system", true, SystemTheme::Light) ==
+              Variant::HighContrast);
 }

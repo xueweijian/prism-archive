@@ -66,8 +66,14 @@ bool PlanHas(const std::vector<prism::UpdateItem>& plan, const std::string& path
 PRISM_TEST("keys: the six blueprint 9.1 rows resolve to their commands") {
   // 9.1 row 3: Ctrl+K -> command palette.
   if (!PRISM_CHECK_EQ(Key('K', true), Command::OpenPalette)) return;
-  // 9.1 row 4: Ctrl+E -> smart extract without a dialog.
-  if (!PRISM_CHECK_EQ(Key('E', true), Command::SmartExtract)) return;
+  // C125: Ctrl+E -> the extract DIALOG (Bandizip's 解压文件(&E)); the silent
+  // smart extract moved to Ctrl+Alt+E. This line used to pin the opposite, and
+  // that pin was the defect: one chord, a disk write nobody asked for.
+  if (!PRISM_CHECK_EQ(Key('E', true), Command::OpenExtractDialog)) return;
+  if (!PRISM_CHECK_EQ(Key('E', true, false, true), Command::SmartExtract)) return;
+  // C125: F5 -> settings (Bandizip's 选项(O) -> 设置(&S)  F5), never extraction.
+  if (!PRISM_CHECK_EQ(Key(prism::keys::kKeyF5), Command::OpenSettings)) return;
+  if (!PRISM_CHECK_EQ(prism::keys::kKeyF5, 0x74u)) return;
   // 9.1 row 5: Ctrl+Shift+N -> folder inside the archive (CoW transaction).
   if (!PRISM_CHECK_EQ(Key('N', true, true), Command::NewFolder)) return;
   // 9.1 row 2: Ctrl+Shift+P -> thumbnail ladder (64..512 px).
@@ -111,8 +117,14 @@ PRISM_TEST("keys: modifiers are strict, so near-miss chords stay inert") {
   // Ctrl+Shift+1 is not Ctrl+1: silent fall-through here would be a surprise.
   if (!PRISM_CHECK_EQ(Key('1', true, true), Command::None)) return;
   if (!PRISM_CHECK_EQ(Key('K', true, true), Command::None)) return;   // Ctrl+Shift+K
-  if (!PRISM_CHECK_EQ(Key('E', true, false, true), Command::None)) return;
+  // C125: Ctrl+Alt+E is now the SILENT extract chord (it used to be inert), so
+  // the strictness proof moves to Ctrl+Shift+E -- still nothing.
+  if (!PRISM_CHECK_EQ(Key('E', true, true), Command::None)) return;
   if (!PRISM_CHECK_EQ(Key('N', true, false, true), Command::None)) return;
+  // F5 with any modifier is not settings either: a chord is not a bare key.
+  if (!PRISM_CHECK_EQ(Key(prism::keys::kKeyF5, true), Command::None)) return;
+  if (!PRISM_CHECK_EQ(Key(prism::keys::kKeyF5, false, true), Command::None)) return;
+  if (!PRISM_CHECK_EQ(Key(prism::keys::kKeyF5, false, false, true), Command::None)) return;
   // A bare digit/letter is not a command (it may be a type-ahead elsewhere).
   if (!PRISM_CHECK_EQ(Key('1'), Command::None)) return;
   if (!PRISM_CHECK_EQ(Key('2'), Command::None)) return;

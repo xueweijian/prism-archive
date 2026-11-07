@@ -28,6 +28,7 @@
 // is no WILL_FAIL.
 #include <windows.h>
 
+#include <algorithm>  // (std::min): a parenthesised call, B1
 #include <cstdio>
 
 #include "../mini_test.hpp"
@@ -45,8 +46,15 @@ namespace {
 constexpr UINT kNewDpi = 144;
 constexpr int kSuggestedLeft = 100;
 constexpr int kSuggestedTop = 120;
+// What we WANT to suggest. If the desktop is smaller, the test shrinks it (see
+// the precondition in the case) -- the assertion is always against the numbers
+// actually put in lParam, never against these.
 constexpr int kSuggestedWidth = 1200;
 constexpr int kSuggestedHeight = 900;
+// Headroom under ptMaxTrackSize: the bound is enforced by DefWindowProc while
+// the window is sized, so the request must sit strictly inside it rather than on
+// the edge (a one-pixel disagreement would read as "we ignored lParam").
+constexpr int kTrackMargin = 64;
 
 }  // namespace
 
@@ -67,24 +75,50 @@ PRISM_TEST("c120.d3: WM_DPICHANGED applies lParam's rect and reflows the layout 
 
   // A monitor move: the OS sends the new DPI in wParam and a suggested rect in
   // lParam. Windows' own rule is that the app resizes to EXACTLY those numbers.
-  RECT suggested{kSuggestedLeft, kSuggestedTop, kSuggestedLeft + kSuggestedWidth,
-                 kSuggestedTop + kSuggestedHeight};
+  //
+  // PRECONDITION (learned from a red CI round): the suggested size must fit the
+  // desktop. DefWindowProc clamps a sizing request to the window's MAXIMUM
+  // tracking size (WM_GETMINMAXINFO -> ptMaxTrackSize, SM_CXMAXTRACK by
+  // default), and a headless runner desktop is small -- the first version of
+  // this test asked for 1200x900 on a 1024x768 session and the OS answered
+  // 1044x760, which looked like "we ignored lParam" but was Windows refusing to
+  // make a window bigger than the desktop. Asking the window itself for the
+  // bound is the faithful source: it is the very number SetWindowPos will
+  // enforce. The margin keeps the request strictly inside it.
+  MINMAXINFO limit{};
+  ::SendMessageW(window.Hwnd(), WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&limit));
+  int maxTrackW = limit.ptMaxTrackSize.x;
+  int maxTrackH = limit.ptMaxTrackSize.y;
+  if (maxTrackW <= 0) maxTrackW = ::GetSystemMetrics(SM_CXMAXTRACK);
+  if (maxTrackH <= 0) maxTrackH = ::GetSystemMetrics(SM_CYMAXTRACK);
+  const int width = (std::min)(kSuggestedWidth, maxTrackW - kTrackMargin);
+  const int height = (std::min)(kSuggestedHeight, maxTrackH - kTrackMargin);
+  std::printf("c120 d3: maxTrack=%dx%d -> suggesting %dx%d outer\n", maxTrackW, maxTrackH,
+              width, height);
+  PRISM_CHECK(width > 0);
+  PRISM_CHECK(height > 0);
+
+  RECT suggested{kSuggestedLeft, kSuggestedTop, kSuggestedLeft + width,
+                 kSuggestedTop + height};
   window.Dispatch(WM_DPICHANGED, MAKEWPARAM(kNewDpi, kNewDpi),
                   reinterpret_cast<LPARAM>(&suggested));
 
-  std::printf("c120 d3: after WM_DPICHANGED dpi=%d client=%dx%d\n", window.DpiForTest(),
-              window.ClientWidthForTest(), window.ClientHeightForTest());
+  RECT applied{};
+  ::GetWindowRect(window.Hwnd(), &applied);
+  std::printf("c120 d3: after WM_DPICHANGED dpi=%d client=%dx%d outer=%ld,%ld %ldx%ld\n",
+              window.DpiForTest(), window.ClientWidthForTest(), window.ClientHeightForTest(),
+              applied.left, applied.top, applied.right - applied.left,
+              applied.bottom - applied.top);
 
   // (a) the window is now laid out at the message's DPI.
   PRISM_CHECK(window.DpiForTest() == static_cast<int>(kNewDpi));
 
-  // (b) SetWindowPos really ran, with lParam's rect -- all four edges.
-  RECT frame{};
-  ::GetWindowRect(window.Hwnd(), &frame);
-  PRISM_CHECK(frame.left == kSuggestedLeft);
-  PRISM_CHECK(frame.top == kSuggestedTop);
-  PRISM_CHECK(frame.right - frame.left == kSuggestedWidth);
-  PRISM_CHECK(frame.bottom - frame.top == kSuggestedHeight);
+  // (b) SetWindowPos really ran, with lParam's rect -- all four edges, against
+  // the numbers this case actually suggested.
+  PRISM_CHECK(applied.left == kSuggestedLeft);
+  PRISM_CHECK(applied.top == kSuggestedTop);
+  PRISM_CHECK(applied.right - applied.left == width);
+  PRISM_CHECK(applied.bottom - applied.top == height);
 
   // (c) the LAYOUT is in DIPs: the client area the tokens see is the physical one
   // 96/144. A window that kept pixel math here would report the raw pixel width

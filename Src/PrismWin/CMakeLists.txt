@@ -26,6 +26,27 @@ target_link_libraries(PrismArchive PRIVATE prism_win_bridge
 # the define changes nothing for them.
 set_target_properties(PrismArchive PROPERTIES WIN32_EXECUTABLE TRUE)
 target_compile_definitions(PrismArchive PRIVATE UNICODE _UNICODE)
+
+# ---------------------------------------------------------------------------
+# C120: PER-MONITOR V2 (docs/UI-AUDIT-BANDIZIP.md: the process shipped as
+# DPI-UNAWARE, so 125% monitors bitmap-scaled the whole window by 1.25x and
+# every glyph and 1 px hairline was resampled).
+#
+# The manifest is MERGED into the one link.exe generates (/MANIFESTINPUT)
+# rather than embedded from the .rc file: the generated half carries the
+# requestedExecutionLevel the installer and the shell verbs rely on, and an
+# .rc-provided RT_MANIFEST would collide with it (CVT1100: duplicate resource,
+# type MANIFEST, name 1). The linker is also the component that owns the
+# manifest, so this is where the declaration belongs.
+#
+# The runtime half of the same decision is Src/PrismWin/DpiAwareness.hpp, called
+# first in wWinMain. Keep the two in step: the manifest is what a fresh
+# ProcessStart sees, the header is what a rebuilt/renamed binary still gets.
+# ---------------------------------------------------------------------------
+if(MSVC)
+  target_link_options(PrismArchive PRIVATE
+    "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/../App/PrismArchive.manifest")
+endif()
 # /WX- : same rationale as the other Windows targets -- the SDK headers are
 # not warning-clean under /W4 (the renderer's float<->pixel conversions are
 # exactness-benign by construction; cast-polish is deferred, not forgotten).

@@ -446,6 +446,31 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
   PRISM_CHECK(meanPanelDelta >= 8.0);   // the page is IN the reflection
   PRISM_CHECK(panelMin >= 4);           // ... across the whole panel, not one lucky pixel
 
+  // (2b) THE SOURCE IS NOT DISPLACED. The panel's 50 % edge in the ghost must be
+  // the panel's OWN edge. This is the assertion the layer has never had, and it
+  // is the one that would have caught the real bug C121 found: the "over"
+  // accumulated gaussian used the PREFIX sum for its alphas, so in an 8-bit
+  // target the early taps vanished and the late ones dominated -- the ghost was
+  // a copy of the page displaced by +4.9 mini px = +39 device px. Measured on
+  // the ghost's own PNG: the rail's 50 % edge sat at x=254 while the panel ends
+  // at x=220. After the suffix fix (BuildBackdrop) it sits within a pixel.
+  const int probeY = static_cast<int>(rail.panel.bottom) - 60;
+  const int edge = static_cast<int>(rail.panel.right);
+  const int panelDeltaAt = maxChannelDelta(ghost.At(edge - 40, probeY), ghostCanvas);
+  int halfEdge = -1;
+  for (int x = edge - 20; x < edge + 80; ++x) {
+    if (!ghost.In(x, probeY)) continue;
+    if (maxChannelDelta(ghost.At(x, probeY), ghostCanvas) * 2 < panelDeltaAt) {
+      halfEdge = x;
+      break;
+    }
+  }
+  std::printf("C77 backdrop source: panel edge at %d, ghost 50%% edge at %d (delta %d)\n", edge,
+              halfEdge, halfEdge - edge);
+  PRISM_CHECK(panelDeltaAt >= 8);
+  PRISM_CHECK(halfEdge > 0);
+  PRISM_CHECK(std::abs(halfEdge - edge) <= 2);   // a displacement of the page is a bug
+
   // ---------------------------------------------------------------- (3) ITEMS
   // The rail-less photo grid: nothing but canvas and the bands near the probe.
   Fixture fixture;

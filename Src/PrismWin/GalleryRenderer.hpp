@@ -799,7 +799,16 @@ class GalleryRenderer {
     if (FAILED(content->GetBitmap(stage.ReleaseAndGetAddressOf()))) return false;
 
     // 2. the blur: two separable passes, 15 taps each (sigma = 28 px at 1:1).
+    //    C121: the PANEL_GLOW arm widens the radius to 64 px, so the panel
+    //    edges' neutral falloff runs past the 32 px the page is allowed -- H5 MUST
+    //    go red. That is the assertion that stops an approved, bounded falloff
+    //    from one day growing back into the halo this card removed.
+#if defined(PRISM_C121_MUTANT_PANEL_GLOW)
+    ++dbgMutantPanelGlow;
+    constexpr float kBlurRadiusPx = 64.0f;
+#else
     constexpr float kBlurRadiusPx = 28.0f;
+#endif
     constexpr int kTaps = 7;  // +-7 mini px, sigma 3.5
     const float sigma = kBlurRadiusPx / kDownsample * 0.5f;
     float weights[2 * kTaps + 1];
@@ -2979,9 +2988,10 @@ class GalleryRenderer {
   // C121: backdrop passes that re-drew the DECODED pixels into the ghost (the
   // tiles-in-ghost arm only; zero in every clean build).
   int dbgBackdropEntryPasses = 0;
-  // C121: proof that each of the two new negative controls really executed.
+  // C121: proof that each of the new negative controls really executed.
   static inline int dbgMutantEmptyGhost = 0;
   static inline int dbgMutantKeyNoTheme = 0;
+  static inline int dbgMutantPanelGlow = 0;
   // C110: tile fills produced by the pre-C110 flat literal (flat-tile mutant).
   static inline int dbgMutantFlatTile = 0;
   // C101: how many ratio bars the LOUD mutant arm painted. Zero in every clean
@@ -3029,6 +3039,7 @@ class GalleryRenderer {
   // C121: how many times the empty-ghost / key-no-theme arms actually ran.
   int EmptyGhostMutantHits() const { return dbgMutantEmptyGhost; }
   int KeyNoThemeMutantHits() const { return dbgMutantKeyNoTheme; }
+  int PanelGlowMutantHits() const { return dbgMutantPanelGlow; }
   // C121 TEST SEAM (not a feature): paint the refraction SOURCE alone -- the
   // 1/8 bitmap BuildBackdrop produced, WITHOUT the veil and without any chrome
   // -- so a suite can ask what the layer is refracting. The target is CLEARED to

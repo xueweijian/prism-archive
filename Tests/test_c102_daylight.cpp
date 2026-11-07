@@ -174,8 +174,13 @@ PRISM_TEST("c102 night and high-contrast rows are untouched") {
                     42, 54, 0.52f));
   PRISM_CHECK(RowIs("midnight ghost", TokenId::SurfaceBackdropGhost, Variant::Midnight, 11, 12,
                     16, 1.0f));
-  PRISM_CHECK(RowIs("midnight veil", TokenId::SurfaceBackdropVeil, Variant::Midnight, 11, 12,
-                    16, 0.65f));
+  // C121: the veil row moved from --surface-backdrop-reference (11,12,16, the
+  // colour that DARKENED the canvas by 3 levels when refraction was on) to the
+  // canvas colour itself, which is C102's own rule for Daylight applied to
+  // Midnight. The ghost row above is untouched: the ghost is only ever consumed
+  // for its ALPHA.
+  PRISM_CHECK(RowIs("midnight veil", TokenId::SurfaceBackdropVeil, Variant::Midnight, 16, 17,
+                    23, 0.65f));
   PRISM_CHECK(RowIs("midnight text primary", TokenId::TextPrimary, Variant::Midnight, 245, 245,
                     247, 1.0f));
 

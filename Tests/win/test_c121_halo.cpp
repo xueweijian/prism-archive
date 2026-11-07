@@ -59,8 +59,10 @@
 
 #include "../mini_test.hpp"
 #include "../../Src/PrismCore/ChromeTheme.hpp"
+#include "../../Src/PrismCore/SidebarModel.hpp"
 #include "../../Src/PrismCore/WindowLayout.hpp"
 #include "../../Src/PrismWin/GalleryRenderer.hpp"
+#include "../../Src/PrismWin/SidebarView.hpp"
 
 using Microsoft::WRL::ComPtr;
 using prism::ArchiveItem;
@@ -86,21 +88,26 @@ constexpr int kPhotoChromaFloor = 60;
 #if defined(PRISM_C121_MUTANT_TILES_IN_GHOST)
 inline constexpr const char* kMutantBanner = "C121 MUTANT ACTIVE: tiles-in-ghost";
 inline constexpr const char* kMutantMarker = "C121 MUTATION CAUGHT: tiles-in-ghost";
-inline constexpr bool kTilesInGhost = true;
 #elif defined(PRISM_C121_MUTANT_KEY_NO_THEME)
 inline constexpr const char* kMutantBanner = "C121 MUTANT ACTIVE: key-no-theme";
 inline constexpr const char* kMutantMarker = "C121 MUTATION CAUGHT: key-no-theme";
-inline constexpr bool kTilesInGhost = false;
+#elif defined(PRISM_C121_MUTANT_PANEL_GLOW)
+inline constexpr const char* kMutantBanner = "C121 MUTANT ACTIVE: panel-glow";
+inline constexpr const char* kMutantMarker = "C121 MUTATION CAUGHT: panel-glow";
 #else
 inline constexpr const char* kMutantBanner = nullptr;
 inline constexpr const char* kMutantMarker = nullptr;
-inline constexpr bool kTilesInGhost = false;
 #endif
 
 // D3: the injected branch really ran. Published by Harness::Paint from the
 // renderer's own counters, so the verdict predicate never reads a case's locals.
+#if defined(PRISM_C121_MUTANT_TILES_IN_GHOST)
 int gEntryPasses = 0;
+#elif defined(PRISM_C121_MUTANT_KEY_NO_THEME)
 int gKeyNoThemeHits = 0;
+#elif defined(PRISM_C121_MUTANT_PANEL_GLOW)
+int gPanelGlowHits = 0;
+#endif
 
 IWICImagingFactory* gWic = nullptr;
 
@@ -239,6 +246,8 @@ struct Harness {
     gEntryPasses += renderer.BackdropEntryPasses();
 #elif defined(PRISM_C121_MUTANT_KEY_NO_THEME)
     gKeyNoThemeHits += renderer.KeyNoThemeMutantHits();
+#elif defined(PRISM_C121_MUTANT_PANEL_GLOW)
+    gPanelGlowHits += renderer.PanelGlowMutantHits();
 #endif
     if (ghost && !renderer.PaintRefractionSource(target.Get())) return false;
     if (FAILED(target->EndDraw())) return false;
@@ -670,17 +679,138 @@ PRISM_TEST("c121.h4_key_theme_and_scroll") {
   PRISM_CHECK_EQ(ghostMoved, 0);
 }
 
+
+// ---------------------------------------------------------------------------
+// H5: the panel's falloff is BOUNDED and NEUTRAL
+// ---------------------------------------------------------------------------
+// C121 APPROVES one visible consequence: a page panel's edge fades into the
+// canvas over the blur radius, because the refraction source carries the page.
+// Measured on Midnight after the veil (and recorded in the PR): +4/+4/+5 levels
+// 1 px outside the rail, +1 by 32 px, 0 by 48 px, and the chroma never moves --
+// a neutral falloff, not a coloured halo, and dE ~1.2 at its peak (below the
+// ~2.3 just-noticeable step).
+//
+// This case pins all three properties, so the approved falloff can never grow
+// back into the halo H1/H3 remove:
+//   (a) NEUTRAL, per pixel, 1..32 px out: the chroma never exceeds the canvas's;
+//   (b) the peak at 1 px stays <= 6 levels;
+//   (c) by 32 px it is <= 2 levels and by 64 px it is EXACTLY 0.
+//       WHY NOT "== 0 AT 32 px": the model reads +0.9 level there. The 1/8
+//       source samples the edge every 8 px, and the sample just outside the
+//       rail sits 4 mini px away, where the gaussian still passes 12.7 % of the
+//       panel (1 - Phi(4 / 3.5)); 0.127 x the panel's +21..+29 lift, veiled at
+//       65 %, is ~+1 byte. Asserting an exact 0 at 32 px would pin the 8 px
+//       UPSCALE GRID, not the material -- the rule docs/TESTING.md 8 states:
+//       AN ASSERTION TESTS THE CONTRACT, NOT THE IMPLEMENTATION DETAIL. The
+//       contract is "the falloff is gone by one blur radius and is zero beyond
+//       it", and 64 px is where zero is exact. The 64 px arm reads +3 at 32 px,
+//       so the defect it injects still fails this line.
+// PRISM_C121_MUTANT_PANEL_GLOW widens the blur from 28 to 64 px, so (c) MUST go
+// red -- "a bounded neutral falloff" is approved behaviour, "a halo" is not.
+PRISM_TEST("c121.h5_panel_edge_falloff") {
+  std::vector<ArchiveItem> catalog = Catalog();
+  prism::sidebar::Model model(&catalog);
+  const prism::layout::Layout layout = prism::layout::Compute(
+      static_cast<int>(kWidth), static_cast<int>(kHeight), /*sidebarVisible=*/true,
+      /*listMode=*/false);
+  prism::win::sidebar::Metrics metrics;
+  metrics.width = static_cast<float>(prism::layout::kSidebarWidth);
+  metrics.viewportTop = static_cast<float>(layout.actionIsland.bottom);
+  metrics.viewportBottom = static_cast<float>(layout.statusBar.top);
+  const prism::win::sidebar::Layout rail = prism::win::sidebar::Build(model, metrics);
+  PRISM_CHECK(rail.panel.Width() > 100.0f);
+  if (rail.panel.Width() <= 100.0f) return;
+
+  Fixture fixture;
+  GalleryRenderer::Scene scene = fixture.scene;
+  scene.layout = &layout;  // the geometry the renderer would compute for a rail
+  scene.sidebar = &rail;
+  scene.backdropRefraction = true;
+
+  Harness harness;
+  PRISM_CHECK(harness.Open(kWidth, kHeight));
+  if (harness.bitmap == nullptr) return;
+  Frame lit;
+  PRISM_CHECK(harness.Paint(scene, &lit));
+  if (lit.pixels.empty()) return;
+
+  // A row BELOW the flow (nothing but canvas to the right of the rail) and 60 px
+  // above the status band, whose own falloff is then ~0.1 level.
+  const int y = static_cast<int>(rail.panel.bottom) - 60;
+  const int edge = static_cast<int>(rail.panel.right);
+  const UINT32 canvas = CanvasPixel(prism::theme::Variant::Midnight);
+  const auto chromaOf = [](UINT32 p) {
+    const int r = static_cast<int>((p >> 16) & 0xFFu);
+    const int g = static_cast<int>((p >> 8) & 0xFFu);
+    const int b = static_cast<int>(p & 0xFFu);
+    return (std::max)(r, (std::max)(g, b)) - (std::min)(r, (std::min)(g, b));
+  };
+  const auto maxDelta = [&](UINT32 p) {
+    int d = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+      d = (std::max)(d, std::abs(static_cast<int>((p >> shift) & 0xFFu) -
+                                 static_cast<int>((canvas >> shift) & 0xFFu)));
+    }
+    return d;
+  };
+  const int canvasChroma = chromaOf(canvas);
+
+  // The probe row really is canvas to the right of the rail: no item, no chrome.
+  int notCanvas = 0;
+  for (int d = 40; d <= 64; ++d) {
+    if (!lit.In(edge + d, y)) continue;
+    if (maxDelta(lit.At(edge + d, y)) > 1) ++notCanvas;
+  }
+  std::printf("C121 H5 row y=%d edge=%d canvasChroma=%d farNotCanvas=%d\n", y, edge,
+              canvasChroma, notCanvas);
+  PRISM_CHECK_EQ(notCanvas, 0);
+
+  // (a) NEUTRAL. Two bounds, both meaningful: no pixel may leave the audit's
+  // "chroma <= 10" contract (the halo read 53), and the falloff may add at most
+  // 3 chroma levels over the canvas's own (the per-channel step is +3..+5, so a
+  // perfectly neutral falloff still moves max-min by ~1 after 8-bit rounding;
+  // 3 leaves one quantisation step on either side).
+  int chromaViolations = 0;
+  int worstChroma = 0;
+  for (int d = 1; d <= 32; ++d) {
+    if (!lit.In(edge + d, y)) continue;
+    const int c = chromaOf(lit.At(edge + d, y));
+    worstChroma = (std::max)(worstChroma, c);
+    if (c > canvasChroma + 3 || c > kGapChromaLimit) ++chromaViolations;
+  }
+  int peak = 0;
+  for (int dy = -20; dy <= 20; ++dy) {
+    if (!lit.In(edge + 1, y + dy)) continue;
+    peak = (std::max)(peak, maxDelta(lit.At(edge + 1, y + dy)));
+  }
+  const int far32 = maxDelta(lit.At(edge + 32, y));
+  const int far64 = maxDelta(lit.At(edge + 64, y));
+  std::printf("C121 H5 chromaViolations=%d worstChroma=%d peak1px=%d delta32=%d delta64=%d\n",
+              chromaViolations, worstChroma, peak, far32, far64);
+  PRISM_CHECK_EQ(chromaViolations, 0);  // (a) neutral all the way out
+  PRISM_CHECK(peak <= 6);               // (b) the approved peak
+  // (c) ONE blur radius out. The model says +0.9 level here (the 1/8 sample sits
+  // 4 mini px from the edge, where the gaussian still passes 12.7 % of the
+  // panel), so the bound is two levels: one quantisation step above the model
+  // and one below what the 64 px arm produces (+3).
+  PRISM_CHECK(far32 <= 2);
+  PRISM_CHECK_EQ(far64, 0);             // ... and flat beyond it
+}
+
 int main(int argc, char** argv) {
   if (kMutantBanner != nullptr) {
     std::printf("%s\n", kMutantBanner);
-    if (kTilesInGhost) {
-      // D3: armed on the renderer's own counter -- H1 may only print CAUGHT when
-      // the injected branch really drew the thumbnails into the ghost.
-      prism::test::SetMutationVerdict(kMutantMarker, []() { return gEntryPasses > 0; });
-    } else {
-      prism::test::SetMutationVerdict(kMutantMarker, []() { return gKeyNoThemeHits > 0; });
-    }
+#if defined(PRISM_C121_MUTANT_TILES_IN_GHOST)
+    // D3: armed on the renderer's own counter -- H1 may only print CAUGHT when
+    // the injected branch really drew the thumbnails into the ghost.
+    prism::test::SetMutationVerdict(kMutantMarker, []() { return gEntryPasses > 0; });
+#elif defined(PRISM_C121_MUTANT_KEY_NO_THEME)
+    prism::test::SetMutationVerdict(kMutantMarker, []() { return gKeyNoThemeHits > 0; });
+#elif defined(PRISM_C121_MUTANT_PANEL_GLOW)
+    prism::test::SetMutationVerdict(kMutantMarker, []() { return gPanelGlowHits > 0; });
+#endif
   } else {
+    static_cast<void>(kMutantMarker);  // armed only in the three mutant builds
     std::puts("C121 MUTANT: none (clean build)");
   }
 

@@ -18,7 +18,11 @@
 #   H3  the chroma spread below a photo tile is <= 12 px;
 #   H4  the cache key carries the THEME (a theme switch rebuilds the source, so
 #       the second frame shows the second theme's canvas) and the SCROLL is not
-#       an input (100 px later the ghost is the same bitmap, byte for byte).
+#       an input (100 px later the ghost is the same bitmap, byte for byte);
+#   H5  a page panel's edge fades into the canvas NEUTRALLY and within one blur
+#       radius (+4/+4/+5 levels at 1 px, <= 1 by 32 px, 0 by 64 px, chroma flat):
+#       the approved consequence of a page-scoped source, pinned so it cannot
+#       grow back into a halo.
 #
 # NEGATIVE CONTROLS (CONTRACTS D3/D26/D27): each arm is the shipped defect in the
 # same source, registered as its own target, and the verdict is the entry's
@@ -27,6 +31,9 @@
 #       source -> H1/H3 MUST go red.
 #   PRISM_C121_MUTANT_KEY_NO_THEME     the key drops the theme (the shipped key)
 #       -> H4 MUST go red.
+#   PRISM_C121_MUTANT_PANEL_GLOW       the blur widens from 28 to 64 px -> the
+#       panel edges' approved NEUTRAL falloff runs past 32 px -> H5 MUST go red
+#       ("a bounded neutral falloff" is approved behaviour; "a halo" is not).
 #   PRISM_C121_MUTANT_EMPTY_GHOST      the source is emptied (compiled into the
 #       C77 target below): C77-1's "the source carries the rail's panel" MUST go
 #       red, which is what stops "fix the halo by deleting the layer".
@@ -43,7 +50,7 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties(win.c121_halo PROPERTIES TIMEOUT 240
       PASS_REGULAR_EXPRESSION "ALL C121 HALO CHECKS PASSED")
 
-  foreach(mutant IN ITEMS TILES_IN_GHOST KEY_NO_THEME)
+  foreach(mutant IN ITEMS TILES_IN_GHOST KEY_NO_THEME PANEL_GLOW)
     string(TOLOWER "${mutant}" mutant_lc)
     add_executable("win_c121_halo_mutant_${mutant_lc}" win/test_c121_halo.cpp)
     target_link_libraries("win_c121_halo_mutant_${mutant_lc}"
@@ -61,9 +68,12 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
     if(mutant STREQUAL "TILES_IN_GHOST")
       set_tests_properties("mutation.c121.${mutant_lc}" PROPERTIES TIMEOUT 240
                            PASS_REGULAR_EXPRESSION "C121 MUTATION CAUGHT: tiles-in-ghost")
-    else()
+    elseif(mutant STREQUAL "KEY_NO_THEME")
       set_tests_properties("mutation.c121.${mutant_lc}" PROPERTIES TIMEOUT 240
                            PASS_REGULAR_EXPRESSION "C121 MUTATION CAUGHT: key-no-theme")
+    else()
+      set_tests_properties("mutation.c121.${mutant_lc}" PROPERTIES TIMEOUT 240
+                           PASS_REGULAR_EXPRESSION "C121 MUTATION CAUGHT: panel-glow")
     endif()
   endforeach()
 

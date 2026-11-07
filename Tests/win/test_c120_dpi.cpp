@@ -105,6 +105,13 @@ PRISM_TEST("c120.d1: the process is PER-MONITOR (>= PROCESS_PER_MONITOR_DPI_AWAR
   PRISM_CHECK(dpi::IsPerMonitor(process));
   PRISM_CHECK(dpi::IsPerMonitor(thread));
   PRISM_CHECK(process != dpi::Awareness::Unavailable);
+  // ... and, because "per-monitor" alone cannot tell v1 from v2, the THREAD's
+  // context is the predefined PER_MONITOR_AWARE_V2 one. V1 would scale its own
+  // non-client area and would not deliver the child-window DPI messages this
+  // card's window relies on.
+  const bool v2 = dpi::ThreadContextIsPerMonitorV2();
+  std::printf("c120 d1: thread context == PER_MONITOR_AWARE_V2: %d\n", v2 ? 1 : 0);
+  PRISM_CHECK(v2);
 }
 
 // ---------------------------------------------------------------- assertion D2

@@ -94,6 +94,7 @@ using SetProcessDpiAwarenessFn = HRESULT(WINAPI*)(int);
 using GetProcessDpiAwarenessFn = HRESULT(WINAPI*)(HANDLE, int*);
 using GetThreadDpiAwarenessContextFn = DpiAwarenessContext(WINAPI*)();
 using GetAwarenessFromDpiAwarenessContextFn = int(WINAPI*)(DpiAwarenessContext);
+using AreDpiAwarenessContextsEqualFn = BOOL(WINAPI*)(DpiAwarenessContext, DpiAwarenessContext);
 using GetDpiForSystemFn = UINT(WINAPI*)();
 
 inline HMODULE User32() {
@@ -130,6 +131,20 @@ inline Awareness QueryThreadAwareness() {
     }
   }
   return Awareness::Unavailable;
+}
+
+// True when the calling thread's context IS the predefined PER_MONITOR_AWARE_V2
+// one -- the difference between "per-monitor" and "the v2 behaviour this card
+// asks for". Awareness alone cannot tell v1 from v2: both answer
+// PROCESS_PER_MONITOR_DPI_AWARE. False on a Windows that predates the context
+// API, where the manifest's dpiAware=true/pm is the best available answer.
+inline bool ThreadContextIsPerMonitorV2() {
+  auto equal = detail::Resolve<detail::AreDpiAwarenessContextsEqualFn>(
+      detail::User32(), "AreDpiAwarenessContextsEqual");
+  auto context = detail::Resolve<detail::GetThreadDpiAwarenessContextFn>(
+      detail::User32(), "GetThreadDpiAwarenessContext");
+  if (!equal || !context) return false;
+  return equal(context(), detail::PerMonitorAwareV2()) != FALSE;
 }
 
 // What the process's awareness is RIGHT NOW.
@@ -193,8 +208,10 @@ inline const char* MutationName() { return "unaware_runtime_fallback"; }
 struct ApplyResult {
   Awareness before = Awareness::Unavailable;  // what the process had on entry
   Awareness after = Awareness::Unavailable;   // what it has when this returns
-  bool accepted = false;   // one of the setters answered success
-  const char* rung = "none";  // "permonitorv2" | "permonitor" | "system" | "none"
+  bool accepted = false;   // the awareness is set (by us, or already by the loader)
+  // "manifest" (already per-monitor before this call: the manifest won) |
+  // "permonitorv2" | "permonitor" | "system" (the fallback rungs) | "none".
+  const char* rung = "none";
 };
 
 // The runtime half of the card. Idempotent and safe to call twice: once the
@@ -212,6 +229,18 @@ inline ApplyResult ApplyProcessDpiAwareness() {
   result.accepted = ::SetProcessDPIAware() != FALSE;
   if (result.accepted) result.rung = "system";
 #else
+  // ALREADY THERE: stop. Measured on Windows 11, in a process the manifest made
+  // per-monitor, SetProcessDPIAware() answers TRUE and changes nothing -- so
+  // running the ladder anyway would log "rung=system" for a process that never
+  // left PMv2. A rung that reports success while changing nothing is a lie the
+  // next reader would trust, and the setters cannot improve on what the loader
+  // already did. The measured state stays the only authority.
+  if (IsPerMonitor(result.before)) {
+    result.accepted = true;
+    result.rung = "manifest";
+    result.after = result.before;
+    return result;
+  }
   if (auto set = detail::Resolve<detail::SetProcessDpiAwarenessContextFn>(
           detail::User32(), "SetProcessDpiAwarenessContext")) {
     if (set(detail::PerMonitorAwareV2()) != FALSE) {

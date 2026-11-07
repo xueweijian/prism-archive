@@ -270,6 +270,10 @@ inline Variant ShellVariantFor(std::string_view themeKey, bool highContrast,
 #if defined(PRISM_C125_MUTANT_SYSTEM_ALWAYS_MIDNIGHT)
   // NEGATIVE CONTROL (CONTRACTS D3): the pre-card rule -- "system" is Midnight
   // whatever the desktop says. S3 (a light OS must be Daylight) MUST go red.
+  // The parameter is deliberately ignored HERE and only here; (void) keeps
+  // -Werror=unused-parameter clean on the Linux lane, which compiles this mutant
+  // build too.
+  (void)systemTheme;
   return Variant::Midnight;
 #else
   if (themeKey == "system") {

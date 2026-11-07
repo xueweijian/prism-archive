@@ -107,6 +107,7 @@
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
 #include "../PrismWin/DragOutToShell.hpp"   // C67: CF_HDROP drag out (lazy extract)
 #include "../PrismWin/EditConfirmDialog.hpp"  // C54: the edit confirmation (programmatic)
+#include "../PrismWin/ExtractDialog.hpp"    // C125: Ctrl+E asks before it writes
 #include "../PrismWin/OverwriteDialog.hpp"  // C94: the ONE conflict dialog
 #include "../PrismWin/GalleryWindow.hpp"
 #include "../PrismWin/LogFile.hpp"           // C85: the daily file sink + the wall clock
@@ -1040,9 +1041,27 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // "system" default paint the Midnight shell the canvas already uses, "light"
   // paints the daylight one, and appearance.highContrast wins over both. The
   // title bar and the owner-drawn menu bar both come from that one variant.
+  //
+  // C125: the third argument is the OS's answer (the Personalize key's
+  // AppsUseLightTheme DWORD). "system" used to resolve to Midnight
+  // unconditionally, so a light desktop got a black window; now it resolves to
+  // what the desktop actually is, and the SAME value drives the canvas
+  // (SetChromeVariant sets both halves), so the shell cannot end up white over
+  // a black canvas.
   window.SetChromeVariant(prism::chrome::ShellVariantFor(
       settings.store.GetString(prism::win::settingsui::kThemeKey, "system"),
-      settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false)));
+      settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false),
+      prism::win::systemtheme::AppsUseLightTheme()));
+  // C125: "跟随系统" must follow without a restart. Windows broadcasts the
+  // Personalization light/dark switch as WM_SETTINGCHANGE with lParam
+  // "ImmersiveColorSet"; the window reports it and this re-applies the SAME
+  // expression above (so an explicit "light"/"dark" still wins over the OS).
+  window.SetSystemThemeHandler([&window, &settings]() {
+    window.SetChromeVariant(prism::chrome::ShellVariantFor(
+        settings.store.GetString(prism::win::settingsui::kThemeKey, "system"),
+        settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false),
+        prism::win::systemtheme::AppsUseLightTheme()));
+  });
   // C40 + C74: the sidebar's headings and the action band's eight words come
   // from the same tables as every other sentence. ONE door (ApplyLanguage) so a
   // language switch re-reads both, and a band that forgot to rebuild is the
@@ -1269,7 +1288,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       // from the document the dialog just wrote.
       window.SetChromeVariant(prism::chrome::ShellVariantFor(
           settings.store.GetString(prism::win::settingsui::kThemeKey, "system"),
-          settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false)));
+          settings.store.GetBool(prism::win::settingsui::kHighContrastKey, false),
+          prism::win::systemtheme::AppsUseLightTheme()));
       // C106: the auto-hide preference is live too -- a document that turned it
       // on withdraws the bar on save, without a restart.
       window.SetMenuAutoHide(
@@ -1420,6 +1440,47 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     });
   };
   window.SetActivateHandler(activateHandler);
+
+  // ---- C125: Ctrl+E ASKS BEFORE IT WRITES ---------------------------------
+  //
+  // Bandizip binds 解压文件(&E) to Ctrl+E and opens an extract dialog. We bound
+  // it to SmartExtract, which wrote the whole archive with no prompt and no
+  // undo -- one finger gesture with a different CONSEQUENCE CLASS, which is the
+  // one thing a migrated user cannot afford.
+  //
+  // The dialog is prefilled by the SAME smart plan the silent path used (so the
+  // default is still one click away) and shows the path, the file count and the
+  // bytes. It writes nothing itself: a cancel returns here and reaches no engine
+  // call at all, so "cancel wrote nothing" is structural, not a flag. The silent
+  // path did not disappear: Ctrl+Alt+E and Alt+double-click keep it.
+  window.SetExtractDialogHandler([&window, app, activateHandler]() {
+    // One operation at a time: the worker reads app->plan, so re-planning under
+    // it would be a data race. A chord pressed during an extraction is a no-op,
+    // exactly like the extract door itself (activateHandler's exchange()).
+    if (app->extracting.load()) return;
+    app->plan = prism::app::BuildExtractionPlan(
+        prism::app::LaunchMode::kSmartExtract, prism::win::WideToUtf8(app->archivePath),
+        app->catalog,
+        [](const std::string& path) {
+          return std::filesystem::exists(prism::win::Utf8ToWide(path));
+        });
+    prism::win::extractdlg::ExtractDialogModel model;
+    model.targetDir = prism::win::Utf8ToWide(app->plan.plan.baseTargetDir);
+    model.summary = prism::win::extractdlg::BuildSummary(app->plan.plan.fileCount,
+                                                         app->plan.plan.totalBytes);
+    prism::win::extractdlg::ExtractDialog dialog;
+    dialog.SetModel(std::move(model));
+    if (!dialog.OpenModal(GetModuleHandleW(nullptr), window.Hwnd())) {
+      // The observable the process-level suite reads: a cancel leaves a line and
+      // no bytes, so "the dialog appeared and nothing was written" is provable.
+      std::fprintf(stderr, "extract dialog cancelled: nothing written\n");
+      return;
+    }
+    app->plan.plan.baseTargetDir = prism::win::WideToUtf8(dialog.TargetDir());
+    std::fprintf(stderr, "extract dialog accepted target=%s\n",
+                 app->plan.plan.baseTargetDir.c_str());
+    activateHandler(-1);  // the same worker, HUD and status line as the silent path
+  });
 
   // ---- C67: Alt+double-click = "extract into <archive name>\" --------------
   //

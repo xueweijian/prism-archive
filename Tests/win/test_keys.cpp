@@ -183,8 +183,14 @@ int main() {
   // collide with the keys the window already handles.
   if (!PRISM_CHECK_EQ(prism::keys::Resolve(Stroke{'K', true, false, false}),
                       Command::OpenPalette)) return 1;
+  // C125: Ctrl+E asks (the dialog); Ctrl+Alt+E is the silent write.
   if (!PRISM_CHECK_EQ(prism::keys::Resolve(Stroke{'E', true, false, false}),
+                      Command::OpenExtractDialog)) return 1;
+  if (!PRISM_CHECK_EQ(prism::keys::Resolve(Stroke{'E', true, false, true}),
                       Command::SmartExtract)) return 1;
+  // F5 is settings, not extraction (Bandizip's 设置(&S)  F5).
+  if (!PRISM_CHECK_EQ(prism::keys::Resolve(Stroke{VK_F5, false, false, false}),
+                      Command::OpenSettings)) return 1;
   if (!PRISM_CHECK_EQ(prism::keys::Resolve(Stroke{'N', true, true, false}),
                       Command::NewFolder)) return 1;
   if (!PRISM_CHECK_EQ(prism::keys::Resolve(Stroke{'P', true, true, false}),

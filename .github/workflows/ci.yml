@@ -158,8 +158,25 @@ jobs:
       # release-msvc is the same preset a developer runs locally, and unlike
       # asan-msvc it is cacheable. The launcher is spelled here rather than in
       # the preset so the local preset keeps using the plain compiler.
+      #
+      # The launcher is resolved to an ABSOLUTE path from SCCACHE_PATH (the
+      # sccache-action exports it) instead of the bare name: a bare name that
+      # is not on PATH fails inside ninja as `CreateProcess failed: The system
+      # cannot find the file specified` on EVERY translation unit, which reads
+      # like a compile error and hides the real cause. If neither the env var
+      # nor PATH has it, fail here with one clear line.
       - name: Configure (release-msvc preset, sccache launcher)
-        run: cmake --preset release-msvc -B build -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+        shell: pwsh
+        run: |
+          $launcher = $env:SCCACHE_PATH
+          if (-not $launcher) { $launcher = (Get-Command sccache -ErrorAction SilentlyContinue).Source }
+          if (-not $launcher) {
+            Write-Host '::error::sccache was not found (neither SCCACHE_PATH nor PATH)'
+            exit 1
+          }
+          Write-Host "sccache launcher: $launcher"
+          cmake --preset release-msvc -B build "-DCMAKE_CXX_COMPILER_LAUNCHER=$launcher"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         run: cmake --build build --parallel

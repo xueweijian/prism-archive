@@ -158,8 +158,8 @@ struct Harness {
 #if defined(PRISM_C121_MUTANT_EMPTY_GHOST)
     gEmptyGhostHits += renderer.EmptyGhostMutantHits();
 #endif
-    // C121: the refraction SOURCE alone. It is opaque, so painting it as the
-    // last operation of the frame turns the read-back into the ghost.
+    // C121: the refraction SOURCE alone: the seam clears the target, so the
+    // read-back is the source itself and not the frame it replaced.
     if (ghost && !renderer.PaintRefractionSource(target.Get())) {
       target->EndDraw();
       return false;
@@ -329,52 +329,59 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
   //
   // The audit's rule is the opposite one: a refraction source carries the PAGE
   // -- canvas, static bands, rail -- and never the archive (docs/design/C 5.1
-  // R1). So this case now asserts BOTH halves, and both can go red:
-  //   (1) THE SOURCE CARRIES A PAGE PANEL. Inside the rail's rectangle the
-  //       ghost reads >= 8 levels away from the canvas at the same coordinate:
-  //       proof that the layer is refracting a page surface (the rail's panel is
-  //       +21/+24/+29 on the midnight canvas, and the 1/8 blur of a 220 px wide
-  //       panel leaves the middle at full strength). THIS IS THE HALF THAT KEEPS
-  //       "fix it by deleting the layer" RED: an empty source reads 0.
-  //   (2) THE SOURCE CARRIES ZERO ITEM PIXELS. Inside a photo tile's rectangle
-  //       the ghost IS the canvas, within 2 levels -- the ghost-level twin of
-  //       the C121 suite's H1/H3 pixel assertions.
+  // R1). So this case now asserts three things, and all three can go red:
+  //   (1) THE SOURCE IS A PAGE, NOT A CUT-OUT. Every sampled pixel of it is
+  //       opaque (alpha >= 250; 8-bit rounding leaves 254/255 in places). The
+  //       old source was a transparent field with the items floating in it.
+  //   (2) IT CARRIES A PAGE PANEL. Inside the rail's rectangle the ghost reads
+  //       >= 8 levels away from the canvas at the same coordinate: proof that
+  //       the layer is refracting a page surface. THIS IS THE HALF THAT KEEPS
+  //       "fix it by deleting the layer" RED -- an empty source reads 0.
+  //   (3) IT CARRIES ZERO ITEM PIXELS. Inside a photo tile's rectangle the ghost
+  //       IS the canvas, within 2 levels -- the ghost-level twin of the C121
+  //       suite's H1/H3 pixel assertions.
+  //
+  // The two halves are measured on TWO SCENES on purpose: (2) needs a rail, and
+  // the rail's own falloff is ~4 levels at 1 px and ~1 by 32 px (see H5), which
+  // would contaminate (3) because the first tile starts 16 px from the rail. A
+  // probe that has to avoid a neighbouring surface is a probe that measures the
+  // neighbour. So (3) runs on the rail-less photo grid, far from every panel.
   //
   // The ghost is read through GalleryRenderer::PaintRefractionSource, the seam
-  // that paints the 1/8 source alone (opaque, so it replaces the frame): asking
-  // the layer what it is made of instead of inferring it from the chrome that
-  // was painted over it.
-  Fixture fixture;
-  std::vector<ArchiveItem> catalog = fixture.items;
-  prism::sidebar::Model model(&catalog);
-  const prism::layout::Layout layout =
+  // that paints the 1/8 source alone: asking the layer what it is made of
+  // instead of inferring it from the chrome that was painted over it.
+  std::vector<ArchiveItem> emptyCatalog;
+  prism::sidebar::Model model(&emptyCatalog);
+  const prism::layout::Layout pageLayout =
       prism::layout::Compute(static_cast<int>(kWidth), static_cast<int>(kHeight),
                              /*sidebarVisible=*/true, /*listMode=*/false);
   prism::win::sidebar::Metrics metrics;
   metrics.width = static_cast<float>(prism::layout::kSidebarWidth);
-  metrics.viewportTop = static_cast<float>(layout.actionIsland.bottom);
-  metrics.viewportBottom = static_cast<float>(layout.statusBar.top);
+  metrics.viewportTop = static_cast<float>(pageLayout.actionIsland.bottom);
+  metrics.viewportBottom = static_cast<float>(pageLayout.statusBar.top);
   const prism::win::sidebar::Layout rail = prism::win::sidebar::Build(model, metrics);
   PRISM_CHECK(rail.panel.Width() > 100.0f);
+  if (rail.panel.Width() <= 100.0f) return;
 
-  GalleryRenderer::Scene glass = fixture.scene;
-  glass.layout = &layout;   // the SAME geometry the renderer would compute
-  glass.sidebar = &rail;
-  glass.backdropRefraction = true;
-  glass.glassPanels = false;  // this case measures the SOURCE, not the panel language
-  glass.theme = prism::theme::Variant::Midnight;
+  GalleryRenderer::Scene page;
+  page.theme = prism::theme::Variant::Midnight;
+  page.layout = &pageLayout;  // the SAME geometry the renderer would compute
+  page.sidebar = &rail;
+  page.backdropRefraction = true;
+  page.breadcrumb = L"empty.7z";
 
   Harness harness;
   PRISM_CHECK(harness.Open(kWidth, kHeight));
   if (harness.bitmap == nullptr) return;
   Frame frame;
-  PRISM_CHECK(harness.Frame_(glass, &frame));
+  PRISM_CHECK(harness.Frame_(page, &frame));
   // CONTRACTS D3: the no-backdrop arm returns before the layer is ever built, so
   // "the layer was requested and never composited" is the proof it ran. Armed
   // before the first assertion the arm is expected to break.
   if (kBackdropMutation && harness.renderer.BackdropDraws() == 0) ++MutationReached();
   PRISM_CHECK_EQ(harness.renderer.BackdropRebuilds(), 1);
   PRISM_CHECK_EQ(harness.renderer.BackdropDraws(), 1);
+  if (kBackdropMutation) ++MutationReached();
 
   const prism::theme::Rgba canvasRgba =
       prism::chrome::CanvasPresentedColor(prism::theme::Variant::Midnight);
@@ -394,31 +401,27 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
   };
 
   Frame ghost;
-  PRISM_CHECK(harness.Frame_(glass, &ghost, /*ghost=*/true));
+  PRISM_CHECK(harness.Frame_(page, &ghost, /*ghost=*/true));
   if (ghost.pixels.empty()) return;
-  // The two pictures this case is about: the frame, and the source it was built
-  // from. The second one is the evidence a reviewer needs -- the frame alone can
-  // no longer show what the layer carries (C121 made it a page).
   if (!WritePng(L"c77-1-frame.png", frame)) std::puts("  WARN: frame PNG failed");
   if (!WritePng(L"c77-1-refraction-source.png", ghost)) std::puts("  WARN: source PNG failed");
-  if (kBackdropMutation) ++MutationReached();
 
-  // THE SOURCE IS A PAGE, NOT A CUT-OUT. Every sample of it is opaque: the
-  // refraction source covers the frame, the way a page background does. Before
-  // C121 it was a transparent field with the items floating in it -- and this
-  // check is also what makes the empty-ghost arm honest, because a suite that
-  // painted nothing would otherwise read the FRAME's own rail through the hole
-  // and call it "the page is in the source".
+  // (1) THE SOURCE IS A PAGE. Sampled away from the 1/8 upscale's border, where
+  // the blur legitimately runs out of taps.
   int transparentSamples = 0;
-  for (int y = 4; y < static_cast<int>(ghost.height); y += 7) {
-    for (int x = 4; x < static_cast<int>(ghost.width); x += 7) {
-      if (static_cast<int>((ghost.At(x, y) >> 24) & 0xFFu) != 255) ++transparentSamples;
+  int minAlpha = 255;
+  for (int y = 64; y + 64 < static_cast<int>(ghost.height); y += 7) {
+    for (int x = 64; x + 64 < static_cast<int>(ghost.width); x += 7) {
+      const int alpha = static_cast<int>((ghost.At(x, y) >> 24) & 0xFFu);
+      minAlpha = (std::min)(minAlpha, alpha);
+      if (alpha < 250) ++transparentSamples;
     }
   }
-  std::printf("C77 backdrop source: transparent samples=%d\n", transparentSamples);
+  std::printf("C77 backdrop source: opaque page? minAlpha=%d holes=%d\n", minAlpha,
+              transparentSamples);
   PRISM_CHECK_EQ(transparentSamples, 0);
 
-  // (1) the rail's panel is IN the source.
+  // (2) the rail's panel is IN the source.
   double panelDelta = 0.0;
   int panelSamples = 0;
   int panelMin = 1000;
@@ -443,8 +446,21 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
   PRISM_CHECK(meanPanelDelta >= 8.0);   // the page is IN the reflection
   PRISM_CHECK(panelMin >= 4);           // ... across the whole panel, not one lucky pixel
 
-  // (2) a photo tile is NOT. The flow is WindowLayout's, so the probe cannot
-  // drift off the tile it names.
+  // ---------------------------------------------------------------- (3) ITEMS
+  // The rail-less photo grid: nothing but canvas and the bands near the probe.
+  Fixture fixture;
+  GalleryRenderer::Scene items = fixture.scene;
+  items.backdropRefraction = true;  // the layer this case is about
+  Harness itemHarness;
+  PRISM_CHECK(itemHarness.Open(kWidth, kHeight));
+  if (itemHarness.bitmap == nullptr) return;
+  Frame itemFrame;
+  Frame itemGhost;
+  PRISM_CHECK(itemHarness.Frame_(items, &itemFrame));
+  PRISM_CHECK(itemHarness.Frame_(items, &itemGhost, /*ghost=*/true));
+  if (itemFrame.pixels.empty() || itemGhost.pixels.empty()) return;
+  if (!WritePng(L"c77-1-items-source.png", itemGhost)) std::puts("  WARN: source PNG failed");
+
   std::vector<prism::layout::FlowItem> flow;
   flow.reserve(fixture.items.size());
   for (const ArchiveItem& item : fixture.items) {
@@ -455,45 +471,56 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
                                prism::layout::ThumbnailCapable(entry.kind);
     flow.push_back(entry);
   }
-  const std::vector<prism::layout::FlowCell> cells = prism::layout::VisibleFlowCells(
-      layout, flow, static_cast<int>(fixture.viewport.Scroll()));
+  const prism::layout::Layout grid = prism::layout::Compute(
+      static_cast<int>(kWidth), static_cast<int>(kHeight), /*sidebarVisible=*/false,
+      /*listMode=*/false);
+  const std::vector<prism::layout::FlowCell> cells =
+      prism::layout::VisibleFlowCells(grid, flow, static_cast<int>(fixture.viewport.Scroll()));
   prism::layout::Rect tile;
   for (const prism::layout::FlowCell& cell : cells) {
     if (cell.kind != prism::layout::CellKind::Tile) continue;
-    if (cell.rect.top < layout.contentInner.top || cell.rect.bottom > layout.contentInner.bottom) {
-      continue;
-    }
+    if (fixture.items[static_cast<size_t>(cell.index)].isDir) continue;
+    if (cell.rect.top < grid.contentInner.top) continue;
+    if (cell.rect.bottom > grid.contentInner.bottom) continue;
     tile = cell.rect;
     break;
   }
   PRISM_CHECK(!tile.Empty());
   if (tile.Empty()) return;
   int worstItemDelta = 0;
+  int worstX = -1;
+  int worstY = -1;
   int itemSamples = 0;
   for (int y = tile.top + 50; y < tile.top + 150; ++y) {
     for (int x = tile.left + 20; x < tile.right - 20; ++x) {
-      if (!ghost.In(x, y)) continue;
-      worstItemDelta = (std::max)(worstItemDelta, maxChannelDelta(ghost.At(x, y), ghostCanvas));
+      if (!itemGhost.In(x, y)) continue;
+      const int d = maxChannelDelta(itemGhost.At(x, y), ghostCanvas);
+      if (d > worstItemDelta) {
+        worstItemDelta = d;
+        worstX = x;
+        worstY = y;
+      }
       ++itemSamples;
     }
   }
   PRISM_CHECK(itemSamples > 2000);
-  std::printf("C77 backdrop source: photo tile (%d,%d)-(%d,%d) worstDelta=%d samples=%d\n",
-              tile.left, tile.top, tile.right, tile.bottom, worstItemDelta, itemSamples);
   // ... and the tile really holds a saturated photo in the frame, so a clean
   // ghost here cannot be a clean ghost over an empty tile.
   int frameChroma = 0;
   for (int y = tile.top + 60; y < tile.top + 100; y += 2) {
     for (int x = tile.left + 30; x < tile.right - 30; x += 2) {
-      if (!frame.In(x, y)) continue;
-      const int r = static_cast<int>((frame.At(x, y) >> 16) & 0xFFu);
-      const int g = static_cast<int>((frame.At(x, y) >> 8) & 0xFFu);
-      const int b = static_cast<int>(frame.At(x, y) & 0xFFu);
+      if (!itemFrame.In(x, y)) continue;
+      const int r = static_cast<int>((itemFrame.At(x, y) >> 16) & 0xFFu);
+      const int g = static_cast<int>((itemFrame.At(x, y) >> 8) & 0xFFu);
+      const int b = static_cast<int>(itemFrame.At(x, y) & 0xFFu);
       frameChroma = (std::max)(frameChroma,
                                (std::max)(r, (std::max)(g, b)) - (std::min)(r, (std::min)(g, b)));
     }
   }
-  std::printf("C77 backdrop source: the same tile in the FRAME has chroma=%d\n", frameChroma);
+  std::printf("C77 backdrop source: photo tile (%d,%d)-(%d,%d) worstDelta=%d at (%d,%d) "
+              "frameChroma=%d samples=%d\n",
+              tile.left, tile.top, tile.right, tile.bottom, worstItemDelta, worstX, worstY,
+              frameChroma, itemSamples);
   PRISM_CHECK(frameChroma >= 60);
   PRISM_CHECK(worstItemDelta <= 2);   // ZERO item pixels in the reflection
 }

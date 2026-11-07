@@ -694,17 +694,18 @@ PRISM_TEST("c121.h4_key_theme_and_scroll") {
 // back into the halo H1/H3 remove:
 //   (a) NEUTRAL, per pixel, 1..32 px out: the chroma never exceeds the canvas's;
 //   (b) the peak at 1 px stays <= 6 levels;
-//   (c) by 32 px it is <= 2 levels and by 64 px it is EXACTLY 0.
-//       WHY NOT "== 0 AT 32 px": the model reads +0.9 level there. The 1/8
-//       source samples the edge every 8 px, and the sample just outside the
-//       rail sits 4 mini px away, where the gaussian still passes 12.7 % of the
-//       panel (1 - Phi(4 / 3.5)); 0.127 x the panel's +21..+29 lift, veiled at
-//       65 %, is ~+1 byte. Asserting an exact 0 at 32 px would pin the 8 px
-//       UPSCALE GRID, not the material -- the rule docs/TESTING.md 8 states:
-//       AN ASSERTION TESTS THE CONTRACT, NOT THE IMPLEMENTATION DETAIL. The
-//       contract is "the falloff is gone by one blur radius and is zero beyond
-//       it", and 64 px is where zero is exact. The 64 px arm reads +3 at 32 px,
-//       so the defect it injects still fails this line.
+//   (c) it is EXACTLY 0 by 32 px, and still 0 at 64 px.
+//       THAT BOUND IS MEASURED, NOT ASSUMED -- and it was only reachable after
+//       the blur's weights were fixed (see BuildBackdrop: the "over" trick used
+//       the PREFIX sum, so the late taps dominated, the early ones vanished in
+//       8 bits, and the whole ghost was a copy displaced by ~5 mini px). With
+//       the suffix form the kernel is the gaussian it claims to be (sigma 1.75
+//       mini px = 14 px at 1:1), so 32 px = 2.3 sigma and the residual is ~0.1
+//       of a level: the predicted byte is 0. docs/TESTING.md 8 -- AN ASSERTION
+//       TESTS THE CONTRACT, NOT THE IMPLEMENTATION DETAIL -- is why this line is
+//       0 rather than "+-2 to be safe": the contract is "gone within one blur
+//       radius", and the arm that widens the blur to 64 px reads +1..+3 here,
+//       so it still fails.
 // PRISM_C121_MUTANT_PANEL_GLOW widens the blur from 28 to 64 px, so (c) MUST go
 // red -- "a bounded neutral falloff" is approved behaviour, "a halo" is not.
 PRISM_TEST("c121.h5_panel_edge_falloff") {
@@ -721,11 +722,17 @@ PRISM_TEST("c121.h5_panel_edge_falloff") {
   PRISM_CHECK(rail.panel.Width() > 100.0f);
   if (rail.panel.Width() <= 100.0f) return;
 
-  Fixture fixture;
-  GalleryRenderer::Scene scene = fixture.scene;
+  // AN EMPTY CATALOG ON PURPOSE. The falloff is a property of the PAGE, so the
+  // probe needs a row where the content cannot paint: with items present the
+  // flow's last row can reach this y (the rail narrows the content, so 13 items
+  // become four rows), and the probe would measure a tile's fill instead of the
+  // edge. With no items the whole right-hand side is canvas at any y.
+  GalleryRenderer::Scene scene;
+  scene.theme = prism::theme::Variant::Midnight;
   scene.layout = &layout;  // the geometry the renderer would compute for a rail
   scene.sidebar = &rail;
   scene.backdropRefraction = true;
+  scene.breadcrumb = L"empty.7z";
 
   Harness harness;
   PRISM_CHECK(harness.Open(kWidth, kHeight));
@@ -789,11 +796,9 @@ PRISM_TEST("c121.h5_panel_edge_falloff") {
               chromaViolations, worstChroma, peak, far32, far64);
   PRISM_CHECK_EQ(chromaViolations, 0);  // (a) neutral all the way out
   PRISM_CHECK(peak <= 6);               // (b) the approved peak
-  // (c) ONE blur radius out. The model says +0.9 level here (the 1/8 sample sits
-  // 4 mini px from the edge, where the gaussian still passes 12.7 % of the
-  // panel), so the bound is two levels: one quantisation step above the model
-  // and one below what the 64 px arm produces (+3).
-  PRISM_CHECK(far32 <= 2);
+  // (c) ONE blur radius out: the falloff is gone. 32 px = 2.3 sigma here, so
+  // the residual is ~0.1 level and the byte is 0; the 64 px arm reads +1..+3.
+  PRISM_CHECK_EQ(far32, 0);
   PRISM_CHECK_EQ(far64, 0);             // ... and flat beyond it
 }
 

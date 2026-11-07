@@ -819,13 +819,22 @@ class GalleryRenderer {
       total += w;
     }
     // "over" accumulation realizes a weighted average if each tap's alpha is
-    // g_i / (1 - sum of the earlier taps): the visible weights then ARE g_i.
+    // chosen for the STILL-TO-COME weight: drawing tap i leaves it with the final
+    // weight a_i * prod_{j>i}(1 - a_j), so a_i must be
+    //     g_i / (1 - sum_{j>i} g_j)          [suffix, not prefix]
+    // C121: the divisor used to be the PREFIX sum, which is the mirror image and
+    // is wrong for exactly this 8-bit target: the first taps then carry alphas
+    // like 1e-4 (they vanish in 8 bits) while the LAST taps carry 0.5..1.0, so
+    // the "blur" was a copy of the source displaced by ~5 mini px. Measured on
+    // the ghost's own PNG: the rail's 50 % edge sat at 254 when the panel ends
+    // at 220, and a 200x200 marker's plateau was off-centre by +19. With the
+    // suffix form the same step's 50 % edge lands at 27.5 of 27.5 mini px.
     float alphas[2 * kTaps + 1];
-    float consumed = 0.0f;
-    for (int i = 0; i < 2 * kTaps + 1; ++i) {
+    float suffix = 0.0f;
+    for (int i = 2 * kTaps; i >= 0; --i) {
       const float g = weights[i] / total;
-      alphas[i] = consumed < 0.999f ? g / (1.0f - consumed) : 0.0f;
-      consumed += g;
+      alphas[i] = suffix < 1.0f ? (g / (1.0f - suffix)) : 1.0f;
+      suffix += g;
     }
     const auto blurPass = [&](ID2D1Bitmap* source, bool horizontal,
                               ComPtr<ID2D1Bitmap>* out) {

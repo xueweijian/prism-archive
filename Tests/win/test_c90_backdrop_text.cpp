@@ -203,7 +203,8 @@ struct Harness {
   bool Paint(const GalleryRenderer::Scene& scene, Frame* out, bool ghost = false) {
     target->BeginDraw();
     renderer.Draw(target.Get(), scene);
-    // C121: the refraction SOURCE alone (opaque, so it replaces the frame).
+    // C121: the refraction SOURCE alone: the seam clears the target, so the
+    // read-back is the source itself (its alpha says what the page painted).
     if (ghost && !renderer.PaintRefractionSource(target.Get())) {
       target->EndDraw();
       return false;
@@ -463,8 +464,6 @@ BandStats MeasureBand(const Frame& on, const Frame& off, const Box& box, int can
   }
   return stats;
 }
-
-
 
 // The band scan, shared by both states (no selection / first row selected).
 // Reports the per-column profile the reporter asked for and returns the number

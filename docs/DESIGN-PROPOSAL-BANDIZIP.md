@@ -4,6 +4,65 @@
 > 依据：`docs/UI-AUDIT-BANDIZIP.md` 的两轮实测（同一 `fixture.zip`，Bandizip 6.29 vs 本机安装版），
 > 以及下面这些**实测数字**（像素采样 / A/B 对照）。
 
+---
+
+## 【前置】在讨论任何设计之前：这个程序是 DPI-UNAWARE 的
+
+> 2026-11-07 实测（探针命令见 `E:\Temp\design\E-platform-fusion.md` 第 9 节）。
+
+| 证据 | 结果 |
+|---|---|
+| exe 内嵌 manifest | 只有 `<trustInfo>/asInvoker`，**无 `dpiAware` / `dpiAwareness`** |
+| `Src/` 全树 grep | **无** `SetProcessDpiAwarenessContext` / `SetProcessDPIAware`（命中只在 `Tests/win/`） |
+| `GetProcessDpiAwareness`（CREATE_SUSPENDED 进程） | `hr=0, value=0` → **UNAWARE** |
+| 本机 `LogPixels` | **120**（125%） |
+
+**后果**：整窗按 96 DPI 渲染 → 系统 1.25× 双线性放大 → **所有文字与 1px 线条都是糊的**。
+截图 1732×1011 = 1385.6×808.8 DIP × 1.25，这正是为什么"看起来不够锐"。
+各处对话框里的 `WM_DPICHANGED` 分支**是死代码**（进程 UNAWARE 时永远不会收到）。
+
+> **这意味着：本提案后面所有关于 1px 描边、4px 栅格、30px 行高的讨论，
+> 在 DPI 修好之前都无法被用户看到。**
+>
+> **修法：manifest 加一行 `PerMonitorV2`。这是整个项目 ROI 最高的一行代码。**
+
+### 另外三条同样属于"前置"的平台事实
+
+| # | 事实 | 影响 |
+|---|---|---|
+| 1 | **"跟随系统"是假的**：`ShellVariantFor("system")` 直接返回 Midnight，且有测试钉死这条 | 本机系统是**浅色**，Bandizip 白底，**我们给黑** —— 迁移语境下最贵的一条 |
+| 2 | 本机 `EnableTransparency=0`（透明效果关闭） | 任何以 Mica 为唯一层级手段的方案会退化成实色；**必须设计 solid fallback** |
+| 3 | 画布是**不透明 Clear** | 即使设 `DWMWA_SYSTEMBACKDROP_TYPE` 也看不见 |
+
+### 平台缺口清单（逐条 grep 证据）
+
+| 缺口 | 后果 |
+|---|---|
+| 无滚动条绘制（0 命中） | 滚动条是系统绘制的，与自绘 UI 风格割裂 |
+| 列表/树**无焦点环**（只有动作条 2 DIP 环） | 键盘用户不知道焦点在哪 |
+| 无 `NotifyWinEvent` / UIA 事件 | **选中变化读屏无感知** |
+| 无 `CreateAcceleratorTable` / `TranslateAccelerator` | 菜单快捷键靠手写消息处理 |
+| 无 `WM_SETTINGCHANGE` | 系统换主题/换 DPI 时**不响应** |
+| 无 `SPI_GETHIGHCONTRAST` | 高对比度模式**不生效** |
+| 无 `ImmSetCandidateWindow` | **中文输入候选框落在系统默认位置**（不在输入框旁） |
+| 无 `SetCurrentProcessExplicitAppUserModelID` | 任务栏图标分组不正确 |
+| 窗口位置只存 w/h | 下次打开**位置丢失** |
+
+### 一条"我们其实更好"的数字（别为了对齐往回调）
+
+| | 动作条标签对比度 |
+|---|---|
+| 我们 | **14.15 : 1** |
+| Bandizip 工具栏最暗端白字 | **4.32 : 1**（低于 4.5） |
+
+### 落地顺序（E 建议，我同意）
+
+1. **manifest 加 PerMonitorV2**（一行，消掉全部糊）
+2. `WM_SETTINGCHANGE` + "跟随系统"真的跟随
+3. 高对比度自动降级
+4. `NotifyWinEvent` + 列表/树焦点环
+5. `ImmSetCandidateWindow`
+
 ## 0. 核心诊断：不是细节不够，是**品类错位**
 
 Bandizip 是**文件管理器**：信息优先、密集、可预期、几乎没有装饰。

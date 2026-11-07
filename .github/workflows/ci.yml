@@ -131,6 +131,66 @@ jobs:
   # real round-trip against the 7-Zip DLL in the runner image, under
   # AddressSanitizer, plus fxc.exe compilation of the Liquid Glass HLSL.
   # ===========================================================================
+  # The FAST Windows lane. The ASan lane below is the deep proof, but it
+  # cannot be cached: sccache refuses to cache /fsanitize=address compiles on
+  # MSVC (the note under that job says so), so every run there recompiles
+  # 900+ TUs cold -- 35-45 minutes before anyone learns the code even builds.
+  #
+  # This lane builds the SAME sources with the release preset, where sccache
+  # DOES work. Measured: the Linux lane (ccache) builds in 3 s and finishes
+  # in 105 s; this lane is the Windows equivalent. It is not a weaker gate --
+  # it is the same configure/build/ctest/gates chain, just cacheable. The ASan
+  # lane still runs, in parallel, and is still required.
+  windows-release:
+    name: Windows (MSVC release, cached)
+    runs-on: windows-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      # windows-latest no longer exposes a VS instance CMake can find alone.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      # release-msvc is the same preset a developer runs locally, and unlike
+      # asan-msvc it is cacheable. The launcher is spelled here rather than in
+      # the preset so the local preset keeps using the plain compiler.
+      - name: Configure (release-msvc preset, sccache launcher)
+        run: cmake --preset release-msvc -B build -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Locate 7z.dll
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\7-Zip\7z.dll",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.dll",
+            "$env:LOCALAPPDATA\Programs\7-Zip\7z.dll")
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($found) {
+            Write-Host "7z.dll: $found"
+            "PRISM_7Z_DLL=$found" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Host "::warning::7z.dll not found - integration test will SKIP"
+          }
+
+      - name: Test
+        working-directory: build
+        shell: bash
+        env:
+          PRISM_CTEST_EXCLUDE: "bench|fuzz"
+        run: |
+          ctest --output-on-failure --parallel 4 --timeout 600
+
+      - name: sccache stats -> step summary
+        if: always()
+        shell: bash
+        run: sccache --show-stats | head -20 >> "$GITHUB_STEP_SUMMARY"
   windows:
     name: Windows (MSVC + ASan + 7z.dll + HLSL)
     runs-on: windows-latest

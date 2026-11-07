@@ -2386,9 +2386,10 @@ class GalleryWindow {
     if (host_.hwnd == nullptr) return;
     RECT rc{};
     if (::GetClientRect(host_.hwnd, &rc) == FALSE) return;
-    const double dipScale = static_cast<double>(WindowDpi()) / 96.0;
-    clientW_ = static_cast<double>(rc.right) / dipScale;
-    clientH_ = static_cast<double>(rc.bottom) / dipScale;
+    // The SAME rounding rule as WM_SIZE (MulDiv): two paths must never disagree
+    // about the size of the same client area.
+    clientW_ = static_cast<double>(::MulDiv(static_cast<int>(rc.right), 96, WindowDpi()));
+    clientH_ = static_cast<double>(::MulDiv(static_cast<int>(rc.bottom), 96, WindowDpi()));
     RecomputeLayout();
   }
 
@@ -2471,9 +2472,14 @@ class GalleryWindow {
         if (target_) {
           target_->Resize(D2D1::SizeU(static_cast<UINT32>(sizeX), static_cast<UINT32>(sizeY)));
         }
-        const double dipScale = static_cast<double>(WindowDpi()) / 96.0;
-        clientW_ = static_cast<double>(sizeX) / dipScale;
-        clientH_ = static_cast<double>(sizeY) / dipScale;
+        // MulDiv, not a double division: it ROUNDS to the nearest DIP, where a
+        // cast truncates, and the two rules disagree by one whenever the client
+        // size is not a whole multiple of the scale (964 px at 144 DPI is 642.67
+        // DIP: truncation says 642, MulDiv says 643 -- CI caught exactly that).
+        // Rounding is the right answer: a layout may cover a fraction of a
+        // pixel, but a truncated one leaves a real strip of the client unused.
+        clientW_ = static_cast<double>(::MulDiv(sizeX, 96, WindowDpi()));
+        clientH_ = static_cast<double>(::MulDiv(sizeY, 96, WindowDpi()));
         // V1: ONE layout authority. WM_SIZE reflows the grid columns, the list
         // body and the breadcrumb pill together -- the components no longer
         // carry their own absolute rectangles.
@@ -4925,10 +4931,10 @@ class GalleryWindow {
     if (clientW_ <= 0.0) {
       RECT rc{};
       if (host_.hwnd) GetClientRect(host_.hwnd, &rc);
-      // C120: GetClientRect is physical pixels, the layout is DIPs.
-      const double dipScale = static_cast<double>(WindowDpi()) / 96.0;
-      clientW_ = static_cast<double>(rc.right) / dipScale;
-      clientH_ = static_cast<double>(rc.bottom) / dipScale;
+      // C120: GetClientRect is physical pixels, the layout is DIPs -- with the
+      // SAME rounding rule as WM_SIZE (MulDiv).
+      clientW_ = static_cast<double>(::MulDiv(static_cast<int>(rc.right), 96, WindowDpi()));
+      clientH_ = static_cast<double>(::MulDiv(static_cast<int>(rc.bottom), 96, WindowDpi()));
     }
     // V1: the pill and its text run come from the layout, so the clickable span
     // is by construction the painted span.

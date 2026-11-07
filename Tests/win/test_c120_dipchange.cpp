@@ -127,10 +127,23 @@ PRISM_TEST("c120.d3: WM_DPICHANGED applies lParam's rect and reflows the layout 
   ::GetClientRect(window.Hwnd(), &client);
   PRISM_CHECK(client.right > 0);
   PRISM_CHECK(client.bottom > 0);
-  PRISM_CHECK(window.ClientWidthForTest() ==
-              ::MulDiv(static_cast<int>(client.right), 96, static_cast<int>(kNewDpi)));
-  PRISM_CHECK(window.ClientHeightForTest() ==
-              ::MulDiv(static_cast<int>(client.bottom), 96, static_cast<int>(kNewDpi)));
+  const int dpi = static_cast<int>(kNewDpi);
+  const int expectedW = ::MulDiv(static_cast<int>(client.right), 96, dpi);
+  const int expectedH = ::MulDiv(static_cast<int>(client.bottom), 96, dpi);
+  // MulDiv ROUNDS to the nearest DIP; a cast truncates. The two disagree by one
+  // whenever the client size is not a whole multiple of the scale -- CI's first
+  // geometry (964 px at 144 DPI = 642.67 DIP) was exactly such a case and this
+  // assertion caught the product truncating. The line below says whether THIS
+  // run's geometry is one of those, so a green is not mistaken for a proof.
+  const int truncatedW = static_cast<int>(static_cast<long long>(client.right) * 96 / dpi);
+  const int truncatedH = static_cast<int>(static_cast<long long>(client.bottom) * 96 / dpi);
+  std::printf("c120 d3: client px=%ldx%ld -> dip=%dx%d (truncating would say %dx%d)\n",
+              client.right, client.bottom, expectedW, expectedH, truncatedW, truncatedH);
+  PRISM_CHECK(window.ClientWidthForTest() == expectedW);
+  PRISM_CHECK(window.ClientHeightForTest() == expectedH);
+  if (expectedW != truncatedW || expectedH != truncatedH) {
+    std::puts("c120 d3: this geometry is a ROUNDING case (round != truncate)");
+  }
   // ... and it is a DIFFERENT number from the pixel width (1.5x smaller), which is
   // what makes case (c) a real assertion rather than an identity.
   PRISM_CHECK(window.ClientWidthForTest() < static_cast<int>(client.right));

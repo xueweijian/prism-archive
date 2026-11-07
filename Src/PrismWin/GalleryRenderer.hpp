@@ -354,12 +354,22 @@ class GalleryRenderer {
                       static_cast<float>(hoverRect.right) - ox,
                       static_cast<float>(hoverRect.bottom) - oy),
           8.0f, 8.0f);
-      brush->SetColor(kCrumbHover);
+      // C117: the hover wash is white 14% -- invisible on the Daylight pill.
+      // Dark themes keep it; Daylight flips to a black wash of the same weight.
+      brush->SetColor(theme == prism::theme::Variant::Daylight
+                           ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.14f)
+                           : kCrumbHover);
       target->FillRoundedRectangle(hover, brush.Get());
     }
 
     if (!text.empty()) {
-      brush->SetColor(kTextPrimary);
+      // C117: this used the midnight LITERAL (kTextPrimary = .91/.925/.945), so on
+      // the Daylight canvas the breadcrumb was near-white on a near-white pill.
+      // Measured on the shipped build: contrast 1.08:1 (WCAG wants 4.5). The
+      // window-side painter already resolves the token every frame; the island
+      // path C112 added must do the same.
+      brush->SetColor(ToD2d(prism::chrome::ThemeSurfaceColor(
+          prism::theme::TokenId::TextPrimary, theme)));
       DrawLabel(target, title_.Get(), text,
                 D2D1::RectF(static_cast<float>(geometry.text.left) - ox,
                             static_cast<float>(geometry.text.top) - oy,

@@ -12,7 +12,7 @@
 // asked for all three variants and compared with the values the Windows pixel
 // suite samples from a real rendered frame:
 //
-//   canvas      day (245,245,247)  night (13,14,18)  high-contrast (0,0,0)
+//   canvas      day (245,245,247)  night (16,17,23)  high-contrast (0,0,0)
 //   island      day (253,253,254)  night (26,29,37)
 //   rail panel  day (255,255,255)  high-contrast (26,26,28)
 //   tab plate   day (254,254,255)  high-contrast (40,40,44)
@@ -127,7 +127,10 @@ PRISM_TEST("c91 the canvas is the theme's composite") {
   // C102 moved the Daylight canvas to the plan's #F5F5F7; the assertion and
   // its +-2 tolerance are unchanged, only the expected triple is.
   const Pixel wantDay{245, 245, 247};
-  const Pixel wantNight{13, 14, 18};
+  // C121: the veil is the canvas colour in every theme (it used to be the
+  // darker --surface-backdrop-reference), so the presented night canvas is the
+  // plain composite.
+  const Pixel wantNight{16, 17, 23};
   const Pixel wantHighContrast{0, 0, 0};
 
   const Pixel day = ToPixel(ch::CanvasPresentedColor(Variant::Daylight));

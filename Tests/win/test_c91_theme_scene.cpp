@@ -395,7 +395,11 @@ PRISM_TEST("c91 the canvas and the status strip are the theme's") {
       // and its +-2 tolerance are unchanged, only the expected triple is.
       PRISM_CHECK(Near("canvas day literal", canvas, Pixel{245, 245, 247}, 2));
     } else if (variants[i] == Variant::Midnight) {
-      PRISM_CHECK(Near("canvas night literal", canvas, Pixel{13, 14, 18}, 2));
+  // C121: the C77 veil is the canvas colour in every theme now (it used to be
+  // --surface-backdrop-reference, i.e. DARKER than the canvas, which moved this
+  // pixel by dE 2.4 when refraction was switched on). The value follows the
+  // token, not the other way round.
+      PRISM_CHECK(Near("canvas night literal", canvas, Pixel{16, 17, 23}, 2));
     } else {
       PRISM_CHECK(Near("canvas hc literal", canvas, Pixel{0, 0, 0}, 0));
     }

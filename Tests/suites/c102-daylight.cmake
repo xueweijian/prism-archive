@@ -11,7 +11,7 @@
 # TWO LAYERS, because the fix has two halves:
 #   core.c102_daylight   the numbers, through prism::chrome's ONE theme entry:
 #                        Day canvas (245,245,247) +-2, island - canvas >= 8
-#                        levels, Night (13,14,18) and HighContrast (0,0,0)
+#                        levels, Night (16,17,23) and HighContrast (0,0,0)
 #                        rows bit-for-bit unchanged (the regression arm),
 #                        HighContrast text still >= 4.5:1, the content plate
 #                        still #FFFFFF;

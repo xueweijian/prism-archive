@@ -13,7 +13,7 @@
 //      target -- the shipping paint path, not a re-implementation of the
 //      arithmetic;
 //   2. samples the canvas and the action island from the PIXELS and asserts
-//      canvas == #F5F5F7 +-2, island - canvas >= 8 levels, night == (13,14,18),
+//      canvas == #F5F5F7 +-2, island - canvas >= 8 levels, night == (16,17,23),
 //      high contrast == (0,0,0);
 //   3. given an output directory on the command line, writes
 //      docs/assets/ui/c102-day.png and c102-night.png from those same bitmaps --
@@ -408,7 +408,10 @@ PRISM_TEST("c102 night and high contrast render unchanged") {
   const Pixel hcCanvas = ToPixel(hc.At(1200, 500));
   std::printf("  [c102] night canvas=(%d,%d,%d) hc canvas=(%d,%d,%d)\n", nightCanvas.r,
               nightCanvas.g, nightCanvas.b, hcCanvas.r, hcCanvas.g, hcCanvas.b);
-  PRISM_CHECK(Near("canvas (night)", nightCanvas, Pixel{13, 14, 18}, 2));
+  // C121: the C77 veil is the canvas colour in every theme (it used to be the
+  // darker --surface-backdrop-reference), so Midnight's resting canvas is the
+  // plain #101117 composite instead of its veil.
+  PRISM_CHECK(Near("canvas (night)", nightCanvas, Pixel{16, 17, 23}, 2));
   // High contrast is opaque black: no tolerance is honest here.
   PRISM_CHECK(Near("canvas (hc)", hcCanvas, Pixel{0, 0, 0}, 0));
 

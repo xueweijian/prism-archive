@@ -347,8 +347,19 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 1.0f)},
     {TokenId::SurfaceBackdropGhost, Variant::Midnight,
      Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 1.0f)},
+    // C121: THE VEIL IS THE CANVAS COLOUR, in every theme (C102 established the
+    // rule for Daylight; Midnight was left on --surface-backdrop-reference and
+    // broke it). The veil covers the whole window, so a veil that is DARKER than
+    // the canvas darkens the canvas itself: the frame measured (16,17,23) with
+    // the layer off and (13,14,18) with it on, dE 2.4 on a region the layer does
+    // not even paint. That is "the glass is not chroma-neutral", and no amount
+    // of source scoping fixes it -- the wash has to land on the colour it is
+    // washing. (16,17,23) IS --surface-canvas-base @.72 over the reference, so
+    // veil-over-canvas is the canvas, exactly like Daylight's #F5F5F7 and High
+    // Contrast's black. The C121 suite pins the result: H2, toggling refraction
+    // on the far canvas, dE <= 1.
     {TokenId::SurfaceBackdropVeil, Variant::Midnight,
-     Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 0.65f)},
+     Rgba(ChannelFromByte(16), ChannelFromByte(17), ChannelFromByte(23), 0.65f)},
     {TokenId::ShadowFloatingPanel, Variant::Midnight,
      Rgba(0.0f, 0.0f, 0.0f, 0.18f)},
     // High contrast (EXT a11y variant: opaque, maximum separation)

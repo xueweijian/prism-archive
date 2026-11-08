@@ -251,10 +251,12 @@ class GalleryRenderer {
     const prism::win::tabbar::View* tabs = nullptr;
 
     // ------------------------------------------------------------- C77 glass
-    // The BACKDROP LAYER: the current items rendered at 1/8 resolution, blurred
-    // and desaturated, painted under everything. It is what makes a translucent
-    // panel read as glass -- a semi-transparent fill over a flat colour is just
-    // grey, which is exactly what the user reported.
+    // The BACKDROP LAYER: the PAGE BACKGROUND (canvas + static bands + rail)
+    // rendered at 1/8 resolution, blurred and washed, painted under everything.
+    // C121 took the ITEMS out of it: a refraction source that carries the
+    // archive turns every photo into a coloured halo between its neighbours
+    // (see the block above DrawPageBackground), and it is not what "glass over
+    // a page" means.
     //
     // OFF by default, like every other optional layer in this renderer (a null
     // action model paints no band; a null sidebar paints no rail): a pre-C77
@@ -542,8 +544,9 @@ class GalleryRenderer {
                                      scene.listMode);
     target->Clear(canvasColor_);
     // C77: the refraction layer sits under EVERYTHING -- bands, content, chrome.
-    // It is built from the content only (the items), never from the chrome, so
-    // a hover or a focus pill cannot make the wallpaper shimmer.
+    // C121: it is built from the PAGE, never from the content and never from
+    // state, so neither a photo, nor a hover, nor a focus pill can put a colour
+    // into the background.
     if (scene.backdropRefraction) DrawBackdrop(target, scene, layout);
     DrawBands(target, layout);
     // C60: the tab strip is a BAND of the layout (DESIGN.md §2.1), painted with
@@ -602,12 +605,28 @@ class GalleryRenderer {
   }
 
   // ------------------------------------------------------------------- C77
-  // THE BACKDROP LAYER (DESIGN.md 2.1, "the content is the wallpaper").
+  // THE BACKDROP LAYER (DESIGN.md 2.1), AS C121 SCOPE RE-STATES IT.
   //
-  // The items are re-rendered into a 1/8-resolution compatible bitmap, blurred
-  // with a 15-tap separable gaussian (sigma 3.5 mini px = 28 px at 1:1), then
-  // composited at the ghost token's strength and washed with the veil token,
-  // which is what cuts its chroma to ~0.35. Only THEN does the chrome paint.
+  // WHAT IT IS: the PAGE BACKGROUND -- the canvas, the two static bands and the
+  // rail -- re-rendered into a 1/8-resolution compatible bitmap, blurred with a
+  // 15-tap separable gaussian (sigma 3.5 mini px = 28 px at 1:1), then
+  // composited and washed with the veil token. Only THEN does the chrome paint.
+  //
+  // WHAT IT IS NOT: the archive. Thumbnails, file/folder glyphs, labels,
+  // skeletons and the selection ring never enter the source. C110 had already
+  // taken the tile CHROME out (fill, folder mark, label, ring) and kept the
+  // decoded thumbnail "because it is archive content, and the content is the
+  // wallpaper"; C77-1 then pinned "the layer must refract the items" with a
+  // pixel count, which is what kept the thumbnail in. A 1/8 sample of a photo,
+  // blurred 28 px, is a colour PLATE, not a soft glow: 0.35 x (210,60,50) +
+  // 0.65 x (12,13,17) = (81,29,29), measured (81,29,28) in the 13 px gap
+  // between two tiles (chroma 53 against 7 in the no-refraction frame), spread
+  // 46-48 lp = 4.4x the gap, 21 % of the content area tinted. THE RULE (the
+  // audit's R1) is therefore: a refraction source carries the PAGE, never the
+  // content. C121 re-defined C77-1 to assert exactly that, and the same change
+  // makes the layer chroma-NEUTRAL: the veil is the canvas colour in every
+  // theme, so switching refraction on cannot move the canvas (it moved
+  // (16,17,23) -> (13,14,18), dE 2.4, before).
   //
   // WHY 1/8 AND NOT A FULL-SIZE BLUR: at 1/8 a 28 px blur is a 3.5 px blur --
   // 30 DrawBitmap calls on a 200x125 surface instead of a full-window pass, and
@@ -615,8 +634,25 @@ class GalleryRenderer {
   //
   // REBUILD POLICY: only on a SIZE or CONTENT change. Scrolling does not
   // rebuild (a backdrop that chased the scroll would be a full-window blur per
-  // frame); the ghost is a still of the content, which is what a refraction
-  // layer is. dbgBackdropRebuilds / dbgBackdropDraws are the evidence.
+  // frame); the ghost is a still of the PAGE, which is what a refraction layer
+  // is. dbgBackdropRebuilds / dbgBackdropDraws are the evidence.
+  // C121: THE KEY IS THE IDENTITY OF THE PAGE BACKGROUND the layer is built
+  // from -- its SIZE, its THEME, the content revision and the view mode. Two
+  // fields are deliberately absent and each absence is a decision, not an
+  // oversight:
+  //   * scrollOffset: the ghost carries no pixel that moves with the scroll
+  //     (the content is out of the source), so a key that carried it would pay
+  //     a full-window blur per wheel notch for a bitmap that is byte-identical.
+  //     The C121 suite pins that as an INVARIANT instead (scroll 100 px -> same
+  //     ghost, zero rebuilds), which is C77-3's contract with the reason now
+  //     spelled out.
+  //   * selectedRow / hover: state is chrome, and chrome never enters the ghost.
+  // THEME IS IN, and it is not cosmetic: the source is OPAQUE canvas colour, so
+  // a stale bitmap left over from the previous theme would paint the OLD canvas
+  // over the new one -- the whole window keeps the previous theme's background.
+  // That was invisible while the ghost was a transparent content still (the
+  // thumbnails do not change with the theme), which is exactly why nobody had
+  // noticed the missing field.
   struct BackdropKey {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -625,10 +661,12 @@ class GalleryRenderer {
     uint64_t fingerprint = 0;
     uint64_t revision = 0;
     bool listMode = false;
+    prism::theme::Variant theme = prism::theme::Variant::Midnight;
     bool operator==(const BackdropKey& other) const {
       return width == other.width && height == other.height && count == other.count &&
              items == other.items && fingerprint == other.fingerprint &&
-             revision == other.revision && listMode == other.listMode;
+             revision == other.revision && listMode == other.listMode &&
+             theme == other.theme;
     }
   };
 
@@ -661,6 +699,16 @@ class GalleryRenderer {
     key.fingerprint = FingerprintOf(scene);
     key.revision = scene.contentRevision;
     key.listMode = scene.listMode;
+    key.theme = scene.theme;
+#if defined(PRISM_C121_MUTANT_KEY_NO_THEME)
+    // C121 MUTANT ACTIVE: key-no-theme -- the shipped key, restored. A theme
+    // switch then re-uses the previous theme's OPAQUE ghost, so the frame keeps
+    // the old canvas colour; the suite's H4 MUST go red. The counter is what the
+    // verdict is armed on (CONTRACTS D3), so a red for another reason stays red
+    // without a false CAUGHT.
+    ++dbgMutantKeyNoTheme;
+    key.theme = prism::theme::Variant::Midnight;
+#endif
     return key;
   }
 
@@ -709,9 +757,12 @@ class GalleryRenderer {
                                                   D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, out);
     };
 
-    // 1. the content, at 1/8. The counters are saved and restored: this pass is
-    //    not the frame's paint, and inflating dbgTileCells here would have made
-    //    the C29/C36 pixel assertions read a number no frame ever produced.
+    // 1. the PAGE BACKGROUND, at 1/8. C121: the content passes that used to run
+    //    here (DrawListMode from C90, DrawGrid from C110) are gone from the
+    //    clean build -- they are the negative-control arms below and nothing
+    //    else. The counters are still saved and restored: this pass is not the
+    //    frame's paint, and inflating dbgTileCells here would have made the
+    //    C29/C36 pixel assertions read a number no frame ever produced.
     ComPtr<ID2D1BitmapRenderTarget> content;
     if (FAILED(makeTarget(content.ReleaseAndGetAddressOf()))) return false;
     content->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -721,12 +772,34 @@ class GalleryRenderer {
     const int savedTiles = dbgTileCells;
     const int savedRows = dbgRowCells;
     const int savedThumbDraws = dbgThumbDraws;
+    DrawPageBackground(content.Get(), scene, layout, size);
+#if defined(PRISM_C110_MUTANT_TILES_IN_BACKDROP)
+    // C110 MUTANT ACTIVE: tiles-in-backdrop -- the shipped grid pass, restored:
+    // the tiles (fill, folder mark, label, thumbnail) are re-drawn into the
+    // ghost. C110's A1 MUST go red; dbgBackdropTilePasses, incremented inside
+    // DrawGrid, is what its verdict is armed on (CONTRACTS D3).
     if (scene.listMode) {
       DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
     } else if (scene.items != nullptr) {
-      // C110: the grid takes the same backdrop pass the list has had since C90.
       DrawGrid(content.Get(), scene, layout, /*backdropPass=*/true);
     }
+#elif defined(PRISM_C77_MUTANT_TEXT_IN_BACKDROP) || defined(PRISM_C77_MUTANT_STATE_IN_BACKDROP)
+    // C90 MUTANT ACTIVE: the list's content pass is restored so the injected
+    // glyph / selection pill reaches the ghost again. The verdicts are armed on
+    // the counters DrawListMode increments (CONTRACTS D3).
+    if (scene.listMode) {
+      DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
+    }
+#elif defined(PRISM_C121_MUTANT_TILES_IN_GHOST)
+    // C121 MUTANT ACTIVE: tiles-in-ghost -- the DECODED THUMBNAIL is back in the
+    // refraction source (C110's rule, the defect C121 removes). H1 (the chroma
+    // of the gap between two tiles) MUST go red; dbgBackdropEntryPasses is what
+    // the verdict is armed on (CONTRACTS D3).
+    ++dbgBackdropEntryPasses;
+    if (scene.items != nullptr) {
+      DrawGrid(content.Get(), scene, layout, /*backdropPass=*/true);
+    }
+#endif
     dbgTileCells = savedTiles;
     dbgRowCells = savedRows;
     dbgThumbDraws = savedThumbDraws;
@@ -736,7 +809,16 @@ class GalleryRenderer {
     if (FAILED(content->GetBitmap(stage.ReleaseAndGetAddressOf()))) return false;
 
     // 2. the blur: two separable passes, 15 taps each (sigma = 28 px at 1:1).
+    //    C121: the PANEL_GLOW arm widens the radius to 64 px, so the panel
+    //    edges' neutral falloff runs past the 32 px the page is allowed -- H5 MUST
+    //    go red. That is the assertion that stops an approved, bounded falloff
+    //    from one day growing back into the halo this card removed.
+#if defined(PRISM_C121_MUTANT_PANEL_GLOW)
+    ++dbgMutantPanelGlow;
+    constexpr float kBlurRadiusPx = 64.0f;
+#else
     constexpr float kBlurRadiusPx = 28.0f;
+#endif
     constexpr int kTaps = 7;  // +-7 mini px, sigma 3.5
     const float sigma = kBlurRadiusPx / kDownsample * 0.5f;
     float weights[2 * kTaps + 1];
@@ -747,13 +829,22 @@ class GalleryRenderer {
       total += w;
     }
     // "over" accumulation realizes a weighted average if each tap's alpha is
-    // g_i / (1 - sum of the earlier taps): the visible weights then ARE g_i.
+    // chosen for the STILL-TO-COME weight: drawing tap i leaves it with the final
+    // weight a_i * prod_{j>i}(1 - a_j), so a_i must be
+    //     g_i / (1 - sum_{j>i} g_j)          [suffix, not prefix]
+    // C121: the divisor used to be the PREFIX sum, which is the mirror image and
+    // is wrong for exactly this 8-bit target: the first taps then carry alphas
+    // like 1e-4 (they vanish in 8 bits) while the LAST taps carry 0.5..1.0, so
+    // the "blur" was a copy of the source displaced by ~5 mini px. Measured on
+    // the ghost's own PNG: the rail's 50 % edge sat at 254 when the panel ends
+    // at 220, and a 200x200 marker's plateau was off-centre by +19. With the
+    // suffix form the same step's 50 % edge lands at 27.5 of 27.5 mini px.
     float alphas[2 * kTaps + 1];
-    float consumed = 0.0f;
-    for (int i = 0; i < 2 * kTaps + 1; ++i) {
+    float suffix = 0.0f;
+    for (int i = 2 * kTaps; i >= 0; --i) {
       const float g = weights[i] / total;
-      alphas[i] = consumed < 0.999f ? g / (1.0f - consumed) : 0.0f;
-      consumed += g;
+      alphas[i] = suffix < 1.0f ? (g / (1.0f - suffix)) : 1.0f;
+      suffix += g;
     }
     const auto blurPass = [&](ID2D1Bitmap* source, bool horizontal,
                               ComPtr<ID2D1Bitmap>* out) {
@@ -788,6 +879,61 @@ class GalleryRenderer {
                        static_cast<float>(r.right), static_cast<float>(r.bottom));
   }
 
+  // C121: THE REFRACTION SOURCE = THE PAGE BACKGROUND.
+  //
+  // The ghost is the canvas plus the surfaces the PAGE itself paints: the two
+  // static bands and the rail's panel. Nothing here came out of the archive, so
+  // nothing here can put an item's colour into the background -- that is the
+  // defect (the halo) this card removes, and it is asserted two ways in
+  // Tests/win/test_c121_halo.cpp: the chroma in the gap between two photo tiles
+  // (H1) and the spread of any chroma away from a tile edge (H3).
+  //
+  // WHY THE CANVAS IS FILLED OPAQUE. The 1/8 target used to be cleared to
+  // transparent and then had the content drawn on it, so every pixel the content
+  // did not cover kept alpha 0 and the ghost was a cut-out. The page background
+  // is the opposite kind of object: it covers the frame, so the ghost does too,
+  // and the blur has a real background to carry instead of a hole. That is also
+  // what makes the veil chroma-neutral -- the veil is the canvas colour, so
+  // "veil over ghost" lands on the canvas the frame was cleared to.
+  //
+  // The rectangles are the LAYOUT's and the colours are the SAME ones the bands
+  // and the rail paint with (StatusBandColor / TokenColor(Panel)), never a
+  // second copy: a source that invented its own colour would refract a surface
+  // no frame ever shows.
+  void DrawPageBackground(ID2D1RenderTarget* target, const Scene& scene,
+                          const prism::layout::Layout& layout, const D2D1_SIZE_F& size) {
+#if defined(PRISM_C121_MUTANT_EMPTY_GHOST)
+    // C121 MUTANT ACTIVE: empty-ghost -- the layer is built from NOTHING, i.e.
+    // the page background is out of the source too. The re-defined C77-1 ("the
+    // ghost carries the rail's panel") MUST go red. The counter is what that
+    // verdict is armed on (CONTRACTS D3).
+    ++dbgMutantEmptyGhost;
+    return;
+#endif
+    island_->SetColor(canvasColor_);
+    target->FillRectangle(D2D1::RectF(0.0f, 0.0f, size.width, size.height), island_.Get());
+    if (!layout.actionIsland.Empty() && !layout.statusBar.Empty()) {
+      // The action band is the canvas (C64's rule), so it contributes nothing;
+      // filling it anyway keeps the source a faithful copy of the bands.
+      island_->SetColor(canvasColor_);
+      target->FillRectangle(ToRectF(layout.actionIsland), island_.Get());
+      island_->SetColor(StatusBandColor());
+      target->FillRectangle(ToRectF(layout.statusBar), island_.Get());
+    }
+    if (SidebarShown(scene) && scene.sidebar != nullptr) {
+      const prism::win::sidebar::Layout& rail = *scene.sidebar;
+      const D2D1_RECT_F box =
+          D2D1::RectF(rail.panel.left, (std::max)(rail.panel.top, 0.0f), rail.panel.right,
+                      (std::min)(rail.panel.bottom, size.height));
+      if (box.right > box.left && box.bottom > box.top) {
+        island_->SetColor(
+            ToD2d(TokenColor(prism::win::sidebar::ColorToken::Panel, scene.theme)));
+        target->FillRectangle(box, island_.Get());
+      }
+    }
+    island_->SetColor(islandColor_);
+  }
+
   // The five bands, painted from the layout (DESIGN.md §2). This is what makes
   // the structure visible in a snapshot instead of an undifferentiated canvas.
   //
@@ -816,11 +962,10 @@ class GalleryRenderer {
     // from the theme. The lift is a constant RATIO of the band's own brightness
     // (0.016/0.018/0.022 on the dark canvas); on an opaque high-contrast canvas
     // it lands on (4,5,6), which is the value the pixel suite pins.
-    D2D1_COLOR_F status = canvasColor_;
-    status.r += 0.016f;
-    status.g += 0.018f;
-    status.b += 0.022f;
-    island_->SetColor(status);
+    // C121: the recipe moved into StatusBandColor() because the refraction
+    // source carries the same band -- two spellings would let the ghost refract
+    // a rectangle the frame never paints.
+    island_->SetColor(StatusBandColor());
     target->FillRectangle(ToRectF(layout.statusBar), island_.Get());
 
     // Hairlines between the bands (the 1 px edge of the glass).
@@ -834,6 +979,17 @@ class GalleryRenderer {
                                       static_cast<float>(layout.statusBar.top) + 1.0f),
                           islandBorder_.Get());
     island_->SetColor(islandColor_);
+  }
+
+  // C121: THE STATUS BAND'S COLOUR, once. The band paints it and the refraction
+  // source carries it; a second copy would be a second authority on what the
+  // band "is".
+  D2D1_COLOR_F StatusBandColor() const {
+    D2D1_COLOR_F status = canvasColor_;
+    status.r += 0.016f;
+    status.g += 0.018f;
+    status.b += 0.022f;
+    return status;
   }
 
   // C105: the air between a segment's label and its value, in DIPs. It is a
@@ -2848,6 +3004,13 @@ class GalleryRenderer {
   // C110: grid-mode backdrop passes that re-drew the tile chrome -- the runtime
   // half of the tiles-in-backdrop verdict, zero in every clean build.
   int dbgBackdropTilePasses = 0;
+  // C121: backdrop passes that re-drew the DECODED pixels into the ghost (the
+  // tiles-in-ghost arm only; zero in every clean build).
+  int dbgBackdropEntryPasses = 0;
+  // C121: proof that each of the new negative controls really executed.
+  static inline int dbgMutantEmptyGhost = 0;
+  static inline int dbgMutantKeyNoTheme = 0;
+  static inline int dbgMutantPanelGlow = 0;
   // C110: tile fills produced by the pre-C110 flat literal (flat-tile mutant).
   static inline int dbgMutantFlatTile = 0;
   // C101: how many ratio bars the LOUD mutant arm painted. Zero in every clean
@@ -2887,6 +3050,33 @@ class GalleryRenderer {
   // zero in the clean build) and tile fills produced by the flat-literal mutant.
   int BackdropTilePasses() const { return dbgBackdropTilePasses; }
   int FlatTileMutantHits() const { return dbgMutantFlatTile; }
+  // C121: the number of times the mutant arm put the items back into the
+  // refraction source. Zero in every clean build (the increment is compiled in
+  // only under PRISM_C121_MUTANT_TILES_IN_GHOST), so a mutant that never
+  // reached the injected branch cannot print CAUGHT (CONTRACTS D3).
+  int BackdropEntryPasses() const { return dbgBackdropEntryPasses; }
+  // C121: how many times the empty-ghost / key-no-theme arms actually ran.
+  int EmptyGhostMutantHits() const { return dbgMutantEmptyGhost; }
+  int KeyNoThemeMutantHits() const { return dbgMutantKeyNoTheme; }
+  int PanelGlowMutantHits() const { return dbgMutantPanelGlow; }
+  // C121 TEST SEAM (not a feature): paint the refraction SOURCE alone -- the
+  // 1/8 bitmap BuildBackdrop produced, WITHOUT the veil and without any chrome
+  // -- so a suite can ask what the layer is refracting. The target is CLEARED to
+  // transparent first, so the read-back is the source itself and its ALPHA says
+  // which pixels this page actually painted (a source that paints nothing leaves
+  // alpha 0, and a suite can tell "an empty page" from "the page, seen through a
+  // transparent hole" -- the difference the empty-ghost arm exists to catch).
+  // Returns false when the layer has not been built for this scene (the
+  // no-backdrop mutant, or a pre-build frame): a suite must never read a stale
+  // bitmap and call it evidence.
+  bool PaintRefractionSource(ID2D1RenderTarget* target) {
+    if (target == nullptr || !backdropBitmap_) return false;
+    const D2D1_SIZE_F size = target->GetSize();
+    target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    target->DrawBitmap(backdropBitmap_.Get(), D2D1::RectF(0.0f, 0.0f, size.width, size.height),
+                       1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    return true;
+  }
   int BackdropBitmapPixels() const {
     if (!backdropBitmap_) return 0;
     const D2D1_SIZE_U size = backdropBitmap_->GetPixelSize();

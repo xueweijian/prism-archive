@@ -208,9 +208,9 @@ struct Metrics {
   // C104: the selection pill is inset 8 px at BOTH ends so the wash never
   float selectionInset = 8.0f;
   float selectionRadius = 6.0f;
-  // C105: the card is FOUR label/value pairs stacked (plan 3.2). Each pair is
-  // a 12 px label line above a 16 px value line (28 px), the pairs are 6 px
-  // apart, and the card keeps 10 px of padding.
+  // C105: the EXPANDED card is FOUR label/value pairs stacked (plan 3.2). Each
+  // pair is a 12 px label line above a 16 px value line (28 px), the pairs are
+  // 6 px apart, and the card keeps 10 px of padding.
   //
   // The RATIO BAR HAS ITS OWN ROW. It used to be drawn INSIDE the value line
   // (bottom-5 .. bottom-2 of that box), which is where the integration build
@@ -218,8 +218,13 @@ struct Metrics {
   // a row with text cannot be positioned correctly at every font/DPI, so the row
   // is reserved by the layout arithmetic that also places the text:
   //   4*28 + 3*6 + (cardBarGap + cardBarHeight) + 2*10 = 137 + 20 = 157.
+  //
+  // C128 (proposal 5.6): the card is FOLDED by default. Folded it is ONE 22 px
+  // line ("未加密 · ZIP · 98.8%") in the same 10 px of padding:
+  //   2*10 + 22 = 42. That is 115 px of the rail's bottom-left corner the user
+  // gets back until they ask for the details by clicking the card.
   // The numbers are integral floats so the pixel assertions are exact.
-  float statusHeight = 157.0f;
+  bool infoCardExpanded = false;
   float statusGapAbove = 12.0f;
   float statusPadding = 10.0f;
   float statusLineHeight = 22.0f;
@@ -234,6 +239,20 @@ struct Metrics {
 
   float CardRowHeight() const { return cardLabelHeight + cardValueHeight; }
   float CardBarRowHeight() const { return cardBarGap + cardBarHeight; }
+  // C128: the pill's height IS the fold state -- one line, or four rows plus the
+  // ratio bar's own row. Both are arithmetic on the tokens above (no literal 157
+  // at a call site, so a spacing change cannot leave the pill and its content in
+  // two different geometries).
+  float StatusHeightCollapsed() const {
+    return statusPadding * 2.0f + statusLineHeight;
+  }
+  float StatusHeightExpanded() const {
+    return statusPadding * 2.0f + 4.0f * CardRowHeight() + 3.0f * cardRowGap +
+           CardBarRowHeight();
+  }
+  float InfoCardHeight() const {
+    return infoCardExpanded ? StatusHeightExpanded() : StatusHeightCollapsed();
+  }
   float scrollY = 0.0f;
   float viewportTop = 0.0f;
   float viewportBottom = 1080.0f;
@@ -373,6 +392,10 @@ struct FolderIcon {
 };
 inline constexpr FolderIcon kFolderIcon{};
 
+// C128: the FOLDED card's separator -- U+00B7 MIDDLE DOT, spelled as UTF-8 bytes
+// so this header stays ASCII (the outer spaces are the design's air: "a · b").
+inline constexpr const char* kCardSeparator = " \xC2\xB7 ";
+
 namespace detail {
 
 inline Box RowBox(const Metrics& m, float y, int depth) {
@@ -405,7 +428,8 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
   layout.panel = Box{0.0f, metrics.viewportTop, metrics.width, metrics.viewportBottom};
   layout.contentTop = metrics.viewportTop + metrics.paddingTop;
   const float pillBottom = metrics.viewportBottom - metrics.paddingBottom;
-  const float pillTop = pillBottom - metrics.statusHeight;
+  // C128: the pill's top IS the fold state (one line or four rows).
+  const float pillTop = pillBottom - metrics.InfoCardHeight();
   layout.pill = Box{metrics.paddingX, pillTop, metrics.width - metrics.paddingX, pillBottom};
   layout.contentBottom = pillTop - metrics.statusGapAbove;
 
@@ -593,10 +617,40 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
   const std::string dictionary =
       status.dictionaryBytes == 0 ? std::string("--") : FormatBytes(status.dictionaryBytes);
   // C81/A3: the ratio VALUE is the CANONICAL view string -- the same one the
-  // list cell and the status band render. FormatRatio stays for the bar's
-  // fraction only, so the three surfaces cannot disagree about the number.
+  // list cell renders. FormatRatio stays for the bar's fraction only, so the
+  // surfaces cannot disagree about the number. C128 moved the band's copy of
+  // this number OFF the band (the card is its only home now).
   const std::string ratioValue =
       status.ratioView.empty() ? FormatRatio(status.ratioPermille) : status.ratioView;
+
+  // C128 (proposal 5.6): THE FOLDED CARD -- ONE line that summarises the four
+  // rows the user has not asked for yet:
+  //     🔒 未加密 · ZIP · 98.8%
+  // The glyph is the card's own encryption icon (row 1's "lock"), the middle is
+  // the method, the tail is the RATIO (the one number the report's screenshot
+  // showed on both surfaces -- it stays here, because this is the surface it
+  // belongs to). The dictionary is the one fact a single line cannot carry
+  // without turning into a sentence; clicking the card is the affordance for it.
+  //
+  // The height is Metrics::StatusHeightCollapsed() (2 * padding + one line), so
+  // the pill and this command list cannot disagree about how tall "folded" is.
+  if (!metrics.infoCardExpanded) {
+    const Box lineBox{cardLeft, pillTop + metrics.statusPadding, cardRight,
+                      pillTop + metrics.statusPadding + metrics.statusLineHeight};
+    push(Command{PrimKind::StatusIcon, detail::GlyphBox(metrics, lineBox), {}, "lock",
+                 status.encrypted ? ColorToken::Locked : ColorToken::SecondaryText, 1.0f,
+                 -1, Section::None});
+    std::string line = cipher;
+    line += kCardSeparator;
+    line += method;
+    line += kCardSeparator;
+    line += ratioValue;
+    Command text{PrimKind::StatusText, Box{textLeft, lineBox.top, cardRight, lineBox.bottom},
+                 line, {}, ColorToken::PrimaryText, 1.0f, -1, Section::None};
+    text.fontSize = metrics.cardValueFontSize;
+    push(std::move(text));
+    return layout;
+  }
 
   struct CardRow {
     const char* icon;

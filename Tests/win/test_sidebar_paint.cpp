@@ -614,6 +614,27 @@ PRISM_TEST("telemetry capsule corners are squircles") {
   PRISM_CHECK(std::abs(measured - circle) <= 12);  // a rounded-rect arc, r = 10
   PRISM_CHECK(measured <= square - 8);            // ... not a square corner
   PRISM_CHECK(measured >= 55);                    // ... and not a chamfer
+  //
+  // THE DETECTOR'S POSITIVE CONTROL, and it is the reason the band above can go
+  // RED. A percentage is easy to assert vacuously ("it is between 55 and 92"
+  // would accept any measurement at all), so the SAME counter is run over a
+  // 10 x 10 region that is unambiguously inside the surface -- the capsule's
+  // straight left edge at mid-height. It must read ~100 %, i.e. the square
+  // model, which is OUTSIDE the corner's band (<= 92). So a corner that stopped
+  // being rounded -- the exact regression this case exists to catch -- measures
+  // 96..100 here and fails, while a blind counter (0, or a region that is not
+  // the surface) fails the control instead of passing quietly.
+  int squareProbe = 0;
+  for (int y = 0; y < kCorner; ++y) {
+    for (int x = 0; x < kCorner; ++x) {
+      if (classify(pillLeft + 1 + x, cy - kCorner / 2 + y)) ++squareProbe;
+    }
+  }
+  std::printf("  [sidebar_paint] detector control (square region): %d/%d (%d%%), corner band "
+              "ceiling %d\n",
+              squareProbe, square, 100 * squareProbe / square, square - 8);
+  PRISM_CHECK(squareProbe >= 96);
+  PRISM_CHECK(squareProbe > square - 8);  // ... i.e. a square corner could not pass above
 }
 
 PRISM_TEST("icons are painted as vector glyphs") {

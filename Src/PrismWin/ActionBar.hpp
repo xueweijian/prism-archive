@@ -212,15 +212,28 @@ class ActionBarPainter {
     // 1. the island: floating glass, specular hairline, squircle corners.
     const D2D1_RECT_F island = RectF(layout.island);
     const D2D1_COLOR_F islandFill = IslandFill(variant);
-    fillSquircle(target, island, 20.0f, islandFill);
-    SetBrush(BorderColor(variant));
-    // The hairline is drawn INSIDE the island (path deflated by half a stroke):
-    // a centred 1 px stroke would spill half a pixel above the band and break
-    // "everything lives inside layout.action" for one antialiased row.
-    strokeSquircle(target, D2D1::RectF(island.left + 0.5f, island.top + 0.5f,
-                                       island.right - 0.5f, island.bottom - 0.5f),
-                   19.5f, 1.0f);
-    ++dbgIslands;
+    if (prism::actionbar::BandIsFlush(layout)) {
+      // C123: the band IS the toolbar. A 20 px squircle here would round the
+      // window's own corners and leave 20 px of canvas at each end of a strip
+      // that is supposed to be edge-to-edge ("贴边通栏"), so the flush case
+      // fills the rectangle and keeps ONE hairline: the seam under the band,
+      // where the crumb bar starts.
+      fillRect(target, island, islandFill);
+      SetBrush(BorderColor(variant));
+      target->DrawLine(D2D1::Point2F(island.left, island.bottom - 0.5f),
+                       D2D1::Point2F(island.right, island.bottom - 0.5f), brush_.Get(), 1.0f);
+      ++dbgIslands;
+    } else {
+      fillSquircle(target, island, 20.0f, islandFill);
+      SetBrush(BorderColor(variant));
+      // The hairline is drawn INSIDE the island (path deflated by half a stroke):
+      // a centred 1 px stroke would spill half a pixel above the band and break
+      // "everything lives inside layout.action" for one antialiased row.
+      strokeSquircle(target, D2D1::RectF(island.left + 0.5f, island.top + 0.5f,
+                                         island.right - 0.5f, island.bottom - 0.5f),
+                     19.5f, 1.0f);
+      ++dbgIslands;
+    }
 
     // 2. C78: the Group seams, painted on the island BEFORE any button so a
     // hover wash can never cover a hairline (the seam belongs to the band, not

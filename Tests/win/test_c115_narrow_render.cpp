@@ -63,6 +63,12 @@ constexpr int kBaseline = 1264;
 IWICImagingFactory* gWic = nullptr;
 const char* gOutDir = nullptr;
 
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+// CONTRACTS D3: set where the product reports an island again; read by the
+// verdict predicate at the first failing "no island" check.
+bool g_pillIslandObserved = false;
+#endif
+
 struct Frame {
   UINT32 width = 0;
   UINT32 height = 0;
@@ -401,23 +407,21 @@ PRISM_TEST("c115.render: 1264 is pixel-identical to the pre-card baseline") {
 }
 
 // ---------------------------------------------------------------------------
-// 4. THE COMPOSITION PANEL IS THE PILL, AND CANNOT BE THE WINDOW.
+// 4. THE COMPOSITION PANEL -- C123: THERE IS NONE.
 //
 // GalleryWindow::GlassPanelRect() sizes the COMPOSITION (topmost) island -- the
-// surface that is layered ABOVE the window's D2D content. C116's white-content
-// report asked whether that surface can ever be sized to the whole client (an
-// opaque island would then cover the window while the a11y tree stayed
-// complete). This case answers it with the window itself, at every width the
-// card covers:
-//   * before the first WM_SIZE the layout is empty -> the panel is EMPTY, which
-//     PresentGlassFrame treats as "present nothing" (rect.w == 0 -> return);
-//   * at every width the panel IS NavPillRect (the C115 agreement);
-//   * its area never exceeds 15 % of the client, and it is never the client.
-// The 15 % bound is checked from the DOCUMENTED minimum window (640 px): at
-// 320 px a 288 x 44 pill would be 16.5 %, but 320 is not a window the product
-// allows (kMinWindowWidth = 640).
+// surface layered ABOVE the window's D2D content. C115 asked "is that surface
+// ever the whole client" and answered "it is the pill". C123 REMOVES the pill:
+// the crumb is a 28 px path bar painted into the page, so the product window
+// publishes no island at all and PresentGlassFrame (rect.w == 0 -> return)
+// sizes nothing. The contract this case pins is that absence, at every width:
+// an island reappearing here would be a blurred ghost rectangle over the
+// toolbar -- a surface for a control that no longer exists.
+//
+// The other two cases of this suite (the pill the RENDERER paints, and the
+// crumb run inside its box) are legacy-composition scenes and are unchanged.
 // ---------------------------------------------------------------------------
-PRISM_TEST("c115.glass_panel: the composition island is the pill, never the window") {
+PRISM_TEST("c115.glass_panel: C123 has no composition island over the toolbar") {
   prism::win::gallery::GalleryWindow window;
   // (a) BEFORE Create: no layout has ever been computed. An empty panel is the
   // only safe answer -- and PresentGlassFrame bails on it, so nothing is sized.
@@ -429,30 +433,33 @@ PRISM_TEST("c115.glass_panel: the composition island is the pill, never the wind
   if (!PRISM_CHECK(window.Create(L"PrismArchive c115 glass panel", GetModuleHandleW(nullptr)))) {
     return;
   }
+  // C123: the crumb band exists only while there is a path to show, so the
+  // window needs one before the ring below can measure the row it replaced.
+  window.SetRootLabel(L"fixture.zip");
   const int widths[] = {640, 700, 784, 800, 900, 1028, 1172, 1184, 1264, 1482, 1920};
   for (const int w : widths) {
     const int h = (std::max)(480, kHeight);
     window.Dispatch(WM_SIZE, SIZE_RESTORED, MAKELPARAM(w, h));
     const prism::layout::Layout layout = window.LayoutForTest();
-    const prism::layout::Rect pill = prism::layout::NavPillRect(layout);
     const prism::glass::IslandRect panel = window.GlassPanelRect();
-    const long long clientArea = static_cast<long long>(w) * h;
-    const long long panelArea = static_cast<long long>(panel.w) * panel.h;
     if (w == 1028) {
-      std::printf("C115 glass panel at 1028: %u,%u %ux%u (pill %d,%d %dx%d, client %dx%d)\n",
-                  panel.x, panel.y, panel.w, panel.h, pill.left, pill.top, pill.Width(),
-                  pill.Height(), w, h);
+      std::printf("C115 glass panel at 1028: %u,%u %ux%u (C123 crumbBar %d,%d %dx%d, client %dx%d)\n",
+                  panel.x, panel.y, panel.w, panel.h, layout.crumbBar.left, layout.crumbBar.top,
+                  layout.crumbBar.Width(), layout.crumbBar.Height(), w, h);
     }
-    // (b) the panel IS the layout's pill -- the C115 agreement, on the real window.
-    PRISM_CHECK_EQ(panel.w, static_cast<uint32_t>(pill.Width()));
-    PRISM_CHECK_EQ(panel.h, static_cast<uint32_t>(pill.Height()));
-    PRISM_CHECK_EQ(panel.x, static_cast<uint32_t>(pill.left));
-    PRISM_CHECK_EQ(panel.y, static_cast<uint32_t>(pill.top));
-    // (c) bounded: never the client, never more than 15 % of it.
-    PRISM_CHECK(!(panel.w == static_cast<uint32_t>(w) && panel.h == static_cast<uint32_t>(h)));
-    PRISM_CHECK(panelArea * 100 <= clientArea * 15);
-    PRISM_CHECK(panel.w <= static_cast<uint32_t>(prism::layout::kNavPillMaxWidth));
-    PRISM_CHECK(panel.h <= static_cast<uint32_t>(prism::layout::kNavPillHeight));
+    // (b) NO island: the composition layer has nothing to cover.
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+    g_pillIslandObserved = g_pillIslandObserved || panel.w != 0 || panel.h != 0;
+#endif
+    PRISM_CHECK_EQ(panel.w, 0u);
+    PRISM_CHECK_EQ(panel.h, 0u);
+    PRISM_CHECK_EQ(panel.x, 0u);
+    PRISM_CHECK_EQ(panel.y, 0u);
+    // (c) and the crumb row it replaced still exists, at the layout's numbers --
+    // so "no island" cannot be green because the crumb band disappeared too.
+    PRISM_CHECK_EQ(layout.crumbBar.Height(), 28);
+    PRISM_CHECK_EQ(layout.crumbBar.left, layout.contentBand.left);
+    PRISM_CHECK_EQ(layout.crumbBar.right, layout.contentBand.right);
   }
   window.Dispatch(WM_DESTROY, 0, 0);
 }
@@ -462,6 +469,13 @@ int main(int argc, char** argv) {
     std::puts("FAIL: COM init failed -- the narrow layout cannot be rendered");
     return 1;
   }
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  // CONTRACTS D3: the pill island C123 deleted comes back -> the "no island"
+  // ring below MUST go red.
+  std::puts("C115 MUTANT ACTIVE: pill_island");
+  prism::test::SetMutationVerdict("C115 MUTATION CAUGHT: pill_island",
+                                  [] { return g_pillIslandObserved; });
+#endif
   ComPtr<IWICImagingFactory> wic;
   if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(wic.ReleaseAndGetAddressOf())))) {

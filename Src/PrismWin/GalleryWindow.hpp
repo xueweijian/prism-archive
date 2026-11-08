@@ -1277,7 +1277,50 @@ class GalleryWindow {
   int GlassOpticsInitializations() const { return glass_ ? glass_->OpticsInitializations() : 0; }
   // The panel the island covers, straight from the LAYOUT (the same rect the
   // breadcrumb pill is painted and hit-tested with) -- never a fixed 960x48.
+  //
+  // C123: there IS no nav pill any more. The crumb is a 28 px path bar painted
+  // by the window into the page (not a floating surface), so the composition
+  // island has no rectangle to cover and the layer is skipped. Returning the
+  // legacy pill here would composite a blurred 44 px pill over the toolbar --
+  // a ghost of a control the user can no longer click.
+  //
+  // C123 leaves this empty ON PURPOSE: the crumb it used to cover no longer
+  // exists, so there is no surface to compose. The refraction ghost C121 fixed
+  // is still built and painted (DrawPageBackground), and C126 gives it its new
+  // host -- the flush toolbar, where content never scrolls under the material.
+  // This empty rectangle is therefore a CORRECT intermediate state, not a
+  // leftover: C107/C112/C115-render assert it, and
+  // PRISM_C123_MUTANT_PILL_ISLAND brings the deleted pill back so those
+  // assertions can be shown to go red (CONTRACTS D3).
   prism::glass::IslandRect GlassPanelRect() const {
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+    // D3 arm for the three suites that now assert "there is no island": the
+    // pre-card pill island comes back over the band -- a blurred rectangle for
+    // a control the user can no longer click. Their first "no island" check
+    // MUST go red.
+    if (layout_.chrome == prism::layout::Chrome::C123) {
+      const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
+      return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
+                                      static_cast<uint32_t>(pill.top),
+                                      static_cast<uint32_t>(pill.Width()),
+                                      static_cast<uint32_t>(pill.Height())};
+    }
+#endif
+#if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
+    // C112's D3 arm, kept ALIVE under C123: the pre-card pill island comes back
+    // over the band. In a C123 window that surface covers the toolbar instead of
+    // the crumb -- a blurred rectangle for a control that no longer exists --
+    // and the C112 suite's "the window publishes no island" assertion MUST go
+    // red. A retired control must not leave its negative control green.
+    if (layout_.chrome == prism::layout::Chrome::C123) {
+      const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
+      return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
+                                      static_cast<uint32_t>(pill.top),
+                                      static_cast<uint32_t>(pill.Width()),
+                                      static_cast<uint32_t>(pill.Height())};
+    }
+#endif
+    if (layout_.chrome == prism::layout::Chrome::C123) return prism::glass::IslandRect{};
     const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
     if (pill.Empty()) return prism::glass::IslandRect{};
     return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
@@ -1332,6 +1375,9 @@ class GalleryWindow {
     // this mutant.
     return false;
 #else
+    // C123: no pill, no island. The crumb is painted by the window into the
+    // page (DrawBreadcrumbPathBar), so there is no surface that could own it.
+    if (layout_.chrome == prism::layout::Chrome::C123) return false;
     return glass_ && glass_->UsesComposition() && glass_->Visible();
 #endif
   }
@@ -2047,7 +2093,24 @@ class GalleryWindow {
     if (crumbHover_ == prism::tree::kNoLevel) return prism::layout::Rect{};
     for (const auto& span : crumbLayout_.spans) {
       if (span.level != crumbHover_ || span.Empty()) continue;
-      return prism::layout::Rect{span.left, barTop_ + 6, span.right, barBottom_ - 6};
+      // C123: an 18 px capsule inside the 28 px path bar (3 px of air above and
+      // below), so the highlight cannot touch the current segment's rule.
+      return prism::layout::Rect{span.left, barTop_ + 3, span.right, barBottom_ - 3};
+    }
+    return prism::layout::Rect{};
+  }
+
+  // C123: the 2 px rule under the crumb the user is STANDING ON -- the last
+  // segment that resolves to a level (the trailing "共 N 项" count is
+  // decoration, not a folder). Geometry from Layout::crumbBar, so the rule sits
+  // on the bar's own bottom edge at every window size; empty when the crumb is
+  // hidden, which is what makes "no archive open paints no rule" true by
+  // construction rather than by a second if.
+  prism::layout::Rect CrumbCurrentRect() const {
+    EnsureNavIsland();
+    for (auto it = crumbLayout_.spans.rbegin(); it != crumbLayout_.spans.rend(); ++it) {
+      if (it->level == prism::tree::kNoLevel || it->Empty()) continue;
+      return prism::layout::CrumbUnderlineRect(layout_, it->left, it->right);
     }
     return prism::layout::Rect{};
   }
@@ -2139,7 +2202,14 @@ class GalleryWindow {
   //     window stays up and the strip hides itself.
   prism::tabs::TabSet& Tabs() { return tabs_; }
   const prism::tabs::TabSet& Tabs() const { return tabs_; }
-  bool TabBarVisible() const { return !tabs_.empty(); }
+  // C123 (proposal 17.2): the strip exists only from the SECOND archive on.
+  // One archive is the migration user's first state, and a strip there is 32 px
+  // of chrome that answers nothing -- "1 个包时 0 像素 chrome". The rule itself
+  // lives in prism::layout::TabBarShown so the layout, the paint and the hit
+  // test cannot disagree about when the band exists.
+  bool TabBarVisible() const {
+    return prism::layout::TabBarShown(static_cast<int>(tabs_.size()));
+  }
   // C85 / D3: the SAME predicate the band branches on, readable by a mutant
   // build so its arm can PROVE the injection fired (a stale macro must stay
   // RED, never green). TRUE means "this Tab is a chord, the band gives it up".
@@ -4939,20 +5009,35 @@ class GalleryWindow {
       crumbSegments_.push_back({WideToUtf8(status_), prism::tree::kNoLevel});
     }
     breadcrumbText_ = Utf8ToWide(prism::tree::JoinBreadcrumb(crumbSegments_));
+    // C123: the crumb owns a 28 px row only while there is a path to show (the
+    // same "hidden, not empty" rule C60 gave the tab strip), so "is there a
+    // path" is a LAYOUT input. The bands above the content used to be
+    // independent of the crumb; they are not any more, and without this the
+    // row would only appear at the next WM_SIZE.
+    if ((!breadcrumbText_.empty()) != (!layout_.crumbBar.Empty())) {
+      RecomputeLayout();
+    }
+    barKnown_ = false;
     UpdateBreadcrumbLayout();
   }
 
   void UpdateBreadcrumbLayout() {
     EnsureNavIsland();
     const auto width = [this](std::string_view text) { return MeasureUtf8(text); };
-    crumbLayout_ = prism::tree::LayoutCenteredBreadcrumb(
+    // C123: LEFT-aligned. The old LayoutCenteredBreadcrumb put the run's origin
+    // at boxLeft + (box - total) / 2, which is the 234 the audit measured inside
+    // a bar that starts at 28: the first crumb's x moved with the path's length
+    // and 62.2 % of the row was empty. The renderer's text layout is set to
+    // LEADING for the same reason, so the spans below are where the glyphs are.
+    crumbLayout_ = prism::tree::LayoutLeftBreadcrumb(
         crumbSegments_, textLeft_, textRight_, width);
   }
 
-  // Mirrors GalleryRenderer::DrawBreadcrumbIsland's fallback geometry (the
-  // window never supplies scene.islands): a 0.62 * width pill, centred, 44 px
-  // tall at y=16, text inset 24 px. Kept here because the hit test has to
-  // agree with the painted box, and the renderer owns no public accessor.
+  // Lazily measures the crumb's rectangle before a click or a hover can use it.
+  // C123: the rectangle is the 28 px PATH BAR (Layout::crumbBar) and its text
+  // box (layout::CrumbTextRect) -- contentBand.left + 16, left-aligned. The
+  // renderer paints exactly these two rectangles (DrawBreadcrumbPathBar), so
+  // "what the user clicks" and "what the user sees" are one measurement.
   void EnsureNavIsland() const {
     if (!barKnown_) const_cast<GalleryWindow*>(this)->MeasureNavIsland();
   }
@@ -4969,7 +5054,12 @@ class GalleryWindow {
     // in BOTH views; only an explicit collapse or a too-narrow window removes it.
     const bool rail = prism::layout::RailVisible(sidebarRailVisible_, listMode_) &&
                       GalleryRenderer::SidebarFits(static_cast<float>(width));
-    return prism::layout::Compute(width, height, rail, listMode_);
+    // C123: the SAME composition RecomputeLayout publishes -- the flush toolbar,
+    // the 28 px path bar and the on-demand tab strip. The band's hit test, the
+    // crumb's spans and the renderer's rectangles all read this one call.
+    return prism::layout::ComputeC123(width, height, rail, listMode_,
+                                      static_cast<int>(tabs_.size()),
+                                      !breadcrumbText_.empty());
   }
 
   void MeasureNavIsland() {
@@ -4984,14 +5074,16 @@ class GalleryWindow {
     // V1: the pill and its text run come from the layout, so the clickable span
     // is by construction the painted span.
     const prism::layout::Layout layout = WindowLayoutForClient();
-    // C-V2: the SPLIT pill. The toolbar may have taken width back from it, and
-    // the renderer paints this same rectangle -- so the crumb the user clicks is
-    // by construction the crumb they see.
-    const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
-    const prism::layout::Rect pill = band.navPill;
-    const prism::layout::Rect textRect = prism::actionbar::NavTextRect(band);
-    barTop_ = pill.top;
-    barBottom_ = pill.bottom;
+    // C123: the crumb is a 28 px PATH BAR under the toolbar, not a pill inside
+    // the band. Its box starts at contentBand.left + 16 (CrumbTextRect) and the
+    // renderer paints the SAME rectangle (DrawBreadcrumbPathBar), so a click
+    // lands on a glyph and the "where does the crumb start" question has ONE
+    // answer again. No pill exists in this composition: layout::crumbBar is the
+    // geometry, and the action band is entirely the toolbar's.
+    const prism::layout::Rect bar = layout.crumbBar;
+    const prism::layout::Rect textRect = prism::layout::CrumbTextRect(layout);
+    barTop_ = bar.top;
+    barBottom_ = bar.bottom;
     textLeft_ = textRect.left;
     textRight_ = textRect.right;
     barKnown_ = true;
@@ -5134,6 +5226,8 @@ class GalleryWindow {
     // C93: the crumb under the pointer, and the exact span to highlight.
     scene.crumbHoverLevel = crumbHover_;
     if (crumbHover_ != prism::tree::kNoLevel) scene.crumbHoverRect = CrumbHoverRect();
+    // C123: the path bar's current-segment rule (2 px, the "seam" token).
+    scene.crumbCurrentRect = CrumbCurrentRect();
     // C60: the strip's view is built from the SAME TabSet the hit tests read,
     // so a tab can never be painted somewhere it cannot be clicked.
     const prism::win::tabbar::View tabView = TabViewNow();
@@ -5827,9 +5921,12 @@ class GalleryWindow {
                       GalleryRenderer::SidebarFits(static_cast<float>(clientW_));
     // C60: the strip reserves 32 px only while a tab exists -- an empty strip
     // returns the action island (and the content) to the pre-C60 geometry.
-    layout_ = prism::layout::Compute(static_cast<int>(clientW_),
-                                     static_cast<int>(clientH_), rail, listMode_,
-                                     TabBarVisible());
+    // C123: "a tab exists" is now "a SECOND archive is open" (TabBarShown), and
+    // the crumb has its own 28 px row between the toolbar and the content.
+    layout_ = prism::layout::ComputeC123(static_cast<int>(clientW_),
+                                         static_cast<int>(clientH_), rail, listMode_,
+                                         static_cast<int>(tabs_.size()),
+                                         !breadcrumbText_.empty());
     // V4: the grid's content height is the FLOW's height (tiles are cellHeight
     // tall, tile-less rows are 32 px bands), so the viewport is fed an average
     // pitch that makes Rows() * pitch == FlowContentHeight(). Scroll clamping

@@ -329,6 +329,18 @@ inline int HitBreadcrumb(const BreadcrumbLayout& layout, int x) {
   return kNoLevel;
 }
 
+// C123: the PATH BAR's layout. The crumb is left-aligned at the box's left
+// edge (WindowLayout::CrumbTextRect == contentBand.left + 16), so the first
+// glyph's x is a property of the LAYOUT, not of the path's length: a centred
+// run drifted by (container - pathWidth) / 2 and left 62.2 % of the row empty
+// (proposal 17.3). Overflow is clipped at the box's right edge, exactly like
+// LayoutCenteredBreadcrumb -- the difference is only where the run STARTS.
+inline BreadcrumbLayout LayoutLeftBreadcrumb(
+    const std::vector<Segment>& segments, int boxLeft, int boxRight,
+    const std::function<int(std::string_view)>& width) {
+  return LayoutBreadcrumb(segments, boxLeft, width, boxLeft, (std::max)(boxLeft, boxRight));
+}
+
 // The window paints the crumb run CENTRED inside the nav island (the renderer's
 // title format is centre-aligned), so the hit test must centre it too and clip
 // to the island's text box. Overflow goes to the right of the box when the run

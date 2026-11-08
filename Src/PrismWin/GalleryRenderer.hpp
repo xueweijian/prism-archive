@@ -243,6 +243,11 @@ class GalleryRenderer {
     // is the defect this field exists to prevent.
     int crumbHoverLevel = prism::tree::kNoLevel;
     prism::layout::Rect crumbHoverRect;
+    // C123: the 2 px accent rule under the crumb the user is STANDING ON. The
+    // window computes it (it owns the measured spans); the renderer only paints
+    // the rectangle, so the "seam" cannot be drawn a few pixels from the word
+    // it marks. Empty in a legacy scene -- nothing is painted.
+    prism::layout::Rect crumbCurrentRect;
 
     // C60: the tab strip. nullptr -> no strip at all (every pre-C60 scene, and
     // the "no archive is open" state, where the band is hidden and the action
@@ -2578,8 +2583,52 @@ class GalleryRenderer {
     return geometry;
   }
 
+  // C123: THE PATH BAR -- the crumb's new body. Not an island: a single 28 px
+  // row under the toolbar, left-aligned at contentBand.left + 16, whose current
+  // segment carries the 2 px "seam" rule on the bar's own bottom edge.
+  //
+  // It paints NO fill: the row is the page's canvas (DrawBands cleared it), so
+  // the path reads as part of the content chrome and never as a second button
+  // group -- which is what the 700 x 67 pill was. The hover capsule and the
+  // rule are the only ink the bar adds, plus the text.
+  //
+  // The text layout is built LEADING (DrawBreadcrumbRun's last argument). That
+  // is not a detail: title_ is a CENTER-aligned format, so without it the run
+  // would stay centred inside a box that is now left-aligned -- the 234 px the
+  // audit measured would survive the geometry fix and nothing would have moved.
+  void DrawBreadcrumbPathBar(ID2D1RenderTarget* target, const Scene& scene,
+                             const prism::layout::Layout& layout) {
+    const prism::layout::Rect bar = layout.crumbBar;
+    const prism::layout::Rect text = prism::layout::CrumbTextRect(layout);
+    if (bar.Empty() || text.Empty()) return;
+    if (scene.crumbHoverRect.Width() > 0 && scene.crumbHoverRect.Height() > 0) {
+      const D2D1_ROUNDED_RECT hover =
+          D2D1::RoundedRect(ToRectF(scene.crumbHoverRect), 6.0f, 6.0f);
+      islandBorder_->SetColor(kCrumbHover);
+      target->FillRoundedRectangle(hover, islandBorder_.Get());
+      islandBorder_->SetColor(kIslandBorder);
+    }
+    if (!scene.crumbCurrentRect.Empty()) {
+      // The rule is the ACCENT, fully opaque: it is the same "seam" the selected
+      // row and the active tab use, and a translucent line over canvas would
+      // measure as a different colour in the three themes.
+      prism::theme::Rgba seam =
+          prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary, ThemeOf(scene))
+              .gradient.from;
+      seam.a = 1.0f;
+      accent_->SetColor(ToD2d(seam));
+      target->FillRectangle(ToRectF(scene.crumbCurrentRect), accent_.Get());
+      accent_->SetColor(accentColor_);
+    }
+    DrawBreadcrumbRun(target, scene.breadcrumb, text, /*leading=*/true);
+  }
+
   void DrawBreadcrumbIsland(ID2D1RenderTarget* target, const Scene& scene,
                             const prism::layout::Layout& layout) {
+    if (layout.chrome == prism::layout::Chrome::C123) {
+      DrawBreadcrumbPathBar(target, scene, layout);
+      return;
+    }
     const PillGeometry geometry = PillGeometryFor(layout, scene.actions);
     const prism::layout::Rect pillRect = geometry.pill;
     if (pillRect.Empty()) return;
@@ -2758,8 +2807,12 @@ class GalleryRenderer {
   // is an ellipsis when the string does not fit, and no glyph may leave the box.
   // Falling back to DrawLabel on a layout failure keeps the pre-C115 behaviour
   // rather than dropping the breadcrumb entirely.
+  // 'leading' is the C123 path bar's alignment. title_ is a CENTER-aligned
+  // format and CreateTextLayout inherits it, so a left-aligned BOX is not
+  // enough: the run itself has to be told to start at the box's left edge.
+  // The pill keeps the centred run (false), byte-for-byte.
   void DrawBreadcrumbRun(ID2D1RenderTarget* target, const std::wstring& text,
-                         const prism::layout::Rect& box) {
+                         const prism::layout::Rect& box, bool leading = false) {
     if (!title_ || text.empty() || box.Width() <= 0 || box.Height() <= 0) return;
     ComPtr<IDWriteTextLayout> layout;
     if (FAILED(prism::win::typography::CreateTextLayout(
@@ -2770,6 +2823,7 @@ class GalleryRenderer {
       return;
     }
     layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (leading) layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     ComPtr<IDWriteInlineObject> ellipsis;
     if (SUCCEEDED(writeFactory_->CreateEllipsisTrimmingSign(
             title_.Get(), ellipsis.ReleaseAndGetAddressOf())) &&

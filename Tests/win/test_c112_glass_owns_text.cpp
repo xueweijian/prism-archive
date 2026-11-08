@@ -492,116 +492,94 @@ PRISM_TEST("c112_pill_text_is_sharp_and_has_no_ghost") {
     }
   }
 
-  // The REFERENCE: the same window with the island switched OFF -- the pill the
-  // user sees today when glass is disabled (sharp text, painted by the window).
+  // ---------------------------------------------------------------- C123
+  // THIS SUITE WAS REWRITTEN BY CARD C123, and every assertion below says why.
+  //
+  // C112 measured the PILL's island: S1/S2 asked whether the composed pill kept
+  // the glyph edges (>= 90 % retention), S3 asked whether the window had stopped
+  // painting the text the island owned. C123 removes the pill: the crumb is a
+  // 28 px PATH BAR painted into the page, one row under a flush toolbar, so
+  // there is no surface that could double-paint it and no handover to measure.
+  //
+  // What survives is the part that can still fail: the layer must publish NO
+  // island rectangle, and the WINDOW must really paint the path (ink inside the
+  // layout's own text box). A resurrected pill island -- exactly the pre-card
+  // defect, and what PRISM_C112_MUTANT_GLASS_OVER_TEXT arms -- turns the first
+  // assertion red through its runtime predicate (D3/D27).
   GalleryWindow offWindow;
-  if (!PRISM_CHECK(MakeWindow(offWindow, L"c112 island off", /*glass=*/false))) return;
+  if (!PRISM_CHECK(MakeWindow(offWindow, L"c112 crumb off", /*glass=*/false))) return;
   Frame offFrame;
-  const prism::win::benchframe::Frame offCapture = CaptureWindow(offWindow, "island-off", &offFrame);
+  const prism::win::benchframe::Frame offCapture = CaptureWindow(offWindow, "crumb-off", &offFrame);
   if (!PRISM_CHECK(offCapture.rendered)) return;
-  // "This is a REAL frame" (C113): a canvas-only, D2D-rejected frame scores
-  // painted == 0 -- and every pixel comparison below would then be measuring
-  // nothing at all.
   PRISM_CHECK(offCapture.painted * 20 >= offCapture.total);  // >= 5% painted
 
-  // The SUBJECT: the same window with the island on.
   GalleryWindow onWindow;
-  if (!PRISM_CHECK(MakeWindow(onWindow, L"c112 island on", /*glass=*/true))) return;
+  if (!PRISM_CHECK(MakeWindow(onWindow, L"c112 crumb on", /*glass=*/true))) return;
 #if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
-  // NEGATIVE CONTROL (D3/D27): armed ONLY when the product really reported the
-  // pre-C112 ownership (window keeps the text while the island is live). The
-  // first failing sharpness check prints the verdict.
-  g_mutantObserved = !onWindow.GlassPillOwnsContent() && onWindow.GlassLayerVisible() &&
-                     onWindow.GlassOpticsReady();
+  // NEGATIVE CONTROL (D3/D27): armed when the pre-C112 pill island is really
+  // back over the band. The first failing "no island" check prints the verdict.
+  g_mutantObserved = onWindow.GlassPanelRect().w != 0;
   prism::test::SetMutationVerdict("C112 MUTATION CAUGHT: glass_over_text",
                                   [] { return g_mutantObserved; });
-  std::printf("  INJECTION: window keeps the pill text, island composed over it (observed=%d)\n",
+  std::printf("  INJECTION: the pill island is back over the band (observed=%d)\n",
               static_cast<int>(g_mutantObserved));
 #else
-  PRISM_CHECK(onWindow.GlassPillOwnsContent());
-  if (!onWindow.GlassPillOwnsContent()) return;
+  PRISM_CHECK(!onWindow.GlassPillOwnsContent());
 #endif
   PRISM_CHECK(onWindow.GlassOpticsReady());
+  const IslandRect rect = onWindow.GlassPanelRect();
+  std::printf("  island rect: %u,%u %ux%u (C123: none)\n", rect.x, rect.y, rect.w, rect.h);
+  PRISM_CHECK_EQ(rect.w, 0u);
+  PRISM_CHECK_EQ(rect.h, 0u);
+
   Frame onFrame;
-  const prism::win::benchframe::Frame onCapture = CaptureWindow(onWindow, "island-on", &onFrame);
+  const prism::win::benchframe::Frame onCapture = CaptureWindow(onWindow, "crumb-on", &onFrame);
   if (!PRISM_CHECK(onCapture.rendered)) return;
   PRISM_CHECK(onCapture.painted * 20 >= onCapture.total);
 
-  const IslandRect rect = onWindow.GlassPanelRect();
-  if (!PRISM_CHECK(rect.w > 0 && rect.h > 0)) return;
-  std::printf("  island rect: %u,%u %ux%u\n", rect.x, rect.y, rect.w, rect.h);
-  if (!PRISM_CHECK(rect.w <= offFrame.width && rect.y + rect.h <= offFrame.height)) return;
-
-  // The two things the user compares: the pill with the island off, and the pill
-  // with the island on -- the product's island content composited over the
-  // window's frame (what DirectComposition does with the premultiplied
-  // swapchain).
-  const Frame pillOff = Crop(offFrame, rect.x, rect.y, rect.w, rect.h);
-  Frame pillOn;
-  if (!PRISM_CHECK(ComposePillOn(onWindow, onFrame, &pillOn))) return;
-  if (!PRISM_CHECK(onWindow.GlassLastFrameOptical())) return;
-
-  if (!PRISM_CHECK(onWindow.BreadcrumbText() == L"pack.7z")) {
-    std::printf("  breadcrumb: '");
-    for (wchar_t ch : onWindow.BreadcrumbText()) std::printf("%lc", ch);
-    std::printf("'\n");
-  }
-
-  // The text band: the pill's 24 px / 10 px inset (the SAME rect the renderer
-  // draws into), minus a 1 px margin so the rounded corners never enter.
+  if (!PRISM_CHECK(onWindow.BreadcrumbText() == L"pack.7z")) return;
+  // The text box is the LAYOUT's (contentBand.left + 16 .. - 16, 3 px inside the
+  // 28 px row) -- the same rectangle the window hit-tests and the renderer's
+  // LEADING run draws into. Sampling anywhere else would be measuring a guess.
+  const prism::layout::Layout layout = onWindow.LayoutForTest();
+  const prism::layout::Rect box = prism::layout::CrumbTextRect(layout);
+  std::printf("  crumb bar: %d,%d %dx%d | text box: %d,%d %dx%d\n", layout.crumbBar.left,
+              layout.crumbBar.top, layout.crumbBar.Width(), layout.crumbBar.Height(), box.left,
+              box.top, box.Width(), box.Height());
+  if (!PRISM_CHECK(!box.Empty() && !layout.crumbBar.Empty())) return;
   Band band;
-  band.x0 = 26;
-  band.x1 = rect.w > 28 ? rect.w - 26 : rect.w;
-  band.y0 = 11;
-  band.y1 = rect.h > 12 ? rect.h - 11 : rect.h;
+  band.x0 = static_cast<UINT>(box.left);
+  band.x1 = static_cast<UINT>(box.right);
+  band.y0 = static_cast<UINT>(box.top);
+  band.y1 = static_cast<UINT>(box.bottom);
+  const double background = BackgroundLevel(onFrame, band);
+  const int ink = InkPixels(onFrame, band, background, 40.0);
+  std::printf("  path ink: %d pixels inside the text box (background %.1f)\n", ink, background);
+  // The window really paints the path (a blank bar would score 0)...
+  PRISM_CHECK(ink > 50);
+  // ...and the same ink is present in the arm with the composition layer off,
+  // i.e. nothing above the window is contributing it.
+  const int offInk = InkPixels(offFrame, band, background, 40.0);
+  std::printf("  path ink with the layer off: %d\n", offInk);
+  PRISM_CHECK(offInk > 50);
 
-  const double bgOff = BackgroundLevel(pillOff, band);
-  const double bgOn = BackgroundLevel(pillOn, band);
-  const double maxOff = MaxGradient(pillOff, band);
-  const double maxOn = MaxGradient(pillOn, band);
-  const double retention = maxOff > 0.0 ? maxOn / maxOff : 0.0;
-  const std::vector<uint8_t> ink = InkMask(pillOff, band, bgOff);
-  const RingStats ringOff = MeasureRing(pillOff, band, ink, bgOff);
-  const RingStats ringOn = MeasureRing(pillOn, band, ink, bgOn);
-  int inkCount = 0;
-  for (uint8_t v : ink) inkCount += v ? 1 : 0;
-
-  std::printf("  background: off=%.1f on=%.1f | ink pixels=%d\n", bgOff, bgOn, inkCount);
-  std::printf("  S1 maxGradient: off=%.1f on=%.1f retention=%.1f%%\n", maxOff, maxOn,
-              retention * 100.0);
-  std::printf("  S2 halo ring: off mean=%.2f max=%.1f | on mean=%.2f max=%.1f (samples=%d)\n",
-              ringOff.meanExcess, ringOff.maxExcess, ringOn.meanExcess, ringOn.maxExcess,
-              ringOn.samples);
-
-  // Screenshots (4x, nearest neighbour) of the SAME pill region, both arms.
   if (const char* outDir = std::getenv("PRISM_C112_OUT")) {
     const std::wstring root(outDir, outDir + std::strlen(outDir));
-    const Frame onShot = Scale4x(pillOn);
-    const Frame offShot = Scale4x(pillOff);
-    std::printf("  [shot] c112-pill-on.png saved=%d\n",
-                static_cast<int>(WritePng(root + L"\\c112-pill-on.png", onShot)));
-    std::printf("  [shot] c112-pill-off.png saved=%d\n",
-                static_cast<int>(WritePng(root + L"\\c112-pill-off.png", offShot)));
+    std::printf("  [shot] c112-path-bar.png saved=%d\n",
+                static_cast<int>(WritePng(root + L"\\c112-path-bar.png", Scale4x(onFrame))));
   }
 
-  // S1: the SAME text, measured the same way. 90% is the card's line: a blur
-  // cannot keep 90% of a one-pixel edge; an occlusion cannot either.
-  PRISM_CHECK(inkCount > 100);  // there IS a text run in the band
-  PRISM_CHECK(maxOff >= 40.0);  // the reference really has sharp glyph edges
-  PRISM_CHECK(retention >= 0.90);
-  // S2: no second, blurred copy in the ring around the glyphs.
-  PRISM_CHECK(ringOn.meanExcess <= 4.0);
-  PRISM_CHECK(ringOn.maxExcess <= 60.0);
-
 #if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
-  std::printf("  INJECTION: PRISM_C112_MUTANT_GLASS_OVER_TEXT (window keeps the text, island covers it)\n");
+  std::printf("  INJECTION: PRISM_C112_MUTANT_GLASS_OVER_TEXT (a pill island over the band)\n");
 #endif
 }
 
 // ---------------------------------------------------------------------------
-// S3: with the island owning the pill, the WINDOW paints nothing there.
+// S3: the WINDOW paints the path, in BOTH arms (C123's replacement for "the
+// window stopped painting what the island owned": with no island, every pixel
+// of the crumb comes from the window, so the two arms must agree there).
 // ---------------------------------------------------------------------------
-PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
+PRISM_TEST("c112_no_island_over_the_crumb: both arms paint the same path") {
   GalleryWindow offWindow;
   if (!PRISM_CHECK(MakeWindow(offWindow, L"c112 s3 off", /*glass=*/false))) return;
   Frame offFrame;
@@ -611,9 +589,11 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
 
   GalleryWindow onWindow;
   if (!PRISM_CHECK(MakeWindow(onWindow, L"c112 s3 on", /*glass=*/true))) return;
-  if (!onWindow.GlassPillOwnsContent()) {
+  if (!onWindow.GlassOpticsReady()) {
     g_skipped = true;
-    g_skipReason = "no DirectComposition on this runner";
+    g_skipReason = "the optical chain did not register on this runner: " +
+                   onWindow.GlassOpticsError();
+    std::printf("  [skip] C112 SKIPPED: %s\n", g_skipReason.c_str());
     return;
   }
   Frame onFrame;
@@ -621,99 +601,41 @@ PRISM_TEST("c112_window_keeps_only_geometry_under_the_pill") {
   if (!PRISM_CHECK(onCapture.rendered)) return;
   PRISM_CHECK(onCapture.painted * 20 >= onCapture.total);
 
-  // Each window's OWN pill rectangle: the two arms must be the same panel, and
-  // saying so explicitly keeps a layout drift from silently cropping the wrong
-  // place (which would read as "the text vanished").
   const IslandRect rect = onWindow.GlassPanelRect();
   const IslandRect rectOff = offWindow.GlassPanelRect();
-  std::printf("  pill rect: island-off %u,%u %ux%u | island-on %u,%u %ux%u\n", rectOff.x,
+  std::printf("  island rect: off %u,%u %ux%u | on %u,%u %ux%u (C123: both none)\n", rectOff.x,
               rectOff.y, rectOff.w, rectOff.h, rect.x, rect.y, rect.w, rect.h);
-  std::printf("  window: %dx%d client, nav band y=%d..%d\n", offWindow.ClientWidthForTest(),
-              offWindow.ClientHeightForTest(), offWindow.NavBarTop(), offWindow.NavBarBottom());
-  if (!PRISM_CHECK(rect.w > 0 && rect.h > 0)) return;
-  PRISM_CHECK_EQ(rectOff.x, rect.x);
-  PRISM_CHECK_EQ(rectOff.y, rect.y);
-  PRISM_CHECK_EQ(rectOff.w, rect.w);
-  PRISM_CHECK_EQ(rectOff.h, rect.h);
-  const Frame offPill = Crop(offFrame, rectOff.x, rectOff.y, rectOff.w, rectOff.h);
-  const Frame onPill = Crop(onFrame, rect.x, rect.y, rect.w, rect.h);
-  // The island's pill for the SAME frame: the glyph reference below is the text
-  // the island paints, not "whatever is inked in the island-off band".
-  Frame pillOn;
-  if (!PRISM_CHECK(ComposePillOn(onWindow, onFrame, &pillOn))) return;
+  PRISM_CHECK_EQ(rect.w, 0u);
+  PRISM_CHECK_EQ(rect.h, 0u);
+  PRISM_CHECK_EQ(rectOff.w, 0u);
+  PRISM_CHECK_EQ(rectOff.h, 0u);
 
+  const prism::layout::Layout layout = onWindow.LayoutForTest();
+  const prism::layout::Rect box = prism::layout::CrumbTextRect(layout);
   Band band;
-  band.x0 = 26;
-  band.x1 = rect.w > 28 ? rect.w - 26 : rect.w;
-  band.y0 = 11;
-  band.y1 = rect.h > 12 ? rect.h - 11 : rect.h;
-  const double bgOff = BackgroundLevel(offPill, band);
-  const double bgOn = BackgroundLevel(onPill, band);
-  const int offInk = InkPixels(offPill, band, bgOff, 40.0);
-  const int onInk = InkPixels(onPill, band, bgOn, 40.0);
-  // THE TEXT, and nothing else. The reference mask comes from the COMPOSITED
-  // island frame -- the text the island paints at the pill's own coordinates --
-  // and the question is how many of those exact pixels the WINDOW still paints.
-  //
-  // Why not the island-off frame's mask: at narrower client widths the action
-  // band's island can reach into the pill rectangle. The window's pill used to
-  // cover it; with the pill on the island, the window's frame shows it -- a real
-  // pixel difference that has nothing to do with the text (measured on CI's
-  // 1028x729 runner: 184 such pixels, all at band x 446..533, far from the
-  // centred run). Keying on the ISLAND's glyphs keeps the assertion about the
-  // breadcrumb on every window size.
-  const std::vector<uint8_t> glyphs = InkMask(pillOn, band, bgOn);
+  band.x0 = static_cast<UINT>(box.left);
+  band.x1 = static_cast<UINT>(box.right);
+  band.y0 = static_cast<UINT>(box.top);
+  band.y1 = static_cast<UINT>(box.bottom);
+  if (!PRISM_CHECK(!box.Empty())) return;
+  const double bgOn = BackgroundLevel(onFrame, band);
+  const double bgOff = BackgroundLevel(offFrame, band);
+  const std::vector<uint8_t> glyphs = InkMask(onFrame, band, bgOn);
   int glyphPixels = 0;
-  int glyphsStillInk = 0;
-  for (UINT y = band.y0; y < band.y1 && y < onPill.height; ++y) {
-    for (UINT x = band.x0; x < band.x1 && x < onPill.width; ++x) {
-      if (!glyphs[static_cast<size_t>(y) * pillOn.width + x]) continue;
+  int glyphsOff = 0;
+  for (UINT y = band.y0; y < band.y1 && y < onFrame.height; ++y) {
+    for (UINT x = band.x0; x < band.x1 && x < onFrame.width; ++x) {
+      if (!glyphs[static_cast<size_t>(y) * onFrame.width + x]) continue;
       ++glyphPixels;
-      if (std::fabs(onPill.L(x, y) - bgOn) >= 40.0) ++glyphsStillInk;
+      if (std::fabs(offFrame.L(x, y) - bgOff) >= 40.0) ++glyphsOff;
     }
   }
-  std::printf(
-      "  window frame in the pill band: island-off ink=%d, island-on ink=%d | of the %d glyph "
-      "pixels the ISLAND paints, %d are also painted by the window\n",
-      offInk, onInk, glyphPixels, glyphsStillInk);
-  // The reference proves the detector fires (there IS a run of glyphs in the
-  // band); the subject proves the window stopped painting them.
-  PRISM_CHECK(offInk > 100);
-  PRISM_CHECK(glyphPixels > 100);
-  PRISM_CHECK(glyphsStillInk * 20 <= glyphPixels);  // <= 5% of the glyphs
-  // The band-wide counts stay as context, not as gates: they measure the
-  // runner's width (the band's island reach) as much as the window.
-
-  // ... and the handover is LOCAL: every pixel outside the pill rectangle (plus
-  // its 1 px stroke) is the same in both frames. The stroke is the one visible
-  // difference and it is a boundary artefact, not a design change: the window
-  // draws a 1 px border CENTRED on the shape's edge, so half of it falls outside
-  // the rectangle; the island's surface IS the rectangle, so its half is
-  // clipped. One pixel ring, same colour.
-  //
-  // This is what makes the C76 first-frame digest's re-recorded value a
-  // statement about the pill and nothing else.
-  size_t outsideChanged = 0;
-  UINT minX = 99999, minY = 99999, maxX = 0, maxY = 0;
-  if (PRISM_CHECK(offFrame.width == onFrame.width && offFrame.height == onFrame.height)) {
-    for (UINT y = 0; y < offFrame.height; ++y) {
-      for (UINT x = 0; x < offFrame.width; ++x) {
-        const bool inPill = x + 1 >= rect.x && x <= rect.x + rect.w && y + 1 >= rect.y &&
-                            y <= rect.y + rect.h;
-        if (inPill) continue;
-        if (offFrame.At(x, y) != onFrame.At(x, y)) {
-          ++outsideChanged;
-          minX = (std::min)(minX, x);
-          minY = (std::min)(minY, y);
-          maxX = (std::max)(maxX, x);
-          maxY = (std::max)(maxY, y);
-        }
-      }
-    }
-  }
-  std::printf("  pixels changed OUTSIDE the pill rect: %zu (bbox %u,%u-%u,%u)\n", outsideChanged,
-              minX, minY, maxX, maxY);
-  PRISM_CHECK(outsideChanged == 0);
+  std::printf("  glyph pixels in the path band: %d, of which the layer-off arm paints %d\n",
+              glyphPixels, glyphsOff);
+  PRISM_CHECK(glyphPixels > 50);
+  // Every glyph the window paints with the layer on is painted with it off too:
+  // the composition layer contributes no crumb ink (it has no surface to own).
+  PRISM_CHECK(glyphsOff * 100 >= glyphPixels * 90);
 }
 
 int main(int argc, char** argv) {

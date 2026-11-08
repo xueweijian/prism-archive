@@ -87,6 +87,70 @@ inline constexpr bool kNavPillYieldsToBand = false;
 inline constexpr bool kNavPillYieldsToBand = true;
 #endif
 
+// ==================================================== C123: THE TOP SEAM
+// THE DEFECT (measured at 125 %, DIP = device / 1.25; proposal 14.4/17.3):
+//
+//   | quantity                         | Bandizip | before C123 |
+//   |----------------------------------|----------|-------------|
+//   | centre of the OPEN button        | (32, 83) | (643, 138)  |
+//   | toolbar's top edge               | 50       | 117         |
+//   | toolbar's left edge              | flush    | 589 (a 964 wide floating island) |
+//   | breadcrumb text                  | --       | centred: container 28..718, text 234..495 -> 62.2 % dead air |
+//
+// THE CAUSE IS STRUCTURAL, not artistic: the breadcrumb pill lives INSIDE the
+// 56 px action band (NavPillRect), so the eight buttons must start to its
+// right -- actionbar::Compute anchors the first button at pill.right + 12.
+// A path display therefore owns the first 560 px of the row that the app's
+// primary affordance ("Open") needs. Two more bands (the 32 px tab strip and
+// the pill's own 56 px) pushed the row down to y = 117.
+//
+// THE FIX (three structural moves, no new panel, no new toolbar -- proposal
+// 16.4's iron rule):
+//   1. TABS ON DEMAND (proposal 17.2): TabBarShown() -- the 32 px strip exists
+//      only while a SECOND archive is open. One archive is the migration
+//      user's first state and the strip there is pure cost: 0 px of chrome.
+//   2. THE CRUMB LEAVES THE BAND: it becomes a 28 px PATH BAR on its own row
+//      under the toolbar (kBreadcrumbBarHeight), left-aligned at
+//      contentBand.left + kContentPadding -- a path, not a second button group.
+//   3. THE TOOLBAR GOES FLUSH AND FULL-WIDTH: its left and right edges ARE the
+//      content band's (ToolbarBandRect), so the first button's centre lands at
+//      52 rather than 643 and the row reads as the same solid strip Bandizip
+//      has.
+//
+// WHY compute a SEPARATE layout function (ComputeC123) instead of moving
+// Compute() itself: Compute() is the pinned geometry of twenty pre-C123
+// suites (v1/v2/v4, C60, C66, C78, C92, C100, C115, C120...). Their scenes are
+// floating-island compositions and stay byte-identical; the WINDOW migrates.
+// The one shared truth is still this header: Layout::chrome says which
+// composition a rectangle belongs to, and both the renderer and the action-bar
+// model branch on it -- never on a copy of the numbers.
+//
+// C115 IS NOT TOUCHED. NavPillRect still yields width to the action island's
+// floor, and the legacy composition still uses it. What changes is who ASKS:
+// a C123 layout publishes no pill (Layout::crumbBar instead), so the narrow
+// window can no longer put one on top of the toolbar at all. The C115 rule
+// remains the law for a composition that still has a pill in the band.
+//
+// NEGATIVE CONTROL (CONTRACTS D3/D26/D27):
+//   PRISM_C123_MUTANT_FLOATING_TOOLBAR -> ToolbarBandRect returns the PRE-CARD
+//   floating island (pill.right + kNavActionGap .. band.right - kContentPadding)
+//   instead of the band, i.e. the 589-start / 964-wide rectangle the audit
+//   photographed. T2 (the Open button's centre) and T3 (flush edges) MUST go
+//   red in that build; the arm prints "C123 MUTATION CAUGHT: floating_toolbar"
+//   from the FIRST failing assertion and leaves 0, and the CTest entry decides
+//   with PASS_REGULAR_EXPRESSION -- never WILL_FAIL.
+#if defined(PRISM_C123_MUTANT_FLOATING_TOOLBAR)
+inline constexpr bool kToolbarSpansBand = false;
+#else
+inline constexpr bool kToolbarSpansBand = true;
+#endif
+
+// The runtime proof the arm really compiled in (D3): a macro that stopped
+// matching would leave the mutant green while its CTest entry stayed red.
+inline constexpr std::string_view ActiveC123Mutation() {
+  return kToolbarSpansBand ? std::string_view{} : std::string_view{"floating_toolbar"};
+}
+
 
 // The runtime proof each mutant is REALLY armed (D3: a macro that stopped
 // matching would leave the mutant green and its WILL_FAIL entry red forever).
@@ -129,6 +193,24 @@ inline constexpr int kFallbackRowHeight = 32;  // P0-2: the row a tile-less item
 inline constexpr int kNavPillHeight = 44;
 inline constexpr int kNavPillMaxWidth = 560;
 inline constexpr int kNavTextInset = 24;
+// C123: the breadcrumb is a PATH BAR, not a pill (proposal 5.2/17.3). 28 is the
+// type scale's own line height (4.2: "面包屑 13 / 400 / 28"), so the row is
+// exactly one line of crumb text plus the 2 px current-segment rule (16.3's
+// "一线") -- no pill, no 44 px island.
+inline constexpr int kBreadcrumbBarHeight = 28;
+// The path starts at the content band's left edge + 16 (proposal 17.3: "左对齐
+// 到内容区 +16（不是居中）"), which is the same 16 the content's own padding
+// uses -- one number, so the crumb's first glyph lines up with the list header
+// below it.
+inline constexpr int kBreadcrumbInset = kContentPadding;
+// The 2 px rule under the crumb you are standing on. It is the "seam" token of
+// 16.3 applied to a fifth semantic position (the other four are the selected
+// row's left bar, the tab underline, the focus ring and the breadcrumb's own
+// current segment).
+inline constexpr int kBreadcrumbUnderlineHeight = 2;
+// C123 (proposal 17.2): the strip appears only when a SECOND archive is open.
+// One archive -- the state every migrating user starts in -- keeps 0 px.
+inline constexpr int kTabBarMinArchives = 2;
 // ------------------------------------------------- C115: the band's two tenants
 // The 56 px band holds the breadcrumb pill (left) and the action island (right).
 // They cannot both have their full width: 16 (inset) + 560 (pill) + 12 (gap) +
@@ -230,20 +312,54 @@ inline std::ostream& operator<<(std::ostream& os, CellKind kind) {
   return os << "?";
 }
 
+// C123: WHICH composition a Layout describes. The rectangles mean the same
+// thing in both (they come from the same function), but the CHROME differs:
+//   V1   -- the breadcrumb pill lives in the action band (NavPillRect), the
+//           toolbar is the eight buttons to its right. Every pre-C123 scene.
+//   C123 -- no pill: the toolbar spans the band, and the crumb is a 28 px path
+//           bar under it (crumbBar). The window composes THIS one.
+// Consumers (the renderer, actionbar::Compute, GalleryWindow) branch on this
+// field instead of keeping a second copy of the numbers.
+enum class Chrome : std::uint8_t { V1, C123 };
+
+inline std::ostream& operator<<(std::ostream& os, Chrome chrome) {
+  switch (chrome) {
+    case Chrome::V1: return os << "V1";
+    case Chrome::C123: return os << "C123";
+  }
+  return os << "?";
+}
+
 struct Layout {
   int windowW = 0;
   int windowH = 0;
   bool sidebarVisible = false;
   bool listMode = false;
+  Chrome chrome = Chrome::V1;
 
   // Siblings: these six tile the window and are pairwise disjoint.
   Rect titleBar;
   // C60: empty (and tabBarVisible false) when no archive is open.
+  // C123: also empty until a SECOND archive is open (TabBarShown).
   Rect tabBar;
   bool tabBarVisible = false;
   Rect actionIsland;
+  // C123: the toolbar proper. It is the actionIsland rectangle in both
+  // compositions; the separate field exists because "the band the toolbar is
+  // painted in" is what T3 measures, and a caller should not have to know that
+  // the band predates the toolbar.
+  Rect toolbar;
+  // C123: the 28 px breadcrumb path bar (empty in V1, where the crumb is the
+  // pill inside actionIsland). It sits BETWEEN the toolbar and the content.
+  Rect crumbBar;
   Rect sidebar;      // empty when collapsed
   Rect content;      // starts at sidebar.right
+  // C123: the FULL-WIDTH band that holds the rail and the list. It is the
+  // window's 内容区: the toolbar and the crumb bar are measured against ITS left
+  // and right edges (T3/T4), and it is what "通栏" means. In V1 it equals
+  // content (the rail reserves width inside it), so a caller may read it
+  // unconditionally.
+  Rect contentBand;
   Rect statusBar;
   // Child of content (inset by kContentPadding).
   Rect contentInner;
@@ -273,14 +389,31 @@ inline bool RailVisible(bool userWantsRail, bool listMode) {
   return kRailInGridMode ? true : listMode;
 }
 
-// The complete geometry of the main window for one client size.
-inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMode,
-                      bool tabBarVisible = false) {
+// C123 (proposal 17.2): the tab strip is CHROME THAT MUST EARN ITS 32 px.
+// One archive is the migration user's first and most common state; a strip that
+// shows a single tab there costs 32 px and buys nothing ("1 个包时 0 像素
+// chrome"). Two is the first count at which the strip answers a question the
+// window cannot ("which of these am I looking at"). The predicate is a function
+// -- not "`size() >= 2`` spelled at the call site -- so the paint, the hit test
+// and the layout cannot disagree about when the band exists.
+inline constexpr bool TabBarShown(int openArchives) {
+  return openArchives >= kTabBarMinArchives;
+}
+
+namespace detail {
+
+// ONE implementation for both compositions. 'c123' selects the C123 chrome
+// (the crumb's own 28 px row, no pill); everything else -- the bands above the
+// content, the rail's reservation, the grid metrics -- is the same arithmetic,
+// so the two layouts can never drift apart on the parts that did not change.
+inline Layout ComputeChrome(int windowW, int windowH, bool sidebarVisible, bool listMode,
+                            bool tabBarVisible, bool c123, bool breadcrumbVisible) {
   Layout l;
   l.windowW = (std::max)(0, windowW);
   l.windowH = (std::max)(0, windowH);
   l.sidebarVisible = sidebarVisible;
   l.listMode = listMode;
+  l.chrome = c123 ? Chrome::C123 : Chrome::V1;
   l.tabBarVisible = tabBarVisible;
 
   const int w = l.windowW;
@@ -303,7 +436,18 @@ inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMo
   // action island up to y = 0 and give it the title band's 32 px as well.)
   const int islandTop = l.tabBar.Empty() ? l.titleBar.bottom : l.tabBar.bottom;
   l.actionIsland = Rect{0, islandTop, w, (std::min)(topBand, h)};
-  const int contentTop = l.actionIsland.bottom;
+  l.toolbar = l.actionIsland;
+  // C123: the crumb's own row, between the toolbar and the content. It is
+  // HIDDEN, not empty, when there is no path to show (the same rule C60 gave
+  // the strip): a band that keeps its 28 px while painting nothing is dead air
+  // above every archive-less window.
+  const int crumbTop = l.actionIsland.bottom;
+  const int crumbHeight =
+      (c123 && breadcrumbVisible)
+          ? (std::min)(kBreadcrumbBarHeight, (std::max)(0, h - crumbTop))
+          : 0;
+  l.crumbBar = crumbHeight > 0 ? Rect{0, crumbTop, w, crumbTop + crumbHeight} : Rect{};
+  const int contentTop = crumbTop + crumbHeight;
   const int statusTop = (std::max)(contentTop, h - kStatusBarHeight);
 
   // The rail is PAINTED whenever it is visible, but it only RESERVES width when
@@ -313,6 +457,11 @@ inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMo
   const int railWidth = sidebarVisible ? (std::min)(kSidebarWidth, w) : 0;
   l.sidebar = sidebarVisible ? Rect{0, contentTop, railWidth, statusTop} : Rect{};
   l.content = Rect{reserve ? railWidth : 0, contentTop, w, statusTop};
+  // In V1 the content band IS the content column: the rail is its left edge, so
+  // "the window's content area" and "the list's rectangle" are the same thing.
+  // C123 separates them: the band spans the window (that is what the toolbar
+  // and the crumb bar align to) and the rail is a child of it.
+  l.contentBand = c123 ? Rect{0, contentTop, w, statusTop} : l.content;
   l.statusBar = Rect{0, statusTop, w, h};
   l.contentInner = Inset(l.content, kContentPadding);
 
@@ -324,6 +473,27 @@ inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMo
   l.tileWidth = (std::min)(tile, kMaxTileWidth);
   l.cellHeight = (std::max)(kMinCellHeight, l.tileWidth + kTileLabelHeight + l.gap);
   return l;
+}
+
+}  // namespace detail
+
+// The complete geometry of the main window for one client size (V1
+// composition: the breadcrumb pill shares the 56 px band with the toolbar).
+inline Layout Compute(int windowW, int windowH, bool sidebarVisible, bool listMode,
+                      bool tabBarVisible = false) {
+  return detail::ComputeChrome(windowW, windowH, sidebarVisible, listMode, tabBarVisible,
+                               /*c123=*/false, /*breadcrumbVisible=*/false);
+}
+
+// C123: the SAME window, with the top seam fixed. The toolbar is a full-width
+// band, the crumb is a 28 px path bar under it, and the tab strip appears only
+// from the second archive on. 'openArchives' is the TabSet's size (not a bool):
+// "is the strip shown" is a rule about a COUNT (TabBarShown), and a caller that
+// hands in a count cannot disagree with the rule.
+inline Layout ComputeC123(int windowW, int windowH, bool sidebarVisible, bool listMode,
+                          int openArchives, bool breadcrumbVisible = true) {
+  return detail::ComputeChrome(windowW, windowH, sidebarVisible, listMode,
+                               TabBarShown(openArchives), /*c123=*/true, breadcrumbVisible);
 }
 
 // ------------------------------------------------------------ item geometry
@@ -834,6 +1004,65 @@ inline Rect NavTextRect(const Layout& layout) {
   // to click", not as a box running backwards through the toolbar.
   const int inset = (std::min)(kNavTextInset, (std::max)(0, pill.Width() / 2));
   return Rect{pill.left + inset, pill.top + 10, pill.right - inset, pill.bottom - 10};
+}
+
+// ============================================== C123: the toolbar's rectangle
+// WHERE the eight buttons live. In the V1 composition (and in the pre-C123
+// window the audit photographed) the toolbar is the pill's right-hand
+// neighbour: the first button starts at pill.right + 12, which is where the
+// 643 px came from. Under C123 it is the band itself, edge to edge, so its left
+// and right edges ARE the content band's -- "贴边通栏".
+//
+// The D3 control returns the pre-card floating island instead (the 589-start /
+// 964-wide rectangle in 14.4), which is why T2 and T3 go red in that build.
+inline Rect ToolbarBandRect(const Layout& layout) {
+  const Rect band = layout.toolbar;
+  if (band.Empty()) return Rect{};
+  if (kToolbarSpansBand) return band;
+  // MUTANT (floating_toolbar): the pill keeps its full width and the toolbar
+  // is pushed to its right, inset 16 from the band's right edge.
+  const Rect pill = NavPillRect(layout);
+  const int left = (std::min)(band.right, pill.right + kNavActionGap);
+  const int right = (std::max)(left, band.right - kContentPadding);
+  return Rect{left, band.top, right, band.bottom};
+}
+
+// ============================================= C123: the breadcrumb path bar
+// The text box of the path bar: left-aligned to the content band + 16 (proposal
+// 17.3) and 18 px tall inside the 28 px row -- one line of 13 px type with the
+// 2 px rule's room under it.
+//
+// This is the ONE answer to "where does the crumb start". The window's hit test
+// and the renderer's text run both read it, so a click can never land on a
+// glyph the user is not looking at. It replaces the CENTRED box
+// (LayoutCenteredBreadcrumb): centring put the first glyph at 234 while the
+// container started at 28 -- 62.2 % of the row was dead air and the left edge
+// drifted with the path's length.
+inline constexpr int kCrumbTextInsetY = 3;
+
+inline Rect CrumbTextRect(const Layout& layout) {
+  const Rect bar = layout.crumbBar;
+  if (bar.Empty()) return Rect{};
+  const int left = layout.contentBand.left + kBreadcrumbInset;
+  // A window narrower than 2 * the inset would invert the box; the floor keeps
+  // it a degenerate (empty) rectangle instead of a backwards one.
+  const int right = (std::max)(left, layout.contentBand.right - kBreadcrumbInset);
+  const int top = bar.top + kCrumbTextInsetY;
+  const int bottom = (std::max)(top, bar.bottom - kCrumbTextInsetY);
+  return Rect{left, top, right, bottom};
+}
+
+// The 2 px rule under the CURRENT segment: the "一线" token (16.3), painted on
+// the crumb's own bottom edge and clamped to the bar. A segment that was
+// clipped away (or an empty one) yields an empty rect -- never a 2 px dash at
+// the start of the bar.
+inline Rect CrumbUnderlineRect(const Layout& layout, int spanLeft, int spanRight) {
+  const Rect bar = layout.crumbBar;
+  if (bar.Empty() || spanRight <= spanLeft) return Rect{};
+  const int left = (std::max)(bar.left, (std::min)(spanLeft, bar.right));
+  const int right = (std::max)(left, (std::min)(spanRight, bar.right));
+  if (right <= left) return Rect{};
+  return Rect{left, bar.bottom - kBreadcrumbUnderlineHeight, right, bar.bottom};
 }
 
 // Quick Look: a card anchored to the content's top-right corner.

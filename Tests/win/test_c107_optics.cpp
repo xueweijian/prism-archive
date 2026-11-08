@@ -90,6 +90,13 @@ bool g_injectionRan = false;
 bool g_skipped = false;
 std::string g_skipReason;
 
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+// CONTRACTS D3: the pill island C123 deleted comes back, so this suite's
+// "the window publishes no island" checks MUST go red. Set where the product
+// reports it, read by the verdict predicate at the first failure.
+bool g_pillIslandObserved = false;
+#endif
+
 // A real window whose content we control: the product's capture reads the
 // window's OWN surface, so a test that painted into a lookalike bitmap would
 // not be testing the capture at all.
@@ -772,41 +779,35 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
   PRISM_CHECK(window.GlassOpticsError().empty());
   PRISM_CHECK_EQ(window.GlassOpticsInitializations(), 1);
 
-  // The island is the LAYOUT's breadcrumb pill -- the same rect the pill is
-  // painted and hit-tested with, not a fixed 960x48 at (0,0).
-  const prism::layout::Layout layout = prism::layout::Compute(
-      window.ClientWidthForTest(), window.ClientHeightForTest(),
-      /*sidebarVisible=*/true, /*listMode=*/false, window.TabBarVisible());
-  const prism::layout::Rect pill = prism::layout::NavPillRect(layout);
+  // C123 CHANGED THIS CASE (documented in the card's PR, one line per
+  // assertion): the island used to be the breadcrumb PILL. The pill is gone --
+  // the crumb is a 28 px path bar painted into the page -- so the product window
+  // now publishes NO island rectangle at all. Returning the legacy pill here
+  // would composite a blurred 44 px rectangle over the toolbar: a ghost of a
+  // control the user can no longer click. The contract this case now pins is
+  // exactly that absence.
   const prism::glass::IslandRect panel = window.GlassPanelRect();
-  std::printf("  island rect: %u,%u %ux%u (layout pill %d,%d %dx%d)\n", panel.x, panel.y, panel.w,
-              panel.h, pill.left, pill.top, pill.Width(), pill.Height());
-  PRISM_CHECK_EQ(panel.x, static_cast<uint32_t>(pill.left));
-  PRISM_CHECK_EQ(panel.y, static_cast<uint32_t>(pill.top));
-  PRISM_CHECK_EQ(panel.w, static_cast<uint32_t>(pill.Width()));
-  PRISM_CHECK_EQ(panel.h, static_cast<uint32_t>(pill.Height()));
-  // C115: the panel is the pill the LAYOUT publishes -- which is 560 px only on a
-  // client wide enough to hold the full pill beside a complete toolbar (>= 1184).
-  // This runner's default window is 1028 px wide, and there the pill is 404 px by
-  // design: the toolbar owns the rest of the band. Pinning the 560 constant here
-  // was pinning the pre-C115 disagreement, so the bound is now "never wider than
-  // V1's pill" and the identity above (panel == pill) carries the real meaning.
-  PRISM_CHECK(panel.w <= static_cast<uint32_t>(prism::layout::kNavPillMaxWidth));
-  PRISM_CHECK_EQ(panel.h, static_cast<uint32_t>(prism::layout::kNavPillHeight));
+  std::printf("  island rect: %u,%u %ux%u (C123: the crumb is a path bar, no island)\n",
+              panel.x, panel.y, panel.w, panel.h);
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  g_pillIslandObserved = panel.w != 0 || panel.h != 0;
+#endif
+  PRISM_CHECK_EQ(panel.x, 0u);
+  PRISM_CHECK_EQ(panel.y, 0u);
+  PRISM_CHECK_EQ(panel.w, 0u);
+  PRISM_CHECK_EQ(panel.h, 0u);
 
-  // Frames: the deferral presents on the second paint, so pump bounded (D29)
-  // and let the window's own WM_PAINT path drive PresentGlassFrame.
+  // Frames: pump bounded (D29) through the window's own WM_PAINT path. With no
+  // panel there is nothing to compose, so the chain must stay at frame 0 -- a
+  // non-zero count here would mean a phantom surface was still being fed.
   HWND hwnd = window.Hwnd();
-  const ULONGLONG deadline = GetTickCount64() + 5000;
-  while (window.GlassComposedFrames() == 0 && GetTickCount64() < deadline) {
+  const ULONGLONG deadline = GetTickCount64() + 1500;
+  while (GetTickCount64() < deadline) {
     MSG message;
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
       TranslateMessage(&message);
       DispatchMessageW(&message);
     }
-    // The window's own WM_PAINT path is the driver: Render() is private on
-    // purpose, and a test that called a second frame body would not be testing
-    // the frames the user gets.
     InvalidateRect(hwnd, nullptr, FALSE);
     UpdateWindow(hwnd);
     Sleep(10);
@@ -814,12 +815,9 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
   std::printf("  composed frames=%d, backdrop captures=%d, backdrop bytes=%zu, transient=%zu\n",
               window.GlassComposedFrames(), window.GlassBackdropCaptures(),
               window.GlassBackdropBytes(), window.GlassTransientBytes());
-  PRISM_CHECK(window.GlassComposedFrames() > 0);
-  PRISM_CHECK(window.GlassBackdropCaptures() > 0);
-  // The frame that reached the chain was fed with the captured backdrop.
-  PRISM_CHECK(window.GlassBackdropLive());
-  PRISM_CHECK(window.GlassLastFrameOptical());
-  PRISM_CHECK(window.GlassBackdropBytes() > 0);
+  PRISM_CHECK_EQ(window.GlassComposedFrames(), 0);
+  PRISM_CHECK_EQ(window.GlassBackdropCaptures(), 0);
+  PRISM_CHECK_EQ(window.GlassBackdropBytes(), static_cast<size_t>(0));
 }
 
 // The suite's own marker (D1): printed only when every check passed, with the
@@ -827,6 +825,11 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
 int main(int argc, char** argv) {
   // WIC (the screenshot encoder) is a COM server.
   const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  std::puts("C107 MUTANT ACTIVE: pill_island");
+  prism::test::SetMutationVerdict("C107 MUTATION CAUGHT: pill_island",
+                                  [] { return g_pillIslandObserved; });
+#endif
   const int code = prism::test::RunAll(argc, argv);
   if (SUCCEEDED(com)) CoUninitialize();
   if (code == 0) {

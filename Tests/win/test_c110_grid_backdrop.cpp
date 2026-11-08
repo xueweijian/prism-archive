@@ -259,8 +259,9 @@ struct Fixture {
     scene.items = &catalog;
     scene.layout = &layout;
     scene.breadcrumb = L"demo.zip  |  15 items  |  solid block 1/2";
-    scene.status.itemCount = static_cast<int>(catalog.size());
-    scene.status.ratioView = prism::CompressionRatioView(7'200'000, 2'412'678);
+    // C128: the band's three numbers -- the size is the packed total.
+    scene.status.fileCount = static_cast<int>(catalog.size());
+    scene.status.archiveBytes = 2'412'678;
   }
 
   // The item rectangles the RENDERER will paint, from the same layout + flow.

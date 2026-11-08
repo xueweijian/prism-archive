@@ -242,8 +242,9 @@ struct Fixture {
     scene.actions = &actions;
     scene.breadcrumb =
         L"Design_Assets_v4.7z  >  payload_text  >  2026-11  >  quarterly_reports  >  final";
-    scene.status.itemCount = static_cast<int>(catalog.size());
-    scene.status.ratioView = prism::CompressionRatioView(7'200'000, 2'412'678);
+    // C128: the band's three numbers -- the size is the packed total.
+    scene.status.fileCount = static_cast<int>(catalog.size());
+    scene.status.archiveBytes = 2'412'678;
     scene.glassPanels = true;
     scene.backdropRefraction = false;
   }

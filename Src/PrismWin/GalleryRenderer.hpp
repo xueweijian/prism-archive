@@ -1097,21 +1097,13 @@ class GalleryRenderer {
   void DrawStatusBar(ID2D1RenderTarget* target, const Scene& scene,
                      const prism::layout::Layout& layout) {
     if (!statusFormat_ || layout.statusBar.Empty()) return;
-    // C79: the counts are the scene's, unless the caller supplied them. Deriving
-    // them HERE keeps GalleryWindow's contract unchanged while still letting the
-    // snapshot and every list-mode frame show real numbers.
-    prism::layout::StatusInfo info = scene.status;
-    if (info.itemCount < 0) {
-      if (scene.listItems != nullptr) {
-        info.itemCount = static_cast<int>(scene.listItems->size());
-      } else if (scene.items != nullptr) {
-        info.itemCount = static_cast<int>(scene.items->size());
-      }
-    }
-    if (info.selectedCount < 0) {
-      info.selectedCount = ListModeActive(scene) ? (scene.selectedRow >= 0 ? 1 : 0)
-                                                  : (scene.selectedItem >= 0 ? 1 : 0);
-    }
+    // C128: the band's three numbers arrive WITH the scene -- the window derives
+    // them from the folder it is showing and the catalog it attached. The painter
+    // used to derive 条目 (from whatever vector the scene happened to carry) and
+    // 选中 here as a fallback, which is how the painted band and the announced
+    // one came to disagree about the same number (C86). There is nothing to
+    // derive now: a count is a fact the model owns, or the slot says "--".
+    const prism::layout::StatusInfo& info = scene.status;
     const std::vector<prism::layout::StatusSegment> segments =
         prism::layout::StatusSegments(layout, info);
     for (const prism::layout::StatusSegment& segment : segments) {
@@ -1126,23 +1118,11 @@ class GalleryRenderer {
         island_->SetColor(islandColor_);
         continue;
       }
-      float textLeft = rect.left;
-      if (segment.id == prism::layout::StatusId::Encryption) {
-        // A 6 px state dot: accent while encrypted, secondary while not, hollow
-        // while unknown. Colour is never the ONLY signal (the text says it too).
-        const D2D1_COLOR_F dot =
-            info.crypto == prism::layout::CryptoState::Encrypted
-                ? accentColor_
-                : (info.crypto == prism::layout::CryptoState::Unencrypted
-                       ? kTextSecondary
-                       : kIslandBorder);
-        const float cy = (rect.top + rect.bottom) * 0.5f;
-        island_->SetColor(dot);
-        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rect.left + 3.0f, cy), 3.0f, 3.0f),
-                            island_.Get());
-        island_->SetColor(islandColor_);
-        textLeft = rect.left + 12.0f;
-      }
+      // C128: no state dot. The dot was the encryption slot's -- accent while
+      // encrypted, hollow while unknown -- and the band no longer carries
+      // encryption at all (the info card does), so every slot is text starting at
+      // its own left edge.
+      const float textLeft = rect.left;
       // C86: the label is spelled ONCE (prism::layout::StatusSegmentLabel), so
       // the band and the accessibility tree cannot read differently.
       const std::string label = prism::layout::StatusSegmentLabel(segment);

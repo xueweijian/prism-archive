@@ -257,6 +257,10 @@ PRISM_TEST("win: switching the language rebuilds all eight band labels") {
   window.SetItems(&items);
   window.SetRootLabel(L"c74.7z");
   window.Dispatch(WM_SIZE, 0, MAKELPARAM(1280, 800));
+  // C128 (proposal 5.6): the card is folded by default (one line). This case is
+  // about the FOUR translated labels, so it asks for the expanded card -- the
+  // fold's own translation is the collapsed line (未加密 · 方法 · 比率).
+  window.SetInfoCardExpanded(true);
 
   // ---- 1. English --------------------------------------------------------
   window.ApplyLanguage(&TranslatorFor(L"en-US"));

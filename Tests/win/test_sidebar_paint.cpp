@@ -216,6 +216,11 @@ Layout BuildLayout(const std::vector<ArchiveItem>& items, float viewportHeight, 
   model.SetFocus(focus);
 
   Metrics metrics;
+  // C128 (proposal 5.6): the info card is folded by default. This suite's frames
+  // were authored against the EXPANDED card (and its "the renderer painted at
+  // least N primitives" floor counts the card's thirteen commands), so it asks
+  // for that state; the fold itself is asserted by win.c128_status.
+  metrics.infoCardExpanded = true;
   // V1: the rail's column width is DESIGN.md's 220 -- the SAME constant the
   // renderer's layout reserves. A literal here would be a second source.
   metrics.width = prism::win::gallery::GalleryRenderer::kSidebarColumnWidth;

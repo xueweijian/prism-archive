@@ -98,6 +98,7 @@ int ColorDistance(UINT32 a, UINT32 b) {
 
 struct Counters {
   int statusSegments = 0;
+  int statusValues = 0;  // C128: the value runs the band painted (one per slot)
   int sidebarPanels = 0;
   int rowCells = 0;
   int tileCells = 0;
@@ -160,6 +161,7 @@ bool Render64(IWICImagingFactory* wic, const prism::win::gallery::GalleryRendere
                 data + static_cast<size_t>(y) * stride, static_cast<size_t>(kWidth) * 4);
   }
   out->counters.statusSegments = renderer->dbgStatusSegments;
+  out->counters.statusValues = renderer->dbgStatusValues;
   out->counters.sidebarPanels = renderer->dbgSidebarPanels;
   out->counters.rowCells = renderer->dbgRowCells;
   out->counters.tileCells = renderer->dbgTileCells;
@@ -589,31 +591,24 @@ PRISM_TEST("v4.sidebar: the grid reserves the rail, collapse gives it back") {
 }
 
 // ---------------------------------------------------------------------------
-// 4. the status bar: two clusters (C79), four DESIGN states
+// 4. the status bar: THREE numbers (C128)
 // ---------------------------------------------------------------------------
-PRISM_TEST("v4.status: two clusters with the four DESIGN states") {
+PRISM_TEST("v4.status: three numbers, the report's labels") {
   const Layout layout = prism::layout::Compute(static_cast<int>(kWidth),
                                                static_cast<int>(kHeight), true, false);
-  // State 1: not encrypted.
-  prism::layout::StatusInfo clear;
-  clear.crypto = prism::layout::CryptoState::Unencrypted;
-  clear.method = "LZMA2";
-  clear.dictionary = "字典 64 MB";
-  clear.ratioPercent = 87;
-  PRISM_CHECK_EQ(prism::layout::CryptoText(clear), std::string_view("未加密"));
-  // C79: TWO clusters -- left (encryption/method/dictionary), then the
-  // right-aligned counts and ratio. The vector is in VISUAL order.
-  // C105 (plan 3.2): the 1 px Divider between the clusters is GONE -- the band
-  // separates them with air, not with a rule -- so the vector is six segments
-  // and no StatusId::Divider may appear at all.
-  auto segments = prism::layout::StatusSegments(layout, clear);
-  PRISM_CHECK_EQ(static_cast<int>(segments.size()), 6);
-  PRISM_CHECK_EQ(segments[0].id, prism::layout::StatusId::Encryption);
-  PRISM_CHECK_EQ(segments[1].id, prism::layout::StatusId::Method);
-  PRISM_CHECK_EQ(segments[2].id, prism::layout::StatusId::Dictionary);
-  PRISM_CHECK_EQ(segments[3].id, prism::layout::StatusId::ItemCount);
-  PRISM_CHECK_EQ(segments[4].id, prism::layout::StatusId::SelectedCount);
-  PRISM_CHECK_EQ(segments[5].id, prism::layout::StatusId::Ratio);
+  // C128 (proposal 5.5): the band answers "what am I looking at" with the
+  // CURRENT FOLDER's counts and the archive's packed size. The four DESIGN states
+  // this test used to walk (常规/加密/未知方法/压缩中) were the INFO CARD's states,
+  // printed a second time; they live on the card now (C105/C128).
+  prism::layout::StatusInfo info;
+  info.fileCount = 14;
+  info.folderCount = 2;
+  info.archiveBytes = 2 * 1024 * 1024;  // "2.0 MB"
+  auto segments = prism::layout::StatusSegments(layout, info);
+  PRISM_CHECK_EQ(static_cast<int>(segments.size()), 3);
+  PRISM_CHECK_EQ(segments[0].id, prism::layout::StatusId::FileCount);
+  PRISM_CHECK_EQ(segments[1].id, prism::layout::StatusId::FolderCount);
+  PRISM_CHECK_EQ(segments[2].id, prism::layout::StatusId::ArchiveSize);
   for (const auto& segment : segments) {
     PRISM_CHECK(layout.statusBar.Contains(segment.rect));
     PRISM_CHECK(segment.id != prism::layout::StatusId::Divider);
@@ -624,55 +619,48 @@ PRISM_TEST("v4.status: two clusters with the four DESIGN states") {
     PRISM_CHECK(!segments[i].rect.Intersects(segments[i + 1].rect));
     PRISM_CHECK(segments[i].rect.right < segments[i + 1].rect.left);
   }
-  PRISM_CHECK_EQ(segments[1].text, std::string_view("LZMA2"));
-  PRISM_CHECK_EQ(segments[2].text, std::string_view("字典 64 MB"));
-  PRISM_CHECK_EQ(segments[5].text, std::string_view("压缩率"));
-  PRISM_CHECK_EQ(segments[5].value, 87);
-
-  // State 2: encrypted.
-  prism::layout::StatusInfo encrypted = clear;
-  encrypted.crypto = prism::layout::CryptoState::Encrypted;
-  PRISM_CHECK_EQ(prism::layout::CryptoText(encrypted), std::string_view("已加密"));
-
-  // State 3: the method is unknown (an engine that answered nothing).
-  prism::layout::StatusInfo unknown = clear;
-  unknown.method = {};
-  unknown.dictionary = {};
-  unknown.ratioPercent = -1;
+  PRISM_CHECK_EQ(segments[0].text, std::string_view("文件:"));
+  PRISM_CHECK_EQ(segments[0].valueText, std::string("14"));
+  PRISM_CHECK_EQ(segments[1].text, std::string_view("文件夹:"));
+  PRISM_CHECK_EQ(segments[1].valueText, std::string("2"));
+  PRISM_CHECK_EQ(segments[2].text, std::string_view("压缩包大小:"));
+  PRISM_CHECK_EQ(segments[2].valueText, std::string("2.0 MB"));
+  // The card's three words are on the CARD, not on the band.
+  for (const auto& segment : segments) {
+    const std::string label = prism::layout::StatusSegmentLabel(segment);
+    PRISM_CHECK(label.find("加密") == std::string::npos);
+    PRISM_CHECK(label.find("方法") == std::string::npos);
+    PRISM_CHECK(label.find("字典") == std::string::npos);
+  }
+  // A count the model did not report is "--", never a fabricated 0.
+  prism::layout::StatusInfo unknown;
   auto unknownSegments = prism::layout::StatusSegments(layout, unknown);
-  PRISM_CHECK_EQ(unknownSegments[1].text, std::string_view("方法未知"));
-  PRISM_CHECK_EQ(unknownSegments[2].text, std::string_view("字典未知"));
-  PRISM_CHECK_EQ(unknownSegments[5].value, -1);
-
-  // State 4: compressing.
-  prism::layout::StatusInfo compressing = clear;
-  compressing.compressing = true;
-  auto compressingSegments = prism::layout::StatusSegments(layout, compressing);
-  PRISM_CHECK_EQ(compressingSegments[5].text, std::string_view("压缩中…"));
-  PRISM_CHECK_EQ(compressingSegments[5].value, -1);
+  PRISM_CHECK_EQ(unknownSegments[0].valueText, std::string("--"));
+  PRISM_CHECK_EQ(unknownSegments[1].valueText, std::string("--"));
+  PRISM_CHECK_EQ(unknownSegments[2].valueText, std::string("--"));
 }
 
-PRISM_TEST("v4.status: the band is no longer empty at the device") {
+PRISM_TEST("v4.status: the band paints its three numbers at the device") {
   IWICImagingFactory* wic = gWic;
   if (!PRISM_CHECK(wic != nullptr)) return;
   const Layout layout = prism::layout::Compute(static_cast<int>(kWidth),
                                                static_cast<int>(kHeight), true, false);
 
-  prism::layout::StatusInfo encrypted;
-  encrypted.crypto = prism::layout::CryptoState::Encrypted;
-  encrypted.method = "LZMA2";
-  encrypted.dictionary = "字典 64 MB";
-  encrypted.ratioPercent = 87;
+  prism::layout::StatusInfo info;
+  info.fileCount = 14;
+  info.folderCount = 2;
+  info.archiveBytes = 2 * 1024 * 1024;
 
   std::vector<prism::ArchiveItem> archive = TextCatalog();
   prism::win::gallery::GalleryRenderer::Scene scene = GridScene(&archive, nullptr);
-  scene.status = encrypted;
+  scene.status = info;
   Render painted;
   if (!PRISM_CHECK(Render64(wic, scene, &painted))) return;
-  // C79: six TEXT segments (the Divider is painted but is not a text run).
-  PRISM_CHECK_EQ(painted.counters.statusSegments, 6);
+  // C128: three TEXT segments and three VALUE runs -- a number per slot.
+  PRISM_CHECK_EQ(painted.counters.statusSegments, 3);
+  PRISM_CHECK_EQ(painted.counters.statusValues, 3);
 
-  const auto segments = prism::layout::StatusSegments(layout, encrypted);
+  const auto segments = prism::layout::StatusSegments(layout, info);
   // The band's own fill, sampled left of the first segment (never on a glyph).
   const UINT32 bandFill = painted.frame.At(layout.statusBar.left + 4,
                                            layout.statusBar.top + 14);
@@ -680,19 +668,18 @@ PRISM_TEST("v4.status: the band is no longer empty at the device") {
     PRISM_CHECK(InkPixels(painted.frame, segment.rect, bandFill) > 8);
   }
 
-  // 未加密 must look different from 已加密 in the encryption segment (the text
-  // and the state dot both change).
-  prism::layout::StatusInfo clear = encrypted;
-  clear.crypto = prism::layout::CryptoState::Unencrypted;
-  prism::win::gallery::GalleryRenderer::Scene clearScene = scene;
-  clearScene.status = clear;
-  Render clearFrame;
-  if (!PRISM_CHECK(Render64(wic, clearScene, &clearFrame))) return;
+  // A count is a NUMBER ON SCREEN: changing it moves THIS slot's pixels.
+  prism::layout::StatusInfo changed = info;
+  changed.fileCount = 3;
+  prism::win::gallery::GalleryRenderer::Scene changedScene = scene;
+  changedScene.status = changed;
+  Render changedFrame;
+  if (!PRISM_CHECK(Render64(wic, changedScene, &changedFrame))) return;
   int differing = 0;
   const Rect box = segments[0].rect;
   for (int y = box.top; y < box.bottom; ++y) {
     for (int x = box.left; x < box.right; ++x) {
-      if (painted.frame.At(x, y) != clearFrame.frame.At(x, y)) ++differing;
+      if (painted.frame.At(x, y) != changedFrame.frame.At(x, y)) ++differing;
     }
   }
   PRISM_CHECK(differing > 6);

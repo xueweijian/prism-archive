@@ -323,6 +323,10 @@ void BuildRig(SceneRig* rig) {
   rig->metrics.width = GalleryRenderer::kSidebarColumnWidth;
   rig->metrics.viewportTop = static_cast<float>(rig->frame.content.top);
   rig->metrics.viewportBottom = static_cast<float>(rig->frame.content.bottom);
+  // C128: the card is FOLDED by default. This suite is the EXPANDED card's
+  // geometry (four label/value rows and the bar's own row), so it asks for the
+  // expanded state explicitly; the fold itself is asserted by win.c128_status.
+  rig->metrics.infoCardExpanded = true;
   rig->sidebar = prism::win::sidebar::Build(rig->model, rig->metrics);
   rig->tabs.items = {{L"Design_Assets_v4.7z", false}, {L"Brand_2026.7z", true}};
   rig->tabs.active = 0;
@@ -336,13 +340,11 @@ void BuildRig(SceneRig* rig) {
   scene.layout = &rig->frame;
   scene.sidebar = &rig->sidebar;
   scene.tabs = &rig->tabs;
-  scene.status.crypto = prism::layout::CryptoState::Encrypted;
-  scene.status.method = "LZMA2";
-  scene.status.dictionary = "64.0 MB";
-  scene.status.ratioPercent = 54;
-  scene.status.ratioView = "53.6%";
-  scene.status.itemCount = 6;
-  scene.status.selectedCount = 1;
+  // C128: the band reads three numbers now -- the CURRENT FOLDER's counts (6
+  // rows in this scene) and the archive's packed bytes (32000 + 21600).
+  scene.status.fileCount = 6;
+  scene.status.folderCount = 3;
+  scene.status.archiveBytes = 53600;
 }
 
 // ------------------------------------------------------------------- PNG
@@ -513,8 +515,10 @@ void CheckStatusGaps(const prism::layout::Layout& frame,
   }
   std::printf("C105 STATUS GAPS: segments=%zu tightestGap=%d dividers=%d\n", segments.size(),
               tightest, dividers);
-  if (segments.size() < 6) {
-    Fail("the status band laid out fewer than six segments");
+  // C128: the band is three slots (文件 / 文件夹 / 压缩包大小). Fewer than three
+  // means a slot vanished; more means the card's words came back.
+  if (segments.size() < 3) {
+    Fail("the status band laid out fewer than three segments");
   }
   if (tightest < 16) {
     char message[160];
@@ -547,13 +551,16 @@ void CheckBandHasNoVerticalRule(const Frame& frame, const prism::layout::Layout&
   const int height = y1 - y0;
   // The empty middle of the band (the clusters leave >= 40 % blank): a point
   // that is provably the band's own fill, not a glyph.
+  // C128: the two COUNTS sit in the band's left cluster and the archive SIZE is
+  // right-aligned, so the "empty middle" this check samples is the air between
+  // the folder slot and the size slot.
   const std::vector<prism::layout::StatusSegment> segments =
       prism::layout::StatusSegments(band, info);
   int leftEnd = band.statusBar.left;
   int rightStart = band.statusBar.right;
   for (const prism::layout::StatusSegment& segment : segments) {
-    if (segment.id == prism::layout::StatusId::Dictionary) leftEnd = segment.rect.right;
-    if (segment.id == prism::layout::StatusId::ItemCount && segment.rect.left < rightStart) {
+    if (segment.id == prism::layout::StatusId::FolderCount) leftEnd = segment.rect.right;
+    if (segment.id == prism::layout::StatusId::ArchiveSize && segment.rect.left < rightStart) {
       rightStart = segment.rect.left;
     }
   }
@@ -590,33 +597,32 @@ void CheckBandTwoTone(const Frame& frame, const GalleryRenderer& renderer,
                       const prism::layout::StatusInfo& info) {
   const std::vector<prism::layout::StatusSegment> segments =
       prism::layout::StatusSegments(band, info);
-  const prism::layout::StatusSegment* ratio = nullptr;
-  for (const prism::layout::StatusSegment& segment : segments) {
-    if (segment.id == prism::layout::StatusId::Ratio) ratio = &segment;
-  }
+  // C128: the LAST slot is the archive size ("压缩包大小: 52.3 KB"); it is the one
+  // the painter's last value run belongs to, exactly as the ratio slot was.
+  const prism::layout::StatusSegment* last = segments.empty() ? nullptr : &segments.back();
   std::printf("C105 BAND TONE: valueRuns=%d lastValueLeft=%.1f\n", renderer.dbgStatusValues,
               static_cast<double>(renderer.dbgLastStatusValueLeft));
   if (renderer.dbgStatusValues < 3) {
     Fail("fewer than three status values were painted in the primary role");
     return;
   }
-  if (ratio == nullptr) {
-    Fail("the status band has no ratio segment to measure");
+  if (last == nullptr) {
+    Fail("the status band has no last segment to measure");
     return;
   }
   const int valueLeft = static_cast<int>(renderer.dbgLastStatusValueLeft);
-  if (valueLeft <= ratio->rect.left || valueLeft >= ratio->rect.right) {
-    Fail("the ratio value was painted outside its own segment");
+  if (valueLeft <= last->rect.left || valueLeft >= last->rect.right) {
+    Fail("the last status value was painted outside its own segment");
     return;
   }
   int labelMax = 0;
   int valueMax = 0;
-  for (int y = ratio->rect.top; y < ratio->rect.bottom; ++y) {
-    for (int x = ratio->rect.left; x < valueLeft - 2; ++x) {
+  for (int y = last->rect.top; y < last->rect.bottom; ++y) {
+    for (int x = last->rect.left; x < valueLeft - 2; ++x) {
       if (!frame.In(x, y)) continue;
       labelMax = (std::max)(labelMax, frame.Luminance(x, y));
     }
-    for (int x = valueLeft; x < ratio->rect.right; ++x) {
+    for (int x = valueLeft; x < last->rect.right; ++x) {
       if (!frame.In(x, y)) continue;
       valueMax = (std::max)(valueMax, frame.Luminance(x, y));
     }

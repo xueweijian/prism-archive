@@ -141,7 +141,13 @@ using prism::win::benchframe::Seam;
 // == 164668/936624 (17.6%), the three preconditions above run first -- and
 // C112's own delta is confined to the pill (S3b: 0 pixels outside it).
 // 0af0b75bc5b12383 was a frame D2D had REJECTED and stays dead.
-uint64_t g_baselineDigest = 0x3c2271cbab6069a1ull;  // C112 + current main, 1264x741
+//
+// C128 re-recorded it: the info card folds to ONE line (the rail's bottom-left
+// corner is the rail's own surface again) and the status band carries three
+// numbers instead of six words. Same scene, same success: painted
+// == 247539/936624 (26.4%), outside_island_diff == 0. Measured with
+// "c76_bench_startup --shaders <build>/Assets/Shaders", never copied.
+uint64_t g_baselineDigest = 0x791ab21f8cbf4153ull;  // C128 + current main, 1264x741
 // The digest is a function of the CLIENT SIZE (the layout is width-driven), so
 // the equality is only meaningful at the geometry it was recorded at. On another
 // display the bench prints the digest and says so instead of pretending a

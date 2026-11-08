@@ -1185,10 +1185,10 @@ int main(int argc, char** argv) {
     sceneChrome.layout = &chromeFrame;
     sceneChrome.sidebar = &chromeSidebar;
     sceneChrome.tabs = &chromeTabs;
-    sceneChrome.status.crypto = prism::layout::CryptoState::Encrypted;
-    sceneChrome.status.method = "LZMA2";
-    sceneChrome.status.dictionary = "64.0 MB";
-    sceneChrome.status.ratioPercent = 54;
+    // C128: the band's three numbers (the card's words are not on it).
+    sceneChrome.status.fileCount = 7;
+    sceneChrome.status.folderCount = 2;
+    sceneChrome.status.archiveBytes = 53600;
 
     std::vector<UINT32> frameChrome;
     renderScene(sceneChrome, L"prism_chrome.png", &frameChrome);
@@ -1530,27 +1530,25 @@ int main(int argc, char** argv) {
         }
       }
 
-      // (2) STATUS BAR: the two clusters leave at least 40% of the band blank
-      // in the middle, and that middle carries no ink except the 1 px divider.
+      // (2) STATUS BAR (C128): the two COUNT slots sit in the band's left cluster
+      // and the archive size is RIGHT-aligned, so the middle of the band is air
+      // and must stay ink-free. (This used to measure the six-slot band's two
+      // clusters; the words moved to the info card with card C128.)
       const std::vector<prism::layout::StatusSegment> chromeSegments =
           prism::layout::StatusSegments(chromeFrame, sceneChrome.status);
       int leftEnd = 0;
       int rightStart = chromeFrame.statusBar.Width();
-      int dividerX = -1;
       for (const auto& segment : chromeSegments) {
-        if (segment.id == prism::layout::StatusId::Dictionary) leftEnd = segment.rect.right;
-        if (segment.id == prism::layout::StatusId::ItemCount && segment.rect.left < rightStart) {
+        if (segment.id == prism::layout::StatusId::FolderCount) leftEnd = segment.rect.right;
+        if (segment.id == prism::layout::StatusId::ArchiveSize && segment.rect.left < rightStart) {
           rightStart = segment.rect.left;
-        }
-        if (segment.id == prism::layout::StatusId::Divider) {
-          dividerX = segment.rect.left;
         }
       }
       const int gap = rightStart - leftEnd;
       const double gapFraction =
           static_cast<double>(gap) / static_cast<double>(chromeFrame.statusBar.Width());
-      std::printf("C79 status clusters: leftEnd=%d rightStart=%d gap=%d (%.1f%%), divider=%d\n",
-                  leftEnd, rightStart, gap, gapFraction * 100.0, dividerX);
+      std::printf("C128 status slots: leftEnd=%d rightStart=%d gap=%d (%.1f%%)\n",
+                  leftEnd, rightStart, gap, gapFraction * 100.0);
       if (gapFraction < 0.40) {
         std::printf("FAIL: the clusters leave only %.1f%% blank (want >= 40%%)\n",
                     gapFraction * 100.0);
@@ -1560,7 +1558,8 @@ int main(int argc, char** argv) {
       const UINT32 bandFill = at(leftEnd + 4, chromeFrame.statusBar.top + 2);
       int inkInGap = 0;
       for (int x = leftEnd + 8; x < rightStart - 8; ++x) {
-        if (dividerX >= 0 && x >= dividerX - 2 && x <= dividerX + 2) continue;
+        // C128: no divider is painted in the middle any more, so every differing
+        // pixel there is ink the band should not have.
         if (at(x, statusY) != bandFill) ++inkInGap;
       }
       std::printf("C79 status gap ink: %d px\n", inkInGap);

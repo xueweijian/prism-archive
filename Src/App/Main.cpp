@@ -1141,6 +1141,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // C46: a restored archive opens in the view mode the session remembers for
   // THAT archive; a freshly opened one keeps C27's global last-view setting.
   window.SetListMode(haveRestoredView ? restoredView.listMode : windowState.listMode);
+  // C128 (proposal 5.6): the info card's fold comes from the settings document;
+  // a document that predates the key opens FOLDED (the shipped default), and the
+  // user's click at exit is what writes the expanded state back.
+  window.SetInfoCardExpanded(windowState.infoCardExpanded);
 
   // C76 segment: frame restore + sidebar store + sort/columns/view mode.
   c76.Add("view_state", "RestoreFrame+AttachSidebarStore+SetListMode", c76T, c76.NowMs() - c76T);
@@ -2359,6 +2363,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     finalState.maximized = closed.maximized;
   }
   finalState.listMode = window.ListMode();
+  // C128: the info card's fold travels with the session (window.infoCardExpanded).
+  finalState.infoCardExpanded = window.InfoCardExpanded();
   finalState.sort = window.SortSpec();
   finalState.columns = window.ListColumns();
   finalState.hasColumns = window.HasListColumns();

@@ -2283,6 +2283,13 @@ struct WindowState {
   bool hasSort = false;
   prism::list::ColumnLayout columns;
   bool hasColumns = false;
+  // C128 (proposal 5.6): the info card's FOLD. false is the shipped default --
+  // the card is one line until the user clicks it -- so a document that predates
+  // the key (every document written before this card) opens folded, and the
+  // first click writes the expanded state back explicitly. Lives beside
+  // listMode/columns as an extra key in the same document: the schema's
+  // unknown-key contract is what carries it (SettingsStore preserves it).
+  bool infoCardExpanded = false;
 };
 
 inline std::string SortKeyNameOf(prism::list::SortKey key) {
@@ -2327,6 +2334,9 @@ inline WindowState LoadWindowState(const prism::settings::SettingsStore& store) 
   // default IS the migration: every existing window opens in the list once,
   // and the next Ctrl+1 writes the grid back explicitly.
   state.listMode = store.GetBool("window.listMode", true);
+  // C128: the info card's fold, default FOLDED (the report's second defect was
+  // the card eating the rail's bottom-left corner by default).
+  state.infoCardExpanded = store.GetBool("window.infoCardExpanded", false);
   const std::string sortName = store.GetString("window.sort.key", "");
   prism::list::SortKey key = prism::list::SortKey::kName;
   if (!sortName.empty() && SortKeyFromName(sortName, &key)) {
@@ -2366,6 +2376,7 @@ inline void SaveWindowState(prism::settings::SettingsStore& store, const WindowS
   }
   store.SetBool("window.maximized", state.maximized);
   store.SetBool("window.listMode", state.listMode);
+  store.SetBool("window.infoCardExpanded", state.infoCardExpanded);
   if (!state.sort.keys.empty()) {
     store.SetString("window.sort.key", SortKeyNameOf(state.sort.keys.front().key));
     store.SetBool("window.sort.descending",

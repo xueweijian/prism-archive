@@ -522,16 +522,16 @@ PRISM_TEST("c86 the status band publishes every segment in visual order") {
   g_bandPublishedNoSegments = names.empty();
   std::printf("  [band] %zu segments:\n", names.size());
   for (const std::wstring& name : names) std::printf("    - %s\n", ToUtf8(name).c_str());
-  // THE CARD'S LIST, in the order the band paints it.
-  if (PRISM_CHECK_EQ(names.size(), static_cast<std::size_t>(6))) {
-    PRISM_CHECK(names[0] == std::wstring(L"未加密"));
-    PRISM_CHECK(names[1] == std::wstring(L"方法未知"));
-    PRISM_CHECK(names[2] == std::wstring(L"字典未知"));
-    PRISM_CHECK(names[3] == std::wstring(L"条目 14"));  // the ROOT rows
-    PRISM_CHECK(names[4] == std::wstring(L"选中 0"));
-    // 压缩率 has no engine number here (the app never sets ratioPercent), and
-    // the band says so rather than inventing a percentage.
-    PRISM_CHECK(names[5].compare(0, 3, L"压缩率") == 0);
+  // THE BAND'S LIST, in the order it paints it. C128: three NUMBERS -- the
+  // current folder's files and folders and the archive's packed size. (The six
+  // words this case used to read -- 未加密 / 方法未知 / 字典未知 / 条目 / 选中 /
+  // 压缩率 -- are on the info card now.)
+  if (PRISM_CHECK_EQ(names.size(), static_cast<std::size_t>(3))) {
+    PRISM_CHECK(names[0] == std::wstring(L"文件: 13"));   // the ROOT rows
+    PRISM_CHECK(names[1] == std::wstring(L"文件夹: 1"));
+    // This fixture never sets packSize, so the catalog cannot answer the size:
+    // the band says "--" instead of inventing "0 B".
+    PRISM_CHECK(names[2] == std::wstring(L"压缩包大小: --"));
   }
   // The published rectangles are the painted ones, left to right.
   long previousRight = 0;
@@ -552,13 +552,18 @@ PRISM_TEST("c86 the status band publishes every segment in visual order") {
   window.Dispatch(WM_DESTROY, 0, 0);
 }
 
-PRISM_TEST("c86 selecting a row moves the 选中 count in the band") {
+PRISM_TEST("c86 the band's numbers are the window's facts (a selection does not move them)") {
   GalleryWindow window;
   if (!MakeWindow(&window, L"PrismArchive c86 select")) return;
   window.SetRootLabel(L"c86.7z");
   window.SetItems(&g_catalog);
   window.Dispatch(WM_SIZE, SIZE_RESTORED, MAKELPARAM(1600, 900));
-  window.SetSelection(3);
+
+  // C128: the band publishes 文件 / 文件夹 / 压缩包大小 -- the 选中 slot this case
+  // used to read is gone (a status bar counts the folder, not the cursor). The
+  // property it existed to prove survives in the shape the band has now: what a
+  // client hears is the WINDOW's own count, and selecting a row -- a fact about
+  // the cursor -- does not move any of the three numbers.
   IAccessible* root = ClientAccessible(window.Hwnd());
   if (!PRISM_CHECK(root != nullptr)) {
     window.Dispatch(WM_DESTROY, 0, 0);
@@ -566,12 +571,24 @@ PRISM_TEST("c86 selecting a row moves the 选中 count in the band") {
   }
   IAccessible* status = StatusBarObject(root);
   if (PRISM_CHECK(status != nullptr)) {
-    // The band and the tree read the SAME facts, so a selection a screen reader
-    // cannot hear is a bug in both.
-    PRISM_CHECK(StatusChildStartingWith(status, L"选中") == std::wstring(L"选中 1"));
+    const std::wstring filesBefore = StatusChildStartingWith(status, L"文件");
+    const std::wstring foldersBefore = StatusChildStartingWith(status, L"文件夹");
+    PRISM_CHECK(filesBefore == std::wstring(L"文件: 13"));  // the root's files
+    PRISM_CHECK(foldersBefore == std::wstring(L"文件夹: 1"));
     status->Release();
   }
   root->Release();
+
+  window.SetSelection(3);
+  root = ClientAccessible(window.Hwnd());
+  if (PRISM_CHECK(root != nullptr)) {
+    if (IAccessible* after = StatusBarObject(root)) {
+      PRISM_CHECK(StatusChildStartingWith(after, L"文件") == std::wstring(L"文件: 13"));
+      PRISM_CHECK(StatusChildStartingWith(after, L"文件夹") == std::wstring(L"文件夹: 1"));
+      after->Release();
+    }
+    root->Release();
+  }
   window.Dispatch(WM_DESTROY, 0, 0);
 }
 
@@ -609,17 +626,21 @@ PRISM_TEST("c86 inside a two-entry folder the breadcrumb and the band agree") {
   PRISM_CHECK(crumb.find(L"本目录 2 项") != std::wstring::npos);
   PRISM_CHECK(crumb.find(L"共 16 项") != std::wstring::npos);  // the total survives
 
-  // The SAME number, read out of the band's 条目 segment.
+  // The SAME number, read out of the band's FILE slot (C128): the band counts
+  // the folder's rows -- 2 files, 0 folders here -- and the crumb says how many
+  // the folder holds. One number on two surfaces, which is the whole point.
   IAccessible* root = ClientAccessible(window.Hwnd());
   if (!PRISM_CHECK(root != nullptr)) {
     window.Dispatch(WM_DESTROY, 0, 0);
     return;
   }
   if (IAccessible* status = StatusBarObject(root)) {
-    const std::wstring items = StatusChildStartingWith(status, L"条目");
-    std::printf("  [band] %s\n", ToUtf8(items).c_str());
-    PRISM_CHECK(items == std::wstring(L"条目 2"));
-    PRISM_CHECK_EQ(TrailingNumber(items), window.ItemCount());
+    const std::wstring files = StatusChildStartingWith(status, L"文件");
+    const std::wstring folders = StatusChildStartingWith(status, L"文件夹");
+    std::printf("  [band] %s | %s\n", ToUtf8(files).c_str(), ToUtf8(folders).c_str());
+    PRISM_CHECK(files == std::wstring(L"文件: 2"));
+    PRISM_CHECK(folders == std::wstring(L"文件夹: 0"));
+    PRISM_CHECK_EQ(TrailingNumber(files), window.ItemCount());
     status->Release();
   } else {
     PRISM_CHECK(false);

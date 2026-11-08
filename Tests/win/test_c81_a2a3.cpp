@@ -9,17 +9,22 @@
 //      IDENTICALLY with the C77 backdrop layer ON and OFF (the blurred still
 //      can no longer bleed header text under the crisp labels).
 //
-// A3's consistency contract: for the SAME byte pair the three surfaces -- the
-// list cell, the sidebar info card, the status band -- must carry the SAME
-// string from prism::CompressionRatioView. The painters render these strings
-// VERBATIM through DrawText (no re-formatting on the way to pixels), so the
-// primitive read-back below IS the rendered text byte for byte.
+// A3's consistency contract: for the SAME byte pair the surfaces that carry a
+// ratio -- the list cell and the sidebar info card -- must carry the SAME string
+// from prism::CompressionRatioView. The painters render these strings VERBATIM
+// through DrawText (no re-formatting on the way to pixels), so the primitive
+// read-back below IS the rendered text byte for byte.
+//
+// C128 moved the ratio OFF the status band (the band is three numbers: the
+// current folder's files/folders and the archive's packed size), so the third
+// surface this card audited no longer exists and the arm that made the band lie
+// about the ratio (PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN) retired with it.
+// The band's own negative control is C128's (mutation.c128.old_status), which
+// restores the six-slot band -- the shape, not a string.
 //
 // Negative controls (CONTRACTS D3 + D26 + D27; same source, compile-time arms):
 //   PRISM_C81_MUTANT_HEADER_SELECTED         the header gets the selected-row
 //                                            vocabulary -> A2 assertions red
-//   PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN the band falls back to the
-//                                            hardcoded 未知 -> A3 assertions red
 // Each mutant is registered under PASS_REGULAR_EXPRESSION (never WILL_FAIL,
 // D26); the CAUGHT marker prints at the FIRST failed assertion (D27).
 //
@@ -51,9 +56,6 @@
 #if defined(PRISM_C81_MUTANT_HEADER_SELECTED)
 inline constexpr const char* kMutantBanner = "C81 MUTANT ACTIVE: header_selected";
 inline constexpr const char* kMutantMarker = "C81 MUTATION CAUGHT: header_selected";
-#elif defined(PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN)
-inline constexpr const char* kMutantBanner = "C81 MUTANT ACTIVE: status_hardcoded_unknown";
-inline constexpr const char* kMutantMarker = "C81 MUTATION CAUGHT: status_hardcoded_unknown";
 #else
 inline constexpr const char* kMutantBanner = nullptr;
 inline constexpr const char* kMutantMarker = nullptr;
@@ -330,10 +332,12 @@ std::vector<SortItem> AuditRows() {
 
 const std::string kGrowToken = prism::CompressionRatioView(15, 19);  // ">100% (126.7%)"
 
+// The band's facts. C128: three numbers (the ratio is the CARD's now).
 const prism::layout::StatusInfo GrowStatus() {
   prism::layout::StatusInfo info;
-  info.crypto = prism::layout::CryptoState::Unknown;
-  info.ratioView = prism::CompressionRatioView(15, 19);
+  info.fileCount = 1;
+  info.folderCount = 0;
+  info.archiveBytes = 19;
   return info;
 }
 
@@ -345,8 +349,11 @@ const prism::layout::StatusInfo GrowStatus() {
 // value, which is a STRICTER check than the old one: the card's text must now
 // BE the canonical token, with no prefix to hide a mismatch behind.
 std::string CardRatioLine(prism::sidebar::Model* model) {
-  const prism::win::sidebar::Layout card =
-      prism::win::sidebar::Build(*model, prism::win::sidebar::Metrics{});
+  // C128: the card is folded by default; this reads the EXPANDED card's RATIO
+  // value (a StatusText under the "RATIO" label), so it asks for that state.
+  prism::win::sidebar::Metrics metrics;
+  metrics.infoCardExpanded = true;
+  const prism::win::sidebar::Layout card = prism::win::sidebar::Build(*model, metrics);
   for (const prism::win::sidebar::Command& label : card.commands) {
     if (label.kind != prism::win::sidebar::PrimKind::StatusLabel) continue;
     if (label.text != "RATIO") continue;
@@ -361,6 +368,9 @@ std::string CardRatioLine(prism::sidebar::Model* model) {
   return {};
 }
 
+// C128: the band has NO ratio slot any more (the ratio lives on the info card).
+// The helper stays so "the band carries no ratio" is an assertion with a name
+// instead of a loop a reader has to re-argue.
 const prism::layout::StatusSegment* RatioSegment(
     const std::vector<prism::layout::StatusSegment>& segments) {
   for (const auto& segment : segments) {
@@ -454,32 +464,25 @@ PRISM_TEST("c81.a3.growth_consistency") {
   const std::string cardLine = CardRatioLine(&model);
   PRISM_CHECK_EQ(cardLine, kGrowToken);
 
-  // 4. the status band: label stays 压缩率, the value IS the canonical string.
-  //    The segment list is OWNED in a local: RatioSegment returns a pointer
-  //    INTO the vector, and a pointer into the destroyed temporary is a
-  //    heap-use-after-free under ASan -- it killed the process before the
-  //    mutant verdict could print (the first CI asan-msvc lane run), while
-  //    Release silently tolerated the dangling read.
+  // 4. the status band (C128): the ratio is NOT on the band any more. It is the
+  //    info card's, and only the card's -- the band answers "what am I looking
+  //    at" with three numbers (files / folders / archive size). The old
+  //    assertion here (the band's ratio == the canonical token) is exactly what
+  //    C128 removed, so it is replaced by the ABSENCE, which is the property the
+  //    removal is supposed to have. The segment list is OWNED in a local: the
+  //    pointer INTO the vector must not outlive it (C86's ASan lesson).
   const prism::layout::Layout layout = TestLayout();
   const prism::layout::StatusInfo info = GrowStatus();
   const std::vector<prism::layout::StatusSegment> segments =
       prism::layout::StatusSegments(layout, info);
-  const prism::layout::StatusSegment* segment = RatioSegment(segments);
-  PRISM_CHECK(segment != nullptr);
-  if (segment != nullptr) {
-    PRISM_CHECK_EQ(segment->text, std::string_view("压缩率"));  // the mutant arm reds HERE
-    PRISM_CHECK_EQ(segment->valueText, std::string_view(kGrowToken));
-  }
+  PRISM_CHECK(RatioSegment(segments) == nullptr);
 
-  // 5. byte-identical across the three surfaces (the audit's ①).
+  // 5. byte-identical across the surfaces that still carry it (the audit's ①).
   //    C105: the card's value line IS the token now (the "RATIO " prefix that
   //    used to be stripped here is a label of its own), so the comparison is
   //    exact instead of "equal after six characters".
   PRISM_CHECK_EQ(cell, sidebarStatus.ratioView);
   PRISM_CHECK_EQ(cardLine, sidebarStatus.ratioView);
-  if (segment != nullptr) {
-    PRISM_CHECK_EQ(std::string(segment->valueText), sidebarStatus.ratioView);
-  }
 }
 
 PRISM_TEST("c81.a3.zero_bytes_unknown_everywhere") {
@@ -499,17 +502,13 @@ PRISM_TEST("c81.a3.zero_bytes_unknown_everywhere") {
   PRISM_CHECK_EQ(sidebarStatus.ratioView, std::string("未知"));
   PRISM_CHECK_EQ(CardRatioLine(&model), std::string("未知"));
 
-  prism::layout::StatusInfo info;
-  info.ratioView = prism::CompressionRatioView(0, 0);
+  // 4. ... and the status band does not carry a ratio slot at all (C128), so it
+  //    cannot disagree with the two surfaces above about a number it never shows.
   const prism::layout::Layout layout = TestLayout();
+  const prism::layout::StatusInfo info = GrowStatus();
   const std::vector<prism::layout::StatusSegment> segments =
       prism::layout::StatusSegments(layout, info);  // owned: see growth_consistency
-  const prism::layout::StatusSegment* segment = RatioSegment(segments);
-  PRISM_CHECK(segment != nullptr);
-  if (segment != nullptr) {
-    PRISM_CHECK_EQ(std::string(segment->valueText), std::string("未知"));
-    PRISM_CHECK_EQ(segment->text, std::string_view("压缩率"));
-  }
+  PRISM_CHECK(RatioSegment(segments) == nullptr);
 }
 
 PRISM_TEST("c81.a3.shrink_consistency") {
@@ -531,17 +530,13 @@ PRISM_TEST("c81.a3.shrink_consistency") {
   PRISM_CHECK_EQ(CardRatioLine(&model), token);
   PRISM_CHECK_EQ(prism::list::RatioCellText(rows[0]), token);
 
-  prism::layout::StatusInfo info;
-  info.ratioView = token;
+  // 4. the band no longer shows a ratio (C128): the two surfaces above are the
+  //    whole claim now.
   const prism::layout::Layout layout = TestLayout();
+  const prism::layout::StatusInfo info = GrowStatus();
   const std::vector<prism::layout::StatusSegment> segments =
       prism::layout::StatusSegments(layout, info);  // owned: see growth_consistency
-  const prism::layout::StatusSegment* segment = RatioSegment(segments);
-  PRISM_CHECK(segment != nullptr);
-  if (segment != nullptr) {
-    PRISM_CHECK_EQ(segment->text, std::string_view("压缩率"));
-    PRISM_CHECK_EQ(std::string(segment->valueText), token);
-  }
+  PRISM_CHECK(RatioSegment(segments) == nullptr);
 }
 
 int main(int argc, char** argv) {

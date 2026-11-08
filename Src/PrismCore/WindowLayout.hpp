@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "ListColumns.hpp"
+#include "ListLayout.hpp"  // C128: the ONE byte formatter (prism::list::FormatBytes)
 #include "Preview.hpp"
 
 namespace prism::layout {
@@ -723,43 +724,46 @@ inline int FlowItemAt(const Layout& layout, std::span<const FlowItem> items, int
   return -1;
 }
 
-// --------------------------------------------------------- V4: the status bar
-// DESIGN.md §2 gives the status band 28 px and §3 lists its four states
-// (常规/加密/未知方法/压缩中). A 28 px band that paints nothing is the defect the
-// screenshot showed; this block is the model behind the four segments, so the
-// text and the rectangles are assertable without a device.
-enum class CryptoState : std::uint8_t { Unencrypted, Encrypted, Unknown };
-
-inline std::ostream& operator<<(std::ostream& os, CryptoState state) {
-  switch (state) {
-    case CryptoState::Unencrypted: return os << "Unencrypted";
-    case CryptoState::Encrypted: return os << "Encrypted";
-    case CryptoState::Unknown: return os << "Unknown";
-  }
-  return os << "?";
-}
-
+// ---------------------------------------- V4/C128: the status bar's THREE numbers
+// DESIGN.md §2 gives the status band 28 px. Until C128 the band answered the
+// question "what is this archive" with the INFO CARD's own words (encryption,
+// method, dictionary, ratio) glued to two counts of the current folder: six
+// slots, three of them printed twice on the same screen -- the report's
+//     status bar: 未加密 / 方法未知 / 字典未知 / 条目 5 / 选中 0 / 压缩率 98.8%
+//     info card : ENCRYPTION 未加密 / METHOD 未知 / DICTIONARY -- / RATIO 98.8%
+// -- and the two counts described the CURRENT FOLDER while the breadcrumb carried
+// the ARCHIVE total ("共 17 项"), i.e. two numbers about two different things in
+// one window (the trust problem card B measured).
+//
+// C128 (proposal 5.5) keeps the ONE question a status band is for -- WHAT AM I
+// LOOKING AT -- and answers it with three numbers: 文件: N / 文件夹: M /
+// 压缩包大小: X. Encryption, method, dictionary and the ratio live on the info
+// card ONLY (SidebarView).
+//
+// C128 (proposal 5.6): the card is FOLDED to one line until the user clicks it,
+// so the band's row is the only thing in the rail's bottom corner at rest.
 struct StatusInfo {
-  CryptoState crypto = CryptoState::Unknown;
-  std::string_view method;              // empty -> "方法未知"
-  std::string_view dictionary;          // empty -> "字典未知"
-  int ratioPercent = -1;                // < 0 -> unknown
-  // C81/A3: the canonical ratio view (prism::CompressionRatioView of the
-  // archive totals). EMPTY means unknown; non-empty it is the exact string
-  // the list cell and the info card render -- one source, one string.
-  std::string ratioView;
-  bool compressing = false;             // wins over the ratio
-  // C79: the RIGHT cluster's two counts. -1 means "not reported", which paints
-  // the label with an explicit "--" rather than a fabricated 0.
-  int itemCount = -1;
-  int selectedCount = -1;
+  // The CURRENT FOLDER's two counts -- the rows the user is actually looking at.
+  // -1 means "not reported": the slot says "文件: --" rather than a fabricated 0.
+  int fileCount = -1;
+  int folderCount = -1;
+  // The WHOLE ARCHIVE's packed size in bytes (sum of ArchiveItem::packSize, i.e.
+  // the bytes the .7z/.zip really occupies on disk). -1 = unknown -> "--".
+  std::int64_t archiveBytes = -1;
 };
 
-// C79: two clusters. The left one answers "what is this archive"; the right
-// one answers "how much of it am I looking at". Divider is a real segment (a
-// 1 px rule) so its rect is laid out with the same arithmetic as the text and
-// the painter never invents an x coordinate.
+// C128: the THREE shipping slots, left to right. The size is right-aligned (it
+// is the archive's number, not the folder's), the two counts are left-aligned.
 enum class StatusId : std::uint8_t {
+  FileCount,    // 文件: N        (the current folder)
+  FolderCount,  // 文件夹: M      (the current folder)
+  ArchiveSize,  // 压缩包大小: X  (the whole archive, right-aligned)
+  // ---- the pre-C128 six-slot vocabulary (C79/C105) ----
+  // NOTHING in the shipping band emits these. They stay for two reasons and both
+  // are about being able to say what is absent: the D3 negative control
+  // (PRISM_C128_MUTANT_OLD_STATUS) restores the old band, and C128's suite
+  // asserts that these words are NOT in the band any more -- an assertion about
+  // a missing slot needs a name for the thing that must be missing.
   Encryption,
   Method,
   Dictionary,
@@ -772,6 +776,9 @@ enum class StatusId : std::uint8_t {
 
 inline std::ostream& operator<<(std::ostream& os, StatusId id) {
   switch (id) {
+    case StatusId::FileCount: return os << "FileCount";
+    case StatusId::FolderCount: return os << "FolderCount";
+    case StatusId::ArchiveSize: return os << "ArchiveSize";
     case StatusId::Encryption: return os << "Encryption";
     case StatusId::Method: return os << "Method";
     case StatusId::Dictionary: return os << "Dictionary";
@@ -784,65 +791,38 @@ inline std::ostream& operator<<(std::ostream& os, StatusId id) {
   return os << "?";
 }
 
-inline std::string_view CryptoText(const StatusInfo& info) {
-  switch (info.crypto) {
-    case CryptoState::Unencrypted: return "未加密";
-    case CryptoState::Encrypted: return "已加密";
-    case CryptoState::Unknown: return "加密状态未知";
-  }
-  return "加密状态未知";
-}
-
-inline std::string_view MethodText(const StatusInfo& info) {
-  return info.method.empty() ? std::string_view{"方法未知"} : info.method;
-}
-
-inline std::string_view DictionaryText(const StatusInfo& info) {
-  return info.dictionary.empty() ? std::string_view{"字典未知"} : info.dictionary;
-}
-
-// The label of the ratio segment; the NUMBER travels separately (value), so the
-// painter can format "压缩率 87%" without this header owning a buffer.
-inline std::string_view RatioText(const StatusInfo& info) {
-  if (info.compressing) return "压缩中…";
-  // C81/A3: known now means "the canonical view string is present". The
-  // PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN arm (Tests/suites/c81-a2a3.cmake)
-  // injects the OLD lie -- the band claiming 未知 while the row and the card
-  // show the real value -- and the consistency suite MUST go red.
-#if defined(PRISM_C81_MUTANT_STATUS_HARDCODED_UNKNOWN)
-  return "压缩率未知";
-#else
-  return (!info.ratioView.empty() || info.ratioPercent >= 0) ? "压缩率" : "压缩率未知";
-#endif
-}
-
-// C79: the right cluster's labels. The NUMBER travels in StatusSegment::value,
-// exactly like Ratio's percentage, so this header owns no buffer.
-inline std::string_view ItemCountText(const StatusInfo& info) {
-  return info.itemCount >= 0 ? "条目" : "条目 --";
-}
-
-inline std::string_view SelectedCountText(const StatusInfo& info) {
-  return info.selectedCount >= 0 ? "选中" : "选中 --";
-}
+// C128: the band's three labels, spelled ONCE. They are Chinese literals for the
+// same reason the six words they replace were (the band has never been keyed --
+// C74 gave the CARD its keys); the VALUES travel in StatusSegment::valueText, so
+// this header owns no buffer and the painter measures the label's real width
+// instead of assuming a constant.
+inline constexpr std::string_view kFileCountLabel = "文件:";
+inline constexpr std::string_view kFolderCountLabel = "文件夹:";
+inline constexpr std::string_view kArchiveSizeLabel = "压缩包大小:";
 
 struct StatusSegment {
   StatusId id = StatusId::Count;
   Rect rect;
   std::string_view text;
-  int value = -1;  // Ratio only: the percentage, or -1 when unknown/compressing
-  // C81/A3: the canonical ratio string. When non-empty the painter renders
-  // text + ' ' + valueText (no integer append).
+  // The INTEGER half of a reading. C128's three slots carry their number in
+  // valueText instead (a count is digits, a size is "2.4 MB"); the field stays
+  // for the pre-C128 vocabulary and for callers that think in integers.
+  int value = -1;
+  // C128: the VALUE string of the slot. When non-empty the painter renders
+  // text + ' ' + valueText (no integer append), which is what makes
+  // "文件: 12" one reading instead of a label the painter had to format.
   //
   // C86 (ASan, CI): this USED to be a std::string_view -- "a view into
   // StatusInfo::ratioView, which the scene owns for the whole frame". That
   // contract is invisible at the call site and one ordinary spelling breaks it:
   //     for (auto& s : StatusSegments(layout, StatusForPublish())) { ... }
   // The StatusInfo is a TEMPORARY there, destroyed at the end of the range-init,
-  // so every ratio segment kept a view into a dead std::string. It cost a
+  // so every segment kept a view into a dead std::string. It cost a
   // stack-use-after-scope in win.c80_a11y and in c86.window on the ASan runner.
   // Owning the bytes is a few characters per frame and makes the vector
-  // self-contained, which is what a caller has every right to assume.
+  // self-contained, which is what a caller has every right to assume -- and it
+  // is why C128's counts and size are BUILT here rather than viewed from the
+  // caller's StatusInfo.
   std::string valueText;
 };
 
@@ -866,71 +846,116 @@ inline constexpr bool kStatusDividerEnabled = false;
 #endif
 inline constexpr int kStatusSegmentMinWidth = 96;
 
-// C79: TWO clusters, laid out from the bar's two edges. The left cluster
-// (encryption | method | dictionary) starts at the left padding; the right
-// cluster (items | selected | ratio) is RIGHT-aligned, so the empty middle is
-// the "40% blank" the design asks for and it grows with the window instead of
-// leaving a ragged tail. A 1 px Divider sits at the midpoint of that gap.
+// C128: the D3 switch. TRUE is the shipping band (three numbers); FALSE is the
+// pre-card band restored verbatim -- two clusters, six slots, the card's three
+// words spoken a second time next to two folder counts and the ratio.
+#if defined(PRISM_C128_MUTANT_OLD_STATUS)
+inline constexpr bool kStatusShowsThreeNumbers = false;
+#else
+inline constexpr bool kStatusShowsThreeNumbers = true;
+#endif
+
+// The runtime proof the arm is REALLY in this binary (CONTRACTS D3): a stale or
+// misspelled macro would leave the mutant green while its CTest entry stayed red
+// forever, and the suite's verdict predicate needs a value to check.
+inline constexpr std::string_view ActiveStatusMutation() {
+  return kStatusShowsThreeNumbers ? std::string_view{} : std::string_view{"old_status"};
+}
+
+// C128: the three slots, measured from the bar's edges.
+//
+//   files | folders .............. archive size
+//
+// The two COUNTS are left-aligned (they describe the folder in the breadcrumb,
+// so they belong beside it); the SIZE is RIGHT-aligned because it describes the
+// archive and a right-anchored number cannot jump when a count gains a digit.
+// The empty middle is the design's "air", not a rule (C105 deleted the 1 px
+// divider; C128 has nothing left to divide).
+inline constexpr int kStatusFileWidth = 104;
+inline constexpr int kStatusFolderWidth = 112;
+inline constexpr int kStatusSizeWidth = 168;
+
 inline std::vector<StatusSegment> StatusSegments(const Layout& layout, const StatusInfo& info) {
   std::vector<StatusSegment> out;
   if (layout.statusBar.Empty()) return out;
   const int top = layout.statusBar.top + 4;
   const int bottom = layout.statusBar.bottom - 4;
   if (bottom <= top) return out;
+  const int leftEdge = layout.statusBar.left + kContentPadding;
+  const int rightEdge = layout.statusBar.right - kContentPadding;
 
-  // C79: tighter than the pre-C79 168/128/140 so the left cluster reads as one
-  // group; the freed width becomes the blank middle (>= 40% at 1600 px).
-  const int leftWidths[] = {150, 110, 120};
-  const std::string_view leftTexts[] = {CryptoText(info), MethodText(info), DictionaryText(info)};
-  int x = layout.statusBar.left + kContentPadding;
-  int leftEnd = x;
-  for (int i = 0; i < 3; ++i) {
-    const int width = (std::max)(kStatusSegmentMinWidth, leftWidths[i]);
-    const Rect rect{x, top, (std::min)(x + width, layout.statusBar.right - kContentPadding), bottom};
-    if (rect.Empty()) break;
-    out.push_back(StatusSegment{static_cast<StatusId>(i), rect, leftTexts[i], -1, {}});
-    leftEnd = rect.right;
-    x = rect.right + kStatusGap;
+  if (!kStatusShowsThreeNumbers) {
+    // ---- NEGATIVE CONTROL (CONTRACTS D3): the shipped-before band. ----------
+    // Six slots in two clusters exactly as C79/C105 laid them out. What the
+    // values WERE is not the point of the control (the engine facts moved to the
+    // card); the SHAPE is: three of the card's words on the band, a second time.
+    const StatusId leftIds[] = {StatusId::Encryption, StatusId::Method,
+                                StatusId::Dictionary};
+    const std::string_view leftTexts[] = {"加密状态未知", "方法未知", "字典未知"};
+    const int leftWidths[] = {150, 110, 120};
+    int x = leftEdge;
+    int leftEnd = x;
+    for (int i = 0; i < 3; ++i) {
+      const int width = (std::max)(kStatusSegmentMinWidth, leftWidths[i]);
+      const Rect rect{x, top, (std::min)(x + width, rightEdge), bottom};
+      if (rect.Empty()) break;
+      out.push_back(StatusSegment{leftIds[i], rect, leftTexts[i], -1, {}});
+      leftEnd = rect.right;
+      x = rect.right + kStatusGap;
+    }
+    const StatusId rightIds[] = {StatusId::ItemCount, StatusId::SelectedCount,
+                                 StatusId::Ratio};
+    const std::string_view rightTexts[] = {"条目 --", "选中 --", "压缩率未知"};
+    const int rightWidths[] = {96, 96, 112};
+    int rightWidth = 2 * kStatusGap;
+    for (int i = 0; i < 3; ++i) rightWidth += (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
+    int rightStart = rightEdge - rightWidth;
+    if (rightStart < leftEnd + kStatusGap) rightStart = leftEnd + kStatusGap;
+    if (kStatusDividerEnabled && rightStart - leftEnd >= 2 * kStatusGap) {
+      const int dividerX = leftEnd + (rightStart - leftEnd) / 2;
+      out.push_back(StatusSegment{StatusId::Divider,
+                                  Rect{dividerX, top, dividerX + 1, bottom}, {}, -1, {}});
+    }
+    int rx = rightStart;
+    for (int i = 0; i < 3; ++i) {
+      const int width = (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
+      const Rect rect{rx, top, (std::min)(rx + width, rightEdge), bottom};
+      if (rect.Empty()) break;
+      out.push_back(StatusSegment{rightIds[i], rect, rightTexts[i], -1, {}});
+      rx = rect.right + kStatusGap;
+    }
+    return out;
   }
 
-  // The right cluster is measured from the RIGHT edge: items, selected, ratio.
-  // Its width is fixed, so the ratio column never jumps when a count changes.
-  const int rightWidths[] = {96, 96, 112};
-  int rightWidth = 2 * kStatusGap;
-  for (int i = 0; i < 3; ++i) rightWidth += (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
-  int rightStart = layout.statusBar.right - kContentPadding - rightWidth;
-  if (rightStart < leftEnd + kStatusGap) {
-    // Narrow window: keep the right cluster's right edge (the ratio stays
-    // readable) and let the gap collapse. The divider is omitted rather than
-    // drawn through a label.
-    rightStart = leftEnd + kStatusGap;
-  }
-  const int gap = rightStart - leftEnd;
-  // C105: NO DIVIDER. The band used to cut the two clusters apart with a 1 px
-  // vertical rule -- the "mechanical grey bar split by six rules" the user
-  // reported. The empty middle is now pure air; the clusters are told apart by
-  // the gap alone (and by the label/value roles inside each segment).
-  if (kStatusDividerEnabled && gap >= 2 * kStatusGap) {
-    const int dividerX = leftEnd + gap / 2;
-    out.push_back(StatusSegment{StatusId::Divider,
-                                Rect{dividerX, top, dividerX + 1, bottom}, {}, -1, {}});
-  }
-  const std::string_view rightTexts[] = {ItemCountText(info), SelectedCountText(info),
-                                         RatioText(info)};
-  const int rightValues[] = {info.itemCount, info.selectedCount,
-                             (info.compressing ? -1 : info.ratioPercent)};
-  const std::string rightValueTexts[] = {{}, {},
-      (info.compressing ? std::string() : info.ratioView)};
-  int rx = rightStart;
-  for (int i = 0; i < 3; ++i) {
-    const int width = (std::max)(kStatusSegmentMinWidth, rightWidths[i]);
-    const Rect rect{rx, top, (std::min)(rx + width, layout.statusBar.right - kContentPadding),
-                    bottom};
-    if (rect.Empty()) break;
-    out.push_back(StatusSegment{static_cast<StatusId>(4 + i), rect, rightTexts[i],
-                                rightValues[i], rightValueTexts[i]});
-    rx = rect.right + kStatusGap;
-  }
+  // ---- the shipping band: THREE numbers ------------------------------------
+  // A count the engine did not report is "--", never a fabricated 0; a size the
+  // catalog could not sum is "--" too. The value TEXT is owned by the segment
+  // (C86's ASan rule: a view into the caller's StatusInfo dies with it).
+  const std::string fileValue = info.fileCount >= 0 ? std::to_string(info.fileCount) : "--";
+  const std::string folderValue =
+      info.folderCount >= 0 ? std::to_string(info.folderCount) : "--";
+  const std::string sizeValue =
+      info.archiveBytes >= 0
+          ? prism::list::FormatBytes(static_cast<std::uint64_t>(info.archiveBytes))
+          : std::string("--");
+
+  const int fileWidth = (std::max)(kStatusSegmentMinWidth, kStatusFileWidth);
+  const Rect fileRect{leftEdge, top, (std::min)(leftEdge + fileWidth, rightEdge), bottom};
+  if (fileRect.Empty()) return out;
+  out.push_back(StatusSegment{StatusId::FileCount, fileRect, kFileCountLabel, -1, fileValue});
+
+  const int folderLeft = fileRect.right + kStatusGap;
+  const int folderWidth = (std::max)(kStatusSegmentMinWidth, kStatusFolderWidth);
+  const Rect folderRect{folderLeft, top, (std::min)(folderLeft + folderWidth, rightEdge), bottom};
+  if (folderRect.Empty()) return out;
+  out.push_back(
+      StatusSegment{StatusId::FolderCount, folderRect, kFolderCountLabel, -1, folderValue});
+
+  const int sizeWidth = (std::max)(kStatusSegmentMinWidth, kStatusSizeWidth);
+  const int sizeLeft = (std::max)(rightEdge - sizeWidth, folderRect.right + kStatusGap);
+  const Rect sizeRect{sizeLeft, top, rightEdge, bottom};
+  if (sizeRect.Empty()) return out;
+  out.push_back(StatusSegment{StatusId::ArchiveSize, sizeRect, kArchiveSizeLabel, -1, sizeValue});
   return out;
 }
 
@@ -1474,9 +1499,10 @@ inline WindowRestore PlanWindowRestore(const SavedWindow& saved, const Rect& wor
 // ======================================== C86: the status band's segment text
 // THE DEFECT (measured through UIA against the shipped window): the status band
 // published ONE element named "共 3 项" (the breadcrumb's transient status line).
-// 未加密 / 方法未知 / 字典未知 / 条目 / 选中 / 压缩率 were painted and reachable by
-// nobody: they are D2D text, not child HWNDs, and the C80 tree never split the
-// band into its segments.
+// The band's own slots were painted and reachable by nobody: they are D2D text,
+// not child HWNDs, and the C80 tree never split the band into its segments.
+// (C128 replaced the six words with three numbers; the machinery below is
+// unchanged and carries whichever slots the band has.)
 //
 // The fix is that the SEGMENT LIST becomes the accessible tree's children, in
 // the order the band paints them. This function is the ONE spelling of a
@@ -1489,9 +1515,10 @@ inline WindowRestore PlanWindowRestore(const SavedWindow& saved, const Rect& wor
 // painted value and the announced one cannot drift apart.
 inline std::string StatusSegmentValueText(const StatusSegment& segment) {
   if (segment.id == StatusId::Divider) return {};
-  // C81/A3: the canonical ratio string travels verbatim (it IS what the info
-  // card and the list cell render); the integer path stays for scenes that only
-  // set value.
+  // C128: the owned value string travels verbatim ("12", "2.4 MB", "--"), so a
+  // number is spelled once, in WindowLayout, and the painter never formats one.
+  // The integer path stays for the pre-C128 vocabulary (the mutation arm) and
+  // for callers that only set value.
   if (!segment.valueText.empty()) return segment.valueText;
   if (segment.value < 0) return {};
   std::string text = std::to_string(segment.value);

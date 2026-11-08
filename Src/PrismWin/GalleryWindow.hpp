@@ -437,23 +437,25 @@ class GalleryWindow {
     if (catalog_) palette_.SetCatalog(*catalog_);
     history_.Clear();
     history_.Visit(nav_.Folder());  // the root is a real level (de-duped to no-op)
-    // C81/A3: the status band's 压缩率 comes from the SAME catalog snapshot,
-    // through the SAME canonical view the list cell and the info card render
-    // ("one catalog, three readers" -- and now one string, never three
-    // formulas; UI-AUDIT A3: the row said 100%, the card 126.7%, the band
-    // 未知 because nothing ever fed it). Crypto keeps whatever SetArchiveInfo
-    // derived; only the ratio is (re)computed here, so a tab switch that
-    // re-attaches the catalog cannot leave a stale number behind.
+    // C128: the band's THIRD number is the whole archive's PACKED size -- the
+    // bytes the file really occupies, which is what a status bar's
+    // "压缩包大小" means (not the unpacked total, and not the current folder's).
+    // It is summed from the SAME catalog snapshot the list, the card and the
+    // breadcrumb read: one catalog, four readers, no second I/O pass. A tab
+    // switch that re-attaches the catalog recomputes it, so a stale size cannot
+    // survive a switch.
     if (catalog_ != nullptr) {
-      std::uint64_t originalBytes = 0;
-      std::uint64_t compressedBytes = 0;
+      std::int64_t packedBytes = 0;
       for (const prism::ArchiveItem& item : *catalog_) {
-        originalBytes += item.size;
-        compressedBytes += item.packSize;
+        packedBytes += static_cast<std::int64_t>(item.packSize);
       }
-      archiveStatus_.ratioView = prism::CompressionRatioView(originalBytes, compressedBytes);
+      // A catalog whose packed sizes are ALL zero cannot answer "how big is the
+      // archive" -- a solid block that reports its bytes on one entry, an engine
+      // that answered nothing, and an empty archive all look alike here. "--" is
+      // the honest reading; "0 B" would be a number we invented.
+      archiveStatus_.archiveBytes = packedBytes > 0 ? packedBytes : -1;
     } else {
-      archiveStatus_.ratioView.clear();
+      archiveStatus_.archiveBytes = -1;
     }
     RebuildFolderView();
     SyncActionContext();  // a newly attached catalog makes the band legal
@@ -751,40 +753,44 @@ class GalleryWindow {
   // answered "条目 --". Both now call THIS, so paint and UIA cannot disagree.
   prism::layout::StatusInfo StatusForPublish() const {
     prism::layout::StatusInfo info = archiveStatus_;
-    if (info.itemCount < 0) info.itemCount = ItemCount();
-    if (info.selectedCount < 0) info.selectedCount = SelectionCount();
+    // C128: the band's two counts are the CURRENT FOLDER's, in ONE pass over the
+    // rows the list already holds (folderItems_ is the navigator's own view --
+    // no second directory read, no engine call). The scope is named here because
+    // the old "条目 5" counted the folder while the breadcrumb's "共 17 项"
+    // counted the archive: two numbers, one window, two meanings.
+    int files = 0;
+    int folders = 0;
+    for (const prism::ArchiveItem& item : folderItems_) {
+      if (item.isDir) {
+        ++folders;
+      } else {
+        ++files;
+      }
+    }
+    info.fileCount = files;
+    info.folderCount = folders;
     return info;
   }
+
+  // C128 (proposal 5.6): the info card's fold. The app sets it from the settings
+  // document at startup (window.infoCardExpanded, default FOLDED) and reads it
+  // back at exit; a click on the card toggles the same field through
+  // SidebarClick, so the state the user sees is the state that gets saved.
+  void SetInfoCardExpanded(bool expanded) {
+    if (infoCardExpanded_ == expanded) return;
+    infoCardExpanded_ = expanded;
+    sidebarDirty_ = true;  // the pill's height IS the fold state
+    Invalidate();
+  }
+  bool InfoCardExpanded() const { return infoCardExpanded_; }
   // Engine facts the catalog cannot derive (method / dictionary / cipher).
   void SetArchiveInfo(const prism::sidebar::ArchiveInfo& info) {
     sidebar_.SetArchiveInfo(info);
     sidebarDirty_ = true;
-    // V4: the status band reads the SAME archive info the rail does. The engine
-    // reports "no password" as Unknown, so the band says so instead of lying
-    // with "未加密"; the cipher is only shown while the archive really is
-    // encrypted.
-    using prism::layout::CryptoState;
-    switch (info.encryption) {
-      case prism::sidebar::Encryption::None:
-        archiveStatus_.crypto = CryptoState::Unencrypted;
-        break;
-      case prism::sidebar::Encryption::Aes256:
-        archiveStatus_.crypto = CryptoState::Encrypted;
-        break;
-      case prism::sidebar::Encryption::Unknown:
-        archiveStatus_.crypto = CryptoState::Unknown;
-        break;
-    }
-    // Method and dictionary are engine facts the rail already receives; the
-    // status band shows the SAME ones (one archive, one readout).
-    statusMethod_ = info.method;
-    statusDictionary_ = info.dictionaryBytes != 0
-                            ? std::string("字典 ") +
-                                  prism::list::FormatBytes(info.dictionaryBytes)
-                            : std::string();
-    archiveStatus_.method = statusMethod_;
-    archiveStatus_.dictionary = statusDictionary_;
-    Invalidate();
+    // C128: these three facts are the INFO CARD's now -- encryption, method and
+    // dictionary used to be copied into the status band as well, which is what
+    // printed them twice on one screen. The rail's model owns them, the band does
+    // not read them, and the band's three numbers do not depend on the engine.
     Invalidate();
   }
 
@@ -4354,6 +4360,18 @@ class GalleryWindow {
     const float fy = static_cast<float>(y);
     if (fx < panel.left || fx >= panel.right) return false;
     if (fy < panel.top || fy >= panel.bottom) return false;
+    // C128: the info card is a BUTTON, not a readout. A click anywhere on the
+    // pill expands it (four rows) or folds it back to one line. It is checked
+    // before RowHit because the pill covers rows: the card must not be a hole
+    // that falls through to a tree row behind it.
+    {
+      const prism::win::sidebar::Box& pill = sidebarLayout_.pill;
+      if (!pill.Empty() && fx >= pill.left && fx < pill.right && fy >= pill.top &&
+          fy < pill.bottom) {
+        SetInfoCardExpanded(!infoCardExpanded_);
+        return true;
+      }
+    }
     for (const prism::win::sidebar::Command& command : sidebarLayout_.commands) {
       if (command.kind != prism::win::sidebar::PrimKind::RowHit) continue;
       if (fx < command.box.left || fx >= command.box.right) continue;
@@ -4884,6 +4902,8 @@ class GalleryWindow {
     metrics.viewportTop = static_cast<float>(layout_.content.top);
     metrics.viewportBottom = static_cast<float>(layout_.content.bottom);
     metrics.scrollY = sidebarScroll_;
+    // C128: the info card's fold, the SAME bit the settings document carries.
+    metrics.infoCardExpanded = infoCardExpanded_;
     // C74: the words are the values ApplyLanguage() copied in, not a lookup in
     // a global translator slot (that slot could outlive its owner).
     sidebarLayout_ = prism::win::sidebar::Build(sidebar_, metrics, sidebarLabels_);
@@ -6575,11 +6595,14 @@ class GalleryWindow {
   // C29: the rail really paints now, and the grid reflow landed (list inset +
   // hit-test guard), so the rail is ON by default in list mode.
   bool sidebarRailVisible_ = true;
-  // V4: the status band's readout. The strings are OWNED here because the
-  // model holds views; ArchiveInfo arrives by value on every set.
+  // C128 (proposal 5.6): the info card's fold. FOLDED is the shipped default --
+  // the settings document's window.infoCardExpanded overrides it at startup, and
+  // a click on the card toggles it. The rail's bottom-left corner is the user's
+  // until they ask for the card's four rows.
+  bool infoCardExpanded_ = false;
+  // V4/C128: the status band's readout -- the archive's packed size (owned here;
+  // the two folder counts are derived per frame from the navigator's rows).
   prism::layout::StatusInfo archiveStatus_;
-  std::string statusMethod_;
-  std::string statusDictionary_;
   prism::sidebar::SidebarStore* sidebarStore_ = nullptr;  // C14 port (not owned)
   bool sidebarRestored_ = false;
   std::function<void(const std::wstring&)> onArchiveChanged_;  // C34: names the new file

@@ -2142,6 +2142,11 @@ class GalleryWindow {
     return prism::layout::Rect{};
   }
 
+  // C124: the seam's anchor is C123's CrumbCurrentRect() ABOVE -- one rule, one
+  // geometry. C124 only made it the same 2 DIP full-strength accent line as the
+  // tab, the selected row and the progress front (kSeamThicknessDip), and gave
+  // the renderer a read-back so the suite can count it.
+
   // How many REAL folder transitions the window performed. A click on the crumb
   // the user is already on must not move it (C93 assertion 3).
   int NavigationEvents() const { return nav_.NavigationCount(); }

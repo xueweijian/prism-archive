@@ -75,7 +75,7 @@ enum class PrimKind : std::uint8_t {
   SectionLabel, // "FAVORITES" / "RECENT" / "ARCHIVE TREE"
   RowHit,       // hit-test region for one row (not painted)
   Selection,    // keyboard focus highlight behind a row
-  SelectionBar, // C79: the 3 px accent rule at the left edge of that highlight
+  SelectionBar, // C79/C124: the 2 DIP accent rule at the left edge of that highlight
   Glyph,        // icon id at an explicit box
   Label,        // one text run at an explicit box
   Chevron,      // tree expander glyph
@@ -201,7 +201,10 @@ struct Metrics {
   // C79: one indent step is 16 px (blueprint 3.2's 4 px scale), and the focus
   // rule is exactly 3 px wide.
   float indent = 16.0f;
-  float selectionBarWidth = 3.0f;
+  // C124 / "the seam": ONE 2 DIP accent line, in the tree and in the list alike.
+  // C79 shipped 3 px here and the list had none, i.e. two widths for one
+  // element -- the same "one product, several truths" the three blues were.
+  float selectionBarWidth = 2.0f;
   // C104: the selection pill is inset 8 px at BOTH ends so the wash never
   float selectionInset = 8.0f;
   float selectionRadius = 6.0f;
@@ -356,16 +359,15 @@ inline std::string RowLabel(std::string_view label, std::string_view path) {
 }
 
 // ------------------------------------------------------- C104 folder icon
-// The tree's folder glyph is a piece of DESIGN, not a tint borrowed from the
-// text role: a rounded two-tone blue (a softer back tab behind a deeper body),
-// both TRANSLUCENT so the row's wash reads through, and both DERIVED from the
-// accent TOKEN instead of a hardcoded accent literal. The numbers live here,
-// next to the geometry, so the renderer and the pixel suite read one source.
+// C124: THE FOLDER IS GOLD (see ThemeTokens' FolderHighlight/Body/Shadow). It
+// used to be the accent mixed toward the panel -- the fourth blue, and the same
+// hue as the selection bar, so the icon and the state could not be told apart
+// (UI-AUDIT 12.5). The three tones are tokens; what lives HERE is only the
+// geometry and the alphas, both of which the pixel suite measures.
 struct FolderIcon {
-  float bodyAlpha = 0.88f;   // <= 0.9 by contract: never an opaque plate
-  float tabAlpha = 0.62f;
-  float bodyMix = 0.22f;     // fraction of the PANEL mixed into the accent
-  float tabMix = 0.45f;
+  float bodyAlpha = 0.92f;    // <= 0.95 by contract: never an opaque plate
+  float tabAlpha = 0.78f;     // the back tab, under the same wash
+  float shadowAlpha = 0.88f;  // the 1 DIP shadow row on the face's bottom edge
   float bodyRadius = 2.5f;
   float tabRadius = 1.5f;
 };
@@ -456,7 +458,7 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
                           ColorToken::SelectedBackground, 1.0f, index, section};
         selection.cornerRadius = kSelectionPill ? metrics.selectionRadius : 0.0f;
         push(std::move(selection));
-        // C79: the 3 px accent rule at the ROW's left edge. It is a separate
+        // C79/C124: the 2 DIP accent rule (THE SEAM) at the ROW's left edge. It is a separate
         // primitive (not a border on Selection) so the width is a number the
         // pixel suite can measure, and so the fill's alpha stays the token's
         // (14%) instead of being fused with an opaque edge.

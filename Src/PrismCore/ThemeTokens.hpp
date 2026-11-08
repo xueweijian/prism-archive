@@ -85,6 +85,21 @@ enum class TokenId : uint8_t {
   SurfaceTabHover,    // 4%-lift hover wash for an inactive tab
   DividerSubtle,      // 1 px status-bar divider (alpha .08)
   ShadowAmbient,      // large-radius low-alpha depth under a raised surface
+  // C124: THE LADDER'S THREE MISSING TIERS. Before this card the rail, the tab
+  // plate, the Quick Look sheet and the tiles each invented a tone; the audit
+  // counted ELEVEN. The five tiers below (canvas / panel / card / floating /
+  // border) are the whole vocabulary -- see SurfaceTier.
+  SurfacePanel,
+  SurfaceCard,
+  SurfaceBorder,
+  // C124: THE FOLDER IS A MATERIAL, NOT A TINT. It used to be the ACCENT mixed
+  // toward the panel, i.e. the fourth blue in a product that should have one
+  // (UI-AUDIT 2.2: #2480DF, 210-214 degrees, the same hue as the selection bar
+  // AND the tab underline). Gold is what makes "folder" readable without
+  // competing with "selected" (DESIGN-PROPOSAL 12.5: 1.61:1 on white).
+  FolderHighlight,
+  FolderBody,
+  FolderShadow,
   Count
 };
 
@@ -109,6 +124,12 @@ inline constexpr std::string_view kTokenNames[] = {
     "--surface-tab-hover",
     "--divider-subtle",
     "--shadow-ambient",
+    "--surface-panel",
+    "--surface-card",
+    "--surface-border",
+    "--folder-highlight",
+    "--folder-body",
+    "--folder-shadow",
 };
 static_assert(sizeof(kTokenNames) / sizeof(kTokenNames[0]) == kTokenCount,
               "every TokenId needs exactly one CSS name");
@@ -122,9 +143,95 @@ inline constexpr Kind kTokenKinds[] = {
     Kind::Color, Kind::Color, Kind::Color,                     // C77: ghost, veil, panel shadow
     Kind::Color, Kind::Color, Kind::Color,                     // C79: selection, tab active, tab hover
     Kind::Color, Kind::Color,                                  // C79: divider, ambient shadow
+    Kind::Color, Kind::Color, Kind::Color,                     // C124: panel, card, border
+    Kind::Color, Kind::Color, Kind::Color,                     // C124: folder highlight/body/shadow
 };
 static_assert(sizeof(kTokenKinds) / sizeof(kTokenKinds[0]) == kTokenCount,
               "every TokenId needs exactly one kind");
+
+// ---------------------------------------------------------------------------
+// C124: THE SURFACE LADDER -- five tiers instead of eleven tones.
+//
+// THE MEASURED DEFECT (UI-AUDIT 12.2 / DESIGN-PROPOSAL 12.7). A sample of one
+// Midnight window read ELEVEN distinct surface tones, and the ordering was
+// backwards: the action island (the primary control surface, the thing that
+// should read as "in front") measured 1.15:1 against the canvas while the side
+// rail -- a passive column -- measured 1.32:1. The card's fix is a five-step
+// ladder with a fixed relationship to the canvas:
+//
+//   tier       Midnight   vs canvas CR   dE to the tier below
+//   canvas     #0B0D12    --             --
+//   panel      #12151C    1.06           4.1
+//   card       #1A1E26    1.16           4.5
+//   floating   #232833    1.32           5.2
+//   border     #2E3340    1.54           5.3
+//
+// WHY THE PIXELS AND NOT THE TOKENS ARE THE SPEC. A tier is a MATERIAL: the
+// floating tier is translucent (the glass), so its token is not its pixel. The
+// ladder above is what the frame MEASURES after compositing, which is why the
+// numbers are asserted through prism::chrome::SurfaceTierPresented() and not
+// against the raw rows. TierOf() is the structural half: every token that IS a
+// surface must belong to a tier, so a sixth "just this once" surface cannot be
+// added without the suite going red.
+// ---------------------------------------------------------------------------
+enum class SurfaceTier : uint8_t { None = 0, Canvas, Panel, Card, Floating, Border };
+
+inline constexpr std::size_t kSurfaceTierCount = 5;
+
+inline constexpr SurfaceTier kSurfaceTiers[kSurfaceTierCount] = {
+    SurfaceTier::Canvas, SurfaceTier::Panel, SurfaceTier::Card,
+    SurfaceTier::Floating, SurfaceTier::Border};
+
+inline constexpr std::string_view SurfaceTierName(SurfaceTier tier) {
+  switch (tier) {
+    case SurfaceTier::None: return "none";
+    case SurfaceTier::Canvas: return "canvas";
+    case SurfaceTier::Panel: return "panel";
+    case SurfaceTier::Card: return "card";
+    case SurfaceTier::Floating: return "floating";
+    case SurfaceTier::Border: return "border";
+  }
+  return "?";
+}
+
+inline std::ostream& operator<<(std::ostream& os, SurfaceTier tier) {
+  return os << SurfaceTierName(tier);
+}
+
+inline constexpr TokenId SurfaceTierToken(SurfaceTier tier) {
+  switch (tier) {
+    case SurfaceTier::Canvas: return TokenId::SurfaceCanvasBase;
+    case SurfaceTier::Panel: return TokenId::SurfacePanel;
+    case SurfaceTier::Card: return TokenId::SurfaceCard;
+    case SurfaceTier::Floating: return TokenId::SurfaceFloatingIsland;
+    case SurfaceTier::Border: return TokenId::SurfaceBorder;
+    case SurfaceTier::None: break;
+  }
+  return TokenId::Count;
+}
+
+// Which tier a surface token sits on. SurfaceTabActive is the CARD tier: a
+// raised tab plate is a card, not a sixth surface (C79 shipped it as its own
+// tone, which is one of the eleven). Text, washes, shadows and the backdrop
+// rows are NOT surfaces and answer None.
+inline constexpr SurfaceTier TierOf(TokenId id) {
+  switch (id) {
+    case TokenId::SurfaceCanvasBase: return SurfaceTier::Canvas;
+    case TokenId::SurfacePanel: return SurfaceTier::Panel;
+    case TokenId::SurfaceCard: return SurfaceTier::Card;
+    case TokenId::SurfaceFloatingIsland: return SurfaceTier::Floating;
+    case TokenId::SurfaceBorder: return SurfaceTier::Border;
+    case TokenId::SurfaceTabActive: return SurfaceTier::Card;
+    default: return SurfaceTier::None;
+  }
+}
+
+// The accent line's thickness, in DIP (C120: geometry is DIP, never "pixels").
+// "THE SEAM" (DESIGN-PROPOSAL 16.3): one 2 DIP accent line, in four places --
+// the active tab's bottom edge, the current crumb's bottom edge, the selected
+// row's left edge, the progress fill's leading edge. One element, four
+// positions, so the user follows a line instead of learning a legend.
+inline constexpr float kSeamThicknessDip = 2.0f;
 
 inline constexpr std::string_view VariantName(Variant v) {
   switch (v) {
@@ -287,6 +394,75 @@ struct FontRow {
   FontStack value;
 };
 
+// ---------------------------------------------------------------------------
+// C124: the card's numbers, in ONE place, with the pre-card palette compiled in
+// as the negative control (CONTRACTS D3).
+//
+// PRISM_C124_MUTANT_OLD_PALETTE restores the palette this card replaces: the
+// 11-tone Midnight surfaces, the two-blue accent (Daylight #007AFF vs Midnight
+// #0A84FF) and a folder with no gold at all. It is a COMPILE-TIME switch, never
+// a text edit, so the mutation cannot drift from the code it mutates. V1 (one
+// accent) and V2 (the five-step ladder) MUST go red on that arm.
+// ---------------------------------------------------------------------------
+#if defined(PRISM_C124_MUTANT_OLD_PALETTE)
+inline constexpr bool kOldPalette = true;
+#else
+inline constexpr bool kOldPalette = false;
+#endif
+
+struct Tone {
+  uint8_t r = 0;
+  uint8_t g = 0;
+  uint8_t b = 0;
+  float a = 1.0f;
+};
+
+inline constexpr Rgba Paint(const Tone& tone) {
+  return Rgba(ChannelFromByte(tone.r), ChannelFromByte(tone.g),
+              ChannelFromByte(tone.b), tone.a);
+}
+
+// THE LADDER (DESIGN-PROPOSAL 12.7). Midnight is the theme the audit measured,
+// so it is the theme the five values are pinned in. The floating tier is a
+// MATERIAL: (43,49,62) at 75 % composites to exactly #232833 on the #0B0D12
+// canvas -- 0.75*43 + 0.25*11 = 35, 0.75*49 + 0.25*13 = 40, 0.75*62 + 0.25*18 =
+// 51 -- so the tier's MEASURED pixel is the table's hex while the glass stays
+// translucent (appearance.glassIntensity must still be able to move it).
+inline constexpr Tone kMidCanvas = kOldPalette ? Tone{18, 20, 26, 0.68f} : Tone{11, 13, 18, 1.0f};
+inline constexpr Tone kMidPanel = kOldPalette ? Tone{38, 42, 54, 0.94f} : Tone{18, 21, 28, 1.0f};
+inline constexpr Tone kMidCard = kOldPalette ? Tone{58, 64, 80, 0.88f} : Tone{26, 30, 38, 1.0f};
+inline constexpr Tone kMidFloating =
+    kOldPalette ? Tone{38, 42, 54, 0.52f} : Tone{43, 49, 62, 0.75f};
+inline constexpr Tone kMidBorder =
+    kOldPalette ? Tone{255, 255, 255, 0.16f} : Tone{46, 51, 64, 1.0f};
+inline constexpr Tone kMidReference = kOldPalette ? Tone{11, 12, 16, 1.0f} : Tone{11, 13, 18, 1.0f};
+inline constexpr Tone kMidVeil = kOldPalette ? Tone{16, 17, 23, 0.65f} : Tone{11, 13, 18, 0.65f};
+inline constexpr Tone kMidSelection =
+    kOldPalette ? Tone{10, 132, 255, 0.14f} : Tone{10, 132, 255, 0.14f};
+
+// THE ACCENT: one value in both design themes (DESIGN-PROPOSAL 16.1 / 16.3).
+// HighContrast keeps its own raised-contrast pair -- an accessibility override,
+// which is the one documented reason for a second accent value.
+inline constexpr Tone kDayAccent =
+    kOldPalette ? Tone{0, 122, 255, 0.88f} : Tone{10, 132, 255, 0.88f};
+inline constexpr Tone kDayAccentEnd =
+    kOldPalette ? Tone{0, 85, 212, 0.88f} : Tone{10, 132, 255, 0.88f};
+inline constexpr Tone kMidAccent =
+    kOldPalette ? Tone{10, 132, 255, 0.82f} : Tone{10, 132, 255, 0.82f};
+inline constexpr Tone kMidAccentEnd =
+    kOldPalette ? Tone{0, 96, 223, 0.82f} : Tone{10, 132, 255, 0.82f};
+
+// THE FOLDER (DESIGN-PROPOSAL 2.1 / 12.5): highlight, body, shadow. The same
+// three tones in every theme -- a folder is a MATERIAL, and its job is to be
+// recognisable at 1.61:1 on white, not to shout. Pre-card this was the accent
+// mixed toward the panel, i.e. a fourth blue.
+inline constexpr Tone kFolderHighlight =
+    kOldPalette ? Tone{10, 132, 255, 1.0f} : Tone{255, 217, 138, 1.0f};
+inline constexpr Tone kFolderBody =
+    kOldPalette ? Tone{10, 132, 255, 1.0f} : Tone{255, 182, 102, 1.0f};
+inline constexpr Tone kFolderShadow =
+    kOldPalette ? Tone{10, 132, 255, 1.0f} : Tone{219, 144, 58, 1.0f};
+
 // --surface-canvas-base, --surface-floating-island, the two EXT text roles and
 // the EXT backdrop reference.
 inline constexpr ColorRow kColorRows[] = {
@@ -311,6 +487,17 @@ inline constexpr ColorRow kColorRows[] = {
     // reads over the 18 % of canvas that shows through).
     {TokenId::SurfaceFloatingIsland, Variant::Daylight,
      Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.82f)},
+    // C124: the ladder's remaining Daylight tiers. The plan (2.1) gives Daylight
+    // three materials -- paper #F5F5F7, plates #FFFFFF, floating rgba(255,255,
+    // 255,.82) -- so panel and card legitimately share #FFFFFF here; the DARK
+    // theme is where the audit counted eleven tones, and it is where the five
+    // steps are pinned.
+    {TokenId::SurfacePanel, Variant::Daylight,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 1.0f)},
+    {TokenId::SurfaceCard, Variant::Daylight,
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 1.0f)},
+    {TokenId::SurfaceBorder, Variant::Daylight,
+     Rgba(ChannelFromByte(230), ChannelFromByte(232), ChannelFromByte(236), 1.0f)},
     {TokenId::TextPrimary, Variant::Daylight,
      Rgba(ChannelFromByte(29), ChannelFromByte(29), ChannelFromByte(31), 1.0f)},
     {TokenId::TextSecondary, Variant::Daylight,
@@ -334,17 +521,27 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(245), ChannelFromByte(245), ChannelFromByte(247), 0.65f)},
     {TokenId::ShadowFloatingPanel, Variant::Daylight,
      Rgba(0.0f, 0.0f, 0.0f, 0.18f)},
-    // Midnight (blueprint 3.3 verbatim)
-    {TokenId::SurfaceCanvasBase, Variant::Midnight,
-     Rgba(ChannelFromByte(18), ChannelFromByte(20), ChannelFromByte(26), 0.68f)},
-    {TokenId::SurfaceFloatingIsland, Variant::Midnight,
-     Rgba(ChannelFromByte(38), ChannelFromByte(42), ChannelFromByte(54), 0.52f)},
+    // Midnight: THE FIVE-STEP LADDER (C124). The canvas is OPAQUE #0B0D12 -- the
+    // ladder's own canvas, and the value the audit measured (#0C0D11 +-1). It
+    // used to be an 68 % sheet over #0B0C10, which C121's veil then presented as
+    // (16,17,23); against THAT canvas the panel tier measures CR 1.029, i.e.
+    // below the card's 1.03 floor, so the ladder cannot be built on it. The
+    // veil follows the canvas (C121's invariant: the wash is the colour it
+    // washes), so a resting canvas region and the refraction-on canvas agree.
+    {TokenId::SurfaceCanvasBase, Variant::Midnight, Paint(kMidCanvas)},
+    {TokenId::SurfacePanel, Variant::Midnight, Paint(kMidPanel)},
+    {TokenId::SurfaceCard, Variant::Midnight, Paint(kMidCard)},
+    {TokenId::SurfaceFloatingIsland, Variant::Midnight, Paint(kMidFloating)},
+    {TokenId::SurfaceBorder, Variant::Midnight, Paint(kMidBorder)},
     {TokenId::TextPrimary, Variant::Midnight,
      Rgba(ChannelFromByte(245), ChannelFromByte(245), ChannelFromByte(247), 1.0f)},
     {TokenId::TextSecondary, Variant::Midnight,
      Rgba(ChannelFromByte(161), ChannelFromByte(161), ChannelFromByte(166), 1.0f)},
-    {TokenId::SurfaceBackdropReference, Variant::Midnight,
-     Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 1.0f)},
+    // C124: the opaque wallpaper reference is the ladder's canvas too. The shell
+    // (title bar + menu plate) composites nothing over it, so the shell pixel is
+    // this row: making it the canvas is what keeps C83's "the shell and the
+    // canvas are one surface" rule true by construction instead of by 2 levels.
+    {TokenId::SurfaceBackdropReference, Variant::Midnight, Paint(kMidReference)},
     {TokenId::SurfaceBackdropGhost, Variant::Midnight,
      Rgba(ChannelFromByte(11), ChannelFromByte(12), ChannelFromByte(16), 1.0f)},
     // C121: THE VEIL IS THE CANVAS COLOUR, in every theme (C102 established the
@@ -358,15 +555,23 @@ inline constexpr ColorRow kColorRows[] = {
     // veil-over-canvas is the canvas, exactly like Daylight's #F5F5F7 and High
     // Contrast's black. The C121 suite pins the result: H2, toggling refraction
     // on the far canvas, dE <= 1.
-    {TokenId::SurfaceBackdropVeil, Variant::Midnight,
-     Rgba(ChannelFromByte(16), ChannelFromByte(17), ChannelFromByte(23), 0.65f)},
+    {TokenId::SurfaceBackdropVeil, Variant::Midnight, Paint(kMidVeil)},
     {TokenId::ShadowFloatingPanel, Variant::Midnight,
      Rgba(0.0f, 0.0f, 0.0f, 0.18f)},
     // High contrast (EXT a11y variant: opaque, maximum separation)
     {TokenId::SurfaceCanvasBase, Variant::HighContrast,
      Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 1.0f)},
+    // C124: HighContrast keeps the ladder -- five opaque steps on black. It is
+    // exempt from V3's 1.03..1.10 band (an accessibility surface must be MORE
+    // separated, not less), which is the same exemption SelectionTint documents.
+    {TokenId::SurfacePanel, Variant::HighContrast,
+     Rgba(ChannelFromByte(14), ChannelFromByte(14), ChannelFromByte(16), 1.0f)},
+    {TokenId::SurfaceCard, Variant::HighContrast,
+     Rgba(ChannelFromByte(20), ChannelFromByte(20), ChannelFromByte(22), 1.0f)},
     {TokenId::SurfaceFloatingIsland, Variant::HighContrast,
      Rgba(ChannelFromByte(28), ChannelFromByte(28), ChannelFromByte(30), 1.0f)},
+    {TokenId::SurfaceBorder, Variant::HighContrast,
+     Rgba(ChannelFromByte(56), ChannelFromByte(56), ChannelFromByte(62), 1.0f)},
     {TokenId::TextPrimary, Variant::HighContrast,
      Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 1.0f)},
     {TokenId::TextSecondary, Variant::HighContrast,
@@ -393,19 +598,23 @@ inline constexpr ColorRow kColorRows[] = {
     // HighContrast is deliberately NOT in that band: on pure black a 14% wash is
     // invisible, so it keeps the accessibility lift (asserted as its own floor).
     {TokenId::SelectionTint, Variant::Daylight,
-     Rgba(ChannelFromByte(0), ChannelFromByte(122), ChannelFromByte(255), 0.14f)},
-    {TokenId::SelectionTint, Variant::Midnight,
      Rgba(ChannelFromByte(10), ChannelFromByte(132), ChannelFromByte(255), 0.14f)},
+    {TokenId::SelectionTint, Variant::Midnight, Paint(kMidSelection)},
     {TokenId::SelectionTint, Variant::HighContrast,
      Rgba(ChannelFromByte(102), ChannelFromByte(179), ChannelFromByte(255), 0.24f)},
     // Raised tab plate: brighter than the canvas, still a translucent material
     // so the backdrop's colour shows through (Daylight/Midnight).
+    // C124: the raised tab plate IS the card tier (TierOf says so), so the three
+    // rows below must equal the card rows exactly -- the suite asserts it, which
+    // is why a "just this once" sixth tone cannot be introduced here. C79 had
+    // this plate as its own value in all three themes; that was one of the
+    // eleven the audit counted, and the 8 px corner + specular rim already carry
+    // "raised" without a bespoke fill.
     {TokenId::SurfaceTabActive, Variant::Daylight,
-     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.85f)},
-    {TokenId::SurfaceTabActive, Variant::Midnight,
-     Rgba(ChannelFromByte(58), ChannelFromByte(64), ChannelFromByte(80), 0.88f)},
+     Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 1.0f)},
+    {TokenId::SurfaceTabActive, Variant::Midnight, Paint(kMidCard)},
     {TokenId::SurfaceTabActive, Variant::HighContrast,
-     Rgba(ChannelFromByte(40), ChannelFromByte(40), ChannelFromByte(44), 1.0f)},
+     Rgba(ChannelFromByte(20), ChannelFromByte(20), ChannelFromByte(22), 1.0f)},
     // Inactive-tab hover: a ~4% lift, never a second plate.
     {TokenId::SurfaceTabHover, Variant::Daylight,
      Rgba(ChannelFromByte(255), ChannelFromByte(255), ChannelFromByte(255), 0.32f)},
@@ -428,20 +637,38 @@ inline constexpr ColorRow kColorRows[] = {
      Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.40f)},
     {TokenId::ShadowAmbient, Variant::HighContrast,
      Rgba(ChannelFromByte(0), ChannelFromByte(0), ChannelFromByte(0), 0.70f)},
+
+    // C124: THE FOLDER'S THREE TONES. A material colour, identical in every
+    // theme: (255,217,138) / (255,182,102) / (219,144,58), the audit's own
+    // sample of Bandizip's folder (DESIGN-PROPOSAL 2.1, 12.5). Relative
+    // luminance decreases highlight -> body -> shadow (the suite asserts the
+    // ORDER, not just the values), which is what makes the glyph read as a
+    // solid object with light from above at 16 px.
+    {TokenId::FolderHighlight, Variant::Daylight, Paint(kFolderHighlight)},
+    {TokenId::FolderBody, Variant::Daylight, Paint(kFolderBody)},
+    {TokenId::FolderShadow, Variant::Daylight, Paint(kFolderShadow)},
+    {TokenId::FolderHighlight, Variant::Midnight, Paint(kFolderHighlight)},
+    {TokenId::FolderBody, Variant::Midnight, Paint(kFolderBody)},
+    {TokenId::FolderShadow, Variant::Midnight, Paint(kFolderShadow)},
+    {TokenId::FolderHighlight, Variant::HighContrast, Paint(kFolderHighlight)},
+    {TokenId::FolderBody, Variant::HighContrast, Paint(kFolderBody)},
+    {TokenId::FolderShadow, Variant::HighContrast, Paint(kFolderShadow)},
 };
 
 // --border-specular-rim and --accent-liquid-primary.
 inline constexpr GradientRow kGradientRows[] = {
     {TokenId::BorderSpecularRim, Variant::Daylight,
      Gradient(Rgba(1.0f, 1.0f, 1.0f, 0.85f), Rgba(1.0f, 1.0f, 1.0f, 0.18f))},
+    // C124: ONE ACCENT. #0A84FF in Daylight and Midnight, FLAT (from == to):
+    // a two-stop accent is a second accent value on every gradient-capable
+    // surface, which is how the product ended up with three blues. HighContrast
+    // below keeps its raised-contrast pair -- the documented a11y override.
     {TokenId::AccentLiquidPrimary, Variant::Daylight,
-     Gradient(Rgba(ChannelFromByte(0), ChannelFromByte(122), ChannelFromByte(255), 0.88f),
-              Rgba(ChannelFromByte(0), ChannelFromByte(85), ChannelFromByte(212), 0.88f))},
+     Gradient(Paint(kDayAccent), Paint(kDayAccentEnd))},
     {TokenId::BorderSpecularRim, Variant::Midnight,
      Gradient(Rgba(1.0f, 1.0f, 1.0f, 0.28f), Rgba(1.0f, 1.0f, 1.0f, 0.04f))},
     {TokenId::AccentLiquidPrimary, Variant::Midnight,
-     Gradient(Rgba(ChannelFromByte(10), ChannelFromByte(132), ChannelFromByte(255), 0.82f),
-              Rgba(ChannelFromByte(0), ChannelFromByte(96), ChannelFromByte(223), 0.82f))},
+     Gradient(Paint(kMidAccent), Paint(kMidAccentEnd))},
     {TokenId::BorderSpecularRim, Variant::HighContrast,
      Gradient(Rgba(1.0f, 1.0f, 1.0f, 0.95f), Rgba(1.0f, 1.0f, 1.0f, 0.45f))},
     {TokenId::AccentLiquidPrimary, Variant::HighContrast,
@@ -602,6 +829,14 @@ inline TokenValue Lookup(std::string_view name, Variant variant) {
   // Unknown names go through the same sentinel path as TokenId::Count, so an
   // unknown token can never masquerade as a rendered (e.g. black) colour.
   return Lookup(FindToken(name), variant);
+}
+
+// C124: a tier's row. This is the TOKEN, not the pixel -- the floating tier is
+// translucent, so what a frame measures is prism::chrome::SurfaceTierPresented.
+inline Rgba SurfaceTierColor(SurfaceTier tier, Variant variant) {
+  const TokenId id = SurfaceTierToken(tier);
+  if (id == TokenId::Count) return kUnknownFallbackColor;
+  return Lookup(id, variant).color;
 }
 
 // ---------------------------------------------------------------------------

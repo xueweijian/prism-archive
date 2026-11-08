@@ -136,6 +136,18 @@ inline Rgba ThemeSurfaceColor(theme::TokenId id, Variant variant) {
   return ThemeSurfaceColor(id, variant, CanvasPresentedColor(variant));
 }
 
+// C124: THE LADDER AS PIXELS. A tier's token is a MATERIAL -- the floating tier
+// is translucent glass -- so "what colour is that step" is only answerable after
+// compositing. This is the ONE function the ladder's numbers are measured
+// through (the card's 12.7 table: canvas #0B0D12 / panel #12151C / card #1A1E26
+// / floating #232833 / border #2E3340, dE 4.1 / 4.5 / 5.2 / 5.3 between steps).
+inline Rgba SurfaceTierPresented(theme::SurfaceTier tier, Variant variant) {
+  const theme::TokenId id = theme::SurfaceTierToken(tier);
+  if (id == theme::TokenId::Count) return theme::kUnknownFallbackColor;
+  return ThemeSurfaceColor(id, variant);
+}
+
+
 inline Rgba Flatten(const Rgba& top, const Rgba& bottom) {
   return theme::CompositeOver(top, bottom);
 }

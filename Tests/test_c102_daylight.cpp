@@ -168,10 +168,16 @@ PRISM_TEST("c102 the island stands at least 8 levels off the canvas") {
 // ---------------------------------------------------------------------------
 PRISM_TEST("c102 night and high-contrast rows are untouched") {
   // Midnight: canvas, island, the two backdrop rows, the text roles.
-  PRISM_CHECK(RowIs("midnight canvas", TokenId::SurfaceCanvasBase, Variant::Midnight, 18, 20,
-                    26, 0.68f));
-  PRISM_CHECK(RowIs("midnight island", TokenId::SurfaceFloatingIsland, Variant::Midnight, 38,
-                    42, 54, 0.52f));
+  // C124 SUPERSEDES THE "night did not move" HALF OF THIS ARM. The card builds
+  // the FIFVE-step surface ladder on the audit's own canvas (#0B0D12), so the
+  // Midnight canvas row is opaque #0B0D12 instead of an 68 % sheet over
+  // #0B0C10, and the island is the ladder's floating tier. The rows below are
+  // the table's NEW values, still compared verbatim -- the point of the arm (a
+  // dark row may not drift silently) is unchanged.
+  PRISM_CHECK(RowIs("midnight canvas", TokenId::SurfaceCanvasBase, Variant::Midnight, 11, 13,
+                    18, 1.0f));
+  PRISM_CHECK(RowIs("midnight island", TokenId::SurfaceFloatingIsland, Variant::Midnight, 43,
+                    49, 62, 0.75f));
   PRISM_CHECK(RowIs("midnight ghost", TokenId::SurfaceBackdropGhost, Variant::Midnight, 11, 12,
                     16, 1.0f));
   // C121: the veil row moved from --surface-backdrop-reference (11,12,16, the
@@ -179,8 +185,11 @@ PRISM_TEST("c102 night and high-contrast rows are untouched") {
   // canvas colour itself, which is C102's own rule for Daylight applied to
   // Midnight. The ghost row above is untouched: the ghost is only ever consumed
   // for its ALPHA.
-  PRISM_CHECK(RowIs("midnight veil", TokenId::SurfaceBackdropVeil, Variant::Midnight, 16, 17,
-                    23, 0.65f));
+  // C124: the veil is still THE CANVAS COLOUR (C121's rule); the canvas moved to
+  // the ladder's #0B0D12, so the veil moved with it. Toggling refraction still
+  // cannot move a resting pixel -- c121 H2 measures dE 0.00.
+  PRISM_CHECK(RowIs("midnight veil", TokenId::SurfaceBackdropVeil, Variant::Midnight, 11, 13,
+                    18, 0.65f));
   PRISM_CHECK(RowIs("midnight text primary", TokenId::TextPrimary, Variant::Midnight, 245, 245,
                     247, 1.0f));
 
@@ -194,9 +203,12 @@ PRISM_TEST("c102 night and high-contrast rows are untouched") {
 
   // ... and the presented pixels the C91 suite pins.
   // C121: the veil is the canvas colour in every theme now; Midnight's
-  // presented pixel is its plain canvas composite (16,17,23).
+  // presented pixel is its plain canvas composite. C124: #0B0D12 -- the
+  // ladder's canvas and the audit's measured #0C0D11 +-1 (the panel tier only
+  // reaches 1.064:1 from THIS canvas; from the brighter (16,17,23) it measures
+  // 1.029, below the card's 1.03 floor).
   PRISM_CHECK(Near("canvas presented (night)",
-                   ToPixel(ch::CanvasPresentedColor(Variant::Midnight)), Pixel{16, 17, 23}, 2));
+                   ToPixel(ch::CanvasPresentedColor(Variant::Midnight)), Pixel{11, 13, 18}, 2));
   PRISM_CHECK(Near("canvas presented (hc)",
                    ToPixel(ch::CanvasPresentedColor(Variant::HighContrast)), Pixel{0, 0, 0},
                    0));

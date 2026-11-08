@@ -469,7 +469,16 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
               halfEdge, halfEdge - edge);
   PRISM_CHECK(panelDeltaAt >= 8);
   PRISM_CHECK(halfEdge > 0);
-  PRISM_CHECK(std::abs(halfEdge - edge) <= 2);   // a displacement of the page is a bug
+  // C124: TOLERANCE 8, NOT 2, AND THE REASON IS MEASURED. The source is built at
+  // 1/8 resolution, so one mini pixel is 8 device px and a 50 %-crossing estimate
+  // cannot be finer than that; it landed within 1 px only while the rail stood 21
+  // levels off the canvas. C124's ladder deliberately lowers that step to 10
+  // levels (the rail must STEP BACK), and the crossing is now quantised to the
+  // source's own grid (measured +6 = +0.75 mini px, i.e. inside one cell). The
+  // bug this assertion exists to catch -- the prefix-summed gaussian that
+  // displaced the whole ghost by 39 px -- is 5x the new bound, so it is still
+  // caught; what is no longer claimed is precision the source cannot express.
+  PRISM_CHECK(std::abs(halfEdge - edge) <= 8);   // a displacement of the page is a bug
 
   // ---------------------------------------------------------------- (3) ITEMS
   // The rail-less photo grid: nothing but canvas and the bands near the probe.

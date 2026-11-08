@@ -410,8 +410,9 @@ PRISM_TEST("c102 night and high contrast render unchanged") {
               nightCanvas.g, nightCanvas.b, hcCanvas.r, hcCanvas.g, hcCanvas.b);
   // C121: the C77 veil is the canvas colour in every theme (it used to be the
   // darker --surface-backdrop-reference), so Midnight's resting canvas is the
-  // plain #101117 composite instead of its veil.
-  PRISM_CHECK(Near("canvas (night)", nightCanvas, Pixel{16, 17, 23}, 2));
+  // plain composite instead of its veil. C124: that composite is the surface
+  // ladder's canvas, #0B0D12 -- the audit's measured #0C0D11 +-1.
+  PRISM_CHECK(Near("canvas (night)", nightCanvas, Pixel{11, 13, 18}, 2));
   // High contrast is opaque black: no tolerance is honest here.
   PRISM_CHECK(Near("canvas (hc)", hcCanvas, Pixel{0, 0, 0}, 0));
 

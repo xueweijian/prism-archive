@@ -1283,7 +1283,29 @@ class GalleryWindow {
   // island has no rectangle to cover and the layer is skipped. Returning the
   // legacy pill here would composite a blurred 44 px pill over the toolbar --
   // a ghost of a control the user can no longer click.
+  //
+  // C123 leaves this empty ON PURPOSE: the crumb it used to cover no longer
+  // exists, so there is no surface to compose. The refraction ghost C121 fixed
+  // is still built and painted (DrawPageBackground), and C126 gives it its new
+  // host -- the flush toolbar, where content never scrolls under the material.
+  // This empty rectangle is therefore a CORRECT intermediate state, not a
+  // leftover: C107/C112/C115-render assert it, and
+  // PRISM_C123_MUTANT_PILL_ISLAND brings the deleted pill back so those
+  // assertions can be shown to go red (CONTRACTS D3).
   prism::glass::IslandRect GlassPanelRect() const {
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+    // D3 arm for the three suites that now assert "there is no island": the
+    // pre-card pill island comes back over the band -- a blurred rectangle for
+    // a control the user can no longer click. Their first "no island" check
+    // MUST go red.
+    if (layout_.chrome == prism::layout::Chrome::C123) {
+      const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
+      return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
+                                      static_cast<uint32_t>(pill.top),
+                                      static_cast<uint32_t>(pill.Width()),
+                                      static_cast<uint32_t>(pill.Height())};
+    }
+#endif
 #if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
     // C112's D3 arm, kept ALIVE under C123: the pre-card pill island comes back
     // over the band. In a C123 window that surface covers the toolbar instead of

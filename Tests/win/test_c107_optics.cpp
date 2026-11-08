@@ -90,6 +90,13 @@ bool g_injectionRan = false;
 bool g_skipped = false;
 std::string g_skipReason;
 
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+// CONTRACTS D3: the pill island C123 deleted comes back, so this suite's
+// "the window publishes no island" checks MUST go red. Set where the product
+// reports it, read by the verdict predicate at the first failure.
+bool g_pillIslandObserved = false;
+#endif
+
 // A real window whose content we control: the product's capture reads the
 // window's OWN surface, so a test that painted into a lookalike bitmap would
 // not be testing the capture at all.
@@ -782,6 +789,9 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
   const prism::glass::IslandRect panel = window.GlassPanelRect();
   std::printf("  island rect: %u,%u %ux%u (C123: the crumb is a path bar, no island)\n",
               panel.x, panel.y, panel.w, panel.h);
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  g_pillIslandObserved = panel.w != 0 || panel.h != 0;
+#endif
   PRISM_CHECK_EQ(panel.x, 0u);
   PRISM_CHECK_EQ(panel.y, 0u);
   PRISM_CHECK_EQ(panel.w, 0u);
@@ -815,6 +825,11 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
 int main(int argc, char** argv) {
   // WIC (the screenshot encoder) is a COM server.
   const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  std::puts("C107 MUTANT ACTIVE: pill_island");
+  prism::test::SetMutationVerdict("C107 MUTATION CAUGHT: pill_island",
+                                  [] { return g_pillIslandObserved; });
+#endif
   const int code = prism::test::RunAll(argc, argv);
   if (SUCCEEDED(com)) CoUninitialize();
   if (code == 0) {

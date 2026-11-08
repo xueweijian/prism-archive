@@ -63,6 +63,12 @@ constexpr int kBaseline = 1264;
 IWICImagingFactory* gWic = nullptr;
 const char* gOutDir = nullptr;
 
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+// CONTRACTS D3: set where the product reports an island again; read by the
+// verdict predicate at the first failing "no island" check.
+bool g_pillIslandObserved = false;
+#endif
+
 struct Frame {
   UINT32 width = 0;
   UINT32 height = 0;
@@ -442,6 +448,9 @@ PRISM_TEST("c115.glass_panel: C123 has no composition island over the toolbar") 
                   layout.crumbBar.Width(), layout.crumbBar.Height(), w, h);
     }
     // (b) NO island: the composition layer has nothing to cover.
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+    g_pillIslandObserved = g_pillIslandObserved || panel.w != 0 || panel.h != 0;
+#endif
     PRISM_CHECK_EQ(panel.w, 0u);
     PRISM_CHECK_EQ(panel.h, 0u);
     PRISM_CHECK_EQ(panel.x, 0u);
@@ -460,6 +469,13 @@ int main(int argc, char** argv) {
     std::puts("FAIL: COM init failed -- the narrow layout cannot be rendered");
     return 1;
   }
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  // CONTRACTS D3: the pill island C123 deleted comes back -> the "no island"
+  // ring below MUST go red.
+  std::puts("C115 MUTANT ACTIVE: pill_island");
+  prism::test::SetMutationVerdict("C115 MUTATION CAUGHT: pill_island",
+                                  [] { return g_pillIslandObserved; });
+#endif
   ComPtr<IWICImagingFactory> wic;
   if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(wic.ReleaseAndGetAddressOf())))) {

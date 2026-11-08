@@ -33,6 +33,7 @@
 
 #include "../mini_test.hpp"
 #include "../../Src/PrismCore/ActionBarModel.hpp"
+#include "../../Src/PrismCore/ThemeTokens.hpp"  // C123: the refraction setting
 #include "../../Src/PrismCore/WindowLayout.hpp"
 #include "../../Src/PrismWin/GalleryRenderer.hpp"
 #include "../../Src/PrismWin/GalleryWindow.hpp"
@@ -45,6 +46,13 @@ namespace {
 constexpr int kSkipReturnCode = 77;
 GalleryWindow* g_window = nullptr;
 std::vector<prism::ArchiveItem> g_catalog;
+
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+// Runtime proof the injected pill island really came back (CONTRACTS D3): it is
+// only set where the product reports a non-empty panel, and only then may the
+// first failing "no island" check print the CAUGHT marker.
+bool g_pillIslandObserved = false;
+#endif
 
 void Add(const char* path, bool dir, uint64_t size) {
   prism::ArchiveItem item;
@@ -301,6 +309,93 @@ PRISM_TEST("c123.window pixels: the toolbar is painted edge to edge") {
 }
 
 // ---------------------------------------------------------------------------
+// 5. C107/C112/C115-render assert this same product property from their own
+//    angles: C123's window publishes NO composition island. It is asserted
+//    here too so the D3 arm (PRISM_C123_MUTANT_PILL_ISLAND) has a binary that
+//    proves the property can go red -- one function, one red-prover, three
+//    suites.
+// ---------------------------------------------------------------------------
+PRISM_TEST("c123.window island: no composition surface over the toolbar") {
+  ResetTabs();
+  (void)g_window->OpenTab("C:\\work\\fixture.zip");
+  const prism::glass::IslandRect panel = g_window->GlassPanelRect();
+  std::printf("C123 window island: %u,%u %ux%u (expected 0,0 0x0)\n", panel.x, panel.y,
+              panel.w, panel.h);
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  g_pillIslandObserved = panel.w != 0 || panel.h != 0;
+#endif
+  PRISM_CHECK_EQ(panel.x, 0u);
+  PRISM_CHECK_EQ(panel.y, 0u);
+  PRISM_CHECK_EQ(panel.w, 0u);
+  PRISM_CHECK_EQ(panel.h, 0u);
+  // ... and the row it was replaced by still exists (so this cannot be green
+  // because the crumb band disappeared too).
+  const prism::layout::Layout layout = g_window->LayoutForTest();
+  PRISM_CHECK_EQ(layout.crumbBar.Height(), 28);
+}
+
+// ---------------------------------------------------------------------------
+// 6. appearance.backdropRefraction must not silently become a no-op.
+//
+// C126 will move the liquid-glass island onto the flush toolbar. Until then the
+// island has no host, so the question "does the setting still reach pixels?"
+// has to be answered by MEASUREMENT, not by a comment (R1): this case renders
+// the same window with the setting on and off and reports how many pixels move,
+// split into "inside the toolbar band" and "everywhere else".
+// ---------------------------------------------------------------------------
+PRISM_TEST("c123.window refraction: the appearance setting still reaches pixels") {
+  ResetTabs();
+  (void)g_window->OpenTab("C:\\work\\fixture.zip");
+  const prism::layout::Layout layout = g_window->LayoutForTest();
+  if (layout.windowW <= 0 || layout.windowH <= 0) {
+    std::puts("  [skip] the window has no client size yet");
+    return;
+  }
+  if (g_window->DpiForTest() != 96) {
+    std::printf("  [skip] DPI is %d, not 96: the pixel sample is DIP-only\n",
+                g_window->DpiForTest());
+    return;
+  }
+  const UINT32 width = static_cast<UINT32>(layout.windowW);
+  const UINT32 height = static_cast<UINT32>(layout.windowH);
+  const bool was = prism::theme::BackdropRefractionEnabled();
+  prism::theme::live::SetBackdropRefraction(true);
+  std::vector<UINT32> on;
+  const bool capturedOn = CaptureWindow(width, height, &on);
+  prism::theme::live::SetBackdropRefraction(false);
+  std::vector<UINT32> off;
+  const bool capturedOff = CaptureWindow(width, height, &off);
+  prism::theme::live::SetBackdropRefraction(was);
+  if (!capturedOn || !capturedOff) {
+    std::puts("  [skip] the device path could not capture both frames");
+    return;
+  }
+  int changed = 0;
+  int changedInBand = 0;
+  int maxDelta = 0;
+  for (int y = 0; y < static_cast<int>(height); ++y) {
+    for (int x = 0; x < static_cast<int>(width); ++x) {
+      const size_t i = static_cast<size_t>(y) * width + static_cast<size_t>(x);
+      const int d = ChannelDelta(on[i], off[i]);
+      if (d == 0) continue;
+      ++changed;
+      maxDelta = (std::max)(maxDelta, d);
+      if (y >= layout.toolbar.top && y < layout.toolbar.bottom) ++changedInBand;
+    }
+  }
+  std::printf("C123 refraction: %d pixels differ (max channel delta %d), %d of them inside "
+              "the toolbar band of %ux%u\n",
+              changed, maxDelta, changedInBand, width, height);
+  // The setting is NOT a no-op: it still gates the panel material (the rail, the
+  // action strip, the cards), which is why turning it off changes pixels. The
+  // REFRACTION half has no island to feed until C126 -- when that card lands
+  // this case must be re-measured, and the count is expected to grow, never to
+  // become zero.
+  PRISM_CHECK(changed > 0);
+  PRISM_CHECK(maxDelta > 2);
+}
+
+// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
   if (FAILED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
     std::printf("SKIP: CoInitializeEx failed (this window station has no COM)\n");
@@ -313,6 +408,11 @@ int main(int argc, char** argv) {
     return kSkipReturnCode;
   }
   g_window = &window;
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  std::printf("C123 MUTANT ACTIVE: pill_island\n");
+  prism::test::SetMutationVerdict("C123 MUTATION CAUGHT: pill_island",
+                                  [] { return g_pillIslandObserved; });
+#endif
 
   const int rc = prism::test::RunAll(argc, argv);
   if (rc != 0) return rc;

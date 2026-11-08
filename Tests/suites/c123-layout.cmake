@@ -57,4 +57,57 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   # cannot create the HWND returns 77 (a visible Skip, never a fake green).
   set_tests_properties(win.c123_window PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
       PASS_REGULAR_EXPRESSION "ALL C123 WINDOW CHECKS PASSED")
+
+  # -------------------------------------------------------------------------
+  # THE "NO ISLAND" ASSERTIONS MUST BE ABLE TO GO RED.
+  #
+  # C123 deletes the breadcrumb pill, so the composition island it owned has no
+  # host: GlassPanelRect() is 0,0 0x0 and PresentGlassFrame sizes nothing. Three
+  # suites assert that absence -- this one, C107 (the chain never composes) and
+  # C115-render (the panel ring at eleven widths). "Nothing happened" is the
+  # easiest kind of assertion to leave vacuously true, so the SAME product
+  # switch (PRISM_C123_MUTANT_PILL_ISLAND, in GalleryWindow::GlassPanelRect)
+  # brings the deleted island back and each suite is rebuilt against it: the
+  # first "no island" check must print its own CAUGHT marker and leave 0.
+  #
+  # No WILL_FAIL anywhere (CONTRACTS D26/D27): PASS_REGULAR_EXPRESSION decides.
+  # -------------------------------------------------------------------------
+  add_executable(win_c123_window_mutant_pill_island win/test_c123_window.cpp)
+  target_link_libraries(win_c123_window_mutant_pill_island PRIVATE prism_core
+                        prism_win_bridge user32.lib gdi32.lib ole32.lib d2d1.lib dwrite.lib
+                        windowscodecs.lib d3d11.lib dxgi.lib dcomp.lib shell32.lib)
+  target_compile_options(win_c123_window_mutant_pill_island PRIVATE /WX-)
+  target_compile_definitions(win_c123_window_mutant_pill_island
+                             PRIVATE PRISM_C123_MUTANT_PILL_ISLAND=1)
+  add_test(NAME "mutation.c123.pill_island"
+           COMMAND win_c123_window_mutant_pill_island)
+  set_tests_properties(mutation.c123.pill_island PROPERTIES TIMEOUT 180
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "C123 MUTATION CAUGHT: pill_island")
+
+  add_executable(win_c107_optics_mutant_pill_island win/test_c107_optics.cpp)
+  target_link_libraries(win_c107_optics_mutant_pill_island PRIVATE prism_core
+                        prism_win_bridge user32.lib gdi32.lib d2d1.lib dwrite.lib
+                        d3d11.lib dxgi.lib dcomp.lib d3dcompiler.lib
+                        windowscodecs.lib ole32.lib)
+  target_compile_options(win_c107_optics_mutant_pill_island PRIVATE /WX-)
+  target_compile_definitions(win_c107_optics_mutant_pill_island
+                             PRIVATE PRISM_C123_MUTANT_PILL_ISLAND=1)
+  add_test(NAME "mutation.c123.c107_pill_island"
+           COMMAND win_c107_optics_mutant_pill_island)
+  set_tests_properties(mutation.c123.c107_pill_island PROPERTIES TIMEOUT 300
+      PASS_REGULAR_EXPRESSION "C107 MUTATION CAUGHT: pill_island")
+
+  add_executable(win_c115_narrow_render_mutant_pill_island win/test_c115_narrow_render.cpp)
+  target_link_libraries(win_c115_narrow_render_mutant_pill_island PRIVATE prism_core
+                        prism_win_bridge user32.lib gdi32.lib d2d1.lib dwrite.lib
+                        windowscodecs.lib ole32.lib d3d11.lib dxgi.lib dcomp.lib
+                        WindowsApp.lib)
+  target_compile_options(win_c115_narrow_render_mutant_pill_island PRIVATE /WX-)
+  target_compile_definitions(win_c115_narrow_render_mutant_pill_island
+                             PRIVATE PRISM_C123_MUTANT_PILL_ISLAND=1)
+  add_test(NAME "mutation.c123.c115_pill_island"
+           COMMAND win_c115_narrow_render_mutant_pill_island)
+  set_tests_properties(mutation.c123.c115_pill_island PROPERTIES TIMEOUT 300
+      PASS_REGULAR_EXPRESSION "C115 MUTATION CAUGHT: pill_island")
 endif()

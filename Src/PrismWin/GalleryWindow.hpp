@@ -1276,29 +1276,30 @@ class GalleryWindow {
     return glass_ ? glass_->ShaderError() : kNoLayer;
   }
   int GlassOpticsInitializations() const { return glass_ ? glass_->OpticsInitializations() : 0; }
-  // The panel the island covers, straight from the LAYOUT (the same rect the
-  // breadcrumb pill is painted and hit-tested with) -- never a fixed 960x48.
+  // The panel the island covers, straight from the LAYOUT -- never a fixed
+  // 960x48.
   //
-  // C123: there IS no nav pill any more. The crumb is a 28 px path bar painted
-  // by the window into the page (not a floating surface), so the composition
-  // island has no rectangle to cover and the layer is skipped. Returning the
-  // legacy pill here would composite a blurred 44 px pill over the toolbar --
-  // a ghost of a control the user can no longer click.
+  // C123 left this EMPTY: the breadcrumb pill it used to cover was deleted (the
+  // crumb is a 28 px path bar painted into the page), so there was no surface
+  // to compose and the ghost C121 fixed had no consumer.
   //
-  // C123 leaves this empty ON PURPOSE: the crumb it used to cover no longer
-  // exists, so there is no surface to compose. The refraction ghost C121 fixed
-  // is still built and painted (DrawPageBackground), and C126 gives it its new
-  // host -- the flush toolbar, where content never scrolls under the material.
-  // This empty rectangle is therefore a CORRECT intermediate state, not a
-  // leftover: C107/C112/C115-render assert it, and
-  // PRISM_C123_MUTANT_PILL_ISLAND brings the deleted pill back so those
-  // assertions can be shown to go red (CONTRACTS D3).
+  // C126 GIVES IT ITS HOST: THE FLUSH TOOLBAR BAND (prism::layout::
+  // ToolbarBandRect). That is the surface the user reads as the material, it is
+  // edge-to-edge so content never scrolls under it, and -- the reason it is the
+  // toolbar and not the crumb row -- the island now OWNS the band's content
+  // (the eight icons, the eight words, the hover capsule, the group seams), so
+  // there is no window-painted copy underneath for the optics to blur into a
+  // ghost. See GlassPillOwnsContent.
+  //
+  // The two D3 arms below keep returning the DELETED pill: their verdicts are
+  // "the island is not the band", and a control that returned the band would be
+  // green in every build.
   prism::glass::IslandRect GlassPanelRect() const {
 #if defined(PRISM_C123_MUTANT_PILL_ISLAND)
-    // D3 arm for the three suites that now assert "there is no island": the
-    // pre-card pill island comes back over the band -- a blurred rectangle for
-    // a control the user can no longer click. Their first "no island" check
-    // MUST go red.
+    // D3 arm for the suites whose contract is "the island IS the toolbar band":
+    // the pre-card pill comes back over the band -- a blurred 560x44 rectangle
+    // for a control the user can no longer click. Their first band-equality
+    // check MUST go red.
     if (layout_.chrome == prism::layout::Chrome::C123) {
       const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
       return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
@@ -1308,11 +1309,11 @@ class GalleryWindow {
     }
 #endif
 #if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
-    // C112's D3 arm, kept ALIVE under C123: the pre-card pill island comes back
-    // over the band. In a C123 window that surface covers the toolbar instead of
-    // the crumb -- a blurred rectangle for a control that no longer exists --
-    // and the C112 suite's "the window publishes no island" assertion MUST go
-    // red. A retired control must not leave its negative control green.
+    // C112's D3 arm, kept ALIVE: the pre-card pill island comes back over the
+    // band. In a C123 window that surface is not the toolbar band -- a blurred
+    // rectangle for a control that no longer exists -- and the C112 suite's
+    // "the island is the band" assertion MUST go red. A retired control must not
+    // leave its negative control green.
     if (layout_.chrome == prism::layout::Chrome::C123) {
       const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
       return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
@@ -1321,7 +1322,17 @@ class GalleryWindow {
                                       static_cast<uint32_t>(pill.Height())};
     }
 #endif
-    if (layout_.chrome == prism::layout::Chrome::C123) return prism::glass::IslandRect{};
+    if (layout_.chrome == prism::layout::Chrome::C123) {
+      // C126: THE TOOLBAR BAND IS THE ISLAND'S RECTANGLE. Empty when the band
+      // has no room (a degenerate window) -- PresentGlassFrame then sizes
+      // nothing, which is the honest "there is no surface" answer.
+      const prism::layout::Rect band = prism::layout::ToolbarBandRect(layout_);
+      if (band.Empty()) return prism::glass::IslandRect{};
+      return prism::glass::IslandRect{static_cast<uint32_t>(band.left),
+                                      static_cast<uint32_t>(band.top),
+                                      static_cast<uint32_t>(band.Width()),
+                                      static_cast<uint32_t>(band.Height())};
+    }
     const prism::layout::Rect pill = prism::layout::NavPillRect(layout_);
     if (pill.Empty()) return prism::glass::IslandRect{};
     return prism::glass::IslandRect{static_cast<uint32_t>(pill.left),
@@ -1368,17 +1379,38 @@ class GalleryWindow {
   // The fix is ownership, not a tuning knob: while the island is composited the
   // pill (fill, rim, hover capsule and TEXT) belongs to the ISLAND, and the
   // window keeps only the geometry it hit-tests with.
+  //
+  // C126: THE SAME RULE, THE SAME FUNCTION, A NEW TENANT -- THE TOOLBAR. While
+  // the island is composited over the flush band, the band's fill, group seams,
+  // hover capsule, icons and Chinese labels belong to the ISLAND, and
+  // GalleryRenderer::DrawActionBar returns without painting any of them. The
+  // window keeps the dropdown panel (it hangs below the island's rectangle) and
+  // the hit-test geometry.
+  //
+  // The name is C112's and is kept on purpose: it is ONE predicate about one
+  // fact ("the island owns the content of the surface it covers"), asked by the
+  // renderer, the window and three suites. Renaming it would leave the older
+  // card's arms referencing a function that no longer exists, and a second
+  // predicate would be the very "two answers to one question" C115 ended.
   bool GlassPillOwnsContent() const {
 #if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
-    // NEGATIVE CONTROL (CONTRACTS D3/D27): the pre-C112 arm -- the window keeps
-    // painting the pill's text and the island is composed on top of it. The
-    // suite's sharpness assertion MUST go red, and the verdict it prints names
-    // this mutant.
+    // NEGATIVE CONTROL (CONTRACTS D3/D27): the window keeps painting the band
+    // and the island is composed on top of it -- the C112 defect, restored. The
+    // C126 suite's G1 (window paints nothing) and G2 (sharpness band) MUST go
+    // red, and the verdict they print names this mutant.
+    return false;
+#elif defined(PRISM_C126_MUTANT_WINDOW_PAINTS_TOOLBAR)
+    // C126 D3: the same arm, named for THIS card. The window keeps the toolbar,
+    // the island still composites over it, and G1/G2 must go red.
     return false;
 #else
-    // C123: no pill, no island. The crumb is painted by the window into the
-    // page (DrawBreadcrumbPathBar), so there is no surface that could own it.
-    if (layout_.chrome == prism::layout::Chrome::C123) return false;
+    // C123 deleted the pill, C126 gave the island the TOOLBAR: both
+    // compositions answer the same question from the same three facts (a
+    // composition host, a visible layer, and -- for C123 -- a band to cover).
+    if (layout_.chrome == prism::layout::Chrome::C123 &&
+        prism::layout::ToolbarBandRect(layout_).Empty()) {
+      return false;
+    }
     return glass_ && glass_->UsesComposition() && glass_->Visible();
 #endif
   }
@@ -1397,6 +1429,11 @@ class GalleryWindow {
     if (rect.w == 0 || rect.h == 0) return false;
     prism::win::glass::GlassConstants constants{};
     BuildGlassConstants(rect, &constants);
+    // C126: the seam composes what the PRODUCT composes. PresentGlassFrame hands
+    // the chain no backdrop while appearance.backdropRefraction is off, so this
+    // seam must drop it too -- otherwise a suite measuring "off" would be
+    // measuring a frame the user never gets, and G4's delta would be invented.
+    if (!prism::theme::BackdropRefractionEnabled()) backdrop = nullptr;
     glassLastFrameOptical_ = backdrop != nullptr && glass_->OpticsLive();
     return glass_->PaintIslandInto(
         target, rect, backdrop, constants,
@@ -1956,6 +1993,36 @@ class GalleryWindow {
                                renderer_.dbgActionLabels,  renderer_.dbgActionIslands,
                                renderer_.dbgActionClippedLabels, renderer_.dbgActionDisabled};
   }
+  // C126: WHO PAINTED THE TOOLBAR, as numbers. 'windowButtons' is the existing
+  // dbgActionButtons read-back above; the island side comes from the renderer's
+  // second painter, which draws on the COMPOSITION device. Two counters from two
+  // devices are the only honest way to say "the window painted nothing and the
+  // island painted eight".
+  struct ToolbarOwnershipCounters {
+    int windowButtons = 0;   // buttons the WINDOW's painter emitted (0 while owned)
+    int windowSkips = 0;     // window frames that took the ownership branch
+    int islandPaints = 0;    // island frames that put the band on the surface
+    int islandButtons = 0;   // buttons those frames emitted
+    int islandIcons = 0;     // icon glyphs those frames emitted
+    int islandLabels = 0;    // words those frames emitted
+  };
+  ToolbarOwnershipCounters ToolbarOwnership() const {
+    return ToolbarOwnershipCounters{renderer_.dbgActionButtons,
+                                    renderer_.ToolbarOwnedWindowSkips(),
+                                    renderer_.ToolbarOnIslandPaints(),
+                                    renderer_.ToolbarOnIslandButtons(),
+                                    renderer_.ToolbarOnIslandIcons(),
+                                    renderer_.ToolbarOnIslandLabels()};
+  }
+  // The ghost's D3 arm: 0 unless PRISM_C126_MUTANT_TEXT_IN_GHOST compiled in and
+  // a backdrop was actually built (the verdict is armed on this, D3).
+  int TextInGhostArmRuns() const { return renderer_.TextInGhostArmRuns(); }
+  int BackdropRebuilds() const { return renderer_.BackdropRebuilds(); }
+  // C126: the refraction source the optics are handed (1/8 of the frame), for
+  // G3. The target must be the one the ghost was BUILT on -- see
+  // GalleryRenderer::PaintGhostSource.
+  UINT GhostSourceWidth() const { return renderer_.GhostSourceWidth(); }
+  UINT GhostSourceHeight() const { return renderer_.GhostSourceHeight(); }
   void SetActionHandler(std::function<void(prism::actionbar::ActionId, int)> handler) {
     onAction_ = std::move(handler);
   }
@@ -5320,6 +5387,12 @@ class GalleryWindow {
     // the same pixels, so the handover frame is invisible (C76's "every
     // differing pixel sits inside the island" invariant).
     scene.pillOwnedByIsland = GlassPillOwnsContent() && glassPresents_ > 0;
+    // C126: the toolbar's handover uses the SAME rule and the SAME frame
+    // boundary. Painting the band on frame 1 (when the island has not presented
+    // yet) and handing it over on frame 2 keeps a visible band in every frame;
+    // owning it one frame early would leave the toolbar EMPTY on the first
+    // frame -- a hole across the top of the window.
+    scene.actionsOwnedByIsland = GlassPillOwnsContent() && glassPresents_ > 0;
     // C91: the frame's ONE theme input. It is the same field the shell paints
     // from (chromeVariant_), so a theme switch can no longer reach the caption
     // and stop there.
@@ -5532,7 +5605,14 @@ class GalleryWindow {
   // release/re-create, the SECOND capture into a fresh WIC target is rejected
   // too (the C113 probe measured 0x88990012 on every render after the first),
   // which is how a digest ends up hashing a frame D2D threw away.
-  bool RenderSceneForCapture(ID2D1RenderTarget* target) {
+  // C126: 'paintGhostInTopLeft' is a MEASUREMENT seam, not a product path. It
+  // blits the cached refraction source (the 1/8 ghost the optics are handed)
+  // into the target's top-left corner after the frame, so a suite can read the
+  // SOURCE instead of the frame -- DrawBands paints the band's canvas over the
+  // ghost, so the frame cannot answer "is the ghost clean?" (see the C126 G3
+  // comment). The frame's own pixels in that corner are overwritten; callers
+  // that want the frame must read it from a capture WITHOUT this flag.
+  bool RenderSceneForCapture(ID2D1RenderTarget* target, bool paintGhostInTopLeft = false) {
     lastRenderError_ = S_OK;
     if (!target) {
       lastRenderError_ = E_POINTER;
@@ -5554,6 +5634,9 @@ class GalleryWindow {
     renderer_.ReleaseDeviceResources();
     renderer_.CreateDeviceResources(target);
     const bool drawn = DrawFrame(target);
+    // C126: the refraction source lives on THIS target's device until the
+    // release below, which is why the read-back has to happen here.
+    if (paintGhostInTopLeft) renderer_.PaintGhostSource(target);
     renderer_.ReleaseDeviceResources();
     if (target_) renderer_.CreateDeviceResources(target_.Get());
     return drawn;
@@ -5665,17 +5748,36 @@ class GalleryWindow {
     // under the panel are on screen (and on the window's own surface). Captured
     // every frame, handed to the chain -- never nullptr, which is what kept the
     // two shaders from ever executing.
-    const bool captured = glass_->GrabBackdrop(host_.hwnd, rect);
+    //
+    // C126: ONLY WHEN THE CHAIN CAN USE IT. GrabBackdrop is a window-sized GDI
+    // blit (plus a PrintWindow fallback) into a rect-sized DIB and a D2D bitmap;
+    // on a runner where the effects did not register, nothing reads the result.
+    // The island is now the whole toolbar band instead of the 560 px pill, so
+    // that dead work tripled and pushed C75's restore budget over its 2 MB band
+    // (measured: baseline min 43.72 MB and green; band-sized island 46.16 MB and
+    // red). A backdrop the chain cannot draw is not a picture of anything.
+    const bool wantsBackdrop = glass_->OpticsLive();
+    const bool captured = wantsBackdrop && glass_->GrabBackdrop(host_.hwnd, rect);
     // 2. THE CONSTANTS. The same GlassIslandScene::WriteCbuffer the shader's
     // cbuffer is bit-asserted against, at the panel's own size, so the
     // refraction band and the blur agree about where the edge is.
     prism::win::glass::GlassConstants constants{};
     BuildGlassConstants(rect, &constants);
+    // C126: THE REFRACTION HALF OF appearance.backdropRefraction GETS A
+    // CONSUMER. Until this card the setting gated the panel language but the
+    // optics chain ran unconditionally -- with no island there was nothing to
+    // argue about. The island now owns the toolbar, so "off" must mean OFF: the
+    // chain is skipped (no backdrop handed in) and the band is painted flat
+    // over the window's canvas, exactly the pre-C77 look. G4 measures the
+    // in-band pixel delta between the two arms; without this line the setting
+    // would be a no-op on the one surface the card creates.
+    const bool refraction = prism::theme::BackdropRefractionEnabled();
     // 3. THE COMPOSITION: backdrop -> Kawase -> Kawase -> LiquidGlass -> panel
     //    chrome, into the island's premultiplied swapchain.
-    glassLastFrameOptical_ = captured && glass_->OpticsLive();
+    glassLastFrameOptical_ = captured && refraction && glass_->OpticsLive();
     const bool composed =
-        glass_->PaintIsland(0, rect, constants, captured ? glass_->Backdrop() : nullptr,
+        glass_->PaintIsland(0, rect, constants,
+                            (captured && refraction) ? glass_->Backdrop() : nullptr,
                             [this](ID2D1DeviceContext* dc, float width, float height) {
                               PaintIslandContent(dc, width, height);
                             });
@@ -5703,8 +5805,22 @@ class GalleryWindow {
       // already underneath (PaintIslandInto draws the chain first), so this text
       // is painted OVER the glass and stays sharp -- and because it is painted
       // AFTER the chain ran, it can never become part of the next backdrop.
+      //
+      // C126: the island's tenant is the TOOLBAR now. The pill arm is kept
+      // first because a V1-chrome layout still paints one and the two never
+      // coexist (the pill rectangle is empty in a C123 layout, so PaintPillOnIsland
+      // returns false and nothing is drawn for it).
       renderer_.PaintPillOnIsland(dc, breadcrumbText_, layout_, &actionBar_, chromeVariant_,
-                                  CrumbHoverRect(), prism::theme::BackdropRefractionEnabled());
+                                  CrumbHoverRect(),
+                                  prism::theme::BackdropRefractionEnabled());
+      if (layout_.chrome == prism::layout::Chrome::C123) {
+        // THE BAND'S CONTENT, in island-local pixels-turned-DIPs. Not a lookalike
+        // painter: ActionBarPainter reads prism::actionbar::Compute and the same
+        // Model the click path hit-tests with, so a button cannot be painted
+        // where it cannot be pressed (or the other way round).
+        renderer_.PaintToolbarOnIsland(dc, layout_, &actionBar_, actionHover_, actionPressed_,
+                                       chromeVariant_);
+      }
       if (scale != 1.0f) dc->SetDpi(96.0f, 96.0f);
       return;
     }

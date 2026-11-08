@@ -49,8 +49,16 @@ namespace prism::win::glass {
 inline constexpr float kPanelRadius = 14.0f;       // continuous corner, DIP
 inline constexpr float kShadowBlur = 24.0f;        // gaussian radius, DIP
 inline constexpr float kShadowOffsetY = 6.0f;      // panel sits 6 px above
-inline constexpr float kFillAlphaMin = 0.45f;      // the card's fill window
-inline constexpr float kFillAlphaMax = 0.55f;
+// The card's fill window. C124 raised the CEILING from .55 to the surface
+// ladder's floating tier (.75): a clamp BELOW the token silently repaints the
+// tier, so the password dialog's card measured (29,33,42) while the action
+// island beside it measured (35,40,51) for the same token -- "one surface, two
+// truths", which is the defect this card exists to remove (C88's "the card's
+// pixels come from the theme tokens" is what caught it). The FLOOR still keeps
+// a fill translucent enough to be glass; .75 lets a quarter of the backdrop
+// through, and C77's clamp assertions are relational to these two constants.
+inline constexpr float kFillAlphaMin = 0.45f;
+inline constexpr float kFillAlphaMax = 0.75f;
 inline constexpr float kRimHeight = 1.0f;          // one device pixel
 inline constexpr int kShadowLayers = 8;
 

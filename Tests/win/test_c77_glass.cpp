@@ -683,8 +683,21 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
 
   // ... and the fill really is a rounded shape: the edge midpoint 1 px inside
   // the left border is the panel, the corner is not.
-  PRISM_CHECK(with.At(card.left + 1, (top + bottom) / 2) !=
-              without.At(card.left + 1, (top + bottom) / 2));
+  //
+  // C124: this used to compare WITH against WITHOUT the glass helper, and the
+  // difference it measured was NOT the shape -- it was the helper's CLAMPED fill
+  // (.55) disagreeing with the non-glass fallback's token fill (.75): "one
+  // surface, two truths", the very defect this card removes (C88 caught the same
+  // divergence from the other side). The clamp now follows the ladder, so both
+  // paths paint the same card -- correctly -- and the probe asks the shape
+  // question directly: 1 px inside the left edge is the surface, the CORNER
+  // pixel of the same frame is the canvas (assertion (4) above proves the
+  // corners are untouched).
+  const UINT32 edgePixel = with.At(card.left + 1, (top + bottom) / 2);
+  const UINT32 cornerPixel = with.At(cornerX[0], cornerY[0]);
+  std::printf("C77 panel: edge=%08X corner=%08X dist=%d\n", edgePixel, cornerPixel,
+              ColorDistance(edgePixel, cornerPixel));
+  PRISM_CHECK(ColorDistance(edgePixel, cornerPixel) > 10);
 
   // The literal "corner == background colour" check: an EMPTY catalog, so the
   // only thing behind the card is the canvas itself (kBackdrop).

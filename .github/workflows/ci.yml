@@ -149,16 +149,17 @@ jobs:
       # -- a launcher that silently falls back to direct compilation would only
       # add a process hop. The Windows proof that matters is the build + the
       # 7z.dll suites below, and they are not slowed down by this.
-      # NON-FATAL on purpose. This lane builds with /fsanitize=address and
-      # sccache refuses to cache ASan compiles (see the note below), so this
-      # action is installed and then never used. When its download started
-      # returning 504s from the CDN it failed the whole job at step 4 with
+      # REMOVED (C145): this lane builds with /fsanitize=address and sccache
+      # refuses to cache ASan compiles, so the action was installed and never
+      # used. When its CDN began returning 504s the job died at step 4 with
       # Build/Test SKIPPED -- an infrastructure hiccup that looked like a code
-      # failure on every open PR at once. Nothing downstream depends on it, so
-      # a failure here must not be able to fail the lane.
-      - name: sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-        continue-on-error: true
+      # failure on every open PR at once, and `continue-on-error` does not help
+      # because the action ALSO has a post step ("Unable to locate executable
+      # file: undefined") that fails the job after the main step is tolerated.
+      #
+      # If this lane ever moves to a cacheable preset, re-add the action AND
+      # wire -DCMAKE_CXX_COMPILER_LAUNCHER, and prove `sccache --version` runs
+      # before trusting it.
 
       # The ASan flags are NOT spelled inline any more: they live in
       # CMakePresets.json's asan-msvc preset, which is the same preset a

@@ -664,7 +664,74 @@ static_assert(prism::layout::kActionIslandMinWidth ==
               "C115: WindowLayout's action-island reserve must equal the band's own "
               "floor (2*kIslandPad + kActionCount*kButtonMinWidth + TotalGaps())");
 
+// ================================================ C123: the FLUSH toolbar
+// The band the eight buttons belong to, decided once. In the V1 composition it
+// is the pill's right-hand neighbour (ToolbarBandRect reads the same rule the
+// audit measured 643 px from); under C123 it is the full-width band, so the
+// first button's centre lands at 52 instead of 643.
+//
+// The bar is FLUSH when its island's left and right edges are the band's own.
+// The painter uses this to choose between the floating squircle (V1) and the
+// edge-to-edge strip (C123) -- a full-width squircle would round the window's
+// own corners, which is nobody's design.
+inline bool BandIsFlush(const Layout& layout) {
+  return !layout.island.Empty() && layout.island.left == layout.band.left &&
+         layout.island.right == layout.band.right;
+}
+
+// C123's eight buttons: left-anchored at the band's edge, each at most
+// kButtonMaxWidth, the tail dropped as a WHOLE when it cannot fit (C66's rule,
+// unchanged). No pill is published: the crumb is Layout::crumbBar now, and a
+// second copy here would be the very "two rectangles called the breadcrumb"
+// defect C115 exists to end.
+inline Layout ComputeFlushBand(const prism::layout::Layout& window) {
+  Layout out;
+  out.band = prism::layout::ToolbarBandRect(window);
+  if (out.band.Empty()) return out;
+  const int gaps = TotalGaps();
+  const int actionFloor = 2 * kIslandPad + kActionCount * kButtonMinWidth + gaps;
+  const int left = out.band.left;
+  const int limit = out.band.right;
+  if (limit - left < actionFloor) {
+    out.dropped = kActionCount;  // the band cannot hold a usable toolbar at all
+    return out;
+  }
+  int buttonWidth = (limit - left - 2 * kIslandPad - gaps) / kActionCount;
+  buttonWidth = (std::max)(kButtonMinWidth, (std::min)(buttonWidth, kButtonMaxWidth));
+  int x = left + kIslandPad;
+  for (int i = 0; i < kActionCount; ++i) {
+    const Rect r{x, out.band.top, x + buttonWidth, out.band.bottom};
+    if (r.right > limit) {
+      ++out.dropped;
+    } else {
+      out.buttons.push_back(
+          Button{kActions[static_cast<std::size_t>(i)].id, r,
+                 static_cast<int>(kActions[static_cast<std::size_t>(i)].group)});
+    }
+    x += buttonWidth + GapBefore(i + 1);
+  }
+  if (out.dropped > 0) {
+    out.buttons.clear();
+    return out;
+  }
+  if (out.buttons.empty()) return out;
+  // The strip IS the band: "贴边通栏" is the rectangle, not a background fill.
+  out.island = out.band;
+  for (std::size_t i = 1; i < out.buttons.size(); ++i) {
+    const Group before = static_cast<Group>(out.buttons[i - 1].group);
+    const Group after = static_cast<Group>(out.buttons[i].group);
+    if (before == after) continue;
+    const int seam = out.buttons[i - 1].rect.right + kGroupGap / 2;
+    out.separators.push_back(GroupSeparator{
+        Rect{seam, out.band.top + kGroupSeparatorInset, seam + 1,
+             out.band.bottom - kGroupSeparatorInset},
+        before, after});
+  }
+  return out;
+}
+
 inline Layout Compute(const prism::layout::Layout& window) {
+  if (window.chrome == prism::layout::Chrome::C123) return ComputeFlushBand(window);
   Layout out;
   out.band = window.actionIsland;
   const int gaps = TotalGaps();

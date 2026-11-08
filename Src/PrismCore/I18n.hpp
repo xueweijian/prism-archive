@@ -687,6 +687,13 @@ inline const std::vector<std::string>& RequiredKeys() {
       "menu.edit.delete",
       "menu.edit.rename",
       "menu.edit.newFolder",
+      // C122: the View menu and its two commands. They exist so the grid stays
+      // reachable from the bar (Ctrl+1 also does it); a table without them would
+      // ship an English "&View" inside a Chinese shell, the exact miss C38 and
+      // C93b were about.
+      "menu.view",
+      "menu.view.list",
+      "menu.view.grid",
       // C92: the IN-APP right-click menus (three surfaces in GalleryWindow).
       // One key per verb, plus one per DISABLED REASON: a greyed item that cannot
       // say why is the same defect as a missing label. Listed in the same order

@@ -281,10 +281,12 @@ GalleryWindow* IslandWindow() {
   static bool ready = false;
   if (!attempted) {
     attempted = true;
+    // Only COMPOSITION is required here: the island paints the band whether or
+    // not the two HLSL effects registered, so G1/G2/G3/G5/G6 are meaningful on a
+    // runner without shaders. G4 (the refraction delta) is the one case that
+    // needs the chain, and it says so itself.
     if (!MakeWindow(window, L"c126 island", /*glass=*/true)) {
       Skip("the composition host could not be initialized (EnableGlassLayer failed)");
-    } else if (!window.GlassOpticsReady()) {
-      Skip("the optical chain did not register on this runner");
     } else {
       ready = true;
     }
@@ -729,6 +731,12 @@ PRISM_TEST("c126.g4 refraction: the setting moves more than C123's 1,236 in-band
   if (!PRISM_CHECK(islandWindow != nullptr)) return;
   GalleryWindow& on = *islandWindow;
   if (!PRISM_CHECK(At96Dpi(on, "g4"))) return;
+  if (!on.GlassOpticsReady()) {
+    // Without the effect chain the two arms compose the same flat band, so the
+    // delta would be 0 for a reason that has nothing to do with the setting.
+    Skip("the optical chain did not register on this runner: no refraction to observe");
+    return;
+  }
   const prism::layout::Layout layout = on.LayoutForTest();
   const prism::layout::Rect bandRect = prism::layout::ToolbarBandRect(layout);
   if (!PRISM_CHECK(!bandRect.Empty())) return;

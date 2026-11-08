@@ -48,6 +48,10 @@ param(
     [string]$SourceDir = '',
     [string]$InstallDir = '',
     [string]$SevenZipDll = '',
+    # C131: an explicit Assets directory. The heuristic below can be fooled by a
+    # BUILD TREE whose Assets\ exists but is empty (no Lang\), which is exactly
+    # how an upgrade shipped a new exe next to a months-old language table.
+    [string]$AssetsDir = '',
     [string[]]$Extensions = @(),
     [string]$ScopeRoot = 'HKCU:\Software',
     [switch]$DryRun,
@@ -437,15 +441,39 @@ function Find-SourceDir {
     throw ('PrismArchive.exe not found. Build first (cmake --build <dir>) or pass -SourceDir. Tried: ' + ($tried -join '; '))
 }
 
+# C131: a candidate only counts if it actually carries the payload. Checking
+# "is this a directory" was not enough: a build tree keeps an Assets\ that was
+# created by an earlier configure and may hold no Lang\ at all, so the first
+# existing candidate won and the install copied nothing while reporting success.
+# The language tables are the payload that silently rots (a missing key falls
+# back to the compiled-in English default), so they are the acceptance test.
+function Test-AssetsPayload {
+    param([string]$Dir)
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $false }
+    $lang = Join-Path $Dir 'Lang'
+    if (-not (Test-Path -LiteralPath $lang -PathType Container)) { return $false }
+    $tables = @(Get-ChildItem -LiteralPath $lang -Filter *.json -File -ErrorAction SilentlyContinue)
+    return ($tables.Count -gt 0)
+}
+
 function Find-AssetsDir {
-    param([string]$SourceDir)
+    param([string]$SourceDir, [string]$Explicit = '')
+    if ($Explicit) {
+        if (-not (Test-Path -LiteralPath $Explicit -PathType Container)) {
+            throw ('assets directory not found: ' + $Explicit)
+        }
+        if (-not (Test-AssetsPayload $Explicit)) {
+            throw ('assets directory carries no Lang\*.json: ' + $Explicit)
+        }
+        return (Resolve-Path -LiteralPath $Explicit).Path
+    }
     $candidates = @(
         (Join-Path $SourceDir 'Assets'),
         (Join-Path $SourceDir '..\..\Assets'),
         (Join-Path (Split-Path -Parent $PSScriptRoot) 'Assets')
     )
     foreach ($c in $candidates) {
-        if (Test-Path -LiteralPath $c -PathType Container) { return (Resolve-Path -LiteralPath $c).Path }
+        if (Test-AssetsPayload $c) { return (Resolve-Path -LiteralPath $c).Path }
     }
     return ''
 }
@@ -501,6 +529,28 @@ function Deploy-Payload {
             if ([System.IO.Path]::GetExtension($full) -eq '.py') { continue }
             $rel = $full.Substring($AssetsDir.Length).TrimStart('\', '/')
             Copy-FileStable $full (Join-Path (Join-Path $TargetDir 'Assets') $rel)
+        }
+        # C131: prove the language tables actually LANDED. Copy-FileStable warns
+        # and returns on a missing source, and the copy loop enumerates a directory
+        # that the heuristic may have chosen badly, so "no exception" was never
+        # evidence that the install carries a language table at all.
+        $srcLang = Join-Path (Join-Path $AssetsDir 'Lang') 'zh-CN.json'
+        if (Test-Path -LiteralPath $srcLang -PathType Leaf) {
+            $dstLang = Join-Path (Join-Path (Join-Path $TargetDir 'Assets') 'Lang') 'zh-CN.json'
+            # Missing is a WARNING, not an error: the self-test drives this with a
+            # synthetic payload that never carries a real table. Differing bytes,
+            # however, mean the copy silently kept an older file -- that is the
+            # upgrade defect this check exists for, so it stays fatal.
+            if (-not (Test-Path -LiteralPath $dstLang -PathType Leaf)) {
+                Warn ('language table not present after install: ' + $dstLang)
+            } else {
+                $a = (Get-FileHash -LiteralPath $srcLang -Algorithm SHA256).Hash
+                $b = (Get-FileHash -LiteralPath $dstLang -Algorithm SHA256).Hash
+                if ($a -ne $b) {
+                    throw ('language table differs from the payload: ' + $dstLang)
+                }
+                Say ('language table verified: ' + $dstLang) 'done'
+            }
         }
     } else {
         Warn 'Assets directory not found; the association icon still resolves because the .ico is compiled into the exe'
@@ -701,7 +751,10 @@ function Invoke-Install {
     $exe = Join-Path $TargetDir 'PrismArchive.exe'
     Say ('payload: ' + $SourceDir)
     Say ('target:  ' + $TargetDir)
-    $assets = Find-AssetsDir -SourceDir $SourceDir
+    $assets = Find-AssetsDir -SourceDir $SourceDir -Explicit $AssetsDir
+if (-not $assets) {
+    Warn 'no Assets directory with Lang\*.json was found; the installed language tables would be stale or absent'
+}
     if (-not $assets) { Warn 'Assets directory not found next to the payload' }
     Deploy-Payload -SourceDir $SourceDir -TargetDir $TargetDir -AssetsDir $assets
 

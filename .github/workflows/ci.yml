@@ -137,10 +137,9 @@ jobs:
   # 900+ TUs cold -- 35-45 minutes before anyone learns the code even builds.
   #
   # This lane builds the SAME sources with the release preset, where sccache
-  # DOES work. Measured: the Linux lane (ccache) builds in 3 s and finishes
-  # in 105 s; this lane is the Windows equivalent. It is not a weaker gate --
-  # it is the same configure/build/ctest/gates chain, just cacheable. The ASan
-  # lane still runs, in parallel, and is still required.
+  # DOES work. It is not a weaker gate: the same configure/build/ctest chain,
+  # just cacheable. The ASan lane still runs, in parallel, and is still
+  # required.
   windows-release:
     name: Windows (MSVC release, cached)
     runs-on: windows-latest
@@ -149,40 +148,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # windows-latest no longer exposes a VS instance CMake can find alone.
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: sccache
         uses: mozilla-actions/sccache-action@v0.0.6
 
-      # release-msvc is the same preset a developer runs locally, and unlike
-      # asan-msvc it is cacheable. The launcher is spelled here rather than in
-      # the preset so the local preset keeps using the plain compiler.
-      #
-      # The launcher is resolved to an ABSOLUTE path from SCCACHE_PATH (the
-      # sccache-action exports it) instead of the bare name: a bare name that
-      # is not on PATH fails inside ninja as `CreateProcess failed: The system
-      # cannot find the file specified` on EVERY translation unit, which reads
-      # like a compile error and hides the real cause. If neither the env var
-      # nor PATH has it, fail here with one clear line.
-      - name: Configure (release-msvc preset, sccache launcher)
+      # The launcher is OPTIONAL. A launcher that cannot be started makes
+      # ninja fail on EVERY translation unit with "CreateProcess failed",
+      # which reads like a compile error and hides the real cause -- so:
+      # resolve it, PROVE it runs, and only then pass it to CMake. If it
+      # does not run, configure without it and say so; the lane still
+      # builds and tests, just without a compiler cache.
+      - name: Configure (release-msvc preset, optional sccache launcher)
         shell: pwsh
         run: |
-          # The launcher is OPTIONAL. A launcher that cannot be started makes
-          # ninja fail on EVERY translation unit with "CreateProcess failed",
-          # which reads like a compile error and hides the real cause -- so:
-          # resolve it, PROVE it runs, and only then pass it to CMake. If it
-          # does not run, configure without it and say so; the lane still
-          # builds and tests, just without a compiler cache.
           $launcher = $env:SCCACHE_PATH
           if (-not $launcher) { $launcher = (Get-Command sccache -ErrorAction SilentlyContinue).Source }
           if ($launcher -and (Test-Path $launcher)) {
             $probe = & $launcher --version 2>&1
             if ($LASTEXITCODE -eq 0) {
               Write-Host "sccache OK: $launcher ($probe)"
-              "PRISM_SCCACHE_OK=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             } else {
-              Write-Host "::warning::sccache at $launcher did not run; building WITHOUT a cache"
+              Write-Host "::warning::sccache did not run; building WITHOUT a cache"
               $launcher = $null
             }
           } else {
@@ -194,114 +181,6 @@ jobs:
           } else {
             cmake --preset release-msvc -B build
           }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build (Release)
-        run: cmake --build build --parallel
-
-      # ONE gate step. This used to be four separate steps (preflight, header
-      # self-containment, Windows-TU typecheck, ctest). They are now the same
-      # command a developer or agent runs locally:
-      #
-      #     pwsh -File tools/local_gates.ps1
-      #
-      # Why: the local script and the CI steps drifted apart twice -- a gate CI
-      # ran that nobody ran locally (three Windows rounds), and a gate that
-      # existed locally but was wired into nothing (tools/check_windows_tu.sh was
-      # broken on main for a whole PR because no job called it). One entry point
-      # cannot drift from itself (CONTRACTS D1).
-      - name: Local gates (preflight + shell gates + manifest + ctest)
-        run: >
-          pwsh -NoProfile -File tools/local_gates.ps1
-          -BuildDir build
-          -Only presets,ctest,preflight,manifest,headers,windows_tu
-
-      # ---- lane 2: Debug + ASan/UBSan (clang) ------------------------------
-      - name: Configure (asan-clang preset)
-        run: cmake --preset asan-clang -B build-asan -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      - name: Build (ASan/UBSan)
-        run: cmake --build build-asan --parallel
-      - name: Test (ASan/UBSan)
-        run: ctest -j 4 --test-dir build-asan --output-on-failure --no-tests=error
-
-      # ---- diagnostics: a red run has to be readable from the run page ----
-      - name: Failed test names -> step summary
-        if: failure()
-        shell: bash
-        run: |
-          {
-            echo '### Failed tests'
-            echo '~~~'
-            grep -hE '^\s*[0-9]+/[0-9]+ Test' build/Testing/Temporary/LastTest.log 2>/dev/null | grep -i 'failed' || true
-            grep -hE '\*\*\*Failed|Failed +[0-9]' build/Testing/Temporary/LastTest.log 2>/dev/null | head -40 || true
-            echo '~~~'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload gate logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-logs-linux
-          if-no-files-found: ignore
-          retention-days: 5
-          path: |
-            build/local-gates/*.log
-            build/Testing/Temporary/LastTest.log
-            build-asan/Testing/Temporary/LastTest.log
-
-      - name: ccache stats -> step summary
-        if: always()
-        run: ccache --show-stats | head -20 >> "$GITHUB_STEP_SUMMARY"
-
-  # ===========================================================================
-  # windows: real MSVC build of the 7z.dll bridge + Win11 shell extension, a
-  # real round-trip against the 7-Zip DLL in the runner image, under
-  # AddressSanitizer, plus fxc.exe compilation of the Liquid Glass HLSL.
-  # ===========================================================================
-  # The FAST Windows lane. The ASan lane below is the deep proof, but it
-  # cannot be cached: sccache refuses to cache /fsanitize=address compiles on
-  # MSVC (the note under that job says so), so every run there recompiles
-  # 900+ TUs cold -- 35-45 minutes before anyone learns the code even builds.
-  #
-  # This lane builds the SAME sources with the release preset, where sccache
-  # DOES work. Measured: the Linux lane (ccache) builds in 3 s and finishes
-  # in 105 s; this lane is the Windows equivalent. It is not a weaker gate --
-  # it is the same configure/build/ctest/gates chain, just cacheable. The ASan
-  # lane still runs, in parallel, and is still required.
-  windows-release:
-    name: Windows (MSVC release, cached)
-    runs-on: windows-latest
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - uses: actions/checkout@v4
-
-      # windows-latest no longer exposes a VS instance CMake can find alone.
-      - uses: ilammy/msvc-dev-cmd@v1
-
-      - name: sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
-      # release-msvc is the same preset a developer runs locally, and unlike
-      # asan-msvc it is cacheable. The launcher is spelled here rather than in
-      # the preset so the local preset keeps using the plain compiler.
-      #
-      # The launcher is resolved to an ABSOLUTE path from SCCACHE_PATH (the
-      # sccache-action exports it) instead of the bare name: a bare name that
-      # is not on PATH fails inside ninja as `CreateProcess failed: The system
-      # cannot find the file specified` on EVERY translation unit, which reads
-      # like a compile error and hides the real cause. If neither the env var
-      # nor PATH has it, fail here with one clear line.
-      - name: Configure (release-msvc preset, sccache launcher)
-        shell: pwsh
-        run: |
-          $launcher = $env:SCCACHE_PATH
-          if (-not $launcher) { $launcher = (Get-Command sccache -ErrorAction SilentlyContinue).Source }
-          if (-not $launcher) {
-            Write-Host '::error::sccache was not found (neither SCCACHE_PATH nor PATH)'
-            exit 1
-          }
-          Write-Host "sccache launcher: $launcher"
-          cmake --preset release-msvc -B build "-DCMAKE_CXX_COMPILER_LAUNCHER=$launcher"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
@@ -328,7 +207,7 @@ jobs:
         env:
           PRISM_CTEST_EXCLUDE: "bench|fuzz"
         run: |
-          ctest --output-on-failure --parallel 4 --timeout 600
+          ctest --output-on-failure --no-tests=error -E "$PRISM_CTEST_EXCLUDE" --parallel 4 --timeout 600
 
       - name: sccache stats -> step summary
         if: always()

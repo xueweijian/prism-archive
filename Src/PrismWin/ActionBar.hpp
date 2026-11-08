@@ -193,9 +193,20 @@ class ActionBarPainter {
 
   // hoverIndex / pressedIndex are button indices (-1 == nothing under/held).
   // They are PAINT inputs only: which button is legal is the model's decision.
+  //
+  // C126: 'drawBand' and 'drawDropdown' SPLIT the call in two, because the two
+  // halves now belong to different surfaces. The ISLAND (a DirectComposition
+  // visual above the window) owns the band -- fill, seams, hover capsule, icons
+  // and words -- while the dropdown panel hangs BELOW the band, outside the
+  // island's rectangle, so the window keeps painting it. A single boolean would
+  // have forced one of the two to be wrong: dropping the whole call would make
+  // the menu vanish, and keeping it would paint the band twice (the C112
+  // ghost). Defaults are the pre-C126 behaviour, so every existing caller --
+  // including the C100 painter probe -- is unchanged.
   void Draw(ID2D1RenderTarget* target, const prism::actionbar::Layout& layout,
             const prism::actionbar::Model& model, int hoverIndex, int pressedIndex,
-            prism::theme::Variant variant) {
+            prism::theme::Variant variant, bool drawBand = true,
+            bool drawDropdown = true) {
     if (!kPaintActions) return;
     if (!brush_ || !target) return;
     if (layout.island.Empty() || layout.buttons.empty()) return;
@@ -208,6 +219,25 @@ class ActionBarPainter {
     // cumulative counter would answer neither.
     dbgMnemonicGlyphs = 0;
     iconCurves_.fill(0);
+    if (drawBand) {
+      DrawBand(target, layout, model, hoverIndex, pressedIndex, variant);
+    }
+
+    // 4. the dropdown hangs BELOW the band and above the content. C126: it is
+    // the WINDOW's half of the band even while the island owns the band itself.
+    if (drawDropdown && model.DropdownOpen() && enabledDropdown(model, layout, hoverIndex)) {
+      const int ownerIndex = OwnerIndex(layout, model.DropdownOwner());
+      if (ownerIndex >= 0) DrawDropdown(target, layout, model, ownerIndex, variant, size);
+    }
+  }
+
+ private:
+  // C126: steps 1-3 of the old single Draw body, lifted verbatim into their own
+  // function so the island can paint the band without also painting (and then
+  // clipping) the dropdown panel that hangs below it.
+  void DrawBand(ID2D1RenderTarget* target, const prism::actionbar::Layout& layout,
+                const prism::actionbar::Model& model, int hoverIndex, int pressedIndex,
+                prism::theme::Variant variant) {
 
     // 1. the island: floating glass, specular hairline, squircle corners.
     const D2D1_RECT_F island = RectF(layout.island);
@@ -314,14 +344,9 @@ class ActionBarPainter {
       PaintButtonContent(target, button, model, enabled, dy, arrow);
       if (!enabled) ++dbgDisabled;
     }
-
-    // 4. the dropdown hangs BELOW the band and above the content.
-    if (model.DropdownOpen() && enabledDropdown(model, layout, hoverIndex)) {
-      const int ownerIndex = OwnerIndex(layout, model.DropdownOwner());
-      if (ownerIndex >= 0) DrawDropdown(target, layout, model, ownerIndex, variant, size);
-    }
   }
 
+ public:
   // Debug counters (the negative control's evidence; see the header comment).
   int dbgIslands = 0;
   int dbgButtons = 0;

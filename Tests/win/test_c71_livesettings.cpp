@@ -197,12 +197,30 @@ PRISM_TEST("accent: the saved colour reaches the progress bar pixel") {
     return s;
   };
 
+  // C124: the bar's FILL is a wash and the seam is the line, so the probe pixel
+  // is the accent at GalleryRenderer::kProgressFillAlpha over the capsule's
+  // island -- the composite the painter really produces. The constant is the
+  // renderer's, read here instead of copied: this test still asserts the thing
+  // it was written for ("the saved accent reaches the progress bar's pixels"),
+  // only now against the pixel that exists.
+  const th::Rgba island = prism::chrome::SurfaceTierPresented(
+      th::SurfaceTier::Floating, th::Variant::Midnight);
+  // ... and the fill lands on the capsule's TRACK (the renderer's own
+  // kTileBorder: white at 12 % over the island), not straight on the island.
+  const D2D1_COLOR_F track = prism::win::gallery::GalleryRenderer::kTileBorder;
+  const th::Rgba underneath = prism::theme::CompositeOver(
+      th::Rgba(track.r, track.g, track.b, track.a), island);
+  const auto fillPixel = [&underneath](th::Rgba accent) {
+    accent.a = prism::win::gallery::GalleryRenderer::kProgressFillAlpha;
+    return prism::theme::CompositeOver(accent, underneath);
+  };
+
   Frame tokenFrame;
   if (!PRISM_CHECK(ApplyAccent(ap::kDefaultAccentHex))) return;
   if (!PRISM_CHECK(RenderScene(scene(), kWidth, kHeight, &tokenFrame))) return;
   const th::Rgba tokenAccent = th::EffectiveAccent(th::Variant::Midnight);
   const UINT32 tokenPixel = tokenFrame.At(cx, cy);
-  PRISM_CHECK(NearPixel(tokenPixel, tokenAccent, 3, "token accent"));
+  PRISM_CHECK(NearPixel(tokenPixel, fillPixel(tokenAccent), 3, "token accent"));
 
   constexpr const char* kCustom = "#FF8800";
   if (!PRISM_CHECK(ApplyAccent(kCustom))) return;
@@ -213,7 +231,7 @@ PRISM_TEST("accent: the saved colour reaches the progress bar pixel") {
   Frame customFrame;
   if (!PRISM_CHECK(RenderScene(scene(), kWidth, kHeight, &customFrame))) return;
   const UINT32 sampled = customFrame.At(cx, cy);
-  PRISM_CHECK(NearPixel(sampled, parsed, 3, "custom accent"));
+  PRISM_CHECK(NearPixel(sampled, fillPixel(parsed), 3, "custom accent"));
   // D2: the difference is a value, not "it changed".
   PRISM_CHECK(ChannelDelta(sampled, tokenPixel) > 60);
   std::printf("    [accent] token=%06lX custom=%06lX\n",

@@ -53,8 +53,16 @@
 namespace prism::win::benchframe {
 
 // A channel at or above this is a pixel a scene actually painted. The canvas
-// the window clears to is (B=11..19) -- see the file header.
-constexpr uint8_t kPaintedChannel = 32;
+// the window clears to is (11,13,18) -- its BRIGHTEST channel is 18, which is
+// what this threshold has to clear.
+//
+// C124 lowered it from 32 to 24. The old number was calibrated when the rail was
+// (26,29,37) and every band sat above 32; the surface ladder puts the rail at
+// (18,21,28) -- max 28 -- so a real frame that paints the rail stopped counting
+// it as "painted" and the "this is a real frame" gate (C112/C113) started
+// failing on frames with MORE scene in them, not less. 24 separates the canvas's
+// 18 from the rail's 28 with 6 levels of headroom on each side.
+constexpr uint8_t kPaintedChannel = 24;
 
 // WHICH SEAM. kProduct is the capture contract (device objects rebuilt on the
 // target, so a capture always succeeds); kRaw is the pre-C113 seam, kept ONLY so

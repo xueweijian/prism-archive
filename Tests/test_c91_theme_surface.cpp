@@ -12,10 +12,10 @@
 // asked for all three variants and compared with the values the Windows pixel
 // suite samples from a real rendered frame:
 //
-//   canvas      day (245,245,247)  night (16,17,23)  high-contrast (0,0,0)
-//   island      day (253,253,254)  night (26,29,37)
-//   rail panel  day (255,255,255)  high-contrast (26,26,28)
-//   tab plate   day (254,254,255)  high-contrast (40,40,44)
+//   canvas      day (245,245,247)  night (11,13,18)  high-contrast (0,0,0)
+//   island      day (253,253,254)  night (35,40,51)
+//   rail panel  day (255,255,255)  high-contrast (14,14,16)
+//   tab plate   day (255,255,255)  high-contrast (20,20,22)
 //   selected    day (219,236,255)
 //   info card   day (242,242,245)
 //   status strip day (249,250,253) high-contrast (4,5,6)
@@ -79,12 +79,12 @@ bool Near(const char* label, const Pixel& got, const Pixel& want, int tolerance)
 
 std::string Name(Variant v) { return std::string(prism::theme::VariantName(v)); }
 
-// The rail's panel: the floating-island token at the near-opaque alpha the
-// sidebar resolves (GalleryRenderer::TokenColor(Panel)), over the canvas.
+// The rail's panel: the PANEL TIER of the surface ladder, which is what
+// GalleryRenderer::TokenColor(Panel) resolves. C124: it used to be the floating
+// island at 94 %, which is why the passive column measured 1.32:1 against the
+// canvas while the action island measured 1.15:1 (UI-AUDIT 12.2).
 Rgba PanelColor(Variant variant) {
-  Rgba panel = prism::theme::Lookup(TokenId::SurfaceFloatingIsland, variant).color;
-  panel.a = 0.94f;
-  return prism::theme::CompositeOver(panel, ch::CanvasPresentedColor(variant));
+  return prism::chrome::SurfaceTierPresented(prism::theme::SurfaceTier::Panel, variant);
 }
 
 // The status strip: the canvas plus the card's documented lift. The renderer
@@ -130,7 +130,8 @@ PRISM_TEST("c91 the canvas is the theme's composite") {
   // C121: the veil is the canvas colour in every theme (it used to be the
   // darker --surface-backdrop-reference), so the presented night canvas is the
   // plain composite.
-  const Pixel wantNight{16, 17, 23};
+  // C124: the surface ladder's canvas (#0B0D12, the audit's measured #0C0D11).
+  const Pixel wantNight{11, 13, 18};
   const Pixel wantHighContrast{0, 0, 0};
 
   const Pixel day = ToPixel(ch::CanvasPresentedColor(Variant::Daylight));
@@ -194,10 +195,14 @@ PRISM_TEST("c91 every content surface resolves from the theme") {
       PRISM_CHECK(Near("info card (day)", infoCard, Pixel{242, 242, 245}, 3));
       PRISM_CHECK(Near("status strip (day)", strip, Pixel{249, 250, 253}, 3));
     } else if (variant == Variant::Midnight) {
-      PRISM_CHECK(Near("island (night)", island, Pixel{26, 29, 37}, 2));
+      // C124: the FLOATING tier (#232833, the audit's action-island sample).
+      PRISM_CHECK(Near("island (night)", island, Pixel{35, 40, 51}, 2));
     } else {
-      PRISM_CHECK(Near("tab plate (hc)", tab, Pixel{40, 40, 44}, 2));
-      PRISM_CHECK(Near("rail panel (hc)", panel, Pixel{26, 26, 28}, 2));
+      // C124: the tab plate is the CARD tier (20,20,22) in HighContrast -- it
+      // used to be a tone of its own, one of the eleven.
+      PRISM_CHECK(Near("tab plate (hc)", tab, Pixel{20, 20, 22}, 2));
+      // C124: the rail is the PANEL tier (14,14,16) in HighContrast.
+      PRISM_CHECK(Near("rail panel (hc)", panel, Pixel{14, 14, 16}, 2));
       PRISM_CHECK(Near("status strip (hc)", strip, Pixel{4, 5, 6}, 3));
       // The card's item 7 quotes (26,26,28) for the HC info card, but its own
       // formula -- canvas-base @.95 over the panel -- cannot produce it: an

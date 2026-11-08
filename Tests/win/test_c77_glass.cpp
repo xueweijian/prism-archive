@@ -469,7 +469,16 @@ PRISM_TEST("C77-1 the backdrop refracts the PAGE -- and carries no item pixels")
               halfEdge, halfEdge - edge);
   PRISM_CHECK(panelDeltaAt >= 8);
   PRISM_CHECK(halfEdge > 0);
-  PRISM_CHECK(std::abs(halfEdge - edge) <= 2);   // a displacement of the page is a bug
+  // C124: TOLERANCE 8, NOT 2, AND THE REASON IS MEASURED. The source is built at
+  // 1/8 resolution, so one mini pixel is 8 device px and a 50 %-crossing estimate
+  // cannot be finer than that; it landed within 1 px only while the rail stood 21
+  // levels off the canvas. C124's ladder deliberately lowers that step to 10
+  // levels (the rail must STEP BACK), and the crossing is now quantised to the
+  // source's own grid (measured +6 = +0.75 mini px, i.e. inside one cell). The
+  // bug this assertion exists to catch -- the prefix-summed gaussian that
+  // displaced the whole ghost by 39 px -- is 5x the new bound, so it is still
+  // caught; what is no longer claimed is precision the source cannot express.
+  PRISM_CHECK(std::abs(halfEdge - edge) <= 8);   // a displacement of the page is a bug
 
   // ---------------------------------------------------------------- (3) ITEMS
   // The rail-less photo grid: nothing but canvas and the bands near the probe.
@@ -674,8 +683,31 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
 
   // ... and the fill really is a rounded shape: the edge midpoint 1 px inside
   // the left border is the panel, the corner is not.
-  PRISM_CHECK(with.At(card.left + 1, (top + bottom) / 2) !=
-              without.At(card.left + 1, (top + bottom) / 2));
+  //
+  // C124: this used to compare WITH against WITHOUT the glass helper, and the
+  // difference it measured was NOT the shape -- it was the helper's CLAMPED fill
+  // (.55) disagreeing with the non-glass fallback's token fill (.75): "one
+  // surface, two truths", the very defect this card removes (C88 caught the same
+  // divergence from the other side). The clamp now follows the ladder, so both
+  // paths paint the same card -- correctly -- and the probe asks the shape
+  // question directly: 1 px inside the left edge is the surface, the CORNER
+  // pixel of the same frame is the canvas (assertion (4) above proves the
+  // corners are untouched).
+  //
+  // WHY IT TAKES BOTH, and each one alone is satisfiable by a different defect:
+  //   * "paintedCorners == 0" is ALSO satisfied by a panel that paints NOTHING
+  //     (a card with no fill has untouched corners too);
+  //   * this probe is ALSO satisfied by a 1 px FRAME with an empty inside.
+  // Together they pin the thing the card is: a rounded, FILLED surface -- corners
+  // are canvas, 1 px inside the edge is the tier's fill -- and the body sample
+  // above (rimLuma/bodyLuma) is what says the middle is filled. Measured after
+  // C124: edge FF232833 (BGRA -> RGB 35,40,51, the floating tier exactly),
+  // corner FF191B20 (the #0B0D12 canvas), dist 25.
+  const UINT32 edgePixel = with.At(card.left + 1, (top + bottom) / 2);
+  const UINT32 cornerPixel = with.At(cornerX[0], cornerY[0]);
+  std::printf("C77 panel: edge=%08X corner=%08X dist=%d\n", edgePixel, cornerPixel,
+              ColorDistance(edgePixel, cornerPixel));
+  PRISM_CHECK(ColorDistance(edgePixel, cornerPixel) > 10);
 
   // The literal "corner == background colour" check: an EMPTY catalog, so the
   // only thing behind the card is the canvas itself (kBackdrop).

@@ -407,7 +407,7 @@ PRISM_TEST("TestEmptyStateWithoutArchive") {
   PRISM_CHECK(dimmedPill);
 }
 
-// C79: the selected row is a 14% accent wash PLUS a 3 px accent rule at its
+// C79/C124: the selected row is a 14% accent wash PLUS a 2 DIP accent rule at its
 // left edge. The rule is its own primitive, so its width is measured, not
 // inferred from the fill's edge.
 PRISM_TEST("TestSelectionAccentRule") {
@@ -421,7 +421,9 @@ PRISM_TEST("TestSelectionAccentRule") {
   PRISM_CHECK_EQ(bars.size(), std::size_t{1});
   PRISM_CHECK_EQ(fills.size(), std::size_t{1});
   if (!bars.empty() && !fills.empty()) {
-    PRISM_CHECK(Near(bars[0]->box.Width(), 3.0f));  // 3 +/- 0: the token value
+    // C124: 2 DIP, the same width as every other seam (the list row, the tab's
+    // bottom rule, the progress front). C79 shipped 3 px in the tree alone.
+    PRISM_CHECK(Near(bars[0]->box.Width(), 2.0f));  // 2 +/- 0: the token value
     // C104: the capsule is inset 8 px from the row, and the rule deliberately
     // stays on the ROW edge. At the capsule's inset edge the expander chevron's
     // vertex cuts the 3 px rule down to ~1 px of accent (gallery_snapshot

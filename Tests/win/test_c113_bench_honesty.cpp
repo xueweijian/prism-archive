@@ -115,7 +115,20 @@ constexpr size_t kPaintedDivisor = 20;
 //   3. the pill's content moved from the window's frame to the island BY DESIGN:
 //      what changed is the OWNERSHIP of those pixels, not the success of the
 //      render.
-constexpr uint64_t kDigest = 0x3c2271cbab6069a1ull;
+//
+// C124 RE-RECORDED IT: this card repaints every surface (canvas #0B0D12, the
+// five-tier ladder, the gold folder, the file-type glyphs, the seam), so the
+// whole-frame hash of the SAME scene MUST move. Measured on the C124 tree:
+// rendered == 1, hr == S_OK, geometry_matches == 1,
+// painted == 192486/936624 (20.5%), digest == a36870e3bffa86ff. Re-measured with
+// "c113_bench_honesty --digest --shaders <build>/Assets/Shaders", never copied.
+//
+// ... AND AGAIN ON THE C122 BASE (26 DIP rows, four columns, the type glyphs in
+// their own column): same scene, same success, painted == 227607/936624 (24.3%),
+// digest == 30b690f8aec461d7. Two cards moved this frame for two different
+// reasons; the constant follows the tree, the assertions above stay the proof
+// that what it hashes is a REAL frame.
+constexpr uint64_t kDigest = 0x30b690f8aec461d7ull;
 constexpr uint32_t kDigestWidth = 1264;
 constexpr uint32_t kDigestHeight = 741;
 constexpr size_t kNonBlackDivisor = 2;

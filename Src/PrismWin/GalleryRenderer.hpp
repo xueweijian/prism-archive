@@ -33,6 +33,7 @@
 
 #include "../PrismCore/ActionBarModel.hpp"  // C-V2: the action table + band geometry
 #include "../PrismCore/ChromeTheme.hpp"    // C91: ThemeSurfaceColor -- the ONE theme entry
+#include "../PrismCore/FileTypeIcon.hpp"    // C124: the 16 DIP file-type glyphs
 #include "../PrismCore/Gallery.hpp"
 #include "../PrismCore/GlassIsland.hpp"
 #include "../PrismCore/ListLayout.hpp"
@@ -101,7 +102,11 @@ class GalleryRenderer {
   static constexpr D2D1_COLOR_F kIslandFill = {0.10f, 0.12f, 0.16f, 0.72f};   // floating glass
   static constexpr D2D1_COLOR_F kCardFill = {0.086f, 0.10f, 0.13f, 0.90f};    // Quick Look body
   static constexpr D2D1_COLOR_F kIslandBorder = {1.0f, 1.0f, 1.0f, 0.16f};
-  static constexpr D2D1_COLOR_F kAccent = {0.243f, 0.545f, 1.0f, 1.0f};       // #3E8BFF
+  // C124: #0A84FF -- THE ONE ACCENT. This is a build-time DEFAULT only: Draw()
+  // recolours the brush from EffectiveAccent() every frame, so the value a frame
+  // paints is always the token's. It used to be a fourth blue (#3E8BFF) that
+  // nothing but a failed init could show.
+  static constexpr D2D1_COLOR_F kAccent = {0.039216f, 0.517647f, 1.0f, 1.0f};  // #0A84FF
   static constexpr D2D1_COLOR_F kTextPrimary = {0.910f, 0.925f, 0.945f, 1.0f};
   static constexpr D2D1_COLOR_F kTextSecondary = {0.604f, 0.655f, 0.706f, 1.0f};
   // V1 (P0-2): the colour of a LOADING skeleton card. It may only ever appear
@@ -564,6 +569,9 @@ class GalleryRenderer {
 
   void Draw(ID2D1RenderTarget* target, const Scene& scene) {
     const D2D1_SIZE_F size = target->GetSize();
+    // C124: this frame's seams replace the previous frame's (the read-back is a
+    // measurement of ONE frame, exactly like the C101 ratio-bar read-back).
+    seamCount_ = 0;
     // C91: ONE theme resolution per frame. Everything below -- the clear, the
     // bands, the status strip, the tab strip, the rail, the action band, the
     // list, the floating islands -- reads this local theme and canvasColor_,
@@ -1320,11 +1328,13 @@ class GalleryRenderer {
       return prism::theme::Lookup(TokenId::AccentLiquidPrimary, variant).gradient.from;
     };
     switch (token) {
-      case prism::win::sidebar::ColorToken::Panel: {
-        prism::theme::Rgba c = color(TokenId::SurfaceFloatingIsland);
-        c.a = 0.94f;
-        return c;
-      }
+      case prism::win::sidebar::ColorToken::Panel:
+        // C124: THE RAIL IS THE PANEL TIER, not the floating island at 94 %.
+        // That 94 % wash is what made the passive column the loudest surface in
+        // the window (UI-AUDIT 12.2: 1.32:1 against the canvas, while the action
+        // island measured 1.15:1). The rail steps BACK to 1.06:1 and the island
+        // comes FORWARD to 1.32:1 -- the ladder's two headline numbers.
+        return color(TokenId::SurfacePanel);
       case prism::win::sidebar::ColorToken::SectionLabel:
         return color(TokenId::TextSecondary);
       case prism::win::sidebar::ColorToken::PrimaryText:
@@ -1438,31 +1448,28 @@ class GalleryRenderer {
     target->FillGeometry(geometry.Get(), brush);
   }
 
-  // C104: the two-tone SOFT folder. Both tones are the ACCENT token mixed
-  // toward the panel (that lift is what makes them soft instead of raw accent) and
-  // both are painted at alpha < 1, so the row's selection wash reads through the
-  // icon. The numbers are the view's token (kFolderIcon), never literals here.
+  // C124: THE FOLDER IS GOLD -- a MATERIAL, not a tint of the accent.
+  //
+  // C104 shipped it as "the accent mixed toward the panel": soft, yes, but also
+  // the FOURTH blue in a product that should have one (UI-AUDIT 2.2, 12.5:
+  // #2480DF, the same 210-214 degrees as the selection bar and the tab rule, so
+  // a user could not tell "folder" from "selected" by colour). Bandizip's folder
+  // is warm gold and measures 1.61:1 on white: recognisable, quiet, and never
+  // competing with the accent. The three tones are TOKENS now (FolderHighlight /
+  // FolderBody / FolderShadow), identical in every theme, and the alphas are the
+  // view's (kFolderIcon) so the row's wash still reads through the icon.
   void DrawFolderGlyph(ID2D1RenderTarget* target, const prism::win::sidebar::Box& box,
                        prism::theme::Variant variant) {
     if (!sidebarBrush_ || box.Empty()) return;
     const prism::win::sidebar::FolderIcon token = prism::win::sidebar::kFolderIcon;
-    const prism::theme::Rgba panel =
-        TokenColor(prism::win::sidebar::ColorToken::Panel, variant);
-    const auto tone = [variant, &panel](float alpha, float mix) {
-      prism::theme::Rgba c =
-          prism::theme::Lookup(prism::theme::TokenId::AccentLiquidPrimary, variant)
-              .gradient.from;
-      const auto blend = [mix](float a, float b) { return a + (b - a) * mix; };
-      c.r = blend(c.r, panel.r);
-      c.g = blend(c.g, panel.g);
-      c.b = blend(c.b, panel.b);
+    const auto tone = [variant](prism::theme::TokenId id, float alpha) {
+      prism::theme::Rgba c = prism::theme::Lookup(id, variant).color;
       c.a = alpha;
       return c;
     };
     float bodyAlpha = token.bodyAlpha;
     float tabAlpha = token.tabAlpha;
-    float bodyMix = token.bodyMix;
-    float tabMix = token.tabMix;
+    float shadowAlpha = token.shadowAlpha;
 #if defined(PRISM_C104_MUTANT_FOLDER_OPAQUE)
     // NEGATIVE CONTROL (CONTRACTS D3): the shipped plate -- the raw accent at
     // full opacity, i.e. the hardcoded accent block. The translucency assertion
@@ -1470,22 +1477,32 @@ class GalleryRenderer {
     ++dbgMutantFolder;
     bodyAlpha = 1.0f;
     tabAlpha = 1.0f;
-    bodyMix = 0.0f;
-    tabMix = 0.0f;
+    shadowAlpha = 1.0f;
 #endif
     const float l = box.left, t = box.top, r = box.right, b = box.bottom;
     const float w = r - l, h = b - t;
-    sidebarBrush_->SetColor(ToD2d(tone(tabAlpha, tabMix)));
+    // Back tab: the HIGHLIGHT tone, because the tab is the surface the light
+    // lands on first.
+    sidebarBrush_->SetColor(ToD2d(tone(prism::theme::TokenId::FolderHighlight, tabAlpha)));
     target->FillRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.20f, l + w * 0.54f,
                                       t + h * 0.40f),
                           token.tabRadius, token.tabRadius),
         sidebarBrush_.Get());
-    sidebarBrush_->SetColor(ToD2d(tone(bodyAlpha, bodyMix)));
+    // Front face: the BODY.
+    sidebarBrush_->SetColor(ToD2d(tone(prism::theme::TokenId::FolderBody, bodyAlpha)));
     target->FillRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(l + w * 0.10f, t + h * 0.30f, r - w * 0.10f,
                                       b - h * 0.16f),
                           token.bodyRadius, token.bodyRadius),
+        sidebarBrush_.Get());
+    // The SHADOW row along the front face's bottom edge: one 1 DIP line, which
+    // is what makes a flat two-tone glyph read as a solid object at 16 px (the
+    // same trick C111's specular row uses on the grid glyph, inverted).
+    sidebarBrush_->SetColor(
+        ToD2d(tone(prism::theme::TokenId::FolderShadow, shadowAlpha)));
+    target->FillRectangle(
+        D2D1::RectF(l + w * 0.16f, b - h * 0.20f, r - w * 0.16f, b - h * 0.16f),
         sidebarBrush_.Get());
   }
 
@@ -2049,18 +2066,23 @@ class GalleryRenderer {
     const float frontTop = box.top + h * 0.08f;  // the tab reaches slightly higher
     const float radius = h * 0.12f;
 
-    const D2D1_COLOR_F light = ToD2d(prism::chrome::ThemeSurfaceColor(
-        prism::theme::TokenId::TextPrimary, theme));
-    const D2D1_COLOR_F base = accentColor_;
-    D2D1_COLOR_F frontFill = MixColor(base, islandColor_, 0.16f);
-    frontFill = MixColor(frontFill, light, 0.10f);
-    frontFill.a = 1.0f;
-    // The back layer is the same accent, darker: 62 % of each channel. Scaling
-    // a token is a material operation, not a new colour authority.
-    const D2D1_COLOR_F tabFill = D2D1::ColorF(
-        base.r * 0.62f, base.g * 0.62f, base.b * 0.62f, 1.0f);
-    const D2D1_COLOR_F frontRim = MixColor(frontFill, light, 0.42f);
-    const D2D1_COLOR_F frontSheen = MixColor(frontFill, light, 0.85f);
+    // C124: THE THREE GOLD TONES, straight from the tokens -- the same three the
+    // 16 DIP rail glyph uses, so "the folder is gold" is one truth in two sizes.
+    // The glyph is OPAQUE: it is a 68 x 56 object standing on a card, not a tint,
+    // and (255,182,102) on white is 1.61:1 precisely BECAUSE it is the material
+    // colour (DESIGN-PROPOSAL 12.5).
+    const auto glyphTone = [theme](prism::theme::TokenId id) {
+      return ToD2d(prism::theme::Lookup(id, theme).color);
+    };
+    const D2D1_COLOR_F highlight = glyphTone(prism::theme::TokenId::FolderHighlight);
+    const D2D1_COLOR_F body = glyphTone(prism::theme::TokenId::FolderBody);
+    const D2D1_COLOR_F shadow = glyphTone(prism::theme::TokenId::FolderShadow);
+    const D2D1_COLOR_F frontFill = body;
+    // The back tab is the SHADOW tone: it is behind the face, so it reads darker
+    // than the body it hides behind (C111's B3 measures exactly that order).
+    const D2D1_COLOR_F tabFill = shadow;
+    const D2D1_COLOR_F frontRim = highlight;
+    const D2D1_COLOR_F frontSheen = highlight;
 
     // Back tab: narrower (5 % in from the left, 68 % of the width), darker, and
     // its lower half hidden behind the face.
@@ -2076,10 +2098,15 @@ class GalleryRenderer {
     // NEGATIVE CONTROL (D3): both 1 px specular rows are gone. B2 must go red.
     ++MutantNoHighlightHits();
 #else
-    // 1 px specular on the tab's top edge, inset by the corner radius.
-    island_->SetColor(light);
+    // The specular on the tab's top edge, inset by the corner radius. C124 made
+    // it 2 DIP (it was 1): with the gold material the tab behind the face is now
+    // the SHADOW tone, so a single highlight row could no longer put the icon's
+    // top 2 px 8 levels above its centre -- and that pair of rows is exactly
+    // what "the top edge catches the light" means (c111 B2).
+    island_->SetColor(highlight);
     target->FillRectangle(D2D1::RectF(tab.left + radius * 0.8f, box.top,
-                                      tab.right - radius * 0.8f, box.top + 1.0f),
+                                      tab.right - radius * 0.8f,
+                                      box.top + prism::theme::kSeamThicknessDip),
                           island_.Get());
 #endif
 
@@ -2292,11 +2319,104 @@ class GalleryRenderer {
   static D2D1_COLOR_F BarColorOf(prism::list::BarColor color) {
     switch (color) {
       case prism::list::BarColor::Teal: return {0.0f, 0.780f, 0.745f, 1.0f};   // #00C7BE
-      case prism::list::BarColor::Blue: return {0.0f, 0.478f, 1.0f, 1.0f};     // #007AFF
+      // C124: the ramp's blue IS the product's one blue (#0A84FF). The ratio bar
+      // is a DATA ramp (hue = file kind), not a second accent, but a stray
+      // #007AFF here was still a fourth blue in the source and the scan cannot
+      // tell the two roles apart -- so it stops existing.
+      case prism::list::BarColor::Blue: return {0.039216f, 0.517647f, 1.0f, 1.0f};  // #0A84FF
       case prism::list::BarColor::Green: return {0.204f, 0.780f, 0.349f, 1.0f}; // #34C759
       case prism::list::BarColor::Amber: return {1.0f, 0.584f, 0.0f, 1.0f};    // #FF9500
     }
     return {1.0f, 1.0f, 1.0f, 1.0f};
+  }
+
+  // C124: the 16 DIP folder of a LIST ROW -- highlight tab, body, shadow row.
+  // The rail's glyph (SidebarView) and the grid's (68 px) use the same three
+  // tokens, so "the folder is gold" is one truth at three sizes.
+  void DrawListFolderGlyph(ID2D1RenderTarget* target, const D2D1_RECT_F& box,
+                           prism::theme::Variant variant) {
+    const auto tone = [variant](prism::theme::TokenId id) {
+      prism::theme::Rgba c = prism::theme::Lookup(id, variant).color;
+      c.a = 1.0f;
+      return ToD2d(c);
+    };
+    const float l = box.left;
+    const float t = box.top;
+    const float r = box.right;
+    const float b = box.bottom;
+    const float w = r - l;
+    const float h = b - t;
+    island_->SetColor(tone(prism::theme::TokenId::FolderHighlight));
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(l + w * 0.06f, t + h * 0.08f, l + w * 0.52f,
+                                      t + h * 0.40f),
+                          1.5f, 1.5f),
+        island_.Get());
+    island_->SetColor(tone(prism::theme::TokenId::FolderBody));
+    target->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(l + w * 0.06f, t + h * 0.26f, r - w * 0.06f,
+                                      b - h * 0.08f),
+                          2.0f, 2.0f),
+        island_.Get());
+    island_->SetColor(tone(prism::theme::TokenId::FolderShadow));
+    target->FillRectangle(D2D1::RectF(l + w * 0.12f, b - h * 0.15f, r - w * 0.12f,
+                                      b - h * 0.08f),
+                          island_.Get());
+    island_->SetColor(islandColor_);
+  }
+
+  // C124: ONE painter for every file-type glyph. The shapes live in PrismCore
+  // (prism::icons) as DIP inside a 16 x 16 box; this maps that box onto the slot
+  // the row offers and strokes them in the SECONDARY INK role. The four kinds are
+  // told apart by SILHOUETTE, not by hue: four more colours would rebuild the
+  // "one colour, three meanings" defect the seam exists to remove (the accent is
+  // the one colour that carries meaning, and it means "you are here").
+  void DrawFileTypeGlyph(ID2D1RenderTarget* target, const D2D1_RECT_F& box,
+                         prism::icons::FileKind kind) {
+    if (!sidebarBrush_ || !textSecondary_ || box.right <= box.left) return;
+    const prism::icons::Geometry geometry = prism::icons::GeometryOf(kind);
+    if (geometry.count == 0) return;
+    const float scale = (box.right - box.left) / prism::icons::kIconSizeDip;
+    const auto px = [&](float v) { return box.left + v * scale; };
+    const auto py = [&](float v) { return box.top + v * scale; };
+    const D2D1_COLOR_F restore = sidebarBrush_->GetColor();
+    sidebarBrush_->SetColor(textSecondary_->GetColor());
+    for (std::size_t i = 0; i < geometry.count; ++i) {
+      const prism::icons::Shape& shape = geometry.shapes[i];
+      const float stroke = shape.stroke * scale;
+      const D2D1_RECT_F rect =
+          D2D1::RectF(px(shape.x0), py(shape.y0), px(shape.x1), py(shape.y1));
+      switch (shape.type) {
+        case prism::icons::ShapeType::StrokeRect:
+          target->DrawRectangle(rect, sidebarBrush_.Get(), stroke);
+          break;
+        case prism::icons::ShapeType::FillRect:
+          target->FillRectangle(rect, sidebarBrush_.Get());
+          break;
+        case prism::icons::ShapeType::Line:
+          target->DrawLine(D2D1::Point2F(rect.left, rect.top),
+                           D2D1::Point2F(rect.right, rect.bottom), sidebarBrush_.Get(),
+                           stroke);
+          break;
+        case prism::icons::ShapeType::Ellipse:
+          target->DrawEllipse(
+              D2D1::Ellipse(D2D1::Point2F((rect.left + rect.right) * 0.5f,
+                                          (rect.top + rect.bottom) * 0.5f),
+                            (rect.right - rect.left) * 0.5f,
+                            (rect.bottom - rect.top) * 0.5f),
+              sidebarBrush_.Get(), stroke);
+          break;
+        case prism::icons::ShapeType::FillEllipse:
+          target->FillEllipse(
+              D2D1::Ellipse(D2D1::Point2F((rect.left + rect.right) * 0.5f,
+                                          (rect.top + rect.bottom) * 0.5f),
+                            (rect.right - rect.left) * 0.5f,
+                            (rect.bottom - rect.top) * 0.5f),
+              sidebarBrush_.Get());
+          break;
+      }
+    }
+    sidebarBrush_->SetColor(restore);
   }
 
   // The main-window file list -- C122 puts Bandizip's four columns in:
@@ -2465,6 +2585,20 @@ class GalleryRenderer {
         accent_->SetColor(selColor);
         target->FillRoundedRectangle(sel, accent_.Get());
         accent_->SetColor(accentColor_);
+        // C124 THE SEAM, position 3 of 4: the selected row's LEFT edge, 2 DIP,
+        // full-strength accent. It leads the pill (which stays inset 8 px), the
+        // same relationship the rail's rule has to its capsule -- one element,
+        // two views, not two widths (C79 shipped 3 px in the tree and nothing
+        // here).
+        D2D1_COLOR_F seamColor = accentColor_;
+        seamColor.a = 1.0f;
+        const D2D1_RECT_F seam =
+            D2D1::RectF(rowRect.left, top + 2.0f,
+                        rowRect.left + prism::theme::kSeamThicknessDip, bottom - 2.0f);
+        accent_->SetColor(seamColor);
+        target->FillRectangle(seam, accent_.Get());
+        accent_->SetColor(accentColor_);
+        if (!backdropPass) RecordSeam(SeamRegion::SelectedRow, seam);
       }
 
       const std::wstring name = Utf8(row.name);
@@ -2473,15 +2607,30 @@ class GalleryRenderer {
       // C122: the 16 px folder mark is centred in the row, whatever the tier.
       const float iconTop = top + (static_cast<float>(rr.Height()) - 16.0f) / 2.0f;
       if (row.isDir) {
-        const D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
-            D2D1::RectF(nameLeft + 4.0f, iconTop, nameLeft + 20.0f, iconTop + 16.0f), 5.0f,
-            5.0f);
-        target->FillRoundedRectangle(folder, accent_.Get());
+        // C124: THE FOLDER IS GOLD in the list too. It was one accent-coloured
+        // rounded rectangle -- the fourth blue, and the only folder in the
+        // product that was a tint rather than the material (the rail and the
+        // grid had their own glyphs). Same three tones as both of those, at the
+        // list's ONE icon size (16 DIP, centred in the row by C122).
+        DrawListFolderGlyph(target,
+                            D2D1::RectF(nameLeft + 4.0f, iconTop, nameLeft + 20.0f,
+                                        iconTop + 16.0f),
+                            scene.theme);
+      } else {
+        // C124: THE FILE-TYPE GLYPH, in the same slot the folder uses, so a list
+        // row has ONE icon column. Before this a file row had no glyph at all
+        // and the grid drew the same grey bar for .md and .bin (UI-AUDIT 12.6):
+        // the icon carried no information. C122's 类型 column keeps its TEXT --
+        // the glyph and the label are different jobs.
+        DrawFileTypeGlyph(target,
+                          D2D1::RectF(nameLeft + 4.0f, iconTop, nameLeft + 20.0f,
+                                      iconTop + 16.0f),
+                          prism::icons::KindFromPath(row.name));
       }
       if (drawGlyphs) {
-        // 名称 -- flexes, left-aligned; a folder keeps its 16 px mark plus 8 px
-        // of air before the name.
-        const float nameTextLeft = row.isDir ? nameLeft + 28.0f : nameLeft;
+        // 名称 -- flexes, left-aligned; the icon column (folder or file kind)
+        // keeps 8 px of air before the name.
+        const float nameTextLeft = nameLeft + 28.0f;
         DrawLabel(target, caption_.Get(), name,
                   D2D1::RectF(nameTextLeft, textRowTop, nameRight, textRowBottom),
                   textPrimary_.Get());
@@ -2700,6 +2849,10 @@ class GalleryRenderer {
       accent_->SetColor(ToD2d(seam));
       target->FillRectangle(ToRectF(scene.crumbCurrentRect), accent_.Get());
       accent_->SetColor(accentColor_);
+      // C124: read back the seam this frame painted (position 2 of 4), so the
+      // suite can assert "exactly one, exactly 2 DIP" instead of trusting the
+      // window's rectangle. C123 supplies the geometry (it owns the spans).
+      RecordSeam(SeamRegion::CrumbCurrent, ToRectF(scene.crumbCurrentRect));
     }
     DrawBreadcrumbRun(target, scene.breadcrumb, text, /*leading=*/true);
   }
@@ -2800,7 +2953,28 @@ class GalleryRenderer {
             D2D1::RectF(track.rect.left, track.rect.top, track.rect.left + fillW,
                         track.rect.bottom),
             3.0f, 3.0f);
+        D2D1_COLOR_F fillColor = accentColor_;
+        fillColor.a = kProgressFillAlpha;
+        accent_->SetColor(fillColor);
         target->FillRoundedRectangle(fill, accent_.Get());
+        accent_->SetColor(accentColor_);
+        // C124 THE SEAM, position 4 of 4: the fill's LEADING edge. The fill is
+        // the accent at the token's alpha (a wash you read as "how far"); the
+        // 2 DIP line is the accent at FULL strength, i.e. the exact pixel the
+        // progress has reached. One line, and its position is the number.
+        // Snapped to a whole DIP: a 2 DIP line between two fractional edges is
+        // anti-aliased into three columns of 60 % accent, which is neither the
+        // line the design asks for nor a pixel a suite can measure.
+        const float frontX = std::round(track.rect.left + fillW);
+        const float half = prism::theme::kSeamThicknessDip * 0.5f;
+        const D2D1_RECT_F seam =
+            D2D1::RectF(frontX - half, track.rect.top, frontX + half, track.rect.bottom);
+        D2D1_COLOR_F seamColor = accentColor_;
+        seamColor.a = 1.0f;
+        accent_->SetColor(seamColor);
+        target->FillRectangle(seam, accent_.Get());
+        accent_->SetColor(accentColor_);
+        RecordSeam(SeamRegion::ProgressFront, seam);
       }
     }
     const std::wstring label =
@@ -3029,7 +3203,7 @@ class GalleryRenderer {
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> writeFactory_;
   // C71: the live colours this frame resolved (see Draw).
-  D2D1_COLOR_F accentColor_{0.243f, 0.545f, 1.0f, 1.0f};
+  D2D1_COLOR_F accentColor_{0.039216f, 0.517647f, 1.0f, 1.0f};  // C124: #0A84FF
   D2D1_COLOR_F islandColor_{0.10f, 0.12f, 0.16f, 0.72f};
   // C91: the canvas this frame cleared to -- the SAME colour the action band and
   // the list header refill themselves with (see DrawBands / DrawListMode).
@@ -3171,6 +3345,46 @@ class GalleryRenderer {
   int RatioBarsPainted() const { return ratioBarCount_; }
   const RatioBarPaint& RatioBarPainted(int index) const { return ratioBars_[index]; }
 
+  // ------------------------------------------------------------- C124 THE SEAM
+  // "THE SEAM" (DESIGN-PROPOSAL 16.3): ONE 2 DIP accent line, four positions --
+  // the active tab's bottom edge, the current crumb's bottom edge, the selected
+  // row's left edge, the progress fill's leading edge. One element with four
+  // meanings, so the user follows a line instead of learning a legend.
+  //
+  // A seam is the accent at FULL strength: every wash and fill in this frame is
+  // the accent at <= 26 %, so the line is findable in the pixels by its exact
+  // colour instead of by "somewhere around here". These three are the ones THIS
+  // painter draws; the fourth belongs to the tab strip and is measured on the
+  // strip's own frame (c124 V6 does both).
+  enum class SeamRegion : uint8_t { CrumbCurrent = 0, SelectedRow, ProgressFront };
+  static constexpr std::size_t kSeamRegionCount = 3;
+  // The progress fill is a WASH, the seam is the LINE. With an opaque fill the
+  // leading edge is the same colour as the bar behind it, so "the front" would
+  // be invisible -- the defect the seam exists to fix. 0.55 is C101's readout
+  // alpha (a bar you read, not a rule you obey), and C71 samples this constant
+  // so its "the saved accent reaches the bar" assertion measures the composite
+  // the painter really produces.
+  static constexpr float kProgressFillAlpha = 0.55f;
+  struct SeamPaint {
+    SeamRegion region = SeamRegion::CrumbCurrent;
+    D2D1_RECT_F rect{};
+  };
+  int SeamsPainted() const { return seamCount_; }
+  int SeamCount(SeamRegion region) const {
+    int n = 0;
+    for (int i = 0; i < seamCount_; ++i) {
+      if (seams_[i].region == region) ++n;
+    }
+    return n;
+  }
+  const SeamPaint* SeamPainted(SeamRegion region, int index) const {
+    for (int i = 0; i < seamCount_; ++i) {
+      if (seams_[i].region != region) continue;
+      if (index-- == 0) return &seams_[i];
+    }
+    return nullptr;
+  }
+
   // C90 follow-up: list-mode backdrop passes that drew the selection pill
   // (mutant arm only; zero in the clean build).
   int dbgBackdropStatePasses = 0;
@@ -3233,6 +3447,17 @@ class GalleryRenderer {
   // block above; the frame's bars are refreshed by every list paint).
   RatioBarPaint ratioBars_[kMaxRatioBarPaints];
   int ratioBarCount_ = 0;
+  // C124: the seam read-back. Four lines is the whole product; 16 leaves room
+  // for a pathological scene without allocating.
+  static constexpr int kMaxSeams = 16;
+  void RecordSeam(SeamRegion region, const D2D1_RECT_F& rect) {
+    if (seamCount_ >= kMaxSeams) return;
+    seams_[seamCount_].region = region;
+    seams_[seamCount_].rect = rect;
+    ++seamCount_;
+  }
+  SeamPaint seams_[kMaxSeams];
+  int seamCount_ = 0;
 };
 
 }  // namespace prism::win::gallery

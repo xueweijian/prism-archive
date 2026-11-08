@@ -14,10 +14,10 @@
 //   * the wash alpha stays under 15% in both design themes (Midnight used to be
 //     16%), with HighContrast pinned as its own accessibility FLOOR -- a
 //     "clamp everything" edit that would hide the selection on black goes red;
-//   * the folder glyph is translucent and lifted off the raw accent: the
-//     measured body pixel matches the alpha-network composite to +/- 3 and sits
-//     far from the opaque accent plate, and neither the view nor the folder
-//     painter contains the literal #007AFF;
+//   * the folder glyph is translucent and is the GOLD MATERIAL (C124): the
+//     measured body pixel matches FolderBody at the view's alpha to +/- 3 and
+//     sits far from the opaque accent plate, and neither the view nor the folder
+//     painter contains an accent literal;
 //   * one indent step is 14..16 px and the deltas between tree depths are real
 //     (measured from the emitted RowHit boxes, not from a constant).
 //
@@ -450,7 +450,7 @@ PRISM_TEST("c104 the selected-row wash stays under 15 percent") {
 
 // The geometry the view owns: 8 px inset at both ends and a 6 px corner, both
 // read from the emitted command rather than from the renderer's mood.
-PRISM_TEST("c104 pill geometry: 8 px inset, 6 px corner, 3 px accent rule") {
+PRISM_TEST("c104 pill geometry: 8 px inset, 6 px corner, 2 DIP accent rule") {
   const std::vector<ArchiveItem> items = SampleCatalog();
   const Layout layout =
       BuildLayout(items, Variant::Midnight, static_cast<float>(kHeight),
@@ -485,15 +485,18 @@ PRISM_TEST("c104 pill geometry: 8 px inset, 6 px corner, 3 px accent rule") {
   // chevron's vertex (gallery_snapshot measured 1 px of accent there).
   PRISM_CHECK(bar->box.left == row->box.left);
   PRISM_CHECK(bar->box.left == selection->box.left - 8.0f);
-  PRISM_CHECK(bar->box.Width() == 3.0f);
+  // C124 / "the seam": the rule is 2 DIP, the same width as the list row's and
+  // the tab's accent line. C79 shipped 3 px here and nothing in the list: two
+  // widths for one element is the geometry version of the three blues.
+  PRISM_CHECK(bar->box.Width() == 2.0f);
 }
 
-// C104: the guard the WHOLE-FRAME snapshot needed. The rule is 3 px in the
-// command, but "3 px in the command" is not "3 px on the screen": an overpainted
+// C104: the guard the WHOLE-FRAME snapshot needed. The rule is 2 DIP in the
+// command, but "2 DIP in the command" is not "2 DIP on the screen": an overpainted
 // glyph can eat it (that is exactly how C104 shipped 1 px of accent into
 // gallery_snapshot's red run). This measures the RENDERED run, per theme, so a
 // future sidebar change turns THIS assertion red instead of the golden frame.
-PRISM_TEST("c104 the 3 px accent rule survives on the rendered frame") {
+PRISM_TEST("c104 the 2 DIP accent rule survives on the rendered frame") {
   const std::vector<ArchiveItem> items = SampleCatalog();
   const Variant variants[] = {Variant::Midnight, Variant::Daylight, Variant::HighContrast};
   for (const Variant variant : variants) {
@@ -591,17 +594,23 @@ PRISM_TEST("c104 the rail paints inside its column and its accent is an icon") {
   int unowned = 0;
   int longestRun = 0;
   int accentOutsidePillBand = 0;
+  int goldOutsidePillBand = 0;
   for (int y = panelTop; y < panelBottom; ++y) {
     const bool inPillBand = y >= static_cast<int>(pillCmd->box.top) &&
                             y < static_cast<int>(pillCmd->box.bottom);
     int run = 0;
     for (int x = colLeft; x <= colRight; ++x) {
       bool isAccent = false;
+      bool isGold = false;
       if (x < colRight) {
         const int red = static_cast<int>((frame.At(x, y) >> 16) & 0xFFu);
         const int blue = static_cast<int>(frame.At(x, y) & 0xFFu);
         isAccent = blue - red >= 40;
+        // C124: the folder is the GOLD MATERIAL (255,182,102): r - b = 153, while
+        // every accent pixel is the other way round.
+        isGold = red - blue >= 60;
       }
+      if (isGold && !inPillBand) ++goldOutsidePillBand;
       if (!isAccent) {
         if (run > longestRun) longestRun = run;
         run = 0;
@@ -620,12 +629,21 @@ PRISM_TEST("c104 the rail paints inside its column and its accent is an icon") {
     }
     if (run > longestRun) longestRun = run;
   }
-  std::printf("  [c104] rail accent outside the capsule band: %d px, longest run %d, "
-              "unowned %d\n",
-              accentOutsidePillBand, longestRun, unowned);
-  // The icons really are there, so the two numbers below are a measurement and
-  // not a blind detector...
-  PRISM_CHECK(accentOutsidePillBand > 40);
+  std::printf("  [c104] rail accent outside the capsule band: %d px, gold: %d px, "
+              "longest run %d, unowned %d\n",
+              accentOutsidePillBand, goldOutsidePillBand, longestRun, unowned);
+  // C124: THE FOLDER IS NO LONGER AN ACCENT PIXEL. This used to assert "> 40
+  // accent px outside the capsule" and every one of them came from the blue
+  // folder glyphs -- i.e. the CALIBRATION of the bleed detector was the very
+  // defect the card removes (UI-AUDIT 12.5: the folder and the selection shared
+  // one hue). Now the icons must be there and they must be GOLD...
+  PRISM_CHECK(goldOutsidePillBand > 40);
+  // ... and the rail's accent is ONE line, inside the selected row: zero accent
+  // pixels outside its band. (The 2 DIP rule is inside the band by construction
+  // -- it is drawn on the row the capsule highlights -- and the "rule survives"
+  // case above measures it at 2 px.) A list pill bleeding into the column would
+  // land here as hundreds of pixels.
+  PRISM_CHECK_EQ(accentOutsidePillBand, 0);
   // ... an icon is at most 14 px wide, a list pill is hundreds...
   PRISM_CHECK(longestRun <= 20);
   // ... and no accent pixel in the rail came from anything but a rail primitive.
@@ -696,21 +714,24 @@ PRISM_TEST("c104 the folder glyph is a soft two-tone, not an opaque plate") {
   PRISM_CHECK(loweredFolder.find("0.478") == std::string::npos);  // 122/255
   PRISM_CHECK(loweredFolder.find("122, channelfrombyte(255)") == std::string::npos);
 
-  // (b) the token: translucent, and genuinely TWO tones.
+  // (b) the token: THREE tones, all translucent, and the tab is the quieter of
+  // the two large ones. C124 replaced "accent mixed toward the panel" with the
+  // gold material, so the mix fields are gone; what the view still owns is the
+  // alpha of each tone, and that is what is asserted.
   const prism::win::sidebar::FolderIcon token = prism::win::sidebar::kFolderIcon;
-  std::printf("  [c104] folder token: body a=%.2f mix=%.2f / tab a=%.2f mix=%.2f\n",
-              static_cast<double>(token.bodyAlpha), static_cast<double>(token.bodyMix),
-              static_cast<double>(token.tabAlpha), static_cast<double>(token.tabMix));
-  PRISM_CHECK(token.bodyAlpha <= 0.9f);
-  PRISM_CHECK(token.tabAlpha <= 0.9f);
+  std::printf("  [c104] folder token: body a=%.2f tab a=%.2f shadow a=%.2f\n",
+              static_cast<double>(token.bodyAlpha), static_cast<double>(token.tabAlpha),
+              static_cast<double>(token.shadowAlpha));
+  PRISM_CHECK(token.bodyAlpha <= 0.95f);
+  PRISM_CHECK(token.tabAlpha <= 0.95f);
+  PRISM_CHECK(token.shadowAlpha <= 0.95f);
   PRISM_CHECK(token.bodyAlpha > 0.5f);  // still an icon, not a ghost
-  PRISM_CHECK(token.tabAlpha < token.bodyAlpha);
-  PRISM_CHECK(token.tabMix > token.bodyMix);  // the back tab is the softer tone
+  PRISM_CHECK(token.tabAlpha < token.bodyAlpha);  // the back tab is the softer tone
 
-  // (c) the pixels: the body is the accent LIFTED toward the panel and painted
-  // at bodyAlpha, so the measured pixel must match that composite and must sit
-  // far from the opaque accent. The mutation arm repaints the plate and fails
-  // both halves.
+  // (c) the pixels: the body is the MATERIAL token (FolderBody) painted at
+  // bodyAlpha over the rail's panel, so the measured pixel must match that
+  // composite and must sit far from the opaque accent plate. The mutation arm
+  // repaints the plate and fails both halves.
   const std::vector<ArchiveItem> items = SampleCatalog();
   const Layout layout = BuildLayout(items, Variant::Midnight, static_cast<float>(kHeight),
                                     FocusTarget{Section::Favorites, 0});
@@ -729,12 +750,7 @@ PRISM_TEST("c104 the folder glyph is a soft two-tone, not an opaque plate") {
   const UINT32 background = frame.At(6, static_cast<int>(glyph->box.top) + 8);
   const Rgba accent = prism::theme::Lookup(TokenId::AccentLiquidPrimary, Variant::Midnight)
                           .gradient.from;
-  Rgba panel = prism::theme::Lookup(TokenId::SurfaceFloatingIsland, Variant::Midnight).color;
-  panel.a = 0.94f;
-  Rgba tone = accent;
-  tone.r = accent.r + (panel.r - accent.r) * token.bodyMix;
-  tone.g = accent.g + (panel.g - accent.g) * token.bodyMix;
-  tone.b = accent.b + (panel.b - accent.b) * token.bodyMix;
+  Rgba tone = prism::theme::Lookup(TokenId::FolderBody, Variant::Midnight).color;
   tone.a = token.bodyAlpha;
   const UINT32 wantSoft = ToPixel(prism::theme::CompositeOver(tone, FromPixel(background)));
   Rgba opaque = tone;

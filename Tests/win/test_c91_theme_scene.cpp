@@ -303,12 +303,11 @@ bool RenderFrame(Rig& rig, Variant variant, Frame* out) {
   return true;
 }
 
-// The rail's panel colour: the floating island at the near-opaque alpha the
-// sidebar resolves (GalleryRenderer::TokenColor(Panel)) over the canvas.
+// The rail's panel colour: the PANEL TIER of the surface ladder -- what
+// GalleryRenderer::TokenColor(Panel) resolves. C124: it used to be the floating
+// island at 94 %, the reason a passive column measured 1.32:1 against the canvas.
 Rgba PanelColor(Variant variant) {
-  Rgba panel = prism::theme::Lookup(TokenId::SurfaceFloatingIsland, variant).color;
-  panel.a = 0.94f;
-  return prism::theme::CompositeOver(panel, prism::chrome::CanvasPresentedColor(variant));
+  return prism::chrome::SurfaceTierPresented(prism::theme::SurfaceTier::Panel, variant);
 }
 
 const prism::win::sidebar::Command* FindCommand(const prism::win::sidebar::Layout& layout,
@@ -399,7 +398,8 @@ PRISM_TEST("c91 the canvas and the status strip are the theme's") {
   // --surface-backdrop-reference, i.e. DARKER than the canvas, which moved this
   // pixel by dE 2.4 when refraction was switched on). The value follows the
   // token, not the other way round.
-      PRISM_CHECK(Near("canvas night literal", canvas, Pixel{16, 17, 23}, 2));
+      // C124: the surface ladder's canvas (#0B0D12, the audit's #0C0D11).
+      PRISM_CHECK(Near("canvas night literal", canvas, Pixel{11, 13, 18}, 2));
     } else {
       PRISM_CHECK(Near("canvas hc literal", canvas, Pixel{0, 0, 0}, 0));
     }
@@ -472,7 +472,9 @@ PRISM_TEST("c91 the tab plate, the rail and its rows follow the theme") {
     if (variant == Variant::Daylight) {
       PRISM_CHECK(Near("tab plate day literal", plate, Pixel{254, 254, 255}, 2));
     } else if (variant == Variant::HighContrast) {
-      PRISM_CHECK(Near("tab plate hc literal", plate, Pixel{40, 40, 44}, 2));
+      // C124: the tab plate is the CARD tier in every theme -- (20,20,22) on
+      // black, a value of its own before this card (one of the eleven).
+      PRISM_CHECK(Near("tab plate hc literal", plate, Pixel{20, 20, 22}, 2));
     }
 
     // (4) THE RAIL PANEL and its selected row.
@@ -485,7 +487,8 @@ PRISM_TEST("c91 the tab plate, the rail and its rows follow the theme") {
     if (variant == Variant::Daylight) {
       PRISM_CHECK(Near("rail panel day literal", panelPixel, Pixel{255, 255, 255}, 2));
     } else if (variant == Variant::HighContrast) {
-      PRISM_CHECK(Near("rail panel hc literal", panelPixel, Pixel{26, 26, 28}, 2));
+      // C124: the rail is the PANEL tier -- (14,14,16) on black.
+      PRISM_CHECK(Near("rail panel hc literal", panelPixel, Pixel{14, 14, 16}, 2));
     }
 
     const prism::win::sidebar::Command* selection =
@@ -549,7 +552,8 @@ PRISM_TEST("c91 the islands and the list ink follow the theme") {
     if (variant == Variant::Daylight) {
       PRISM_CHECK(Near("action island day literal", island, Pixel{253, 253, 254}, 2));
     } else if (variant == Variant::Midnight) {
-      PRISM_CHECK(Near("action island night literal", island, Pixel{26, 29, 37}, 2));
+      // C124: the FLOATING tier (#232833 -- the audit's action-island sample).
+      PRISM_CHECK(Near("action island night literal", island, Pixel{35, 40, 51}, 2));
     }
 
     // The breadcrumb pill is the SAME token through a different painter (the

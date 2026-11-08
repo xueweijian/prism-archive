@@ -93,11 +93,16 @@ PRISM_TEST("3.3: blueprint values are verbatim, not approximations") {
   PRISM_CHECK(Near(dayCanvas.g, ChannelFromByte(241)));
   PRISM_CHECK(Near(dayCanvas.b, ChannelFromByte(244)));
   PRISM_CHECK(Near(dayCanvas.a, 0.72));
+  // C124: the Night canvas is the surface ladder's CANVAS tier -- opaque
+  // #0B0D12. It used to be (18,20,26)@.68 over the #0B0C10 reference, which
+  // C121's veil presented as (16,17,23); the ladder is defined against
+  // #0B0D12 (UI-AUDIT 12.7), and the panel tier measures 1.064:1 from it
+  // against 1.029:1 from the brighter one.
   const Rgba nightCanvas = ColorOf(TokenId::SurfaceCanvasBase, Variant::Midnight);
-  PRISM_CHECK(Near(nightCanvas.r, ChannelFromByte(18)));
-  PRISM_CHECK(Near(nightCanvas.g, ChannelFromByte(20)));
-  PRISM_CHECK(Near(nightCanvas.b, ChannelFromByte(26)));
-  PRISM_CHECK(Near(nightCanvas.a, 0.68));
+  PRISM_CHECK(Near(nightCanvas.r, ChannelFromByte(0x0B)));
+  PRISM_CHECK(Near(nightCanvas.g, ChannelFromByte(0x0D)));
+  PRISM_CHECK(Near(nightCanvas.b, ChannelFromByte(0x12)));
+  PRISM_CHECK(Near(nightCanvas.a, 1.0));
 
   // --surface-floating-island
   const Rgba dayIsland = ColorOf(TokenId::SurfaceFloatingIsland, Variant::Daylight);
@@ -106,12 +111,15 @@ PRISM_TEST("3.3: blueprint values are verbatim, not approximations") {
   // C102: plan 2.1 asks for .82 so the island stops reading as a flat white
   // pill on the canvas; the row's colour (white) is untouched.
   PRISM_CHECK(Near(dayIsland.a, 0.82));
+  // C124: the FLOATING tier -- (43,49,62) at 75 %, i.e. exactly #232833 once
+  // composited on the #0B0D12 canvas (the audit's own action-island sample).
+  // Translucent on purpose: appearance.glassIntensity must still move it.
   const Rgba nightIsland =
       ColorOf(TokenId::SurfaceFloatingIsland, Variant::Midnight);
-  PRISM_CHECK(Near(nightIsland.r, ChannelFromByte(38)));
-  PRISM_CHECK(Near(nightIsland.g, ChannelFromByte(42)));
-  PRISM_CHECK(Near(nightIsland.b, ChannelFromByte(54)));
-  PRISM_CHECK(Near(nightIsland.a, 0.52));
+  PRISM_CHECK(Near(nightIsland.r, ChannelFromByte(43)));
+  PRISM_CHECK(Near(nightIsland.g, ChannelFromByte(49)));
+  PRISM_CHECK(Near(nightIsland.b, ChannelFromByte(62)));
+  PRISM_CHECK(Near(nightIsland.a, 0.75));
 
   // --border-specular-rim: top .85 -> bottom .18 (day), .28 -> .04 (night)
   const Gradient dayRim = GradientOf(TokenId::BorderSpecularRim, Variant::Daylight);
@@ -123,23 +131,27 @@ PRISM_TEST("3.3: blueprint values are verbatim, not approximations") {
   PRISM_CHECK(Near(nightRim.to.a, 0.04));
   PRISM_CHECK(Near(dayRim.from.r, 1.0) && Near(nightRim.from.b, 1.0));
 
-  // --accent-liquid-primary: #007AFF -> #0055D4 @.88; #0A84FF -> #0060DF @.82
+  // --accent-liquid-primary: C124 made it ONE VALUE. #0A84FF, FLAT (from == to)
+  // in both design themes, at each theme's existing alpha. The blueprint's
+  // Daylight #007AFF -> #0055D4 and Midnight #0A84FF -> #0060DF were four
+  // values doing one job -- "three blues", counted at the pixel (UI-AUDIT
+  // 16.1). HighContrast below keeps its raised-contrast pair (a11y override).
   const Gradient dayAccent =
       GradientOf(TokenId::AccentLiquidPrimary, Variant::Daylight);
-  PRISM_CHECK(Near(dayAccent.from.r, ChannelFromByte(0)));
-  PRISM_CHECK(Near(dayAccent.from.g, ChannelFromByte(122)));
+  PRISM_CHECK(Near(dayAccent.from.r, ChannelFromByte(10)));
+  PRISM_CHECK(Near(dayAccent.from.g, ChannelFromByte(132)));
   PRISM_CHECK(Near(dayAccent.from.b, ChannelFromByte(255)));
   PRISM_CHECK(Near(dayAccent.from.a, 0.88));
-  PRISM_CHECK(Near(dayAccent.to.r, ChannelFromByte(0)));
-  PRISM_CHECK(Near(dayAccent.to.g, ChannelFromByte(85)));
-  PRISM_CHECK(Near(dayAccent.to.b, ChannelFromByte(212)));
+  PRISM_CHECK(Near(dayAccent.to.r, ChannelFromByte(10)));
+  PRISM_CHECK(Near(dayAccent.to.g, ChannelFromByte(132)));
+  PRISM_CHECK(Near(dayAccent.to.b, ChannelFromByte(255)));
   const Gradient nightAccent =
       GradientOf(TokenId::AccentLiquidPrimary, Variant::Midnight);
   PRISM_CHECK(Near(nightAccent.from.r, ChannelFromByte(10)));
   PRISM_CHECK(Near(nightAccent.from.g, ChannelFromByte(132)));
   PRISM_CHECK(Near(nightAccent.from.b, ChannelFromByte(255)));
   PRISM_CHECK(Near(nightAccent.from.a, 0.82));
-  PRISM_CHECK(Near(nightAccent.to.b, ChannelFromByte(223)));
+  PRISM_CHECK(Near(nightAccent.to.b, ChannelFromByte(255)));
 
   // --spring-snappy-interactive: m=1, k=420, c=28 (zeta ~ 0.68)
   const auto snappy =

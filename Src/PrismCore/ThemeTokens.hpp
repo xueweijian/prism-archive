@@ -6,13 +6,20 @@
 // lookups scattered through the renderer, because a token that only exists in
 // a design doc drifts away from the pixels at the first refactor.
 //
-//   --surface-canvas-base        rgba(246,248,252,.72) | rgba(18,20,26,.68)
-//   --surface-floating-island    rgba(255,255,255,.58) | rgba(38,42,54,.52)
+//   --surface-canvas-base        rgba(241,241,244,.72) | #0B0D12 opaque
+//   --surface-floating-island    rgba(255,255,255,.82) | rgba(43,49,62,.75)
 //   --border-specular-rim        top/bottom alpha .85->.18 | .28->.04
-//   --accent-liquid-primary      #007AFF->#0055D4 @.88 | #0A84FF->#0060DF @.82
+//   --accent-liquid-primary      #0A84FF flat @.88 | #0A84FF flat @.82
 //   --font-stack-system          SF Pro Display/Inter + PingFang/HarmonyOS
 //   --spring-snappy-interactive  m=1 k=420 c=28
 //   --spring-fluid-sheet         m=1 k=280 c=34
+//
+// C124 replaced the eight ad-hoc surface tones those first two rows used to
+// imply with an explicit FIVE-STEP LADDER (SurfaceTier below: canvas / panel /
+// card / floating / border). The table above lists the rows the blueprint names;
+// the ladder is the vocabulary the renderer paints, and it is where "which
+// surface is this" is decided (UI-AUDIT 12.2 counted eleven tones and the
+// hierarchy was backwards).
 //
 // Two things the table itself does not spell out, marked EXT below:
 //   * --text-primary / --text-secondary -- the two foreground roles the WCAG

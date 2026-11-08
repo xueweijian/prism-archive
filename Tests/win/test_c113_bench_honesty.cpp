@@ -122,7 +122,13 @@ constexpr size_t kPaintedDivisor = 20;
 // rendered == 1, hr == S_OK, geometry_matches == 1,
 // painted == 192486/936624 (20.5%), digest == a36870e3bffa86ff. Re-measured with
 // "c113_bench_honesty --digest --shaders <build>/Assets/Shaders", never copied.
-constexpr uint64_t kDigest = 0xa36870e3bffa86ffull;
+//
+// ... AND AGAIN ON THE C122 BASE (26 DIP rows, four columns, the type glyphs in
+// their own column): same scene, same success, painted == 227607/936624 (24.3%),
+// digest == 30b690f8aec461d7. Two cards moved this frame for two different
+// reasons; the constant follows the tree, the assertions above stay the proof
+// that what it hashes is a REAL frame.
+constexpr uint64_t kDigest = 0x30b690f8aec461d7ull;
 constexpr uint32_t kDigestWidth = 1264;
 constexpr uint32_t kDigestHeight = 741;
 constexpr size_t kNonBlackDivisor = 2;

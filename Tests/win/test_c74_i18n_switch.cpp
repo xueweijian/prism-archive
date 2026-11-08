@@ -116,10 +116,10 @@ const char* kZhNotEncrypted = "\xE6\x9C\xAA\xE5\x8A\xA0\xE5\xAF\x86";  // 未加
 // one-line readout: four labels and three values have to come from the table.
 const char* kEnCryptoLabel = "ENCRYPTION";
 const char* kZhCryptoLabel =
-    "\xE5\x8A\xA0\xE5\xAF\x86\xE7\x8A\xB6\xE6\x80\x81";  // 加密状态
+    "\xE5\x8A\xA0\xE5\xAF\x86";  // 加密
 const char* kEnMethodLabel = "METHOD";
 const char* kZhMethodLabel =
-    "\xE5\x8E\x8B\xE7\xBC\xA9\xE6\x96\xB9\xE6\xB3\x95";  // 压缩方法
+    "\xE6\x96\xB9\xE6\xB3\x95";  // 方法
 const char* kEnDictLabel = "DICTIONARY";
 const char* kZhDictLabel = "\xE5\xAD\x97\xE5\x85\xB8";  // 字典
 const char* kEnRatioLabel = "RATIO";

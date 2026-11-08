@@ -1909,6 +1909,12 @@ inline LanguageRuntime LoadLanguageFor(const std::wstring& directory,
   }
   runtime.translator.SetLanguage(runtime.choice.tag);
   runtime.tag = prism::win::Utf8ToWide(runtime.choice.tag);
+  // C127: a table from an OLDER install silently mixed languages (C105's card
+  // labels fell back to English inside a Chinese window). Name every missing
+  // required key once, at startup, so a stale payload is diagnosable from the
+  // log instead of only from a screenshot.
+  const std::vector<std::string> missingRequired =
+      prism::i18n::MissingRequiredKeys(runtime.translator);
   if (logger != nullptr) {
     logger->Emit(prism::log::Level::kInfo, "i18n", "language resolved",
                  {{"tag", runtime.choice.tag},
@@ -1918,6 +1924,18 @@ inline LanguageRuntime LoadLanguageFor(const std::wstring& directory,
     if (!runtime.detail.empty()) {
       logger->Emit(prism::log::Level::kWarn, "i18n", "language table unavailable",
                    {{"detail", runtime.detail}});
+    }
+    if (!missingRequired.empty()) {
+      std::string names;
+      for (const std::string& key : missingRequired) {
+        if (!names.empty()) names += ',';
+        names += key;
+      }
+      logger->Emit(prism::log::Level::kWarn, "i18n",
+                   "language table is missing required keys",
+                   {{"tag", runtime.choice.tag},
+                    {"count", std::to_string(missingRequired.size())},
+                    {"keys", names}});
     }
   }
   return runtime;

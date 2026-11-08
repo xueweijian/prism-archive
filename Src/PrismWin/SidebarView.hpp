@@ -70,6 +70,16 @@ inline constexpr bool kSelectionPill = false;
 inline constexpr bool kSelectionPill = true;
 #endif
 
+// C127: the four info-card field labels are translated words. The mutation
+// build restores the compiled-in English defaults (the defect the card fixes),
+// so the suite's zh-CN assertion goes red instead of passing on a hardcoded
+// Chinese literal that no table can ever change.
+#if defined(PRISM_C127_MUTANT_HARDCODED_LABEL)
+inline constexpr bool kCardLabelsLocalized = false;
+#else
+inline constexpr bool kCardLabelsLocalized = true;
+#endif
+
 enum class PrimKind : std::uint8_t {
   Panel,        // sidebar background
   SectionLabel, // "FAVORITES" / "RECENT" / "ARCHIVE TREE"
@@ -253,7 +263,15 @@ struct Layout {
 // C40: the four section headings used to be literals in this header, so the
 // sidebar stayed English in a Chinese build even though sidebar.section.* and
 // sidebar.empty.noArchive had been in both tables since C19. They are now a
-// value the caller can hand in (or that the installed translator fills).
+// value the caller hands in explicitly (GalleryWindow's ApplyLanguage copies
+// them once).
+//
+// C127: there used to be a PROCESS-GLOBAL translator slot here (SetTranslator /
+// InstalledTranslator) that the two-argument Build() read. The product never
+// filled it -- it passed Labels instead -- so the slot was a second, silent
+// source of truth that made a unit suite read Chinese while a different call
+// path painted English. It is GONE; a Build() without Labels gets the compiled
+// defaults, and every translated call site must say so.
 struct Labels {
   // C40: the four section headings.
   std::string favorites = "FAVORITES";
@@ -272,26 +290,11 @@ struct Labels {
   // C105: the four FIELD LABELS of the info card. The card is a label/value
   // stack now, so "DICT 64.0 MB" became a label ("DICTIONARY") above a value
   // ("64.0 MB"), and each label is a key of its own.
-  std::string cardCrypto = "ENCRYPTION";
+  std::string cardEncryption = "ENCRYPTION";
   std::string cardMethod = "METHOD";
   std::string cardDictionary = "DICTIONARY";
   std::string cardRatio = "RATIO";
 };
-
-// The translator the app installs ONCE at startup (Main.cpp, before the window
-// exists). It is a slot rather than a Build() parameter because the renderer's
-// call site belongs to another card (V1/V3) and must not be edited by this one;
-// a null slot -- unit suites, the shell DLLs -- keeps the English literals.
-inline const prism::i18n::Translator*& TranslatorSlot() {
-  static const prism::i18n::Translator* translator = nullptr;
-  return translator;
-}
-
-inline void SetTranslator(const prism::i18n::Translator* translator) {
-  TranslatorSlot() = translator;
-}
-
-inline const prism::i18n::Translator* InstalledTranslator() { return TranslatorSlot(); }
 
 inline Labels LabelsFrom(const prism::i18n::Translator* translator) {
   Labels labels;
@@ -308,10 +311,12 @@ inline Labels LabelsFrom(const prism::i18n::Translator* translator) {
   labels.unknownMethod = pick("status.unknownMethod", labels.unknownMethod);
   labels.ratio = pick("status.ratio", labels.ratio);
   labels.dictionary = pick("status.dictionary", labels.dictionary);
-  labels.cardCrypto = pick("sidebar.card.crypto", labels.cardCrypto);
-  labels.cardMethod = pick("sidebar.card.method", labels.cardMethod);
-  labels.cardDictionary = pick("sidebar.card.dictionary", labels.cardDictionary);
-  labels.cardRatio = pick("sidebar.card.ratio", labels.cardRatio);
+  if (kCardLabelsLocalized) {
+    labels.cardEncryption = pick("sidebar.card.encryption", labels.cardEncryption);
+    labels.cardMethod = pick("sidebar.card.method", labels.cardMethod);
+    labels.cardDictionary = pick("sidebar.card.dictionary", labels.cardDictionary);
+    labels.cardRatio = pick("sidebar.card.ratio", labels.cardRatio);
+  }
   return labels;
 }
 
@@ -604,7 +609,7 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
     const std::string* value;
   };
   const CardRow cardRows[4] = {
-      {"lock", &labels.cardCrypto, &cipher},
+      {"lock", &labels.cardEncryption, &cipher},
       {"bolt", &labels.cardMethod, &method},
       {"drum", &labels.cardDictionary, &dictionary},
       {"chart", &labels.cardRatio, &ratioValue},
@@ -665,8 +670,10 @@ inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics,
   return layout;
 }
 
+// No translator slot: the compiled defaults are the only thing a caller can get
+// without handing in Labels. GalleryWindow passes its ApplyLanguage() copy.
 inline Layout Build(const prism::sidebar::Model& model, const Metrics& metrics) {
-  return Build(model, metrics, LabelsFrom(InstalledTranslator()));
+  return Build(model, metrics, Labels{});
 }
 
 }  // namespace prism::win::sidebar

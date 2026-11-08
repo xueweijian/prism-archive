@@ -693,6 +693,16 @@ PRISM_TEST("C77-2 the glass panel has a rim, a shadow and a continuous corner") 
   // question directly: 1 px inside the left edge is the surface, the CORNER
   // pixel of the same frame is the canvas (assertion (4) above proves the
   // corners are untouched).
+  //
+  // WHY IT TAKES BOTH, and each one alone is satisfiable by a different defect:
+  //   * "paintedCorners == 0" is ALSO satisfied by a panel that paints NOTHING
+  //     (a card with no fill has untouched corners too);
+  //   * this probe is ALSO satisfied by a 1 px FRAME with an empty inside.
+  // Together they pin the thing the card is: a rounded, FILLED surface -- corners
+  // are canvas, 1 px inside the edge is the tier's fill -- and the body sample
+  // above (rimLuma/bodyLuma) is what says the middle is filled. Measured after
+  // C124: edge FF232833 (BGRA -> RGB 35,40,51, the floating tier exactly),
+  // corner FF191B20 (the #0B0D12 canvas), dist 25.
   const UINT32 edgePixel = with.At(card.left + 1, (top + bottom) / 2);
   const UINT32 cornerPixel = with.At(cornerX[0], cornerY[0]);
   std::printf("C77 panel: edge=%08X corner=%08X dist=%d\n", edgePixel, cornerPixel,

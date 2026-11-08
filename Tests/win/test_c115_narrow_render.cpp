@@ -407,21 +407,27 @@ PRISM_TEST("c115.render: 1264 is pixel-identical to the pre-card baseline") {
 }
 
 // ---------------------------------------------------------------------------
-// 4. THE COMPOSITION PANEL -- C123: THERE IS NONE.
+// 4. THE COMPOSITION PANEL -- C126: IT IS THE TOOLBAR BAND, AT EVERY WIDTH.
 //
 // GalleryWindow::GlassPanelRect() sizes the COMPOSITION (topmost) island -- the
 // surface layered ABOVE the window's D2D content. C115 asked "is that surface
-// ever the whole client" and answered "it is the pill". C123 REMOVES the pill:
-// the crumb is a 28 px path bar painted into the page, so the product window
-// publishes no island at all and PresentGlassFrame (rect.w == 0 -> return)
-// sizes nothing. The contract this case pins is that absence, at every width:
-// an island reappearing here would be a blurred ghost rectangle over the
-// toolbar -- a surface for a control that no longer exists.
+// ever the whole client" and C123 answered "there is none" (the pill it used to
+// be was deleted). C126 gives it the flush TOOLBAR band.
 //
-// The other two cases of this suite (the pill the RENDERER paints, and the
-// crumb run inside its box) are legacy-composition scenes and are unchanged.
+// Every assertion C123 wrote here is CHANGED, listed one per line (D3):
+//   file:line (C123)               old assertion                 why it is a DEFECT now
+//   -----------------------------  ----------------------------  --------------------------
+//   test_c115_narrow_render.cpp:454  PRISM_CHECK_EQ(panel.w, 0u)  the island has a host again;
+//   test_c115_narrow_render.cpp:455  PRISM_CHECK_EQ(panel.h, 0u)  "no island" was C123's
+//   test_c115_narrow_render.cpp:456  PRISM_CHECK_EQ(panel.x, 0u)  intermediate state, not a law.
+//   test_c115_narrow_render.cpp:457  PRISM_CHECK_EQ(panel.y, 0u)
+//
+// NEW assertion: at each of the eleven widths the panel IS
+// prism::layout::ToolbarBandRect -- edge to edge, 56 DIP tall, never the pill
+// and never the whole client. WHAT MAKES IT RED: PRISM_C123_MUTANT_PILL_ISLAND
+// publishes the 560x44 pill, so the first width already fails.
 // ---------------------------------------------------------------------------
-PRISM_TEST("c115.glass_panel: C123 has no composition island over the toolbar") {
+PRISM_TEST("c115.glass_panel: the composition island is the toolbar band") {
   prism::win::gallery::GalleryWindow window;
   // (a) BEFORE Create: no layout has ever been computed. An empty panel is the
   // only safe answer -- and PresentGlassFrame bails on it, so nothing is sized.
@@ -442,19 +448,32 @@ PRISM_TEST("c115.glass_panel: C123 has no composition island over the toolbar") 
     window.Dispatch(WM_SIZE, SIZE_RESTORED, MAKELPARAM(w, h));
     const prism::layout::Layout layout = window.LayoutForTest();
     const prism::glass::IslandRect panel = window.GlassPanelRect();
+    const prism::layout::Rect toolbar = prism::layout::ToolbarBandRect(layout);
     if (w == 1028) {
-      std::printf("C115 glass panel at 1028: %u,%u %ux%u (C123 crumbBar %d,%d %dx%d, client %dx%d)\n",
-                  panel.x, panel.y, panel.w, panel.h, layout.crumbBar.left, layout.crumbBar.top,
+      std::printf("C115 glass panel at 1028: %u,%u %ux%u (C126 toolbar %d,%d %dx%d, "
+                  "crumbBar %d,%d %dx%d, client %dx%d)\n",
+                  panel.x, panel.y, panel.w, panel.h, toolbar.left, toolbar.top,
+                  toolbar.Width(), toolbar.Height(), layout.crumbBar.left, layout.crumbBar.top,
                   layout.crumbBar.Width(), layout.crumbBar.Height(), w, h);
     }
-    // (b) NO island: the composition layer has nothing to cover.
+    // (b) the island IS the toolbar band: edge to edge, 56 DIP tall, and never
+    // the pill (C123 deleted it) nor the whole client (C115's own question).
 #if defined(PRISM_C123_MUTANT_PILL_ISLAND)
-    g_pillIslandObserved = g_pillIslandObserved || panel.w != 0 || panel.h != 0;
+    g_pillIslandObserved =
+        g_pillIslandObserved ||
+        (static_cast<int>(panel.x) != toolbar.left || static_cast<int>(panel.y) != toolbar.top ||
+         static_cast<int>(panel.w) != toolbar.Width() ||
+         static_cast<int>(panel.h) != toolbar.Height());
 #endif
-    PRISM_CHECK_EQ(panel.w, 0u);
-    PRISM_CHECK_EQ(panel.h, 0u);
-    PRISM_CHECK_EQ(panel.x, 0u);
-    PRISM_CHECK_EQ(panel.y, 0u);
+    PRISM_CHECK(!toolbar.Empty());
+    PRISM_CHECK_EQ(static_cast<int>(panel.x), toolbar.left);
+    PRISM_CHECK_EQ(static_cast<int>(panel.y), toolbar.top);
+    PRISM_CHECK_EQ(static_cast<int>(panel.w), toolbar.Width());
+    PRISM_CHECK_EQ(static_cast<int>(panel.h), toolbar.Height());
+    // ... and it is not the whole window: an island covering the client would
+    // blur the content under it, which is exactly what the pill never did.
+    PRISM_CHECK(panel.h < static_cast<unsigned>(h));
+    PRISM_CHECK(panel.h <= static_cast<unsigned>(prism::layout::kActionIslandHeight));
     // (c) and the crumb row it replaced still exists, at the layout's numbers --
     // so "no island" cannot be green because the crumb band disappeared too.
     PRISM_CHECK_EQ(layout.crumbBar.Height(), 28);

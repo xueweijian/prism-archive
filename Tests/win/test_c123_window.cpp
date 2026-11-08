@@ -309,39 +309,68 @@ PRISM_TEST("c123.window pixels: the toolbar is painted edge to edge") {
 }
 
 // ---------------------------------------------------------------------------
-// 5. C107/C112/C115-render assert this same product property from their own
-//    angles: C123's window publishes NO composition island. It is asserted
-//    here too so the D3 arm (PRISM_C123_MUTANT_PILL_ISLAND) has a binary that
-//    proves the property can go red -- one function, one red-prover, three
-//    suites.
+// 5. THE ISLAND'S RECTANGLE. C123 rewrote this case to pin "no island"; C126
+//    gives the island a HOST, so the case is rewritten AGAIN -- and every
+//    changed assertion is listed here, one line each, because an assertion that
+//    is quietly edited is an assertion nobody can trust (CONTRACTS D3):
+//
+//      file:line (pre-C126)  old assertion                 why it is a DEFECT now
+//      --------------------  ----------------------------  -------------------------------
+//      test_c123_window.cpp:327  PRISM_CHECK_EQ(panel.x, 0u)   C126's whole point is that the
+//      test_c123_window.cpp:328  PRISM_CHECK_EQ(panel.y, 0u)   island covers the toolbar band;
+//      test_c123_window.cpp:329  PRISM_CHECK_EQ(panel.w, 0u)   "0x0" was a CORRECT intermediate
+//      test_c123_window.cpp:330  PRISM_CHECK_EQ(panel.h, 0u)   state, not a contract.
+//
+//    NEW assertion: the panel IS prism::layout::ToolbarBandRect -- not a second
+//    rectangle, not the deleted pill, not 0x0 -- and the 28 px crumb row it must
+//    never cover still exists. WHAT MAKES IT RED: the registered D3 arm
+//    (PRISM_C123_MUTANT_PILL_ISLAND) returns the deleted pill (16,38 560x44), so
+//    the band equality fails and the entry prints
+//    "C123 MUTATION CAUGHT: pill_island".
 // ---------------------------------------------------------------------------
-PRISM_TEST("c123.window island: no composition surface over the toolbar") {
+PRISM_TEST("c123.window island: the composition surface IS the toolbar band") {
   ResetTabs();
   (void)g_window->OpenTab("C:\\work\\fixture.zip");
-  const prism::glass::IslandRect panel = g_window->GlassPanelRect();
-  std::printf("C123 window island: %u,%u %ux%u (expected 0,0 0x0)\n", panel.x, panel.y,
-              panel.w, panel.h);
-#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
-  g_pillIslandObserved = panel.w != 0 || panel.h != 0;
-#endif
-  PRISM_CHECK_EQ(panel.x, 0u);
-  PRISM_CHECK_EQ(panel.y, 0u);
-  PRISM_CHECK_EQ(panel.w, 0u);
-  PRISM_CHECK_EQ(panel.h, 0u);
-  // ... and the row it was replaced by still exists (so this cannot be green
-  // because the crumb band disappeared too).
   const prism::layout::Layout layout = g_window->LayoutForTest();
+  const prism::layout::Rect toolbar = prism::layout::ToolbarBandRect(layout);
+  const prism::glass::IslandRect panel = g_window->GlassPanelRect();
+  std::printf("C123 window island: %u,%u %ux%u (toolbar band %d,%d %dx%d)\n", panel.x,
+              panel.y, panel.w, panel.h, toolbar.left, toolbar.top, toolbar.Width(),
+              toolbar.Height());
+#if defined(PRISM_C123_MUTANT_PILL_ISLAND)
+  // CONTRACTS D3: the injected pill is really back when the product publishes a
+  // rectangle that is NOT the band (a 44 px pill at x = 16 instead of 0..W).
+  g_pillIslandObserved = !toolbar.Empty() &&
+                         (static_cast<int>(panel.x) != toolbar.left ||
+                          static_cast<int>(panel.y) != toolbar.top ||
+                          static_cast<int>(panel.w) != toolbar.Width() ||
+                          static_cast<int>(panel.h) != toolbar.Height());
+#endif
+  PRISM_CHECK(!toolbar.Empty());
+  PRISM_CHECK_EQ(static_cast<int>(panel.x), toolbar.left);
+  PRISM_CHECK_EQ(static_cast<int>(panel.y), toolbar.top);
+  PRISM_CHECK_EQ(static_cast<int>(panel.w), toolbar.Width());
+  PRISM_CHECK_EQ(static_cast<int>(panel.h), toolbar.Height());
+  // ... and the row it must never cover still exists (so this cannot be green
+  // because the crumb band disappeared too), and the two do not intersect.
   PRISM_CHECK_EQ(layout.crumbBar.Height(), 28);
+  PRISM_CHECK_EQ(toolbar.Intersects(layout.crumbBar) ? 1 : 0, 0);
 }
 
 // ---------------------------------------------------------------------------
 // 6. appearance.backdropRefraction must not silently become a no-op.
 //
-// C126 will move the liquid-glass island onto the flush toolbar. Until then the
-// island has no host, so the question "does the setting still reach pixels?"
-// has to be answered by MEASUREMENT, not by a comment (R1): this case renders
-// the same window with the setting on and off and reports how many pixels move,
-// split into "inside the toolbar band" and "everywhere else".
+// C123 recorded this because the island had no host: the setting still gated the
+// panel language (rail, cards, band chrome), so it moved pixels -- but only
+// 1,236 of them inside the toolbar band, and none of them by REFRACTION.
+//
+// C126 OWNS THAT NUMBER NOW. This case is kept as the floor it always was
+// ("turning the material off changes the frame"), with NO glass layer in this
+// window: it measures the window-only path. The requirement that the in-band
+// count GROW -- the reason this card exists -- is c126 G4, on the real
+// composition path (> 1,236 in-band pixels with the island live). Splitting the
+// two keeps each assertion honest: the floor lives where the window is, the
+// growth lives where the island is, and neither can be satisfied by the other.
 // ---------------------------------------------------------------------------
 PRISM_TEST("c123.window refraction: the appearance setting still reaches pixels") {
   ResetTabs();
@@ -387,10 +416,10 @@ PRISM_TEST("c123.window refraction: the appearance setting still reaches pixels"
               "the toolbar band of %ux%u\n",
               changed, maxDelta, changedInBand, width, height);
   // The setting is NOT a no-op: it still gates the panel material (the rail, the
-  // action strip, the cards), which is why turning it off changes pixels. The
-  // REFRACTION half has no island to feed until C126 -- when that card lands
-  // this case must be re-measured, and the count is expected to grow, never to
-  // become zero.
+  // action strip, the cards), which is why turning it off changes pixels. C126
+  // landed the other half (the refraction the island applies to the toolbar
+  // band); its growth is asserted by c126 G4, and the floor asserted here stays
+  // "never zero" so a future card cannot make the setting decorative.
   PRISM_CHECK(changed > 0);
   PRISM_CHECK(maxDelta > 2);
 }

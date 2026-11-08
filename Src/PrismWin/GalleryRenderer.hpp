@@ -305,6 +305,29 @@ class GalleryRenderer {
     // over the text -- a second, offset, blurred copy of every glyph.
     // Opt-in like every other optional layer: a pre-C112 scene is unchanged.
     bool pillOwnedByIsland = false;
+
+    // ------------------------------------------------------------- C126 glass
+    // WHO OWNS THE TOOLBAR'S CONTENT. Same ownership rule as the pill above,
+    // applied to the eight buttons: while the island is composited over the
+    // flush toolbar band, the band's FILL, its group seams, the hover capsule,
+    // the eight icons and the eight Chinese labels are painted by the ISLAND's
+    // own device context, and the window paints NOTHING there.
+    //
+    // The distinction matters and is not cosmetic. "Put the island on top of
+    // the toolbar" (what a layering fix would do) leaves the window's glyphs
+    // under the material, the island's backdrop capture then contains them, the
+    // optics blur that capture and paint the blur back over the same words --
+    // the C112 "重影" with a different rectangle. Ownership is the only shape
+    // that cannot produce it: there is no second copy to blur.
+    //
+    // The window keeps what the island's rectangle cannot cover: the DROPDOWN
+    // panel that hangs below the band (painted by DrawActionBar) and the
+    // hit-test geometry (GalleryWindow::ActionBarLayout, unchanged).
+    //
+    // Opt-in like every other layer: a pre-C126 scene (and the whole legacy V1
+    // composition) sets nothing and paints exactly what it painted before.
+    bool actionsOwnedByIsland = false;
+
     // A caller-side bump for "the items changed". The renderer ALSO fingerprints
     // the catalog (count + first/middle/last path), so a rename rebuilds even
     // when nobody bumps this; the field exists so a test can force the change.
@@ -434,6 +457,62 @@ class GalleryRenderer {
       ++dbgPillTextOnIsland;
     }
     ++dbgPillOnIsland;
+    return true;
+  }
+
+  // ---------------------------------------------------------------- C126
+  // THE TOOLBAR, PAINTED BY THE ISLAND.
+  //
+  // The surface is ISLAND-LOCAL: the composition bitmap's origin is the band's
+  // corner, so the band's own absolute rectangle is translated to (0,0) and the
+  // ActionBarPainter -- the SAME object, the SAME table, the SAME rules -- draws
+  // the strip there. Nothing in this function knows where a button goes: the
+  // geometry comes from prism::actionbar::Compute, the words and the enabled
+  // states from the SAME Model the hit test resolves, and the icons from the
+  // SAME curve glyphs C100 pinned.
+  //
+  // WHY A SECOND ActionBarPainter AND NOT THE WINDOW'S. A D2D brush is bound to
+  // the DEVICE that created it, and the composition host builds its own D3D11
+  // device -- so the window's painter cannot draw here any more than the
+  // island's could draw there. The second instance is device state, not a
+  // second model: both read prism::actionbar and nothing else.
+  bool PaintToolbarOnIsland(ID2D1RenderTarget* target, const prism::layout::Layout& layout,
+                            const prism::actionbar::Model* actions, int hoverIndex,
+                            int pressedIndex, prism::theme::Variant theme) {
+    if (!target || actions == nullptr) return false;
+    const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+    if (band.island.Empty() || band.buttons.empty()) return false;
+    // The device belongs to the composition host and outlives this call; a
+    // different target means different device resources (never a foreign brush).
+    if (islandBarTarget_ != target) {
+      actionBarIsland_.ReleaseDeviceResources();
+      islandBarTarget_ = target;
+    }
+    if (FAILED(actionBarIsland_.CreateDeviceResources(target))) return false;
+    const int beforeButtons = actionBarIsland_.dbgButtons;
+    const int beforeIcons = actionBarIsland_.dbgIcons;
+    const int beforeLabels = actionBarIsland_.dbgLabels;
+    const int beforeIslands = actionBarIsland_.dbgIslands;
+
+    D2D1::Matrix3x2F saved;
+    target->GetTransform(&saved);
+    // Band coordinates -> surface coordinates, ON TOP of whatever the optics
+    // chain left (it draws full-surface quads in plain 1:1).
+    const D2D1::Matrix3x2F origin =
+        D2D1::Matrix3x2F::Translation(-static_cast<float>(band.island.left),
+                                      -static_cast<float>(band.island.top));
+    target->SetTransform(origin * D2D1::Matrix3x2F(saved));
+    actionBarIsland_.Draw(target, band, *actions, hoverIndex, pressedIndex, theme,
+                          /*drawBand=*/true, /*drawDropdown=*/false);
+    target->SetTransform(saved);
+
+    dbgToolbarOnIslandButtons += actionBarIsland_.dbgButtons - beforeButtons;
+    dbgToolbarOnIslandIcons += actionBarIsland_.dbgIcons - beforeIcons;
+    dbgToolbarOnIslandLabels += actionBarIsland_.dbgLabels - beforeLabels;
+    dbgToolbarOnIslandIslands += actionBarIsland_.dbgIslands - beforeIslands;
+    // "Painted" is a FRAME count, not a primitive count: the C126 suite asserts
+    // exactly 1 island frame per window frame, which is the handover rule.
+    if (actionBarIsland_.dbgIslands > beforeIslands) ++dbgToolbarOnIslandPaints;
     return true;
   }
 
@@ -842,6 +921,14 @@ class GalleryRenderer {
     const int savedTiles = dbgTileCells;
     const int savedRows = dbgRowCells;
     const int savedThumbDraws = dbgThumbDraws;
+    // C126: the ghost pass is NOT the frame's band paint. The text-in-ghost arm
+    // draws the toolbar here, and without this save the window-side counter G1
+    // reads would be inflated by the control arm (a false red for the wrong
+    // reason -- C67's lesson, applied to a different counter).
+    const int savedActionButtons = dbgActionButtons;
+    const int savedActionIcons = dbgActionIcons;
+    const int savedActionLabels = dbgActionLabels;
+    const int savedActionIslands = dbgActionIslands;
     DrawPageBackground(content.Get(), scene, layout, size);
 #if defined(PRISM_C110_MUTANT_TILES_IN_BACKDROP)
     // C110 MUTANT ACTIVE: tiles-in-backdrop -- the shipped grid pass, restored:
@@ -860,6 +947,33 @@ class GalleryRenderer {
     if (ListModeActive(scene)) {
       DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
     }
+#elif defined(PRISM_C126_MUTANT_TEXT_IN_GHOST)
+    // C126 MUTANT ACTIVE: text-in-ghost -- the TOOLBAR is re-drawn into the
+    // refraction source, which is exactly the C112 defect this card forbids (the
+    // island would then refract a picture of its own band and paint the blur
+    // back over it). G3 MUST go red.
+    //
+    // The arm runs INSIDE the page pass, at the pass's own 1/8 scale, so the
+    // band lands where the band IS (mini y = 32/8..88/8) instead of 8x away from
+    // it. At that scale the band's MATERIAL is what 8-bit pixels can measure
+    // (the fill is 30..60 levels off the canvas); the eight words ride along
+    // with it, which is why G3 samples the label boxes as well as the strip.
+    ++dbgMutantTextInGhost;
+    // Straight to the PAINTER, not through DrawActionBar: that function honours
+    // 'actionsOwnedByIsland' and would skip the band (which is the clean build).
+    // A LOCAL painter, because its brush must be created on THIS target: the
+    // field painter's brush belongs to the frame's device, and reusing it here
+    // made the ghost be rejected at EndDraw -- the defect then "passed" G3 by
+    // leaving no ghost at all, which is the false green this arm must not have.
+    {
+      const prism::actionbar::Layout ghostBand = prism::actionbar::Compute(layout);
+      prism::win::actionbar::ActionBarPainter ghostPainter;
+      if (scene.actions != nullptr && !ghostBand.island.Empty() &&
+          SUCCEEDED(ghostPainter.CreateDeviceResources(content.Get()))) {
+        ghostPainter.Draw(content.Get(), ghostBand, *scene.actions, scene.actionHover,
+                          scene.actionPressed, scene.theme);
+      }
+    }
 #elif defined(PRISM_C121_MUTANT_TILES_IN_GHOST)
     // C121 MUTANT ACTIVE: tiles-in-ghost -- the DECODED THUMBNAIL is back in the
     // refraction source (C110's rule, the defect C121 removes). H1 (the chroma
@@ -873,6 +987,10 @@ class GalleryRenderer {
     dbgTileCells = savedTiles;
     dbgRowCells = savedRows;
     dbgThumbDraws = savedThumbDraws;
+    dbgActionButtons = savedActionButtons;
+    dbgActionIcons = savedActionIcons;
+    dbgActionLabels = savedActionLabels;
+    dbgActionIslands = savedActionIslands;
     content->SetTransform(D2D1::Matrix3x2F::Identity());
     if (FAILED(content->EndDraw())) return false;
     ComPtr<ID2D1Bitmap> stage;
@@ -940,6 +1058,8 @@ class GalleryRenderer {
 
     backdropBitmap_ = vertical;
     backdropKey_ = key;
+    backdropMiniW_ = miniW;
+    backdropMiniH_ = miniH;
     ++dbgBackdropRebuilds;
     return true;
   }
@@ -2742,6 +2862,21 @@ class GalleryRenderer {
                      const prism::layout::Layout& layout) {
     if (!scene.actions) return;
     const prism::actionbar::Layout band = prism::actionbar::Compute(layout);
+    if (scene.actionsOwnedByIsland) {
+      // C126: THE ISLAND OWNS THE BAND. This branch is the WHOLE of the window's
+      // toolbar contribution: no fill, no group seams, no hover capsule, no
+      // icon, no word, and no drop shadow or specular rim around the band (the
+      // flush strip reaches the window's edges, so a shadow here would fall on
+      // the crumb row for no reason). The one thing that stays is the DROPDOWN
+      // panel, which hangs BELOW the band -- outside the island's rectangle --
+      // and must keep working: 'drawBand=false' paints the menu and nothing
+      // else, and the window's counters record the skip below.
+      if (band.island.Empty()) return;
+      actionBar_.Draw(target, band, *scene.actions, scene.actionHover, scene.actionPressed,
+                      scene.theme, /*drawBand=*/false, /*drawDropdown=*/true);
+      ++dbgToolbarOwnedWindowSkips;
+      return;
+    }
     // C67: the painter's counters are CUMULATIVE for its own lifetime, so
     // "+= actionBar_.dbgButtons" counted every earlier frame again: a band that
     // drew 8 buttons once and nothing afterwards reported 16 after two paints.
@@ -3120,7 +3255,12 @@ class GalleryRenderer {
     for (const auto& gradient : thumbs_) {
       if (gradient) ++n;
     }
-    return n + actionBar_.BrushCount() + tabPainter_.BrushCount();
+    // C126: the island's own toolbar painter is device state too. Counting it
+    // here (and releasing it in ReleaseDeviceResources) is what keeps C75's
+    // "a minimised window holds zero brushes" true now that the toolbar has a
+    // second painter on the composition device.
+    return n + actionBar_.BrushCount() + actionBarIsland_.BrushCount() +
+           tabPainter_.BrushCount();
   }
   int TextFormatCount() const {
     int n = 0;
@@ -3134,7 +3274,8 @@ class GalleryRenderer {
     if (sidebarStatus_) ++n;
     if (sidebarCardLabel_) ++n;
     if (statusFormat_) ++n;
-    return n + actionBar_.TextFormatCount() + tabPainter_.TextFormatCount();
+    return n + actionBar_.TextFormatCount() + actionBarIsland_.TextFormatCount() +
+           tabPainter_.TextFormatCount();
   }
   size_t ThumbBitmapCount() const { return thumbBitmaps_.size(); }
   size_t ThumbBitmapBytes() const {
@@ -3183,7 +3324,14 @@ class GalleryRenderer {
     glassPanel_.Unbind();
     backdropBitmap_.Reset();
     backdropKey_ = BackdropKey{};
+    // backdropMiniW_/H_ deliberately SURVIVE the release: they are the SIZE of
+    // the last ghost this renderer built, not the live bitmap's. A capture seam
+    // that blits the ghost and then drops the device resources (C113's contract)
+    // has to be able to say how large the region it just wrote is.
+    
     actionBar_.ReleaseDeviceResources();
+    actionBarIsland_.ReleaseDeviceResources();
+    islandBarTarget_ = nullptr;
     tabPainter_.ReleaseDeviceResources();
   }
 
@@ -3232,6 +3380,10 @@ class GalleryRenderer {
   // C77: the cached refraction layer (1/8 size, already blurred) and its key.
   ComPtr<ID2D1Bitmap> backdropBitmap_;
   BackdropKey backdropKey_{};
+  // C126: the ghost's own pixel size, so a suite can read the SOURCE the optics
+  // are handed instead of guessing it from the frame (see PaintGhostSource).
+  UINT backdropMiniW_ = 0;
+  UINT backdropMiniH_ = 0;
   // C77: the glass-panel helper (borrows sidebarBrush_, owns nothing).
   prism::win::glass::PanelPainter glassPanel_;
   prism::win::glass::Stats glassStats_;
@@ -3297,6 +3449,63 @@ class GalleryRenderer {
   int dbgActionHover = 0;
   int dbgActionPressed = 0;
   int dbgActionDropdowns = 0;
+  // C126: the two halves of "who painted the toolbar". 'OnIsland' counts the
+  // island frames that actually put the band on the composition surface and the
+  // primitives the island's painter emitted; 'OwnedWindowSkips' counts the
+  // window frames whose DrawActionBar took the ownership branch. The suite's G1
+  // is the pair (window buttons == 0, island paints == 1) -- two counters from
+  // two DEVICES, so neither can be satisfied by the other's bookkeeping.
+  int dbgToolbarOnIslandPaints = 0;
+  int dbgToolbarOnIslandButtons = 0;
+  int dbgToolbarOnIslandIcons = 0;
+  int dbgToolbarOnIslandLabels = 0;
+  int dbgToolbarOnIslandIslands = 0;
+  int dbgToolbarOwnedWindowSkips = 0;
+  // C126 D3: runtime proof the text-in-ghost arm compiled in and ran.
+  int dbgMutantTextInGhost = 0;
+  // Read-back seams (the C126 suite asserts the pair, never a claim):
+  //   * ToolbarOnIslandPaints -- island frames that painted the band;
+  //   * ToolbarOnIslandButtons -- the eight icons' buttons the island emitted;
+  //   * ToolbarOwnedWindowSkips -- window frames whose band paint was SKIPPED.
+  // Window-side button count stays the existing dbgActionButtons (0 while owned).
+  int ToolbarOnIslandPaints() const { return dbgToolbarOnIslandPaints; }
+  int ToolbarOnIslandButtons() const { return dbgToolbarOnIslandButtons; }
+  int ToolbarOnIslandIcons() const { return dbgToolbarOnIslandIcons; }
+  int ToolbarOnIslandLabels() const { return dbgToolbarOnIslandLabels; }
+  int ToolbarOwnedWindowSkips() const { return dbgToolbarOwnedWindowSkips; }
+  int TextInGhostArmRuns() const { return dbgMutantTextInGhost; }
+  // C126: THE REFRACTION SOURCE, as the optics receive it. G3 asks "does the
+  // ghost carry the toolbar?", and the only object that can answer is the 1/8
+  // bitmap itself: the frame paints the band's canvas OVER the ghost (DrawBands
+  // runs after DrawBackdrop), so sampling the frame measures the band fill and
+  // not the source. This seam draws the cached bitmap 1:1 into the caller's
+  // target -- which must live on the device that BUILT it (the capture target),
+  // or D2D rejects the copy.
+  UINT GhostSourceWidth() const { return backdropMiniW_; }
+  UINT GhostSourceHeight() const { return backdropMiniH_; }
+  bool PaintGhostSource(ID2D1RenderTarget* target) {
+    if (!target || !backdropBitmap_ || backdropMiniW_ == 0 || backdropMiniH_ == 0) return false;
+    // D2D order matters: the transform and the clip are only legal BETWEEN
+    // BeginDraw and EndDraw. Doing it the other way round returns
+    // D2DERR_WRONG_STATE, the blit silently does nothing and this seam would
+    // "prove" a ghost that was never copied.
+    target->BeginDraw();
+    target->SetTransform(D2D1::Matrix3x2F::Identity());
+    target->PushAxisAlignedClip(
+        D2D1::RectF(0.0f, 0.0f, static_cast<float>(backdropMiniW_),
+                    static_cast<float>(backdropMiniH_)),
+        D2D1_ANTIALIAS_MODE_ALIASED);
+    target->DrawBitmap(backdropBitmap_.Get(),
+                       D2D1::RectF(0.0f, 0.0f, static_cast<float>(backdropMiniW_),
+                                   static_cast<float>(backdropMiniH_)),
+                       1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+    target->PopAxisAlignedClip();
+    return SUCCEEDED(target->EndDraw());
+  }
+  // The island's own ActionBarPainter (see PaintToolbarOnIsland for why it is
+  // a second instance: a D2D brush belongs to the device that made it).
+  prism::win::actionbar::ActionBarPainter actionBarIsland_;
+  ID2D1RenderTarget* islandBarTarget_ = nullptr;
   // V4: proof that the status band painted its segments (four per frame).
   int dbgStatusSegments = 0;
   // C105: how many segment VALUES were painted in the PRIMARY role, and where

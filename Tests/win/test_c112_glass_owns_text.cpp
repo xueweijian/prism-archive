@@ -492,20 +492,30 @@ PRISM_TEST("c112_pill_text_is_sharp_and_has_no_ghost") {
     }
   }
 
-  // ---------------------------------------------------------------- C123
-  // THIS SUITE WAS REWRITTEN BY CARD C123, and every assertion below says why.
+  // ------------------------------------------- C123 rewrote this, C126 again
+  // C112 measured the PILL's island. C123 deleted the pill (the crumb became a
+  // 28 px path bar painted into the page) and rewrote the case as "there is no
+  // island". C126 gives the island the TOOLBAR BAND, so the changed assertions
+  // are listed one line each (CONTRACTS D3):
   //
-  // C112 measured the PILL's island: S1/S2 asked whether the composed pill kept
-  // the glyph edges (>= 90 % retention), S3 asked whether the window had stopped
-  // painting the text the island owned. C123 removes the pill: the crumb is a
-  // 28 px PATH BAR painted into the page, one row under a flush toolbar, so
-  // there is no surface that could double-paint it and no handover to measure.
+  //   file:line (C123)              old assertion                          why it is a DEFECT now
+  //   ----------------------------  -------------------------------------  --------------------------
+  //   test_c112_glass_owns_text.cpp:527  PRISM_CHECK(!GlassPillOwnsContent())  the island OWNS the
+  //   test_c112_glass_owns_text.cpp:532  PRISM_CHECK_EQ(rect.w, 0u)            toolbar band again, so
+  //   test_c112_glass_owns_text.cpp:533  PRISM_CHECK_EQ(rect.h, 0u)            "no owner / 0x0" is
+  //   test_c112_glass_owns_text.cpp:608  PRISM_CHECK_EQ(rect.w, 0u) (S3)       the pre-C126 state.
+  //   test_c112_glass_owns_text.cpp:609  PRISM_CHECK_EQ(rect.h, 0u) (S3)
+  //   test_c112_glass_owns_text.cpp:610  PRISM_CHECK_EQ(rectOff.w, 0u) (S3)
+  //   test_c112_glass_owns_text.cpp:611  PRISM_CHECK_EQ(rectOff.h, 0u) (S3)
   //
-  // What survives is the part that can still fail: the layer must publish NO
-  // island rectangle, and the WINDOW must really paint the path (ink inside the
-  // layout's own text box). A resurrected pill island -- exactly the pre-card
-  // defect, and what PRISM_C112_MUTANT_GLASS_OVER_TEXT arms -- turns the first
-  // assertion red through its runtime predicate (D3/D27).
+  // WHAT THE PILL'S CONTRACT BECOMES. The crumb is NOT the island's tenant any
+  // more (the pill is gone), so the part that can still fail is unchanged and
+  // stays: the WINDOW must really paint the path (ink inside the layout's own
+  // text box), in BOTH arms. The island's rectangle is the TOOLBAR band in both
+  // arms -- it is LAYOUT geometry, published whether or not a device exists --
+  // and the crumb band does not intersect it. WHAT MAKES THEM RED: the pill
+  // island (PRISM_C112_MUTANT_GLASS_OVER_TEXT / PRISM_C123_MUTANT_PILL_ISLAND)
+  // publishes a 560x44 rectangle instead of the band, and the equality fails.
   GalleryWindow offWindow;
   if (!PRISM_CHECK(MakeWindow(offWindow, L"c112 crumb off", /*glass=*/false))) return;
   Frame offFrame;
@@ -515,22 +525,38 @@ PRISM_TEST("c112_pill_text_is_sharp_and_has_no_ghost") {
 
   GalleryWindow onWindow;
   if (!PRISM_CHECK(MakeWindow(onWindow, L"c112 crumb on", /*glass=*/true))) return;
+  const prism::layout::Rect toolbar = prism::layout::ToolbarBandRect(onWindow.LayoutForTest());
 #if defined(PRISM_C112_MUTANT_GLASS_OVER_TEXT)
   // NEGATIVE CONTROL (D3/D27): armed when the pre-C112 pill island is really
-  // back over the band. The first failing "no island" check prints the verdict.
-  g_mutantObserved = onWindow.GlassPanelRect().w != 0;
+  // back -- the published rectangle is NOT the toolbar band C126 gave it.
+  g_mutantObserved = !toolbar.Empty() &&
+                     (static_cast<int>(onWindow.GlassPanelRect().x) != toolbar.left ||
+                      static_cast<int>(onWindow.GlassPanelRect().y) != toolbar.top ||
+                      static_cast<int>(onWindow.GlassPanelRect().w) != toolbar.Width() ||
+                      static_cast<int>(onWindow.GlassPanelRect().h) != toolbar.Height());
   prism::test::SetMutationVerdict("C112 MUTATION CAUGHT: glass_over_text",
                                   [] { return g_mutantObserved; });
   std::printf("  INJECTION: the pill island is back over the band (observed=%d)\n",
               static_cast<int>(g_mutantObserved));
 #else
-  PRISM_CHECK(!onWindow.GlassPillOwnsContent());
+  // C126: the island owns the TOOLBAR (that is what made the band's content move
+  // to the composition surface). The CRUMB is still the window's -- the next
+  // assertions measure exactly that, and they are the ones the two mutants (a
+  // window that keeps painting the band) turn red in the C126 suite.
+  PRISM_CHECK(onWindow.GlassPillOwnsContent());
 #endif
   PRISM_CHECK(onWindow.GlassOpticsReady());
   const IslandRect rect = onWindow.GlassPanelRect();
-  std::printf("  island rect: %u,%u %ux%u (C123: none)\n", rect.x, rect.y, rect.w, rect.h);
-  PRISM_CHECK_EQ(rect.w, 0u);
-  PRISM_CHECK_EQ(rect.h, 0u);
+  std::printf("  island rect: %u,%u %ux%u (C126: toolbar band %d,%d %dx%d)\n", rect.x, rect.y,
+              rect.w, rect.h, toolbar.left, toolbar.top, toolbar.Width(), toolbar.Height());
+  PRISM_CHECK(!toolbar.Empty());
+  PRISM_CHECK_EQ(static_cast<int>(rect.x), toolbar.left);
+  PRISM_CHECK_EQ(static_cast<int>(rect.y), toolbar.top);
+  PRISM_CHECK_EQ(static_cast<int>(rect.w), toolbar.Width());
+  PRISM_CHECK_EQ(static_cast<int>(rect.h), toolbar.Height());
+  // ...and it does not cover the crumb: that is the whole reason the path bar
+  // can stay the window's while the band becomes the island's.
+  PRISM_CHECK_EQ(toolbar.Intersects(onWindow.LayoutForTest().crumbBar) ? 1 : 0, 0);
 
   Frame onFrame;
   const prism::win::benchframe::Frame onCapture = CaptureWindow(onWindow, "crumb-on", &onFrame);
@@ -603,12 +629,23 @@ PRISM_TEST("c112_no_island_over_the_crumb: both arms paint the same path") {
 
   const IslandRect rect = onWindow.GlassPanelRect();
   const IslandRect rectOff = offWindow.GlassPanelRect();
-  std::printf("  island rect: off %u,%u %ux%u | on %u,%u %ux%u (C123: both none)\n", rectOff.x,
-              rectOff.y, rectOff.w, rectOff.h, rect.x, rect.y, rect.w, rect.h);
-  PRISM_CHECK_EQ(rect.w, 0u);
-  PRISM_CHECK_EQ(rect.h, 0u);
-  PRISM_CHECK_EQ(rectOff.w, 0u);
-  PRISM_CHECK_EQ(rectOff.h, 0u);
+  const prism::layout::Rect toolbar = prism::layout::ToolbarBandRect(onWindow.LayoutForTest());
+  std::printf("  island rect: off %u,%u %ux%u | on %u,%u %ux%u (C126: toolbar band %d,%d %dx%d)\n",
+              rectOff.x, rectOff.y, rectOff.w, rectOff.h, rect.x, rect.y, rect.w, rect.h,
+              toolbar.left, toolbar.top, toolbar.Width(), toolbar.Height());
+  // C126: the rectangle is LAYOUT geometry, so both arms publish the same band --
+  // with the layer off and with it on. (It used to be 0x0 in both, because C123
+  // had no surface to size; the assertion is "the geometry is the band", not
+  // "the geometry is empty".)
+  PRISM_CHECK(!toolbar.Empty());
+  PRISM_CHECK_EQ(static_cast<int>(rect.x), toolbar.left);
+  PRISM_CHECK_EQ(static_cast<int>(rect.y), toolbar.top);
+  PRISM_CHECK_EQ(static_cast<int>(rect.w), toolbar.Width());
+  PRISM_CHECK_EQ(static_cast<int>(rect.h), toolbar.Height());
+  PRISM_CHECK_EQ(static_cast<int>(rectOff.x), toolbar.left);
+  PRISM_CHECK_EQ(static_cast<int>(rectOff.y), toolbar.top);
+  PRISM_CHECK_EQ(static_cast<int>(rectOff.w), toolbar.Width());
+  PRISM_CHECK_EQ(static_cast<int>(rectOff.h), toolbar.Height());
 
   const prism::layout::Layout layout = onWindow.LayoutForTest();
   const prism::layout::Rect box = prism::layout::CrumbTextRect(layout);

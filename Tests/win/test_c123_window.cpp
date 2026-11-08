@@ -271,16 +271,33 @@ PRISM_TEST("c123.window pixels: the toolbar is painted edge to edge") {
     return pixels[static_cast<size_t>(y) * width + static_cast<size_t>(x)];
   };
   const int bandY = (layout.toolbar.top + layout.toolbar.bottom) / 2;
+  // The painter's own counter: the band really reached the device. Without it
+  // the three colour samples below could agree because nothing was painted --
+  // the same "a canvas-only frame passes a colour test" trap C113 records.
+  const GalleryWindow::ActionPaintCounters painted = g_window->PaintedActionCounters();
+  PRISM_CHECK(painted.islands >= 1);
+  PRISM_CHECK_EQ(painted.buttons, prism::actionbar::kActionCount);
+
   const UINT32 farLeft = at(1, bandY);
   const UINT32 farRight = at(static_cast<int>(width) - 2, bandY);
+  // A reference column INSIDE the strip but to the RIGHT of the last button:
+  // the material the band paints where no button can reach. The eight buttons
+  // end at layout.toolbar.left + 8 + 8 * kButtonMaxWidth + gaps << width, so a
+  // 40 px inset is always clear of them.
+  const UINT32 reference = at(static_cast<int>(width) - 40, bandY);
   const UINT32 canvas = at(1, layout.titleBar.top + 4);
-  std::printf("C123 window pixels: left=%08X right=%08X canvas=%08X\n", farLeft, farRight,
-              canvas);
-  // Both extremes carry the SAME material (the strip is one rectangle)...
+  std::printf("C123 window pixels: left=%08X right=%08X reference=%08X canvas=%08X\n", farLeft,
+              farRight, reference, canvas);
+  // Both extremes carry the SAME material as the empty part of the strip: the
+  // toolbar is one rectangle from the window's left edge to its right, not a
+  // floating island that starts at 589.
   PRISM_CHECK(ChannelDelta(farLeft, farRight) <= 3);
-  // ...and it is not the canvas, so "flush" cannot be green because the band
-  // was never painted at all.
-  PRISM_CHECK(ChannelDelta(farLeft, canvas) > 4);
+  PRISM_CHECK(ChannelDelta(farLeft, reference) <= 3);
+  PRISM_CHECK(ChannelDelta(farRight, reference) <= 3);
+  // ...and the strip is not the canvas, so "flush" cannot be green because the
+  // band was never painted at all (the island counter above already rules that
+  // out; this keeps the two facts independent).
+  PRISM_CHECK(ChannelDelta(farLeft, canvas) > 2);
 }
 
 // ---------------------------------------------------------------------------

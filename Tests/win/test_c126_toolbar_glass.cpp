@@ -505,8 +505,15 @@ int MaxDeltaFrom(const Frame& frame, UINT x0, UINT y0, UINT x1, UINT y1, UINT32 
 
 bool At96Dpi(GalleryWindow& window, const char* testName) {
   if (window.DpiForTest() == 96) return true;
-  std::printf("  [skip] %s: DPI is %d, the samples are DIP-only\n", testName,
-              window.DpiForTest());
+  // D1: a named skip, repeated on the suite's final line. The layout is DIPs and
+  // these samples are pixels, so on a HiDPI runner the band's columns are
+  // scaled and every rectangle below would measure a different row.
+  char reason[160];
+  std::snprintf(reason, sizeof(reason),
+                "%s runs at %d DPI, not 96: the pixel samples are DIP-only", testName,
+                window.DpiForTest());
+  Skip(reason);
+  std::printf("  [skip] %s\n", reason);
   return false;
 }
 

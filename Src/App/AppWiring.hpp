@@ -1925,7 +1925,9 @@ inline LanguageRuntime LoadLanguageFor(const std::wstring& directory,
       logger->Emit(prism::log::Level::kWarn, "i18n", "language table unavailable",
                    {{"detail", runtime.detail}});
     }
-    if (!missingRequired.empty()) {
+    if (runtime.catalogs > 0 && !missingRequired.empty()) {
+      // When NO table loaded at all, "language table unavailable" above is the
+      // one useful line; listing all 149 keys would bury it.
       std::string names;
       for (const std::string& key : missingRequired) {
         if (!names.empty()) names += ',';

@@ -658,8 +658,12 @@ PRISM_TEST("c90.list_name_band_is_not_a_white_plate") {
   const BandScan scan =
       ScanRowBand(lit, reference, scanBand, rowsBottom, canvasLum, 4, "unselected");
   // C122: the row pitch is 26 DIP (was 36), so the same 1000 px wide band holds
-  // 14 * 26 = 364 rows instead of 504. The floor scales with the band; the scan
-  // stays far from vacuous (3917 probes measured at this pitch).
+  // 14 * 26 = 364 rows instead of 504. This floor is a NON-VACUITY guard, not
+  // the detector: probes counts pixels that are CANVAS in the REFERENCE
+  // (backdrop-off) frame, and that frame is identical in the mutant builds --
+  // measured 3917 probes here and 3917 in the text-in-backdrop mutant. What
+  // separates the two is violations (0 fixed / 143 state-in-backdrop) and the
+  // ratio-strip ghost delta (0 fixed / 47 text-in-backdrop), asserted below.
   PRISM_CHECK(scan.probes > 2500);
   PRISM_CHECK(scan.violations == 0);
 }
@@ -708,8 +712,9 @@ PRISM_TEST("c90.selected_row_leaves_no_band_across_the_row") {
   const BandScan scan =
       ScanRowBand(lit, reference, scanBand, rowsBottom, canvasLum, kBandTolerance, "selected");
   // 11 columns x the 26 DIP row band, minus the selected pill's own crisp
-  // pixels. C122's pitch keeps this at 3675 probes (measured), which is not
-  // vacuous, and the mutant arm proves it is not.
+  // pixels: 3675 probes (measured), the same count in the state-in-backdrop
+  // mutant -- the reference frame is shared. The detector is violations
+  // (0 fixed / 143 mutant), not this floor.
   PRISM_CHECK(scan.probes > 2500);
   // ASSERTION 5: no band of any width. This is what the name-column-only box
   // could not see: the pill is 1600 px wide.

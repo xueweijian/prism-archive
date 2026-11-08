@@ -1004,6 +1004,19 @@ inline int ListRowAt(const Layout& layout, int x, int y, int scrollPx) {
 // One struct, one function: the header labels, the row cells, the sort hit test
 // and the suite all read THIS, so "the header says 压缩后大小 but the number is
 // under 原始大小" is not a state the code can reach.
+//
+// C27's persisted prism::list::ColumnLayout (window.columns.size/packed/ratio)
+// is still SAVED and LOADED, but it does NOT participate in painting: the four
+// widths above are fixed by the design (120/120/100), and changing this function
+// is how a future card makes columns draggable -- do not grow a second column
+// model beside it. Reading a stale ColumnLayout to position a cell would put
+// the numbers under the wrong heading.
+//
+// RULE FOR EVERY LIST-GEOMETRY ASSERTION: derive the rectangle from THIS
+// function (or from GalleryWindow::LayoutForTest(), which is the same object the
+// frame painted) -- never hard-code a pixel value. A test that writes "x = 1388"
+// or "row = 36" goes red for a layout change it was never about, and the usual
+// "fix" (re-baselining the number) is noise that hides the real regression.
 struct ListColumnLayout {
   Rect name;
   Rect packed;

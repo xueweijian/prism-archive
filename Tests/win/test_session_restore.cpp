@@ -354,7 +354,14 @@ BOOL CALLBACK FindWindowProc(HWND hwnd, LPARAM param) {
   if (pid != state->pid || !IsWindowVisible(hwnd)) return TRUE;
   wchar_t title[260]{};
   if (GetWindowTextW(hwnd, title, 260) <= 0) return TRUE;
-  if (wcsncmp(title, L"PrismArchive --", 15) != 0) return TRUE;
+  // C127: the caption is "<file> - PrismArchive" (or "PrismArchive" with no
+  // archive), not the old "PrismArchive -- <file>". Matching the new suffix is
+  // what keeps this helper finding the window instead of timing out.
+  const std::size_t length = wcslen(title);
+  const bool isMainWindow =
+      wcscmp(title, L"PrismArchive") == 0 ||
+      (length >= 15 && wcscmp(title + length - 15, L" - PrismArchive") == 0);
+  if (!isMainWindow) return TRUE;
   state->window = hwnd;
   return FALSE;
 }

@@ -104,6 +104,7 @@
 #include "../PrismCore/Log.hpp"            // C16: the one warn line a missing key gets
 #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
 #include "../PrismCore/ThumbStore.hpp"
+#include "../PrismCore/WindowTitle.hpp"  // C127: one caption rule for both setters
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
 #include "../PrismWin/DpiAwareness.hpp"      // C120: PerMonitorV2, runtime half
 #include "../PrismWin/DragOutToShell.hpp"   // C67: CF_HDROP drag out (lazy extract)
@@ -116,7 +117,7 @@
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
 #include "../PrismWin/SettingsDialog.hpp"   // C53: Settings... menu + dialog (C31/V3)
 #include "../PrismWin/StartupTrace.hpp"  // C76: the QPC segment recorder
-#include "../PrismWin/SidebarView.hpp"      // C40: SetTranslator (four headings)
+#include "../PrismCore/SidebarModel.hpp"   // prism::sidebar::ArchiveInfo (C12)
 #include "../PrismWin/SolidSweeper.hpp"
 
 #pragma comment(lib, "advapi32.lib")  // RegOpenKeyExW in Resolve7zDll
@@ -1053,7 +1054,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   c76T = c76.NowMs();
 
   prism::win::gallery::GalleryWindow window;
-  if (!window.Create(L"PrismArchive -- " + FileNameWide(archive), instance)) {
+  // C127: "<file> - PrismArchive" (Windows convention), not the old
+  // "PrismArchive -- <file>". WindowTitle is the ONE rule; the switch below
+  // calls the same function.
+  if (!window.Create(prism::ui::WindowTitle(FileNameWide(archive)), instance)) {
     app->ops->Close();
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
@@ -2087,8 +2091,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       window.SetEditAvailability(gate.enabled, gate.reason);
     }
     if (window.Hwnd() != nullptr) {
-      const std::wstring title = L"PrismArchive -- " + FileNameWide(app->archivePath);
-      SetWindowTextW(window.Hwnd(), title.c_str());
+      SetWindowTextW(window.Hwnd(),
+                     prism::ui::WindowTitle(FileNameWide(app->archivePath)).c_str());
     }
     // C86 (S3-4): the count follows the folder, published by the window itself
     // (this line used to write the ARCHIVE's total into the breadcrumb).

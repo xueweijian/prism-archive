@@ -345,9 +345,11 @@ PRISM_TEST("c40.sidebar: the four headings are the table's text under zh-CN") {
   model.PushRecent("C:/archives/a.7z", 100);
 
   prism::win::sidebar::Metrics metrics;
-  prism::win::sidebar::SetTranslator(&translator);
-  const prism::win::sidebar::Layout layout = prism::win::sidebar::Build(model, metrics);
-  prism::win::sidebar::SetTranslator(nullptr);  // never leak the slot into later cases
+  // C127: the process-global translator slot is GONE. A translated layout must
+  // say which words it draws; passing them explicitly is the only path left, so
+  // no later case can inherit a stale slot either.
+  const prism::win::sidebar::Layout layout = prism::win::sidebar::Build(
+      model, metrics, prism::win::sidebar::LabelsFrom(&translator));
 
   const auto sectionLabel = [&layout](prism::sidebar::Section section) {
     for (const prism::win::sidebar::Command& command : layout.commands) {
@@ -375,8 +377,8 @@ PRISM_TEST("c40.sidebar: the four headings are the table's text under zh-CN") {
   PRISM_CHECK(HasNonAscii(sectionLabel(prism::sidebar::Section::Favorites)));
   PRISM_CHECK(HasNonAscii(emptyState()));
 
-  // Without a translator the four literals are unchanged (the unit suites and the
-  // shell DLLs render these, and none of them has a table).
+  // Without a translator (the 2-argument Build) the four literals are unchanged
+  // (the unit suites and the shell DLLs render these, and none of them has a table).
   const prism::win::sidebar::Layout plain = prism::win::sidebar::Build(model, metrics);
   PRISM_CHECK_EQ(plain.commands.size(), layout.commands.size());
   const auto plainLabel = [&plain](prism::sidebar::Section section) {

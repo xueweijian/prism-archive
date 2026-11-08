@@ -684,7 +684,7 @@ void CheckCardBarRow(const Layout& layout, const Metrics& metrics) {
 // fails HERE, in the suite that owns the words.
 void CheckI18nCensus() {
   const std::vector<std::string>& keys = prism::i18n::RequiredKeys();
-  const char* kAdded[] = {"sidebar.card.crypto", "sidebar.card.method",
+  const char* kAdded[] = {"sidebar.card.encryption", "sidebar.card.method",
                           "sidebar.card.dictionary", "sidebar.card.ratio"};
   for (const char* key : kAdded) {
     const int count = static_cast<int>(std::count(keys.begin(), keys.end(), std::string(key)));

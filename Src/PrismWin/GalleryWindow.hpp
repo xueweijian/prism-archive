@@ -589,7 +589,7 @@ class GalleryWindow {
       OpenContextMenu(-1, -1, true);
       return;
     }
-    POINT point{clientX, clientY};
+    POINT point{ToPixels(clientX), ToPixels(clientY)};
     ClientToScreen(host_.hwnd, &point);
     OpenContextMenu(point.x, point.y, false);
   }
@@ -1285,6 +1285,19 @@ class GalleryWindow {
                                     static_cast<uint32_t>(pill.Width()),
                                     static_cast<uint32_t>(pill.Height())};
   }
+  // C120: the SAME panel in PHYSICAL pixels. GlassPanelRect is layout (DIP)
+  // geometry, but a DComp swapchain, the backdrop capture and the shader's
+  // cbuffer all speak pixels. At 96 DPI the two are identical, which is why
+  // nothing here moves on a 96 DPI runner.
+  prism::glass::IslandRect GlassPanelPixels() {
+    const prism::glass::IslandRect dip = GlassPanelRect();
+    if (dip.w == 0 || dip.h == 0) return prism::glass::IslandRect{};
+    return prism::glass::IslandRect{
+        static_cast<uint32_t>(ToPixels(static_cast<int>(dip.x))),
+        static_cast<uint32_t>(ToPixels(static_cast<int>(dip.y))),
+        static_cast<uint32_t>(ToPixels(static_cast<int>(dip.w))),
+        static_cast<uint32_t>(ToPixels(static_cast<int>(dip.h)))};
+  }
   // What the last composed island was fed with: the capture ran, the backdrop
   // is a bitmap on the host's device, and the frame count proves the paint path
   // (not just EnableGlassLayer) reached the chain.
@@ -1333,7 +1346,7 @@ class GalleryWindow {
   // lookalike would not be asserting the frames the user gets.
   bool ComposeIslandForTest(ID2D1Bitmap1* target, ID2D1Bitmap* backdrop) {
     if (!glass_ || !target) return false;
-    const prism::glass::IslandRect rect = GlassPanelRect();
+    const prism::glass::IslandRect rect = GlassPanelPixels();
     if (rect.w == 0 || rect.h == 0) return false;
     prism::win::glass::GlassConstants constants{};
     BuildGlassConstants(rect, &constants);
@@ -1972,6 +1985,10 @@ class GalleryWindow {
   // Test-only geometry probe: when a click lands nowhere, the numbers decide
   // whether the test aimed wrong or the hit test is wrong.
   int ClientWidthForTest() const { return static_cast<int>(clientW_); }
+  // C120: the DPI the window LAYS OUT at (96 == the DIP authoring scale). Public
+  // because a runner with one monitor can only exercise the per-monitor path by
+  // synthesising WM_DPICHANGED; the value read here is the one the layout used.
+  int DpiForTest() { return WindowDpi(); }
   int MeasureForTest(std::string_view t) { return MeasureUtf8(t); }
   int NavBarCrumbCountForTest() const { return static_cast<int>(crumbLayout_.spans.size()); }
   int ClientHeightForTest() const { return static_cast<int>(clientH_); }
@@ -2333,6 +2350,68 @@ class GalleryWindow {
   }
 
  private:
+  // ---------- card C120: the window's ONE DPI -------------------------------
+  // Every layout token in this file (bands, row heights, paddings, the panel
+  // language's 1 px strokes) was authored at 96 DPI, i.e. in DIPs. The window
+  // therefore keeps its LAYOUT in DIPs and lets Direct2D apply dpi/96 through
+  // the render target: a 125% monitor then shows the same design 1.25x bigger
+  // with sharp glyphs, instead of a 1.25x bitmap-scaled copy of a 96 DPI frame.
+  //
+  // 96 is also what Windows reports to an UNAWARE process (it virtualizes the
+  // value), so a process that never became aware -- the pre-card state, and
+  // every test binary, which carries no manifest -- keeps exactly today's
+  // pixels. That is what makes this refactor a no-op at 96 DPI.
+  int WindowDpi() {
+    if (dpi_ >= 48 && dpi_ <= 480) return dpi_;
+    if (host_.hwnd != nullptr) {
+      const UINT dpi = ::GetDpiForWindow(host_.hwnd);
+      if (dpi >= 48 && dpi <= 480) {
+        dpi_ = static_cast<int>(dpi);
+        return dpi_;
+      }
+    }
+    return 96;  // no window yet, or the OS could not answer: the authoring scale
+  }
+  float DpiScale() { return static_cast<float>(WindowDpi()) / 96.0f; }
+  // Physical pixels <-> DIPs, for the four places that are handed SCREEN or
+  // client pixels: the mouse messages, ScreenToClient, DragQueryPoint and the
+  // composition island (a DComp surface is sized in pixels).
+  int ToDip(int pixels) { return ::MulDiv(pixels, 96, WindowDpi()); }
+  int ToPixels(int dip) { return ::MulDiv(dip, WindowDpi(), 96); }
+
+  // dpi/96 on the render target is what rescales the DIP scene; D2D does the
+  // multiplication when it rasterises, so no rectangle below has to know.
+  void ApplyDpiToRenderTarget() {
+    if (!target_) return;
+    const float dpi = 96.0f * DpiScale();
+    target_->SetDpi(dpi, dpi);
+  }
+
+  // Everything created from the target (brushes, bitmaps, TEXT FORMATS) belongs
+  // to the device and the scale it was built at, and a monitor move can change
+  // the device too. Rebuilding the stack -- rather than patching it -- is what
+  // keeps a format from painting the old glyph size on the new monitor.
+  void RebuildTargetBoundResources() {
+    if (!target_ || !rendererInitialized_) return;
+    renderer_.ReleaseDeviceResources();
+    rendererReady_ = SUCCEEDED(renderer_.CreateDeviceResources(target_.Get()));
+  }
+
+  // Re-read the client rect in DIPs. WM_SIZE normally does this (the
+  // SetWindowPos above triggers one), but WM_DPICHANGED can also arrive with a
+  // suggested rect equal to the current one, and a test drives the branch
+  // directly on a single-DPI runner.
+  void SyncClientSizeFromWindow() {
+    if (host_.hwnd == nullptr) return;
+    RECT rc{};
+    if (::GetClientRect(host_.hwnd, &rc) == FALSE) return;
+    // The SAME rounding rule as WM_SIZE (MulDiv): two paths must never disagree
+    // about the size of the same client area.
+    clientW_ = static_cast<double>(::MulDiv(static_cast<int>(rc.right), 96, WindowDpi()));
+    clientH_ = static_cast<double>(::MulDiv(static_cast<int>(rc.bottom), 96, WindowDpi()));
+    RecomputeLayout();
+  }
+
   static LRESULT CALLBACK ProcThunk(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     auto* self = reinterpret_cast<GalleryWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_NCCREATE && lparam) {
@@ -2347,6 +2426,48 @@ class GalleryWindow {
 
   LRESULT Proc(UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+      case WM_DPICHANGED: {
+#if defined(PRISM_C120_MUTANT_NO_DPICHANGED)
+        // MUTATION (CONTRACTS D3/D27): the pre-card state -- the branch exists
+        // and does nothing. A per-monitor window that ignores the suggested rect
+        // and the new scale is exactly the "dead code" this card replaced, so
+        // c120.d3 MUST go red and the mutant prints CAUGHT.
+        return 0;
+#endif
+        // C120: the branch that used to be dead code. A DPI-UNAWARE process is
+        // never sent this message -- that is exactly why the dialogs' handlers
+        // never ran and the window had none at all. wParam carries the new DPI
+        // (LOWORD = x, HIWORD = y; identical in the per-monitor model), lParam
+        // points at the rect Windows SUGGESTS for the window at that DPI.
+        //
+        // The suggested rect is a contract, not advice: applying anything else
+        // makes the window jump and resize wrongly as it crosses monitors. So
+        // SetWindowPos gets exactly those four numbers.
+        const UINT newDpi = HIWORD(wparam);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (newDpi >= 48 && newDpi <= 480) dpi_ = static_cast<int>(newDpi);
+        if (suggested != nullptr && host_.hwnd != nullptr) {
+          ::SetWindowPos(host_.hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        // The new scale reaches the pixels HERE: the render target's DPI is what
+        // maps the DIP layout onto the new monitor. Typography's CreateTextFormat
+        // sizes are DIPs, so every text format is rebuilt with the rest of the
+        // target-bound objects -- a format created at the old scale would keep
+        // painting the old glyph size on the new monitor.
+        ApplyDpiToRenderTarget();
+        RebuildTargetBoundResources();
+        // WM_SIZE normally does this (SetWindowPos above triggers it), but the
+        // handler is also driven directly -- by a test on a single-DPI runner,
+        // and by the OS in the mixed case where the suggested rect is identical
+        // to the current one -- so the client size is re-read here rather than
+        // assumed.
+        SyncClientSizeFromWindow();
+        Invalidate();
+        return 0;
+      }
       case WM_SIZE: {
         if (wparam == SIZE_MINIMIZED) {
           // C34 + C75: nothing of this window is on screen, so the entire
@@ -2360,11 +2481,24 @@ class GalleryWindow {
           ReleaseRenderMemory();
           return 0;
         }
+        // C120: WM_SIZE carries PHYSICAL pixels while the layout is authored in
+        // DIPs (96 == 100%). Converting here is the whole window's ONE unit
+        // change: everything below -- bands, row heights, paddings, the pill --
+        // keeps the numbers it always had, and at 96 DPI the division is the
+        // identity, so an unaware process (and every test) keeps today's pixels.
+        const int sizeX = static_cast<int>(LOWORD(lparam));
+        const int sizeY = static_cast<int>(HIWORD(lparam));
         if (target_) {
-          target_->Resize(D2D1::SizeU(LOWORD(lparam), HIWORD(lparam)));
+          target_->Resize(D2D1::SizeU(static_cast<UINT32>(sizeX), static_cast<UINT32>(sizeY)));
         }
-        clientW_ = static_cast<double>(LOWORD(lparam));
-        clientH_ = static_cast<double>(HIWORD(lparam));
+        // MulDiv, not a double division: it ROUNDS to the nearest DIP, where a
+        // cast truncates, and the two rules disagree by one whenever the client
+        // size is not a whole multiple of the scale (964 px at 144 DPI is 642.67
+        // DIP: truncation says 642, MulDiv says 643 -- CI caught exactly that).
+        // Rounding is the right answer: a layout may cover a fraction of a
+        // pixel, but a truncated one leaves a real strip of the client unused.
+        clientW_ = static_cast<double>(::MulDiv(sizeX, 96, WindowDpi()));
+        clientH_ = static_cast<double>(::MulDiv(sizeY, 96, WindowDpi()));
         // V1: ONE layout authority. WM_SIZE reflows the grid columns, the list
         // body and the breadcrumb pill together -- the components no longer
         // carry their own absolute rectangles.
@@ -2720,7 +2854,7 @@ class GalleryWindow {
         if (LOWORD(lparam) == HTCLIENT) {
           POINT point{};
           if (GetCursorPos(&point) && ScreenToClient(host_.hwnd, &point) &&
-              CrumbLevelAt(point.x, point.y) != prism::tree::kNoLevel) {
+              CrumbLevelAt(ToDip(point.x), ToDip(point.y)) != prism::tree::kNoLevel) {
             // IDC_HAND expands through MAKEINTRESOURCE, whose TCHAR-ness follows
             // UNICODE. This header is also compiled by test TUs that do not set
             // UNICODE, so the wide spelling is cast explicitly instead.
@@ -3151,9 +3285,13 @@ class GalleryWindow {
     return false;
   }
 
-  // Signed client coordinates: a drag can deliver negative values.
-  static int MouseX(LPARAM lparam) { return static_cast<short>(LOWORD(lparam)); }
-  static int MouseY(LPARAM lparam) { return static_cast<short>(HIWORD(lparam)); }
+  // Signed client coordinates: a drag can deliver negative values. C120: mouse
+  // messages carry PHYSICAL client pixels while every hit test below is in DIPs,
+  // so the conversion lives here -- the one place the pointer enters the window.
+  // Non-static because the factor depends on the window's DPI; at 96 DPI the
+  // conversion is the identity.
+  int MouseX(LPARAM lparam) { return ToDip(static_cast<short>(LOWORD(lparam))); }
+  int MouseY(LPARAM lparam) { return ToDip(static_cast<short>(HIWORD(lparam))); }
 
   // ---------- card C53: the one-surface gate --------------------------------
   // Every OPEN of a modal surface funnels through here: "keep" survives, the
@@ -4194,15 +4332,18 @@ class GalleryWindow {
       // the one a click at that pixel would get.
       clientX = static_cast<int>(clientW_ / 2.0f);
       clientY = static_cast<int>((layout_.content.top + layout_.content.bottom) / 2);
-      POINT point{clientX, clientY};
+      // C120: the layout point is DIPs, ClientToScreen speaks physical pixels.
+      POINT point{ToPixels(clientX), ToPixels(clientY)};
       ClientToScreen(host_.hwnd, &point);
       screenX = point.x;
       screenY = point.y;
     } else {
       POINT point{screenX, screenY};
       ScreenToClient(host_.hwnd, &point);
-      clientX = point.x;
-      clientY = point.y;
+      // C120: ScreenToClient answers PHYSICAL pixels; the surface decision below
+      // compares against the DIP layout.
+      clientX = ToDip(point.x);
+      clientY = ToDip(point.y);
     }
     const prism::ctxmenu::Surface surface = ContextSurfaceAt(clientX, clientY);
     // BEFORE the model is built: the menu's enabled state must describe the
@@ -4835,8 +4976,10 @@ class GalleryWindow {
     if (clientW_ <= 0.0) {
       RECT rc{};
       if (host_.hwnd) GetClientRect(host_.hwnd, &rc);
-      clientW_ = static_cast<double>(rc.right);
-      clientH_ = static_cast<double>(rc.bottom);
+      // C120: GetClientRect is physical pixels, the layout is DIPs -- with the
+      // SAME rounding rule as WM_SIZE (MulDiv).
+      clientW_ = static_cast<double>(::MulDiv(static_cast<int>(rc.right), 96, WindowDpi()));
+      clientH_ = static_cast<double>(::MulDiv(static_cast<int>(rc.bottom), 96, WindowDpi()));
     }
     // V1: the pill and its text run come from the layout, so the clickable span
     // is by construction the painted span.
@@ -5268,6 +5411,12 @@ class GalleryWindow {
     // expand to two arguments and break the arity.
       return false;
     }
+    // C120: the target is created at D2D's default 96 DPI, which makes one
+    // device unit one physical pixel. Raising it to the window's DPI turns the
+    // drawing space into DIPs, so the layout below (authored at 96 DPI) is
+    // rasterised at 1.25x on a 125% monitor instead of being stretched by the
+    // system as a bitmap. At 96 DPI this call writes the value it already had.
+    ApplyDpiToRenderTarget();
     return true;
   }
 
@@ -5302,7 +5451,8 @@ class GalleryWindow {
     ++glassPresents_;
     // C107: the island is the panel the LAYOUT gives us (the breadcrumb pill),
     // not a 960x48 rectangle at (0,0) that covered nothing in particular.
-    const prism::glass::IslandRect rect = GlassPanelRect();
+    // C120: in PIXELS -- the swapchain and the backdrop capture are physical.
+    const prism::glass::IslandRect rect = GlassPanelPixels();
     if (rect.w == 0 || rect.h == 0) return;
     if (!glass_->ResizeIsland(0, rect.w, rect.h)) return;
 
@@ -5334,6 +5484,15 @@ class GalleryWindow {
   // sharp here and can never be blurred by the backdrop capture.
   void PaintIslandContent(ID2D1DeviceContext* dc, float width, float height) {
     if (!dc || width <= 0.0f || height <= 0.0f) return;
+    // C120: the surface arrives in PIXELS and the content below is DIPs (the
+    // breadcrumb pill, the rim and the border all come from the layout). The
+    // context's own DPI is the conversion, so nothing here needs a scale factor
+    // of its own; it is restored so the optics chain -- which draws full-surface
+    // quads in pixels -- keeps the plain 1:1 mapping.
+    const float scale = DpiScale();
+    if (scale != 1.0f) dc->SetDpi(96.0f * scale, 96.0f * scale);
+    width /= scale;
+    height /= scale;
     if (GlassPillOwnsContent()) {
       // C112: the whole pill, into the island's own surface. The optics are
       // already underneath (PaintIslandInto draws the chain first), so this text
@@ -5341,12 +5500,14 @@ class GalleryWindow {
       // AFTER the chain ran, it can never become part of the next backdrop.
       renderer_.PaintPillOnIsland(dc, breadcrumbText_, layout_, &actionBar_, chromeVariant_,
                                   CrumbHoverRect(), prism::theme::BackdropRefractionEnabled());
+      if (scale != 1.0f) dc->SetDpi(96.0f, 96.0f);
       return;
     }
     // Without composition there is no island above the window: the window still
     // paints the pill (its own DrawBreadcrumbIsland), and this call only has the
     // rim to add to the transparent surface.
     PaintGlassPanelChrome(dc, width, height, chromeVariant_);
+    if (scale != 1.0f) dc->SetDpi(96.0f, 96.0f);
   }
 
   // C107: the island's own chrome -- the specular rim and the hairline border,
@@ -5789,6 +5950,10 @@ class GalleryWindow {
       }
       (void)::DragQueryPoint(drop, &point);
       ::DragFinish(drop);
+      // C120: the shell hands over PHYSICAL client pixels; the hint and the
+      // model below work in DIPs.
+      point.x = ToDip(point.x);
+      point.y = ToDip(point.y);
     }
     dropPoint_ = point;
 
@@ -6271,8 +6436,12 @@ class GalleryWindow {
   std::wstring breadcrumbText_;
   std::vector<prism::tree::Segment> crumbSegments_;
   prism::tree::BreadcrumbLayout crumbLayout_;
+  // C120: the layout space is DIPs (96 == 100%), so these two are the client
+  // area DIVIDED by the window's scale; the render target's own DPI turns them
+  // back into physical pixels at draw time.
   double clientW_ = 0.0;
   double clientH_ = 0.0;
+  int dpi_ = 0;  // 0 = not asked yet; resolved from the OS on first use
   int barTop_ = 0;
   int barBottom_ = 0;
   int textLeft_ = 0;

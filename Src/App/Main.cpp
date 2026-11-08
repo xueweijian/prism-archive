@@ -105,6 +105,7 @@
 #include "../PrismCore/Preview.hpp"        // QuickLookPlanner::KindByName
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismWin/CompressDialog.hpp"  // C18: the create dialog (programmatic)
+#include "../PrismWin/DpiAwareness.hpp"      // C120: PerMonitorV2, runtime half
 #include "../PrismWin/DragOutToShell.hpp"   // C67: CF_HDROP drag out (lazy extract)
 #include "../PrismWin/EditConfirmDialog.hpp"  // C54: the edit confirmation (programmatic)
 #include "../PrismWin/ExtractDialog.hpp"    // C125: Ctrl+E asks before it writes
@@ -556,6 +557,18 @@ std::wstring RunPasswordGate(HINSTANCE instance, const std::wstring& archive,
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  // C120: PER-MONITOR V2, before anything else this process does. The manifest
+  // (Src/App/PrismArchive.manifest) already declares it, and the loader applies
+  // that before the first instruction -- this call is the runtime half, for the
+  // copies of the exe whose manifest was dropped, replaced or never merged, and
+  // it is the reason a rebuilt binary cannot silently regress to the blurry
+  // state. It MUST run before any window is created: Windows freezes the
+  // process's awareness at the first window and refuses every later change
+  // (E_ACCESSDENIED). When the manifest won, the call fails exactly that way,
+  // the fallbacks fail identically, and the process keeps PMv2 -- never a
+  // downgrade. See Src/PrismWin/DpiAwareness.hpp for the three-rung ladder.
+  const prism::win::dpi::ApplyResult c120Dpi = prism::win::dpi::ApplyProcessDpiAwareness();
+
   // C76: the startup timeline. Begin() is the FIRST thing this process does in
   // our code, so every later span is measured on one clock and the gap between
   // any two stages is arithmetic, not a guess. Off unless PRISM_C76_TRACE=1.
@@ -641,6 +654,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                {"archives", std::to_string(launch.archives.size())},
                {"log_dir", prism::win::logfile::NarrowPath(
                                std::filesystem::path(prism::win::logfile::LogDirectory()))}});
+  // C120: one line saying which half of the decision actually won. A user on a
+  // 125% monitor reporting "still blurry" is answered by this record: "after"
+  // is what Windows says the process IS, and "rung" says whether the manifest
+  // (rung == "none", the setter was refused) or the runtime ladder set it.
+  logger.Emit(prism::log::Level::kInfo, "startup", "dpi awareness",
+              {{"before", prism::win::dpi::AwarenessName(c120Dpi.before)},
+               {"after", prism::win::dpi::AwarenessName(c120Dpi.after)},
+               {"rung", c120Dpi.rung},
+               {"system_dpi", std::to_string(prism::win::dpi::SystemDpi())}});
   if (!settings.loaded) {
     logger.Emit(prism::log::Level::kWarn, "settings", "settings could not be read",
                 {{"detail", settings.report.detail},

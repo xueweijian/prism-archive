@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  PrismArchive.manifest: the executable's application manifest (card C120).
+
+  Src/PrismWin/CMakeLists.txt hands this file to the linker as
+  /MANIFESTINPUT, so its contents are MERGED into the manifest link.exe embeds
+  (the generated half keeps the requestedExecutionLevel the installer relies
+  on). Nothing here is decorative: the loader reads it BEFORE the process's
+  first instruction, which is the only moment DPI awareness can be chosen
+  without a race.
+
+  WHY BOTH ELEMENTS. They are read by different generations of Windows, in
+  order, and the FIRST match wins:
+
+    dpiAwareness (SMI/2016), Windows 10 1607+. The string "PerMonitorV2"
+        selects the v2 behaviour: WM_DPICHANGED per monitor, non-client area
+        scaled by the system, child windows told about their parent's DPI, and
+        the part this project needs: no bitmap scaling of the frame. On a 125%
+        monitor the window is rendered at 120 DPI and every glyph and 1 px
+        hairline arrives sharp.
+
+    dpiAware (SMI/2005), Windows Vista to 10 1511, which do not know
+        dpiAwareness. "true/pm" is per-monitor aware (v1). Older than that,
+        unknown values degrade to system DPI awareness rather than failing.
+
+  The runtime half of the same decision lives in Src/PrismWin/DpiAwareness.hpp
+  and is called as the first statement of wWinMain: a manifest can be dropped
+  by a resource editor, replaced by a packer, or never reach the loader at all
+  (a copied or renamed binary), and the process must still come up per monitor.
+
+  NOTE for editors: XML comments may not contain a double hyphen, so this file
+  spells ranges and asides with "to" and colons rather than the usual dash runs.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

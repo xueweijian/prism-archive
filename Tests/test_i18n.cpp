@@ -288,6 +288,11 @@ PRISM_TEST("catalog: every required surface is present in both tables") {
   // became a label above a value and each label is a word of its own. The census
   // is 144 -- and the first push of C105 forgot this line too, which is exactly
   // what this number is for.
+  // C127: the first key is RENAMED crypto -> encryption (the word the card shows)
+  // and the zh-CN values become 加密/方法/字典/压缩率. A rename is not an addition:
+  // the census stays 149 (the card's "153" assumed all four keys were new, but
+  // C105 had already shipped method/dictionary/ratio). The C127 suite checks the
+  // four names and their exact values; this line keeps the size honest.
   // C93b: +2 for the Help and About items on the menu bar. Both were asked for
   // via Tr::Or() with a code default, so a Chinese build shipped them in
   // English and no audit could see the miss (the same hole C38 closed for

@@ -457,6 +457,15 @@ class Translator {
     return catalog == nullptr ? 0 : catalog->size();
   }
 
+  // True when the table for `tag` itself defines the key. Used by the C127
+  // completeness check: a half-translated ACTIVE table is a defect even when
+  // the en-US fallback answers the key (that is exactly how a Chinese window
+  // ended up with English card labels).
+  bool HasIn(std::string_view tag, std::string_view key) const {
+    const Catalog* catalog = FindCatalog(tag);
+    return catalog != nullptr && catalog->Find(key) != nullptr;
+  }
+
   // True when some table in the chain defines the key. Does NOT record a miss.
   bool Has(std::string_view key) const {
     const std::string* text = nullptr;
@@ -718,7 +727,7 @@ inline const std::vector<std::string>& RequiredKeys() {
       // stack now (plan 3.2), so the words above each value are their own
       // strings -- they used to be absent because the old capsule glued a
       // field word and its value into one sentence ("DICT 64.0 MB").
-      "sidebar.card.crypto",
+      "sidebar.card.encryption",
       "sidebar.card.method",
       "sidebar.card.dictionary",
       "sidebar.card.ratio",
@@ -850,6 +859,24 @@ inline const std::vector<std::string>& RequiredKeys() {
       "password.status.budget",
   };
   return keys;
+}
+
+// C127: the required keys the ACTIVE table chain cannot answer.
+//
+// WHY THIS EXISTS: a stale install payload (Assets/Lang older than the exe)
+// silently answered three quarters of the UI from its zh-CN table and fell back
+// to the compiled English defaults for the four info-card labels -- one card,
+// two languages, and no test could see it because every suite reads the SOURCE
+// tables. The startup path now calls this and LOGS the names, so "the installer
+// left an old table behind" is a sentence in the log instead of a mystery.
+inline std::vector<std::string> MissingRequiredKeys(const Translator& translator,
+                                                   std::string_view tag = {}) {
+  const std::string active = tag.empty() ? translator.language() : std::string(tag);
+  std::vector<std::string> missing;
+  for (const std::string& key : RequiredKeys()) {
+    if (!translator.HasIn(active, key)) missing.push_back(key);
+  }
+  return missing;
 }
 
 }  // namespace prism::i18n

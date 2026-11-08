@@ -484,8 +484,22 @@ PRISM_TEST("c64 action island pixels: token fill, bounded canvas contrast, 4.5:1
               static_cast<double>(expectedIsland.b) * 255.0, Channel(islandPixel, 16),
               Channel(islandPixel, 8), Channel(islandPixel, 0), Channel(canvasPixel, 16),
               Channel(canvasPixel, 8), Channel(canvasPixel, 0), delta);
+  // C124: THE UPPER BOUND IS NO LONGER 18. The island IS the surface ladder's
+  // FLOATING tier now -- CR 1.317 against the canvas, up from 1.15, because the
+  // audit's headline defect was that the action island was the QUIETEST surface
+  // in the window while the passive rail was the loudest (UI-AUDIT 12.2). Its
+  // lift is 26.7 levels by design, not by hand.
+  //
+  // The "hand-lightened ribbon" this cap existed to catch (~22 luma above the
+  // canvas, the pre-fix literal) cannot come back silently anyway: two lines
+  // above, the pixel is asserted to BE CompositeOver(Floating, canvas) +-2, so a
+  // hand tint fails THERE first. What the pair below pins is the property that
+  // survives a palette change: visible (>= 8 levels) and its lift IS the tier's
+  // lift (not a number someone liked).
   PRISM_CHECK(delta >= 8.0);   // the island must be visible at all
-  PRISM_CHECK(delta <= 18.0);  // ... and must not be the brighter ribbon
+  const double expectedDelta = luma255(ToPixel(expectedIsland)) - canvasLuma;
+  std::printf("  [island] dLuma=%.2f expected(tier)=%.2f\n", delta, expectedDelta);
+  PRISM_CHECK(std::abs(delta - expectedDelta) <= 2.0);  // ... and it is the TOKEN's lift
 
   // Button text: the brightest glyph pixel in the label box, against the island
   // it is painted on. WCAG AA for normal text.

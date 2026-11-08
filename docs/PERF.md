@@ -1135,7 +1135,7 @@ C65 给出的数字是 **164.5 ms 进程内首帧 / 208.4 ms p95 / 193.5 ms 黑�
 
 | 测试 | 断言 |
 |---|---|
-| `c76.bench_startup` | **先证明帧是真的**（`rendered == 1`、`enddraw_hr == 0x0`、`painted >= 5%`、`digest != 0`，C113 新增），再比 digest：**`e735eb87a09d4f84` @1264×741**（C113 重录，见下方“作废/待重测”）；`hlsl_runtime_compiles == 0`；`hlsl_precompiled >= 2`；**首帧玻璃呈现次数 == 0**；第二帧 ≥ 1；首帧 < 1500 ms（防挂死，不是 60 ms 门）。~~第一/二帧差异像素在玻璃岛之外为 0~~ **待重测**（C113 之前它比较的两帧是同一张被 D2D 拒绝的空帧，这条恒真） |
+| `c76.bench_startup` | **先证明帧是真的**（`rendered == 1`、`enddraw_hr == 0x0`、`painted >= 5%`、`digest != 0`，C113 新增），再比 digest：**`791ab21f8cbf4153` @1264×741**（C128 重录：信息卡默认折叠成一行 + 状态条三个数；C113 的 `e735eb87a09d4f84` 见下方“作废/待重测”）；`hlsl_runtime_compiles == 0`；`hlsl_precompiled >= 2`；**首帧玻璃呈现次数 == 0**；第二帧 ≥ 1；首帧 < 1500 ms（防挂死，不是 60 ms 门）。~~第一/二帧差异像素在玻璃岛之外为 0~~ **待重测**（C113 之前它比较的两帧是同一张被 D2D 拒绝的空帧，这条恒真） |
 | `c76.bench_baseline` | 改前行为（运行时编译 + 首帧上玻璃）的参考数字与参考 digest。旧值 `79a56a1305dd98de` **作废**（C113 之前的镜头里混入了设备域失败的帧），C113 之后这台机器读出 `e735eb87a09d4f84`，**待重测**并重录 |
 | `mutation.c76.runtime_shaders` | 注掉 .cso 路径 → `runtime_compiles=2` → 同一条 `== 0` 谓词变红，打印 `C76 MUTATION CAUGHT: runtime_shaders`（D27：注入先被运行期观测到，才允许宣告捕获） |
 | `mutation.c76.glass_on_first_frame` | 恢复"首帧上玻璃" → `presents_frame1=2` → `presents_frame1 == 0` 变红，打印 `C76 MUTATION CAUGHT: glass_on_first_frame` |

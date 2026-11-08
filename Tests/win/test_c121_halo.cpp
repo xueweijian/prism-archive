@@ -354,7 +354,8 @@ struct Fixture {
     scene.thumbs = &thumbs;
     scene.layout = &layout;
     scene.breadcrumb = L"Berlin_Trip_2026.zip  |  13 items  |  5 solid blocks";
-    scene.status.itemCount = static_cast<int>(items.size());
+    // C128: the band's first number is the current folder's file count.
+    scene.status.fileCount = static_cast<int>(items.size());
     scene.backdropRefraction = true;
   }
 

@@ -246,10 +246,10 @@ struct Rig {
     scene.tabs = &tabs;
     scene.actions = &actions;
     scene.breadcrumb = L"Design_Assets_v4.7z";
-    scene.status.crypto = prism::layout::CryptoState::Encrypted;
-    scene.status.method = "LZMA2";
-    scene.status.dictionary = "64.0 MB";
-    scene.status.ratioPercent = 54;
+    // C128: the band carries three NUMBERS (the card's words are not on it).
+    scene.status.fileCount = 12;
+    scene.status.folderCount = 3;
+    scene.status.archiveBytes = 9'780'000;
     // The shipping default for the refraction layer: ON, so the canvas pixel is
     // the presented (veiled) composite -- the number the card quotes.
     scene.backdropRefraction = true;

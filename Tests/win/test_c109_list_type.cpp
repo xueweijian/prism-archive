@@ -303,8 +303,9 @@ struct Fixture {
     scene.layout = &layout;
     scene.breadcrumb = L"payload.7z  |  20 items  |  solid block 3/5";
     scene.glassPanels = true;
-    scene.status.itemCount = static_cast<int>(rows.size());
-    scene.status.ratioView = prism::CompressionRatioView(21737891, 4522292);
+    // C128: the band's three numbers -- the size is the packed total.
+    scene.status.fileCount = static_cast<int>(rows.size());
+    scene.status.archiveBytes = 4522292;
     scene.backdropRefraction = false;
   }
 };

@@ -81,6 +81,16 @@ prism::sidebar::Model FullModel(std::vector<ArchiveItem>* items) {
   return model;
 }
 
+// C128 (proposal 5.6): the info card is FOLDED by default. This suite was
+// written for the EXPANDED card -- four label/value pairs, the ratio bar's own
+// row and the 157 px pill (C105) -- so every layout it builds asks for that
+// state explicitly. The fold itself is asserted by win.c128_status.
+Metrics ExpandedCard() {
+  Metrics metrics;
+  metrics.infoCardExpanded = true;
+  return metrics;
+}
+
 const Command* FindLabel(const Layout& layout, std::string_view text) {
   for (const Command& command : layout.commands) {
     if (command.kind == PrimKind::Label && command.text == text) return &command;
@@ -130,7 +140,7 @@ bool BoxInsideViewport(const Box& box, float top, float bottom) {
 PRISM_TEST("TestColumnAndPillGeometry") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
-  const Metrics metrics;
+  const Metrics metrics = ExpandedCard();
   const Layout layout = prism::win::sidebar::Build(model, metrics);
 
   PRISM_CHECK(SameBox(layout.panel, Box{0.0f, 0.0f, 236.0f, 1080.0f}));
@@ -155,7 +165,7 @@ PRISM_TEST("TestColumnAndPillGeometry") {
 PRISM_TEST("TestSectionStackAndRowBoxes") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
 
   // FAVORITES: header at y=12 (h=18), rows at 30 and 58.
   const Command* favoritesHeader = FindSection(layout, "FAVORITES");
@@ -212,7 +222,7 @@ PRISM_TEST("TestSectionStackAndRowBoxes") {
 PRISM_TEST("TestTreeIndentAndChevrons") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
 
   const auto labels = OfKind(layout, PrimKind::Label);
   const Command* brand = nullptr;
@@ -233,7 +243,7 @@ PRISM_TEST("TestTreeIndentAndChevrons") {
   }
   PRISM_CHECK(sawDown);
   model.SetCollapsed("Design_Assets", true);
-  const Layout collapsed = prism::win::sidebar::Build(model, Metrics{});
+  const Layout collapsed = prism::win::sidebar::Build(model, ExpandedCard());
   bool sawRight = false;
   for (const Command* chevron : OfKind(collapsed, PrimKind::Chevron)) {
     if (chevron->icon == "chevron-right") sawRight = true;
@@ -244,7 +254,7 @@ PRISM_TEST("TestTreeIndentAndChevrons") {
   // Non-expandable folders still reserve the chevron slot: their label starts
   // at the same x as their expandable siblings (no 16 px jitter).
   model.SetCollapsed("Design_Assets", false);
-  const Layout expanded = prism::win::sidebar::Build(model, Metrics{});
+  const Layout expanded = prism::win::sidebar::Build(model, ExpandedCard());
   const Command* raw = FindLabel(expanded, "03_Raw");
   PRISM_CHECK(raw != nullptr);
   if (raw != nullptr) {
@@ -256,7 +266,7 @@ PRISM_TEST("TestSelectionFollowsKeyboardFocus") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
   PRISM_CHECK(model.SetFocus(FocusTarget{Section::Tree, 1}));
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
   const auto selection = OfKind(layout, PrimKind::Selection);
   PRISM_CHECK_EQ(selection.size(), std::size_t{1});
   if (!selection.empty()) {
@@ -270,7 +280,7 @@ PRISM_TEST("TestSelectionFollowsKeyboardFocus") {
   }
   // Moving the focus moves the highlight: no stale selection is left behind.
   PRISM_CHECK_EQ(model.MoveDown(), prism::sidebar::FocusAction::Moved);
-  const Layout moved = prism::win::sidebar::Build(model, Metrics{});
+  const Layout moved = prism::win::sidebar::Build(model, ExpandedCard());
   const auto movedSelection = OfKind(moved, PrimKind::Selection);
   PRISM_CHECK_EQ(movedSelection.size(), std::size_t{1});
   if (!movedSelection.empty()) {
@@ -283,7 +293,7 @@ PRISM_TEST("TestScrollCullsRowsButKeepsContentHeight") {
   prism::sidebar::Model model = FullModel(&items);
   Metrics scrolled;
   scrolled.scrollY = 320.0f;
-  const Layout top = prism::win::sidebar::Build(model, Metrics{});
+  const Layout top = prism::win::sidebar::Build(model, ExpandedCard());
   const Layout down = prism::win::sidebar::Build(model, scrolled);
 
   // Scroll-invariant: the scrollbar length must not jump as rows are culled.
@@ -313,7 +323,7 @@ PRISM_TEST("TestStatusCapsuleLinesAndRatioBar") {
   prism::sidebar::Model model(&items);
   model.SetArchiveInfo(
       prism::sidebar::ArchiveInfo{"LZMA2", 64ull * 1024 * 1024, Encryption::Aes256});
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
 
   const auto labels = OfKind(layout, PrimKind::StatusLabel);
   PRISM_CHECK_EQ(labels.size(), std::size_t{4});
@@ -382,7 +392,7 @@ PRISM_TEST("TestStatusCapsuleLinesAndRatioBar") {
 
 PRISM_TEST("TestEmptyStateWithoutArchive") {
   prism::sidebar::Model model;  // no catalog
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
   bool emptyState = false;
   for (const Command& command : layout.commands) {
     if (command.kind == PrimKind::EmptyState && command.text == "NO ARCHIVE OPEN") {
@@ -414,7 +424,7 @@ PRISM_TEST("TestSelectionAccentRule") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
   PRISM_CHECK(model.SetFocus(FocusTarget{Section::Tree, 1}));
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
 
   const auto bars = OfKind(layout, PrimKind::SelectionBar);
   const auto fills = OfKind(layout, PrimKind::Selection);
@@ -444,7 +454,7 @@ PRISM_TEST("TestSelectionAccentRule") {
 PRISM_TEST("TestSectionHeadingTrackingAndRole") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
   const Command* header = FindSection(layout, "FAVORITES");
   PRISM_CHECK(header != nullptr);
   if (header != nullptr) {
@@ -463,7 +473,7 @@ PRISM_TEST("TestCapsuleReadoutUsesSecondaryRole") {
   prism::sidebar::Model model(&items);
   model.SetArchiveInfo(
       prism::sidebar::ArchiveInfo{"LZMA2", 64ull * 1024 * 1024, Encryption::Aes256});
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
   const auto readouts = OfKind(layout, PrimKind::StatusText);
   PRISM_CHECK_EQ(readouts.size(), std::size_t{4});
   for (const Command* readout : readouts) {
@@ -483,7 +493,7 @@ PRISM_TEST("TestCapsuleReadoutUsesSecondaryRole") {
 PRISM_TEST("TestRowPayloadsCoverEverySection") {
   auto items = SampleCatalog();
   prism::sidebar::Model model = FullModel(&items);
-  const Layout layout = prism::win::sidebar::Build(model, Metrics{});
+  const Layout layout = prism::win::sidebar::Build(model, ExpandedCard());
   const auto hits = OfKind(layout, PrimKind::RowHit);
   PRISM_CHECK_EQ(hits.size(), model.Favorites().size() + model.Recent().size() +
                                   model.Tree().size());

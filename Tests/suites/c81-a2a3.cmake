@@ -10,10 +10,16 @@
 # the band is byte-identical with the C77 backdrop ON and OFF -- the ghost
 # cannot come back), plus the three-surface A3 consistency read-back.
 #
-# Two compile-time negative controls (CONTRACTS D3/D26/D27; PASS_REGULAR_
+# One compile-time negative control (CONTRACTS D3/D26/D27; PASS_REGULAR_
 # EXPRESSION on the CAUGHT marker, never WILL_FAIL):
 #   header_selected          the audit's original sin is back -> A2 red
-#   status_hardcoded_unknown the band lies 未知 again      -> A3 red
+#
+# C128 RETIRED the second arm, "status_hardcoded_unknown", which made the STATUS
+# BAND report 未知 for the ratio. C128 removed the ratio slot from the band (the
+# band is three numbers now; the ratio is the info card's), so the surface that
+# arm lied about no longer exists and the arm could only go green while claiming
+# a defect that cannot reach a pixel. The band's own negative control is C128's
+# mutation.c128.old_status (restores the six-slot band).
 add_executable(c81_ratio_core test_c81_ratio_core.cpp)
 target_link_libraries(c81_ratio_core PRIVATE prism_core)
 add_test(NAME "core.c81_ratio" COMMAND c81_ratio_core)
@@ -29,7 +35,9 @@ if(WIN32 AND PRISM_BUILD_WIN_LAYER)
   set_tests_properties(win.c81_a2a3 PROPERTIES TIMEOUT 300
       PASS_REGULAR_EXPRESSION "ALL C81 A2A3 CHECKS PASSED")
 
-  set(C81_MUTANT_ARMS header_selected status_hardcoded_unknown)
+  # C128: status_hardcoded_unknown retired with the band's ratio slot (see the
+  # header). header_selected still guards A2.
+  set(C81_MUTANT_ARMS header_selected)
   foreach(arm IN LISTS C81_MUTANT_ARMS)
     string(TOUPPER "${arm}" C81_ARM_UPPER)
     add_executable(win_c81_${arm} win/test_c81_a2a3.cpp)

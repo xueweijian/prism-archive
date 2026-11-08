@@ -128,7 +128,15 @@ constexpr size_t kPaintedDivisor = 20;
 // digest == 30b690f8aec461d7. Two cards moved this frame for two different
 // reasons; the constant follows the tree, the assertions above stay the proof
 // that what it hashes is a REAL frame.
-constexpr uint64_t kDigest = 0x30b690f8aec461d7ull;
+//
+// C128 RE-RECORDED IT: the rail's bottom-left corner lost 115 px of info card
+// (the card is folded to ONE line now) and the status band carries three numbers
+// instead of six words, so the same scene hashes differently -- and it paints
+// MORE, not less: the freed corner is the rail's own surface. Measured on the
+// C128 tree: rendered == 1, hr == S_OK, geometry_matches == 1,
+// painted == 247539/936624 (26.4%), digest == 791ab21f8cbf4153. Re-measured with
+// "c113_bench_honesty --digest --shaders <build>/Assets/Shaders", never copied.
+constexpr uint64_t kDigest = 0x791ab21f8cbf4153ull;
 constexpr uint32_t kDigestWidth = 1264;
 constexpr uint32_t kDigestHeight = 741;
 constexpr size_t kNonBlackDivisor = 2;

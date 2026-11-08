@@ -35,7 +35,6 @@
 namespace {
 
 using prism::layout::BreadcrumbCountText;
-using prism::layout::CryptoState;
 using prism::layout::Layout;
 using prism::layout::PlanWindowRestore;
 using prism::layout::Rect;
@@ -62,10 +61,9 @@ bool Inside(const Rect& inner, const Rect& outer) { return outer.Contains(inner)
 // honest if a future "optimisation" turns a std::string back into a view.
 std::vector<StatusSegment> SegmentsFromTemporary(const Layout& layout) {
   StatusInfo info;
-  info.crypto = CryptoState::Unencrypted;
-  info.ratioView = "87.5%";
-  info.itemCount = 2;
-  info.selectedCount = 0;
+  info.fileCount = 2;
+  info.folderCount = 1;
+  info.archiveBytes = 1572864;  // 1.5 MB
   return prism::layout::StatusSegments(layout, info);
 }
 
@@ -209,15 +207,20 @@ PRISM_TEST("c86 the breadcrumb count names the folder and keeps the archive tota
 // ---------------------------------------------------------------------------
 // 4. Every status segment has exactly ONE readable label (S3-11), and the band
 //    publishes them in the order it paints them.
+//
+// C128: the band is THREE numbers now -- the current folder's files and folders
+// and the archive's packed size. The six words this block used to assert
+// (未加密 / 方法未知 / 字典未知 / 条目 / 选中 / 压缩率) moved to the info card,
+// which is the surface the user asked for them on; asserting them here would be
+// asserting a band that no longer exists.
 // ---------------------------------------------------------------------------
 PRISM_TEST("c86 the status band's segments read in the band's order") {
   const Layout layout = prism::layout::Compute(1600, 800, /*sidebarVisible=*/false,
                                                /*listMode=*/true);
   StatusInfo info;
-  info.crypto = CryptoState::Unencrypted;
-  info.ratioPercent = 87;
-  info.itemCount = 2;
-  info.selectedCount = 0;
+  info.fileCount = 12;
+  info.folderCount = 5;
+  info.archiveBytes = 1572864;  // 1.5 MB, exactly what the ONE formatter prints
   const std::vector<StatusSegment> segments = prism::layout::StatusSegments(layout, info);
   std::string joined;
   for (const StatusSegment& segment : segments) {
@@ -227,40 +230,42 @@ PRISM_TEST("c86 the status band's segments read in the band's order") {
     joined += label;
   }
   std::printf("  [status] %s\n", joined.c_str());
-  PRISM_CHECK_EQ(joined, std::string("未加密 | 方法未知 | 字典未知 | 条目 2 | 选中 0 | 压缩率 87%"));
-  // The divider is ink, not a reading: it must not become an element.
+  PRISM_CHECK_EQ(joined, std::string("文件: 12 | 文件夹: 5 | 压缩包大小: 1.5 MB"));
+  // The 1 px divider went with the two clusters it separated, and the card's
+  // words went with it: an ink-only rule or a second copy of the card would be
+  // a reading nobody can read twice.
   for (const StatusSegment& segment : segments) {
-    if (segment.id != StatusId::Divider) continue;
-    PRISM_CHECK(StatusSegmentLabel(segment).empty());
+    PRISM_CHECK(segment.id != StatusId::Divider);
+    PRISM_CHECK(segment.id != StatusId::Encryption);
+    PRISM_CHECK(segment.id != StatusId::Method);
+    PRISM_CHECK(segment.id != StatusId::Dictionary);
+    PRISM_CHECK(segment.id != StatusId::Ratio);
   }
 }
 
-PRISM_TEST("c86 an unknown ratio and empty counts say so instead of inventing numbers") {
+PRISM_TEST("c86 an unknown count and an unknown size say so instead of inventing numbers") {
   const Layout layout = prism::layout::Compute(1600, 800, false, true);
-  StatusInfo info;  // every field at its "unknown" value
-  info.crypto = CryptoState::Unknown;
-  info.itemCount = 3;
-  info.selectedCount = 0;
+  StatusInfo info;  // every field at its "unknown" value (-1)
   const std::vector<StatusSegment> segments = prism::layout::StatusSegments(layout, info);
   std::vector<std::string> labels;
   for (const StatusSegment& segment : segments) {
     const std::string label = StatusSegmentLabel(segment);
     if (!label.empty()) labels.push_back(label);
   }
-  // -1 means "the engine did not say", and the band says that rather than "0%".
-  PRISM_CHECK(!labels.empty());
-  PRISM_CHECK_EQ(labels.back(), std::string("压缩率未知"));
-  PRISM_CHECK_EQ(labels.front(), std::string("加密状态未知"));
-  PRISM_CHECK_EQ(labels[3], std::string("条目 3"));
+  if (!PRISM_CHECK_EQ(labels.size(), static_cast<std::size_t>(3))) return;
+  // -1 means "the model did not say", and the band says that rather than "0".
+  PRISM_CHECK_EQ(labels[0], std::string("文件: --"));
+  PRISM_CHECK_EQ(labels[1], std::string("文件夹: --"));
+  PRISM_CHECK_EQ(labels[2], std::string("压缩包大小: --"));
 }
 
 PRISM_TEST("c86 a band label owns its text (no view into the caller's StatusInfo)") {
   const Layout layout = prism::layout::Compute(1600, 800, false, true);
   const std::vector<StatusSegment> segments = SegmentsFromTemporary(layout);
-  if (!PRISM_CHECK(!segments.empty())) return;
-  // The ratio is the LAST label, and it is the one that used to hold a view into
-  // StatusInfo::ratioView -- a std::string owned by the caller.
-  PRISM_CHECK_EQ(StatusSegmentLabel(segments.back()), std::string("压缩率 87.5%"));
+  if (!PRISM_CHECK_EQ(segments.size(), static_cast<std::size_t>(3))) return;
+  // The SIZE is the LAST label, and its value is BUILT by the layout ("1.5 MB"),
+  // not viewed from the StatusInfo the caller owned.
+  PRISM_CHECK_EQ(StatusSegmentLabel(segments.back()), std::string("压缩包大小: 1.5 MB"));
   // Reading every label here is what the accessibility tree and the painter do;
   // on the ASan lane a view-based implementation dies at this line.
   std::string all;
@@ -268,24 +273,5 @@ PRISM_TEST("c86 a band label owns its text (no view into the caller's StatusInfo
     const std::string label = StatusSegmentLabel(segment);
     if (!label.empty()) all += label;
   }
-  PRISM_CHECK(all.find("压缩率 87.5%") != std::string::npos);
-}
-
-PRISM_TEST("c86 a compressing archive shows progress instead of a ratio") {
-  const Layout layout = prism::layout::Compute(1600, 800, false, true);
-  StatusInfo info;
-  info.crypto = CryptoState::Unencrypted;
-  info.compressing = true;
-  info.ratioPercent = 50;  // present, but the run is not finished
-  info.itemCount = 0;
-  info.selectedCount = 0;
-  const std::vector<StatusSegment> segments = prism::layout::StatusSegments(layout, info);
-  bool sawCompressing = false;
-  for (const StatusSegment& segment : segments) {
-    if (segment.id != StatusId::Ratio) continue;
-    sawCompressing = StatusSegmentLabel(segment) == "压缩中…";
-    // No half-baked percentage while the engine is still writing.
-    PRISM_CHECK_EQ(segment.value, -1);
-  }
-  PRISM_CHECK(sawCompressing);
+  PRISM_CHECK(all.find("压缩包大小: 1.5 MB") != std::string::npos);
 }

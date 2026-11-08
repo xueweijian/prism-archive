@@ -198,7 +198,8 @@ struct SceneFixture {
     scene.listItems = &rows;
     scene.layout = &layout;
     scene.breadcrumb = L"fixture.zip";
-    scene.status.itemCount = static_cast<int>(rows.size());
+    // C128: the band's first number is the current folder's file count.
+    scene.status.fileCount = static_cast<int>(rows.size());
   }
 };
 

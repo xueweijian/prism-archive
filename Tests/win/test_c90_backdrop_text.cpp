@@ -358,8 +358,9 @@ struct Fixture {
     scene.layout = &layout;  // the SAME geometry the renderer would compute
     scene.breadcrumb = L"payload.7z  |  14 items  |  solid block 3/5";
     scene.glassPanels = true;  // the shipping frame: floating breadcrumb island
-    scene.status.itemCount = static_cast<int>(rows.size());
-    scene.status.ratioView = prism::CompressionRatioView(21'737'891, 4'522'292);
+    // C128: the band's three numbers -- the size is the packed total.
+    scene.status.fileCount = static_cast<int>(rows.size());
+    scene.status.archiveBytes = 4'522'292;
     // selectedRow stays -1: a selection tint is CONTENT and would legitimately
     // brighten the band (it is kept in the backdrop on purpose); the audit's
     // frame measured the plate between the glyphs, not the selection.

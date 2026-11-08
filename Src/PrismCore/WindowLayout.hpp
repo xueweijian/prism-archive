@@ -36,6 +36,7 @@
 #include <string_view>
 #include <vector>
 
+#include "ListColumns.hpp"
 #include "Preview.hpp"
 
 namespace prism::layout {
@@ -177,13 +178,31 @@ inline constexpr int kContentPadding = 16;
 inline constexpr int kStatusBarHeight = 28;
 inline constexpr int kIslandGap = 12;
 inline constexpr int kListHeaderHeight = 32;
-// C109: 36 px, not 32. Data-dense archives were a wall of 32 px rows with no
-// air between them; 4 px is the smallest bump that reads as a deliberate rhythm
-// at 100% DPI without turning the list into a "comfortable" touch list. The
-// whole list stack (ListRowRect / VisibleListRows / ListRowAt and the window's
-// scroll pitch) reads THIS constant, so one number moves paint and hit test
-// together -- the C109 suite pins both.
-inline constexpr int kListRowHeight = 36;
+// C122: 26 DIP, not 36. The design proposal's §13.2 measured Bandizip at 19.2
+// logical px and asked for 26: 35 % looser than Bandizip, 19 % denser than
+// Win11 Explorer, and -- the number the user actually feels -- 21.6 visible
+// rows instead of 15.6 in the same 1007x742 window.
+//
+// The whole list stack (ListRowRect / VisibleListRows / ListRowAt and the
+// window's scroll pitch) reads ListRowHeightFor(layout), so one number moves
+// paint and hit test together. 26 is the REGULAR tier; a window shorter than
+// kListCompactWindowHeight switches to the 22 DIP compact tier (design proposal
+// §17.1), which is a property of the WINDOW, not of a caller's mood.
+inline constexpr int kListRowHeight = 26;
+inline constexpr int kListRowHeightCompact = 22;
+inline constexpr int kListCompactWindowHeight = 700;  // DIP
+
+// C122 §2: the four columns. Name flexes; the two size columns are 120 DIP and
+// the type column 100 DIP (design proposal §5.3). kListRightPadding is the
+// right INNER padding: before this card the list's right inset was 0, so the
+// size cell ended exactly on the clip edge and "2.0 MB" shipped as "2.0 M"
+// (design proposal §12.6 defect 1). The last column's right edge -- and with
+// it every numeric baseline in the row -- is the content edge minus this.
+inline constexpr int kListColPackedWidth = 120;
+inline constexpr int kListColOriginalWidth = 120;
+inline constexpr int kListColTypeWidth = 100;
+inline constexpr int kListColumnGutter = 16;
+inline constexpr int kListRightPadding = 20;
 inline constexpr int kListIndent = 20;
 inline constexpr int kMinTileWidth = 120;  // DESIGN.md §2: minimum column width
 inline constexpr int kMaxTileWidth = 192;
@@ -929,10 +948,21 @@ inline Rect ListBodyRect(const Layout& layout) {
               layout.contentInner.bottom};
 }
 
+// C122: the row pitch is a property of the WINDOW (its height, in DIP), not of
+// the caller. A 1007x742 window gets the 26 DIP regular tier; a short one
+// (< 700 DIP) gets 22. Every consumer -- paint, virtualization, hit test and the
+// window's scroll viewport -- asks THIS function, so a frame can never paint one
+// pitch and hit-test another. Tests at 96 DPI read 26 / 22 directly (DIP == px
+// at 96 DPI).
+inline int ListRowHeightFor(const Layout& layout) {
+  return layout.windowH < kListCompactWindowHeight ? kListRowHeightCompact : kListRowHeight;
+}
+
 inline Rect ListRowRect(const Layout& layout, int row, int scrollPx) {
   const Rect body = ListBodyRect(layout);
-  const int y = body.top + row * kListRowHeight - scrollPx;
-  return Rect{body.left, y, body.right, y + kListRowHeight};
+  const int pitch = ListRowHeightFor(layout);
+  const int y = body.top + row * pitch - scrollPx;
+  return Rect{body.left, y, body.right, y + pitch};
 }
 
 // The first/last row that intersects the body, overscan rows on both sides.
@@ -947,10 +977,11 @@ inline RowRange VisibleListRows(const Layout& layout, int rowCount, int scrollPx
   if (rowCount <= 0) return range;
   const Rect body = ListBodyRect(layout);
   if (body.Empty()) return range;
+  const int pitch = ListRowHeightFor(layout);
   constexpr int kOverscan = 2;
-  range.first = (std::max)(0, scrollPx / kListRowHeight - kOverscan);
+  range.first = (std::max)(0, scrollPx / pitch - kOverscan);
   range.last = (std::min)(rowCount - 1,
-                          (scrollPx + body.Height()) / kListRowHeight + kOverscan - 1);
+                          (scrollPx + body.Height()) / pitch + kOverscan - 1);
   if (range.last < range.first) range.first = range.last;
   return range;
 }
@@ -960,7 +991,90 @@ inline int ListRowAt(const Layout& layout, int x, int y, int scrollPx) {
   const Rect body = ListBodyRect(layout);
   if (body.Empty() || x < body.left || x >= body.right) return -1;
   if (y < body.top || y >= body.bottom) return -1;
-  return (y - body.top + scrollPx) / kListRowHeight;
+  const int pitch = ListRowHeightFor(layout);
+  return (y - body.top + scrollPx) / pitch;
+}
+
+// ------------------------------------------------------- C122: the four cells
+// The list's column rectangles, right-anchored: the TYPE column ends on the
+// content edge minus kListRightPadding (so the last cell cannot be clipped),
+// then original / packed / name march leftwards with one 16 DIP gutter between
+// them. The name column takes whatever is left.
+//
+// One struct, one function: the header labels, the row cells, the sort hit test
+// and the suite all read THIS, so "the header says 压缩后大小 but the number is
+// under 原始大小" is not a state the code can reach.
+//
+// C27's persisted prism::list::ColumnLayout (window.columns.size/packed/ratio)
+// is still SAVED and LOADED, but it does NOT participate in painting: the four
+// widths above are fixed by the design (120/120/100), and changing this function
+// is how a future card makes columns draggable -- do not grow a second column
+// model beside it. Reading a stale ColumnLayout to position a cell would put
+// the numbers under the wrong heading.
+//
+// RULE FOR EVERY LIST-GEOMETRY ASSERTION: derive the rectangle from THIS
+// function (or from GalleryWindow::LayoutForTest(), which is the same object the
+// frame painted) -- never hard-code a pixel value. A test that writes "x = 1388"
+// or "row = 36" goes red for a layout change it was never about, and the usual
+// "fix" (re-baselining the number) is noise that hides the real regression.
+struct ListColumnLayout {
+  Rect name;
+  Rect packed;
+  Rect original;
+  Rect type;
+
+  const Rect& For(prism::list::Column column) const {
+    switch (column) {
+      case prism::list::Column::Name: return name;
+      case prism::list::Column::PackedSize: return packed;
+      case prism::list::Column::OriginalSize: return original;
+      case prism::list::Column::Type: return type;
+    }
+    return name;
+  }
+};
+
+inline ListColumnLayout ListColumnRects(const Layout& layout) {
+  ListColumnLayout columns;
+  const Rect header = ListHeaderRect(layout);
+  if (header.Empty()) return columns;
+  // Degenerate widths clamp to the header's left edge instead of producing
+  // rectangles that run backwards through their neighbour.
+  const int right = (std::max)(header.left, header.right - kListRightPadding);
+  const int typeLeft = (std::max)(header.left, right - kListColTypeWidth);
+  columns.type = Rect{typeLeft, header.top, right, header.bottom};
+  const int originalRight = (std::max)(header.left, typeLeft - kListColumnGutter);
+  columns.original = Rect{(std::max)(header.left, originalRight - kListColOriginalWidth),
+                          header.top, originalRight, header.bottom};
+  const int packedRight = (std::max)(header.left, columns.original.left - kListColumnGutter);
+  columns.packed = Rect{(std::max)(header.left, packedRight - kListColPackedWidth), header.top,
+                        packedRight, header.bottom};
+  const int nameLeft = header.left + kListIndent;
+  const int nameRight = (std::max)(nameLeft, columns.packed.left - kListColumnGutter);
+  columns.name = Rect{nameLeft, header.top, nameRight, header.bottom};
+  return columns;
+}
+
+// Which header cell is under (x, y)? prism::list::Column::Name is column 0, so
+// an unset point cannot be confused with a real hit -- use ListColumnHit below.
+struct ListColumnHit {
+  prism::list::Column column = prism::list::Column::Name;
+  bool hit = false;
+};
+
+inline ListColumnHit ListColumnAt(const Layout& layout, int x, int y) {
+  ListColumnHit result;
+  const Rect header = ListHeaderRect(layout);
+  if (header.Empty() || y < header.top || y >= header.bottom) return result;
+  const ListColumnLayout columns = ListColumnRects(layout);
+  for (const prism::list::Column column : prism::list::kColumnOrder) {
+    const Rect rect = columns.For(column);
+    if (rect.Empty() || x < rect.left || x >= rect.right) continue;
+    result.column = column;
+    result.hit = true;
+    return result;
+  }
+  return result;
 }
 
 // ------------------------------------------------------------- floating chrome

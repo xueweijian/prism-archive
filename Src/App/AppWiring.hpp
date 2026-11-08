@@ -2101,6 +2101,12 @@ struct MenuLabels {
     // zh-CN window showed "文件 编辑 设置(S)... Help". Measured on the real window.
     std::wstring help;
     std::wstring about;
+    // C122: 视图(V) with its two commands. The keys are code defaults (the
+    // RequiredKeys census does not grow for a menu the app can translate);
+    // the fallback is already localised per tag, exactly like menu.file.
+    std::wstring view;
+    std::wstring viewList;
+    std::wstring viewGrid;
 };
 
 // The fallbacks are the app's own words (C38's rule: real text, never an escape
@@ -2123,6 +2129,12 @@ inline MenuLabels BuildMenuLabels(const Tr& tr, const std::wstring& tag) {
   labels.help = tr.Or("menu.help", chinese ? L"帮助" : L"&Help");
   labels.about = tr.Or("menu.about", chinese ? L"关于 PrismArchive" : L"&About PrismArchive");
 #endif
+  // C122: 视图(V) / 列表 / 网格. Bandizip's menu order puts 视图 before 帮助
+  // (design proposal §14.5); the words follow the same Tr::Or contract as the
+  // rest of the bar, with a localised code default.
+  labels.view = tr.Or("menu.view", chinese ? L"视图(&V)" : L"&View");
+  labels.viewList = tr.Or("menu.view.list", chinese ? L"列表(&L)" : L"&List");
+  labels.viewGrid = tr.Or("menu.view.grid", chinese ? L"网格(&G)" : L"&Grid");
   return labels;
 }
 
@@ -2135,6 +2147,10 @@ inline void ApplyMenuLabels(WindowLike& window, const MenuLabels& labels) {
   window.SetEditMenuLabels(labels.edit, labels.deleteItem, labels.rename, labels.newFolder);
   window.SetSettingsMenuLabel(labels.settings);
     window.SetAboutMenuLabels(labels.help, labels.about);
+  // C122: the View menu's words. A WindowLike without this setter would not
+  // compile -- the exe's GalleryWindow and every suite instance are the same
+  // type, which is the point of the seam.
+  window.SetViewMenuLabels(labels.view, labels.viewList, labels.viewGrid);
 }
 
 // ---------------------------------------------------------------------------
@@ -2259,7 +2275,10 @@ struct WindowState {
   int y = 0;
   bool hasPosition = false;
   bool maximized = false;
-  bool listMode = false;
+  // C122: THE DEFAULT VIEW IS THE LIST. Bandizip opens a four-column listing;
+  // the grid is one Ctrl+1 (or View > 网格) away. A user whose document already
+  // says "listMode": false keeps the grid -- their choice is honoured.
+  bool listMode = true;
   prism::list::MultiSortSpec sort;
   bool hasSort = false;
   prism::list::ColumnLayout columns;
@@ -2304,7 +2323,10 @@ inline WindowState LoadWindowState(const prism::settings::SettingsStore& store) 
     state.hasPosition = true;
   }
   state.maximized = store.GetBool("window.maximized", false);
-  state.listMode = store.GetBool("window.listMode", false);
+  // C122: the shipped default. A pre-C122 document has no such key, so the
+  // default IS the migration: every existing window opens in the list once,
+  // and the next Ctrl+1 writes the grid back explicitly.
+  state.listMode = store.GetBool("window.listMode", true);
   const std::string sortName = store.GetString("window.sort.key", "");
   prism::list::SortKey key = prism::list::SortKey::kName;
   if (!sortName.empty() && SortKeyFromName(sortName, &key)) {

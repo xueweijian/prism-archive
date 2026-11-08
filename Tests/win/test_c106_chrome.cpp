@@ -552,8 +552,9 @@ PRISM_TEST("c106 the menu is still in the UIA tree while the bar is hidden") {
     long children = -1;
     PRISM_CHECK(SUCCEEDED(menu->get_accChildCount(&children)));
     std::printf("  [uia] menu children=%ld (bar hidden)\n", children);
-    // The four items are still THERE: the bar was parked, not dismantled.
-    PRISM_CHECK_EQ(children, 4);
+    // The five items are still THERE: the bar was parked, not dismantled.
+    // (C122 added 视图 between 设置 and 帮助; the count moved 4 -> 5.)
+    PRISM_CHECK_EQ(children, 5);
     VARIANT child;
     ::VariantInit(&child);
     child.vt = VT_I4;

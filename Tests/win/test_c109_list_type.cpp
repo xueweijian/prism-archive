@@ -1,5 +1,6 @@
 // PrismArchive -- PrismWin
-// C109: list typography -- tabular numerals, one column baseline, 36 px rows.
+// C109: list typography -- tabular numerals, one column baseline per numeric
+// column, and one row pitch shared by paint and hit test (C122: 26 DIP).
 //
 // The DEFECT this suite is armed against: the size / packed / ratio cells were
 // drawn in the proportional UI face, so '6.3 KB' and '11.2 KB' put their
@@ -309,14 +310,18 @@ struct Fixture {
 };
 
 // ---------------------------------------------------------------- assertion 2
-int RightInkEdge(const Frame& frame, const prism::layout::Rect& body,
-                 const prism::list::ColumnLayout& cols, int row) {
-  const int top = body.top + row * prism::layout::kListRowHeight;
-  const int left = static_cast<int>(cols.sizeLeft(static_cast<std::uint32_t>(body.right)));
-  const int right = static_cast<int>(cols.sizeRight(static_cast<std::uint32_t>(body.right)));
+// C122: the painted size column is WindowLayout's ListColumnRects().original.
+// The pre-C122 prism::list::ColumnLayout is no longer a painted cell, so a probe
+// left on it would measure empty canvas and pass for the wrong reason.
+int RightInkEdge(const Frame& frame, const prism::layout::Layout& layout,
+                 const prism::layout::ListColumnLayout& cols, int row) {
+  const int pitch = prism::layout::ListRowHeightFor(layout);
+  const int top = prism::layout::ListBodyRect(layout).top + row * pitch;
+  const int left = cols.original.left;
+  const int right = cols.original.right;
   const UINT32 canvas = CanvasPixel();
   int edge = -1;
-  for (int y = top + 2; y < top + prism::layout::kListRowHeight - 2; ++y) {
+  for (int y = top + 2; y < top + pitch - 2; ++y) {
     for (int x = right - 1; x >= left; --x) {
       if (!frame.In(x, y)) continue;
       if (MaxChannelDelta(frame.At(x, y), canvas) >= 50) {
@@ -339,15 +344,14 @@ PRISM_TEST("c109.right_edges: 1/2/3-digit sizes end within 1 px") {
   if (!frame.pixels.empty()) {
     if (!WritePng(L"c109-list-type.png", frame)) std::puts("  WARN: PNG failed");
   }
-  const prism::layout::Rect body = prism::layout::ListBodyRect(fixture.layout);
-  const prism::list::ColumnLayout cols;
-  const int e0 = RightInkEdge(frame, body, cols, 0);
-  const int e1 = RightInkEdge(frame, body, cols, 1);
-  const int e2 = RightInkEdge(frame, body, cols, 2);
-  std::printf("C109 right edges: row0=%d row1=%d row2=%d spread=%d (size column %u..%u)\n",
-              e0, e1, e2, (std::max)({e0, e1, e2}) - (std::min)({e0, e1, e2}),
-              cols.sizeLeft(static_cast<std::uint32_t>(body.right)),
-              cols.sizeRight(static_cast<std::uint32_t>(body.right)));
+  const prism::layout::ListColumnLayout cols =
+      prism::layout::ListColumnRects(fixture.layout);
+  const int e0 = RightInkEdge(frame, fixture.layout, cols, 0);
+  const int e1 = RightInkEdge(frame, fixture.layout, cols, 1);
+  const int e2 = RightInkEdge(frame, fixture.layout, cols, 2);
+  std::printf("C109 right edges: row0=%d row1=%d row2=%d spread=%d (size column %d..%d)\n",
+              e0, e1, e2, (std::max)({e0, e1, e2}) - (std::min)({e0, e1, e2}), cols.original.left,
+              cols.original.right);
   PRISM_CHECK(e0 > 0);
   PRISM_CHECK(e1 > 0);
   PRISM_CHECK(e2 > 0);
@@ -355,7 +359,7 @@ PRISM_TEST("c109.right_edges: 1/2/3-digit sizes end within 1 px") {
 }
 
 // ---------------------------------------------------------------- assertion 3
-PRISM_TEST("c109.hit: the third 36 px row is the third item") {
+PRISM_TEST("c109.hit: the third list row is the third item") {
   prism::win::gallery::GalleryWindow window;
   if (!PRISM_CHECK(window.Create(L"PrismArchive c109 hit", GetModuleHandleW(nullptr)))) return;
   std::vector<ArchiveItem> items;
@@ -373,20 +377,21 @@ PRISM_TEST("c109.hit: the third 36 px row is the third item") {
   window.Dispatch(WM_SIZE, 0, MAKELPARAM(1200, 800));
   const prism::layout::Layout layout = window.LayoutForTest();
   const prism::layout::Rect body = prism::layout::ListBodyRect(layout);
-  PRISM_CHECK_EQ(prism::layout::kListRowHeight, 36);
+  const int pitch = prism::layout::ListRowHeightFor(layout);
+  PRISM_CHECK_EQ(pitch, prism::layout::kListRowHeight);  // the 800 px regular tier
   const int x = body.left + 60;
   for (int i = 0; i < 5; ++i) {
-    const int top = body.top + i * 36;
+    const int top = body.top + i * pitch;
     PRISM_CHECK_EQ(window.HitTestForTest(x, top + 1), i);
-    PRISM_CHECK_EQ(window.HitTestForTest(x, top + 35), i);
+    PRISM_CHECK_EQ(window.HitTestForTest(x, top + pitch - 1), i);
     if (i > 0) PRISM_CHECK_EQ(window.HitTestForTest(x, top - 1), i - 1);
   }
   // The named case, stated the way the card does: third row -> item 2.
-  std::printf("C109 hit: click y=%d -> item %d\n", body.top + 2 * 36 + 10,
-              window.HitTestForTest(x, body.top + 2 * 36 + 10));
-  PRISM_CHECK_EQ(window.HitTestForTest(x, body.top + 2 * 36 + 10), 2);
-  PRISM_CHECK_EQ(window.HitTestForTest(x, body.top + 3 * 36 - 1), 2);
-  PRISM_CHECK_EQ(window.HitTestForTest(x, body.top + 3 * 36), 3);
+  std::printf("C109 hit: click y=%d -> item %d\n", body.top + 2 * pitch + 10,
+              window.HitTestForTest(x, body.top + 2 * pitch + 10));
+  PRISM_CHECK_EQ(window.HitTestForTest(x, body.top + 2 * pitch + 10), 2);
+  PRISM_CHECK_EQ(window.HitTestForTest(x, body.top + 3 * pitch - 1), 2);
+  PRISM_CHECK_EQ(window.HitTestForTest(x, body.top + 3 * pitch), 3);
   window.Dispatch(WM_DESTROY, 0, 0);
 }
 

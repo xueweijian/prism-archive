@@ -657,7 +657,10 @@ PRISM_TEST("c90.list_name_band_is_not_a_white_plate") {
   const Box scanBand{kNameBandLeft, geometry.body.top, kNameBandRight, rowsBottom};
   const BandScan scan =
       ScanRowBand(lit, reference, scanBand, rowsBottom, canvasLum, 4, "unselected");
-  PRISM_CHECK(scan.probes > 4000);
+  // C122: the row pitch is 26 DIP (was 36), so the same 1000 px wide band holds
+  // 14 * 26 = 364 rows instead of 504. The floor scales with the band; the scan
+  // stays far from vacuous (3917 probes measured at this pitch).
+  PRISM_CHECK(scan.probes > 2500);
   PRISM_CHECK(scan.violations == 0);
 }
 
@@ -704,9 +707,10 @@ PRISM_TEST("c90.selected_row_leaves_no_band_across_the_row") {
   const Box scanBand{kNameBandLeft, geometry.body.top, kNameBandRight, rowsBottom};
   const BandScan scan =
       ScanRowBand(lit, reference, scanBand, rowsBottom, canvasLum, kBandTolerance, "selected");
-  // 11 columns x 448 rows of the row band, minus the selected pill's own crisp
-  // pixels (~4.5k). Not vacuous, and the mutant arm proves it is not.
-  PRISM_CHECK(scan.probes > 4000);
+  // 11 columns x the 26 DIP row band, minus the selected pill's own crisp
+  // pixels. C122's pitch keeps this at 3675 probes (measured), which is not
+  // vacuous, and the mutant arm proves it is not.
+  PRISM_CHECK(scan.probes > 2500);
   // ASSERTION 5: no band of any width. This is what the name-column-only box
   // could not see: the pill is 1600 px wide.
   PRISM_CHECK(scan.violations == 0);

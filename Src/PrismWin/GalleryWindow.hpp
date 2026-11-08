@@ -100,6 +100,7 @@
 #include "../PrismCore/ThumbStore.hpp"
 #include "../PrismCore/TabSet.hpp"      // C59: several archives, one window
 #include "../PrismCore/WindowLayout.hpp"  // V1: the ONE geometry authority
+#include "../PrismCore/ListColumns.hpp"      // C122: four columns, type table, header sort
 #include "AboutDialog.hpp"                  // C57: Help > About (one menu item, one modal)
 #include "Accessible.hpp"                    // C80: WM_GETOBJECT -> IAccessible (MSAA)
 #include "../PrismCore/A11yTree.hpp"         // C80: what the client area publishes
@@ -2046,9 +2047,35 @@ class GalleryWindow {
     if (listMode_ == listMode) return;
     listMode_ = listMode;
     quickLookClose();
-    RecomputeLayout();  // 32 px list rows vs the grid's tile cells
+    RecomputeLayout();  // 26 DIP list rows vs the grid's tile cells
     Invalidate();
   }
+
+  // C122: what the header arrow shows. Derived from the sort spec the list is
+  // ALREADY ordered by, so the arrow cannot point at a column the rows are not
+  // sorted by (and a SetSortSpec from the app moves the arrow too).
+  prism::list::HeaderSort ListSort() const {
+    prism::list::HeaderSort sort;
+    if (sortSpec_.keys.empty()) return sort;
+    sort.column = ColumnForSortKey(sortSpec_.keys.front().key);
+    sort.ascending = sortSpec_.keys.front().direction == prism::list::SortDirection::kAscending;
+    return sort;
+  }
+
+  // C122: View > 列表 / 网格. The words are the app's (translated like every
+  // other menu string); the window owns the commands and the marker.
+  void SetViewMenuLabels(std::wstring viewTitle, std::wstring listText,
+                         std::wstring gridText) {
+    viewMenuLabel_ = std::move(viewTitle);
+    viewListLabel_ = std::move(listText);
+    viewGridLabel_ = std::move(gridText);
+    RebuildMenu();
+  }
+
+  // The command ids the View menu posts (0xE006/0xE007). Public so a suite can
+  // drive the SAME WM_COMMAND route the menu uses.
+  static constexpr UINT kMenuViewList = 0xE006;
+  static constexpr UINT kMenuViewGrid = 0xE007;
 
   // Message-dispatch seam: EXACTLY what the window procedure runs (same
   // switch, same order), exposed so the Windows integration test drives real
@@ -2981,6 +3008,9 @@ class GalleryWindow {
         // C-V2: the band is chrome ABOVE the rows: a button click must never
         // also select the tile that happens to be behind it.
         if (ActionBarClick(MouseX(lparam), MouseY(lparam))) return 0;
+        // C122: the list header is a row of sort buttons. It is NOT list
+        // content, so a press there must sort and never select.
+        if (HandleListHeaderClick(MouseX(lparam), MouseY(lparam))) return 0;
         ClickAt(MouseX(lparam), MouseY(lparam), (wparam & MK_CONTROL) != 0,
                 (wparam & MK_SHIFT) != 0);
         return 0;
@@ -3027,6 +3057,12 @@ class GalleryWindow {
         int textWidth = 0;
         int textHeight = 0;
         MeasureMenuText(dc, item->text, &textWidth, &textHeight);
+        // C122: the View items carry a "● " marker when they are the active
+        // mode (owner-drawn items do not get the system's radio dot), so their
+        // measured width has to include it.
+        if (item->command == kMenuViewList || item->command == kMenuViewGrid) {
+          textWidth += 16;
+        }
         if (dc != nullptr) ::ReleaseDC(host_.hwnd, dc);
         measure->itemWidth = static_cast<UINT>(textWidth + 2 * kMenuTextPaddingX);
         measure->itemHeight = static_cast<UINT>(textHeight + 2 * kMenuTextPaddingY);
@@ -3058,7 +3094,12 @@ class GalleryWindow {
                                                                       : palette.text)));
         HGDIOBJ previous = menuFont_ != nullptr ? ::SelectObject(draw->hDC, menuFont_)
                                                 : nullptr;
-        const std::wstring plain = MenuTextPlain(item->text);
+        std::wstring plain = MenuTextPlain(item->text);
+        // C122: View marks the mode it is currently in.
+        if ((item->command == kMenuViewList && listMode_) ||
+            (item->command == kMenuViewGrid && !listMode_)) {
+          plain.insert(0, L"\x25CF ");
+        }
         ::DrawTextW(draw->hDC, plain.c_str(), -1, &textRect,
                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
         if (previous != nullptr) ::SelectObject(draw->hDC, previous);
@@ -3099,6 +3140,15 @@ class GalleryWindow {
         }
         if (command == kMenuEditNewFolder) {
           RequestEdit(prism::win::editui::EditAction::NewFolder);
+          return 0;
+        }
+        // C122: View > 列表 / 网格. The grid is KEPT, one command away.
+        if (command == kMenuViewList) {
+          SetListMode(true);
+          return 0;
+        }
+        if (command == kMenuViewGrid) {
+          SetListMode(false);
           return 0;
         }
         if (onMenuCommand_) onMenuCommand_(command);
@@ -4642,10 +4692,14 @@ class GalleryWindow {
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
     HMENU edit = CreatePopupMenu();
-    if (!bar || !file || !edit) {
+    // C122: View > 列表 / 网格. The grid is KEPT; this is the switch that brings
+    // it back (Ctrl+1 does the same from the keyboard).
+    HMENU view = CreatePopupMenu();
+    if (!bar || !file || !edit || !view) {
       if (bar) DestroyMenu(bar);
       if (file) DestroyMenu(file);
       if (edit) DestroyMenu(edit);
+      if (view) DestroyMenu(view);
       if (background) DeleteObject(background);
       if (highlight) DeleteObject(highlight);
       return;
@@ -4693,6 +4747,12 @@ class GalleryWindow {
     // bar of its own; Main only falls back to it when the window has no menu.)
     addItem(bar, MF_STRING, prism::win::settingsui::SettingsDialog::kMenuSettingsId,
             settingsMenuLabel_);
+    barItems.push_back(items.back().get());
+    // C122: 视图(V) sits between 选项 and 帮助, Bandizip's order (design proposal
+    // §14.5: the bar is 文件/编辑/查找/选项/视图/帮助; 查找 is a later card).
+    addItem(view, MF_STRING, kMenuViewList, viewListLabel_);
+    addItem(view, MF_STRING, kMenuViewGrid, viewGridLabel_);
+    addItem(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), viewMenuLabel_);
     barItems.push_back(items.back().get());
     // C57: Help > About. The label is literal here like "Settings..." above: the
     // item is chrome on this window, and the dialog it opens is where the words
@@ -4942,6 +5002,49 @@ class GalleryWindow {
                                      static_cast<int>(viewport_.Scroll()));
   }
 
+  // C122: the header is a row of SORT buttons. A press on a cell folds into the
+  // window's OWN sort spec -- the list re-orders, the archive's engine order is
+  // never touched, which is what "UI state only" means for this card. Returns
+  // true when the press belonged to the header (so it cannot also reach a row).
+  static prism::list::SortKey SortKeyForColumn(prism::list::Column column) {
+    switch (column) {
+      case prism::list::Column::Name: return prism::list::SortKey::kName;
+      case prism::list::Column::PackedSize: return prism::list::SortKey::kPackedSize;
+      case prism::list::Column::OriginalSize: return prism::list::SortKey::kOriginalSize;
+      case prism::list::Column::Type: return prism::list::SortKey::kType;
+    }
+    return prism::list::SortKey::kName;
+  }
+
+  static prism::list::Column ColumnForSortKey(prism::list::SortKey key) {
+    switch (key) {
+      case prism::list::SortKey::kPackedSize: return prism::list::Column::PackedSize;
+      case prism::list::SortKey::kOriginalSize: return prism::list::Column::OriginalSize;
+      case prism::list::SortKey::kType: return prism::list::Column::Type;
+      case prism::list::SortKey::kName:
+      case prism::list::SortKey::kRatio:
+      case prism::list::SortKey::kMtime:
+        return prism::list::Column::Name;
+    }
+    return prism::list::Column::Name;
+  }
+
+  bool HandleListHeaderClick(int x, int y) {
+    if (!listMode_) return false;
+    const prism::layout::ListColumnHit hit = prism::layout::ListColumnAt(layout_, x, y);
+    if (!hit.hit) return false;
+    const prism::list::HeaderSort next = prism::list::NextSort(ListSort(), hit.column);
+    prism::list::MultiSortSpec spec;
+    spec.dirsFirst = sortSpec_.dirsFirst;
+    spec.keys.push_back({SortKeyForColumn(hit.column),
+                         next.ascending ? prism::list::SortDirection::kAscending
+                                        : prism::list::SortDirection::kDescending});
+    SetSortSpec(spec);  // re-orders the VIEW (and moves the header arrow)
+    SetStatus(next.ascending ? L"\u5DF2\u6309\u5347\u5E8F\u6392\u5E8F"
+                             : L"\u5DF2\u6309\u964D\u5E8F\u6392\u5E8F");
+    return true;
+  }
+
   // V4: the classification FACTS for the current folder, in catalog order. Only
   // the ThumbStore knows whether a photo really has pixels; the geometry is the
   // layout's job. One function feeds painting, hit-testing and the test seam.
@@ -5183,6 +5286,9 @@ class GalleryWindow {
                         : nullptr;
     scene.sidebarCollapsed = !sidebarRailVisible_;
     scene.listMode = listMode_;
+    // C122: the header arrow shows the sort the list is already in (name
+    // ascending by default), so paint and order cannot disagree.
+    scene.listSort = ListSort();
     scene.listColumns = &listColumns_;
     scene.hasListColumns = hasListColumns_;
     scene.listItems = listMode_ ? &listItems_ : nullptr;
@@ -5934,7 +6040,9 @@ class GalleryWindow {
     // keeps its 32 px pitch unchanged.
     double pitch = 0.0;
     if (listMode_) {
-      pitch = static_cast<double>(prism::layout::kListRowHeight);
+      // C122: the SAME pitch the paint and hit test read, tier included -- a
+      // 700 px window scrolls by 26, a shorter one by 22.
+      pitch = static_cast<double>(prism::layout::ListRowHeightFor(layout_));
     } else {
       const std::vector<prism::layout::FlowItem> flow = FlowInputs();
       const int rows = ItemsCount() > 0 && layout_.columns > 0
@@ -6413,6 +6521,11 @@ class GalleryWindow {
   // calls SetEditAvailability must not offer a delete that can only fail; the
   // window created by a test opts in explicitly.
   std::wstring editMenuLabel_ = L"&Edit";
+  // C122: the View menu's three words. The fallbacks are the window's own (the
+  // app installs translated ones through SetViewMenuLabels).
+  std::wstring viewMenuLabel_ = L"&View";
+  std::wstring viewListLabel_ = L"&List";
+  std::wstring viewGridLabel_ = L"&Grid";
   std::wstring editDeleteLabel_ = L"&Delete";
   std::wstring editRenameLabel_ = L"Rena&me";
   std::wstring editNewFolderLabel_ = L"New &Folder";

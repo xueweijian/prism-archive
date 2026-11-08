@@ -206,10 +206,30 @@ class GalleryRenderer {
     // paints them; it never derives one. nullptr -> no rail (the pre-C27 scene,
     // which the snapshot tool and older tests still build).
     const prism::win::sidebar::Layout* sidebar = nullptr;
+    // C122: the DEFAULT VIEW IS THE LIST. Bandizip opens a four-column listing
+    // and the audit's verdict was "the first screen is another category of
+    // product" -- the grid stays one Ctrl+1 (or View > 网格) away.
+    //
+    // A scene that carries items but NO list rows still paints the grid: the
+    // effective mode is scene.listMode && listItems != nullptr (see Draw). That
+    // is what keeps every pre-C122 grid scene -- which never set this field --
+    // byte-identical instead of silently going blank.
+    //
+    // D3 NEGATIVE CONTROL: PRISM_C122_MUTANT_GRID_DEFAULT restores the grid
+    // default; L1 (this class's Scene{}.listMode) MUST go red.
+#if defined(PRISM_C122_MUTANT_GRID_DEFAULT)
     bool listMode = false;
+#else
+    bool listMode = true;
+#endif
     std::vector<prism::list::SortItem>* listItems = nullptr;
     uint32_t listScroll = 0;
     int selectedRow = -1;
+    // C122 §3: which header cell shows the sort arrow, and which way it points.
+    // The WINDOW owns the state (a click on the header folds into its own sort
+    // spec); the scene only says what to paint. Default: 名称 ascending, which
+    // is the order the list opens in.
+    prism::list::HeaderSort listSort;
     // C13 columns, persisted by the app (C27): 0/absent -> the module default.
     const prism::list::ColumnLayout* listColumns = nullptr;
     bool hasListColumns = false;
@@ -286,6 +306,25 @@ class GalleryRenderer {
     uint64_t contentRevision = 0;
   };
 
+  // C122: the EFFECTIVE view mode of a scene. "list mode" is a REQUEST plus
+  // the rows to honour it with: a scene that asks for the list but carries no
+  // list rows (every pre-C122 grid scene, and a sidebar-only composition) paints
+  // the grid instead of a blank content band. The renderer has no third state.
+  static bool ListModeActive(const Scene& scene) {
+    return scene.listMode && scene.listItems != nullptr;
+  }
+
+  // C122 D3: which default this binary carries, and the runtime proof the
+  // mutant arm really compiled in (the mutant suite's CAUGHT marker is armed on
+  // "a default Scene asks for the grid", i.e. on the injected defect itself).
+  static constexpr bool DefaultViewIsList() {
+#if defined(PRISM_C122_MUTANT_GRID_DEFAULT)
+    return false;
+#else
+    return true;
+#endif
+  }
+
   HRESULT Initialize() {
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
                                    factory_.ReleaseAndGetAddressOf());
@@ -301,6 +340,10 @@ class GalleryRenderer {
   // so "the label is 10 px and the value is 12 px" is measured on the format
   // the painter actually draws with, not on a copy of the number.
   IDWriteTextFormat* CardLabelFormat() const { return sidebarCardLabel_.Get(); }
+  // C122: the list header's REAL DirectWrite format (11 px), read by the suite
+  // the same way CardLabelFormat is: "the header is 11 px" is measured on the
+  // object the painter draws with.
+  IDWriteTextFormat* ColumnHeaderFormat() const { return columnHeader_.Get(); }
   IDWriteTextFormat* CardValueFormat() const { return sidebarStatus_.Get(); }
 
   // ---------------------------------------------------------------- C112
@@ -437,6 +480,16 @@ class GalleryRenderer {
     prism::win::typography::CreateTextFormat(
         writeFactory_.Get(), 12.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
         small_.ReleaseAndGetAddressOf());
+    // C122: the list header. 11 px, regular weight, secondary role -- the
+    // design's "表头 11px 次要色" (proposal 4.2 / 5.3). Its own format (not a
+    // size passed at DrawText time) so a suite can read the real size back.
+    prism::win::typography::CreateTextFormat(
+        writeFactory_.Get(), 11.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, L"en-US",
+        columnHeader_.ReleaseAndGetAddressOf());
+    if (columnHeader_) {
+      columnHeader_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+      columnHeader_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
     // C109: the numeric columns (size / packed / ratio). One format, trailing
     // alignment, tabular advances -- see ListType.hpp for why the family is
     // monospaced instead of "the proportional face + tnum".
@@ -541,12 +594,16 @@ class GalleryRenderer {
     // reverses: the grid is not a different window, and a rail that disappears
     // when the user presses Ctrl+2 is a layout jump, not a mode.
     const bool railColumn = SidebarShown(scene);
+    // C122: one answer for the whole frame -- the bands, the backdrop key, the
+    // content pass and the status counts all use THIS, not scene.listMode
+    // directly, so a scene without list rows cannot half-paint a list.
+    const bool listMode = ListModeActive(scene);
     const prism::layout::Layout layout =
         scene.layout != nullptr
             ? *scene.layout
             : prism::layout::Compute(static_cast<int>(size.width),
                                      static_cast<int>(size.height), railColumn,
-                                     scene.listMode);
+                                     listMode);
     target->Clear(canvasColor_);
     // C77: the refraction layer sits under EVERYTHING -- bands, content, chrome.
     // C121: it is built from the PAGE, never from the content and never from
@@ -575,7 +632,7 @@ class GalleryRenderer {
     // replaces the per-tile guesswork that let cards slide under the rail.
     target->PushAxisAlignedClip(ToRectF(layout.contentInner),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
-    if (scene.listMode) {
+    if (listMode) {
       DrawListMode(target, scene, layout);
     } else if (scene.items != nullptr) {
       // A scene may be a sidebar-only composition (the C27 glue suite and the
@@ -703,7 +760,7 @@ class GalleryRenderer {
     key.items = scene.items;
     key.fingerprint = FingerprintOf(scene);
     key.revision = scene.contentRevision;
-    key.listMode = scene.listMode;
+    key.listMode = ListModeActive(scene);
     key.theme = scene.theme;
 #if defined(PRISM_C121_MUTANT_KEY_NO_THEME)
     // C121 MUTANT ACTIVE: key-no-theme -- the shipped key, restored. A theme
@@ -783,7 +840,7 @@ class GalleryRenderer {
     // the tiles (fill, folder mark, label, thumbnail) are re-drawn into the
     // ghost. C110's A1 MUST go red; dbgBackdropTilePasses, incremented inside
     // DrawGrid, is what its verdict is armed on (CONTRACTS D3).
-    if (scene.listMode) {
+    if (ListModeActive(scene)) {
       DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
     } else if (scene.items != nullptr) {
       DrawGrid(content.Get(), scene, layout, /*backdropPass=*/true);
@@ -792,7 +849,7 @@ class GalleryRenderer {
     // C90 MUTANT ACTIVE: the list's content pass is restored so the injected
     // glyph / selection pill reaches the ghost again. The verdicts are armed on
     // the counters DrawListMode increments (CONTRACTS D3).
-    if (scene.listMode) {
+    if (ListModeActive(scene)) {
       DrawListMode(content.Get(), scene, layout, /*backdropPass=*/true);
     }
 #elif defined(PRISM_C121_MUTANT_TILES_IN_GHOST)
@@ -1044,8 +1101,8 @@ class GalleryRenderer {
       }
     }
     if (info.selectedCount < 0) {
-      info.selectedCount = scene.listMode ? (scene.selectedRow >= 0 ? 1 : 0)
-                                          : (scene.selectedItem >= 0 ? 1 : 0);
+      info.selectedCount = ListModeActive(scene) ? (scene.selectedRow >= 0 ? 1 : 0)
+                                                  : (scene.selectedItem >= 0 ? 1 : 0);
     }
     const std::vector<prism::layout::StatusSegment> segments =
         prism::layout::StatusSegments(layout, info);
@@ -2242,10 +2299,14 @@ class GalleryRenderer {
     return {1.0f, 1.0f, 1.0f, 1.0f};
   }
 
-  // The main-window file list (blueprint ch. 3.2): 名称 | 原始大小 | 压缩后 |
-  // 压缩率, 36 px virtualized rows from WindowLayout (C109), micro-capsule
-  // bars, folders first. Every rectangle is anchored to the layout's list body,
-  // which is already inset by the rail (C29's column, V1's geometry).
+  // The main-window file list -- C122 puts Bandizip's four columns in:
+  //   名称 (flex, left) | 压缩后大小 (120, right) | 原始大小 (120, right) |
+  //   类型 (100, left)
+  // at 26 DIP rows (22 under 700 DIP, see ListRowHeightFor), virtualized from
+  // WindowLayout. Every rectangle -- the header cells and the row cells alike --
+  // comes from ListColumnRects/ListRowRect, so the painted cells and the
+  // header's own hit test cannot disagree. The compression-ratio capsule stays
+  // as a readout under the packed-size number; the 压缩率 COLUMN is retired.
   void DrawListMode(ID2D1RenderTarget* target, const Scene& scene,
                     const prism::layout::Layout& layout,
                     bool backdropPass = false) {
@@ -2253,27 +2314,22 @@ class GalleryRenderer {
     // C101: this frame's bars replace the previous frame's.
     ratioBarCount_ = 0;
     const auto& rows = *scene.listItems;
-    // The app persists the user's column geometry (C27); absent means the module
-    // default, which is what every pre-C27 call site gets.
-    const prism::list::ColumnLayout cols =
-        scene.hasListColumns && scene.listColumns != nullptr ? *scene.listColumns
-                                                             : prism::list::ColumnLayout{};
+    // C122: the four columns come from WindowLayout -- the ONE geometry
+    // authority -- never from a constant copied into this file. The list no
+    // longer reads the persisted C27 ColumnLayout: the design fixes the four
+    // widths (120 / 120 / 100), so a stale user width cannot push the type cell
+    // off the content edge or put the numbers under the wrong heading.
     const prism::layout::Rect header = prism::layout::ListHeaderRect(layout);
     const prism::layout::Rect body = prism::layout::ListBodyRect(layout);
+    const prism::layout::ListColumnLayout cols = prism::layout::ListColumnRects(layout);
     const int scroll = static_cast<int>(scene.listScroll);
-    // C109: three explicit boxes with a >= 16 px gutter, each ending on its own
-    // column baseline. Every numeric cell is drawn trailing-aligned against
-    // these edges, so a 1-digit and a 4-digit size share a right edge by
-    // construction rather than by font luck.
-    const uint32_t canvasW = static_cast<uint32_t>(body.right);
-    const float nameRight = static_cast<float>(cols.nameRight(canvasW));
-    const float sizeLeft = static_cast<float>(cols.sizeLeft(canvasW));
-    const float sizeRight = static_cast<float>(cols.sizeRight(canvasW));
-    const float packedLeft = static_cast<float>(cols.packedLeft(canvasW));
-    const float packedRight = static_cast<float>(cols.packedRight(canvasW));
-    const float ratioLeft = static_cast<float>(cols.ratioLeft(canvasW));
-    const float ratioRight = static_cast<float>(cols.ratioRight(canvasW));
-    const float textTop = static_cast<float>(header.top) + 4.0f;
+    // Header ink: 11 px, secondary role (design proposal 4.2 / 5.3), starting
+    // 8 px below the band's top so the two glyph-free strips C81/A2 audits stay
+    // bare canvas, and ending above the 1 px rule.
+    const float textTop = static_cast<float>(header.top) + 8.0f;
+    const float textBottom = textTop + 16.0f;
+    // Row ink: 13 px, 5 px below the row's top -- visually centred in 26 DIP.
+    constexpr float kRowTextInset = 5.0f;
 
     // C90: GLYPHS ARE NOT A REFRACTION SOURCE. At 1/8 a 13 px run of near-white
     // text rasterizes into a solid mini row (measured source coverage 0.81
@@ -2318,16 +2374,37 @@ class GalleryRenderer {
     if (!backdropPass) {
       island_->SetColor(canvasColor_);
       target->FillRectangle(ToRectF(header), island_.Get());
-      DrawLabel(target, caption_.Get(), L"\x540D\x79F0 ^",
-                D2D1::RectF(static_cast<float>(header.left) + prism::layout::kListIndent,
-                            textTop, nameRight, textTop + 24.0f),
+      // C122: four labels, in Bandizip's order, from the ONE column model. The
+      // numeric headings are trailing-aligned on the SAME baselines the numbers
+      // end on, and the active column carries the sort arrow (a SHAPE-free
+      // glyph, drawn in the secondary role -- C81/A2's "no accent ink in the
+      // header" assertion stays true).
+      const auto headerText = [&](prism::list::Column column) {
+        std::wstring text = Utf8(prism::list::ColumnTitle(column));
+        if (scene.listSort.column == column) {
+          // U+2191/U+2193 rather than the solid triangles: the arrow block is
+          // present in every UI face Windows ships, so the indicator cannot
+          // render as tofu on a font without geometric shapes.
+          text += scene.listSort.ascending ? L" \x2191" : L" \x2193";
+        }
+        return text;
+      };
+      DrawLabel(target, columnHeader_.Get(), headerText(prism::list::Column::Name),
+                D2D1::RectF(static_cast<float>(cols.name.left), textTop,
+                            static_cast<float>(cols.name.right), textBottom),
                 textSecondary_.Get());
-      DrawTrailingLabel(target, caption_.Get(), L"\x539F\x59CB\x5927\x5C0F", sizeLeft,
-                        sizeRight, textTop, textSecondary_.Get());
-      DrawTrailingLabel(target, caption_.Get(), L"\x538B\x7F29\x540E", packedLeft,
-                        packedRight, textTop, textSecondary_.Get());
-      DrawTrailingLabel(target, caption_.Get(), L"\x538B\x7F29\x7387", ratioLeft, ratioRight,
-                        textTop, textSecondary_.Get());
+      DrawTrailingLabel(target, columnHeader_.Get(),
+                        headerText(prism::list::Column::PackedSize),
+                        static_cast<float>(cols.packed.left),
+                        static_cast<float>(cols.packed.right), textTop, textSecondary_.Get());
+      DrawTrailingLabel(target, columnHeader_.Get(),
+                        headerText(prism::list::Column::OriginalSize),
+                        static_cast<float>(cols.original.left),
+                        static_cast<float>(cols.original.right), textTop, textSecondary_.Get());
+      DrawLabel(target, columnHeader_.Get(), headerText(prism::list::Column::Type),
+                D2D1::RectF(static_cast<float>(cols.type.left), textTop,
+                            static_cast<float>(cols.type.right), textBottom),
+                textSecondary_.Get());
       // The one 1 px separator (DESIGN: flat text + a rule, nothing else).
       island_->SetColor(ToD2d(prism::theme::Lookup(prism::theme::TokenId::DividerSubtle,
                                                    scene.theme)
@@ -2358,8 +2435,16 @@ class GalleryRenderer {
       island_->SetColor(islandColor_);
     }
 
-    const prism::layout::RowRange window = prism::layout::VisibleListRows(
-        layout, static_cast<int>(rows.size()), scroll);
+    const prism::layout::RowRange window =
+        prism::layout::VisibleListRows(layout, static_cast<int>(rows.size()), scroll);
+    const float nameLeft = static_cast<float>(body.left) + prism::layout::kListIndent;
+    const float nameRight = static_cast<float>(cols.name.right);
+    const float packedLeft = static_cast<float>(cols.packed.left);
+    const float packedRight = static_cast<float>(cols.packed.right);
+    const float originalLeft = static_cast<float>(cols.original.left);
+    const float originalRight = static_cast<float>(cols.original.right);
+    const float typeLeft = static_cast<float>(cols.type.left);
+    const float typeRight = static_cast<float>(cols.type.right);
     for (int i = window.first; i <= window.last; ++i) {
       const auto& row = rows[static_cast<size_t>(i)];
       const prism::layout::Rect rr = prism::layout::ListRowRect(layout, i, scroll);
@@ -2383,49 +2468,56 @@ class GalleryRenderer {
       }
 
       const std::wstring name = Utf8(row.name);
-      const float nameLeft = rowRect.left + prism::layout::kListIndent;
+      const float textRowTop = top + kRowTextInset;
+      const float textRowBottom = bottom - 2.0f;
+      // C122: the 16 px folder mark is centred in the row, whatever the tier.
+      const float iconTop = top + (static_cast<float>(rr.Height()) - 16.0f) / 2.0f;
       if (row.isDir) {
         const D2D1_ROUNDED_RECT folder = D2D1::RoundedRect(
-            D2D1::RectF(nameLeft + 4.0f, top + 9.0f, nameLeft + 20.0f, top + 27.0f), 5.0f,
+            D2D1::RectF(nameLeft + 4.0f, iconTop, nameLeft + 20.0f, iconTop + 16.0f), 5.0f,
             5.0f);
         target->FillRoundedRectangle(folder, accent_.Get());
-        if (drawGlyphs) {
-          DrawLabel(target, caption_.Get(), name,
-                    D2D1::RectF(nameLeft + 28.0f, top + 5.0f, nameRight, bottom - 4.0f),
-                    textPrimary_.Get());
-          DrawNumericTrailing(target, L"--", sizeLeft, sizeRight, top + 6.0f,
+      }
+      if (drawGlyphs) {
+        // 名称 -- flexes, left-aligned; a folder keeps its 16 px mark plus 8 px
+        // of air before the name.
+        const float nameTextLeft = row.isDir ? nameLeft + 28.0f : nameLeft;
+        DrawLabel(target, caption_.Get(), name,
+                  D2D1::RectF(nameTextLeft, textRowTop, nameRight, textRowBottom),
+                  textPrimary_.Get());
+        // 压缩后大小 / 原始大小 -- the two numeric cells, trailing on their own
+        // baselines. A folder has no byte stream, so it keeps the honest "--".
+        if (row.isDir) {
+          DrawNumericTrailing(target, L"--", packedLeft, packedRight, textRowTop,
                               textSecondary_.Get());
-          DrawNumericTrailing(target, L"--", packedLeft, packedRight, top + 6.0f,
+          DrawNumericTrailing(target, L"--", originalLeft, originalRight, textRowTop,
                               textSecondary_.Get());
-        }
-      } else {
-        if (drawGlyphs) {
-          DrawLabel(target, caption_.Get(), name,
-                    D2D1::RectF(nameLeft, top + 5.0f, nameRight, bottom - 4.0f),
-                    textPrimary_.Get());
-          DrawNumericTrailing(target, Utf8(prism::list::FormatBytes(row.size)), sizeLeft,
-                              sizeRight, top + 6.0f, textPrimary_.Get());
+        } else {
           DrawNumericTrailing(target, Utf8(prism::list::FormatBytes(row.packedSize)),
-                              packedLeft, packedRight, top + 6.0f, textPrimary_.Get());
+                              packedLeft, packedRight, textRowTop, textPrimary_.Get());
+          DrawNumericTrailing(target, Utf8(prism::list::FormatBytes(row.size)),
+                              originalLeft, originalRight, textRowTop, textPrimary_.Get());
+        }
+        // 类型 -- the five-class Chinese name; an unknown extension is blank
+        // (ListColumns.hpp owns the table, so paint and L4 cannot disagree).
+        const std::wstring type = Utf8(prism::list::TypeLabelOf(row.name, row.isDir));
+        if (!type.empty()) {
+          DrawLabel(target, caption_.Get(), type,
+                    D2D1::RectF(typeLeft, textRowTop, typeRight, textRowBottom),
+                    textPrimary_.Get());
         }
       }
 
-      // 压缩率 cell -- C81/A3: THE canonical view string, shared with the
-      // info card and the status band. The micro-capsule bar (blueprint ch.
-      // 3.2.3) stays decorative and only shows for a real shrink; an expanded
-      // (">100% (...)") or unknown row renders the text across the column so
-      // the longer honest string fits.
+      // The compression-ratio capsule (C101) survives, but the 压缩率 COLUMN
+      // does not: Bandizip's fourth column is 类型 (design proposal's red line
+      // #5), so the bar is a READOUT UNDER the packed-size number -- 4 px tall,
+      // radius 2, at most 56 px, alpha 0.55, hue from the measured ratio. It
+      // stays inside the packed column, so the retired fifth column cannot come
+      // back by accident.
       if (prism::list::RatioBarVisible(row)) {
         const auto bar = prism::list::RatioBar(row);
-        const float trackX = ratioLeft + 8.0f;   // C109: the ratio column owns its origin
-        // C101 (ui-redesign-plan §2.2): the bar is a READOUT, not a rule. The
-        // shipped one was 6 px of full-alpha #007AFF across the entire 130 px
-        // ratio column -- the user's "刺眼荧光绿厚条". This one is 4 px tall with
-        // a 2 px radius, at most 56 px wide (it never spans the column), and its
-        // hue comes from the MEASURED ratio through PrismCore's RatioBarTint,
-        // where the mute (alpha 0.55 + desaturation) is explained and pinned.
         float barWidth = (std::min)(prism::list::kRatioBarMaxWidth,
-                                    static_cast<float>(cols.ratioW) - 64.0f);
+                                    static_cast<float>(cols.packed.Width()) - 64.0f);
         float halfH = prism::list::kRatioBarHeight * 0.5f;
         float radius = prism::list::kRatioBarRadius;
         const prism::list::Rgb tint = prism::list::RatioBarTint(bar->percent);
@@ -2433,15 +2525,16 @@ class GalleryRenderer {
             D2D1::ColorF(tint.r, tint.g, tint.b, prism::list::kRatioBarAlpha);
 #if defined(PRISM_C101_MUTANT_LOUD)
         // C101 MUTANT ACTIVE: the shipped bar is restored -- 6 px, radius 3,
-        // alpha 1.0, the full ratio column, the file-kind colour. The suite's
+        // alpha 1.0, the full column, the file-kind colour. The suite's
         // geometry, alpha and pixel assertions MUST go red on this arm.
-        barWidth = static_cast<float>(cols.ratioW) - 64.0f;
+        barWidth = static_cast<float>(cols.packed.Width());
         halfH = 3.0f;
         radius = 3.0f;
         fillColor = BarColorOf(bar->color);
         ++dbgMutantRatioBars;
 #endif
-        const float cy = top + prism::layout::kListRowHeight / 2.0f;
+        const float cy = bottom - 3.0f;
+        const float trackX = packedRight - barWidth;
         const D2D1_ROUNDED_RECT track =
             D2D1::RoundedRect(D2D1::RectF(trackX, cy - halfH, trackX + barWidth, cy + halfH),
                               radius, radius);
@@ -2454,24 +2547,12 @@ class GalleryRenderer {
         target->FillRoundedRectangle(fill, tileBorder_.Get());
         // C101: the read-back seam. The colour is taken from the brush AFTER
         // SetColor, so the suite measures what reached the device rather than
-        // what the caller intended.
-        // The backdrop pass paints the same bars into a 1/8 target; the
-        // read-back is about the frame the user sees, so only that pass records.
+        // what the caller intended. The backdrop pass paints the same bars into
+        // a 1/8 target; only the presented frame records.
         if (!backdropPass) {
           RecordRatioBar(track.rect, fill.rect, radius, tileBorder_->GetColor(), bar->percent);
         }
         tileBorder_->SetColor(kTileBorder);
-        if (drawGlyphs) {
-          // C109 + C101 merge: ONE percentage draw, on the tabular face, ending
-          // on the ratio column's baseline. (The rebase left C101's old
-          // DrawTrailingLabel call here as well; two runs would double-paint.)
-          const std::wstring pct = Utf8(prism::list::RatioCellText(row));
-          DrawNumericTrailing(target, pct, ratioRight - 48.0f, ratioRight, top + 6.0f,
-                              textSecondary_.Get());
-        }
-      } else if (drawGlyphs) {
-        DrawNumericTrailing(target, Utf8(prism::list::RatioCellText(row)), ratioLeft + 8.0f,
-                            ratioRight, top + 6.0f, textSecondary_.Get());
       }
     }
   }
@@ -2873,6 +2954,7 @@ class GalleryRenderer {
     if (title_) ++n;
     if (small_) ++n;
     if (numbers_) ++n;  // C109
+    if (columnHeader_) ++n;  // C122
     if (sidebarLabel_) ++n;
     if (sidebarSmall_) ++n;
     if (sidebarStatus_) ++n;
@@ -2913,6 +2995,7 @@ class GalleryRenderer {
     title_.Reset();
     small_.Reset();
     numbers_.Reset();  // C109
+    columnHeader_.Reset();  // C122
     sidebarLabel_.Reset();
     sidebarSmall_.Reset();
     sidebarStatus_.Reset();
@@ -2956,7 +3039,8 @@ class GalleryRenderer {
   ComPtr<ID2D1SolidColorBrush> textPrimary_, textSecondary_;
   // C29 sidebar: one recolourable brush + the two single-line text formats.
   ComPtr<ID2D1SolidColorBrush> sidebarBrush_;
-  ComPtr<IDWriteTextFormat> numbers_;  // C109: size/packed/ratio columns
+  ComPtr<IDWriteTextFormat> numbers_;  // C109: size/packed columns
+  ComPtr<IDWriteTextFormat> columnHeader_;  // C122: the 11 px list header
   ComPtr<IDWriteTextFormat> sidebarLabel_, sidebarSmall_;
   // C79: the capsule readout (12 px); headings reuse sidebarSmall_. C105: it is
   // the card's VALUE line (primary role), and sidebarCardLabel_ is the 10 px

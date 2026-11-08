@@ -194,6 +194,8 @@ void InstallChineseLabels(GalleryWindow* window) {
                             L"\u65B0\u5EFA\u6587\u4EF6\u5939");
   window->SetAboutMenuLabels(L"Help", L"\u5173\u4E8E PrismArchive...");
   window->SetSettingsMenuLabel(L"\u8BBE\u7F6E(&S)...");
+  // C122: 视图(V) sits between 设置 and 帮助 (Bandizip's order).
+  window->SetViewMenuLabels(L"\u89C6\u56FE(&V)", L"\u5217\u8868(&L)", L"\u7F51\u683C(&G)");
 }
 
 }  // namespace
@@ -413,8 +415,9 @@ PRISM_TEST("c83 the caption and the menu bar are the canvas's surface") {
 }
 
 // ---------------------------------------------------------------------------
-// 3. THE MENU STRUCTURE the owner-drawn bar must not lose: four top-level
-//    items, the Settings command, both popups, and the exact words.
+// 3. THE MENU STRUCTURE the owner-drawn bar must not lose: five top-level
+//    items, the Settings command, the File/Edit/View/Help popups, and the exact
+//    words. (C122 added 视图 between 设置 and 帮助.)
 // ---------------------------------------------------------------------------
 PRISM_TEST("c83 the owner-drawn bar keeps the menu structure and its words") {
   GalleryWindow window;
@@ -426,19 +429,21 @@ PRISM_TEST("c83 the owner-drawn bar keeps the menu structure and its words") {
   HMENU bar = ::GetMenu(window.Hwnd());
   PRISM_CHECK(bar != nullptr);
   if (bar != nullptr) {
-    PRISM_CHECK_EQ(::GetMenuItemCount(bar), 4);
+    PRISM_CHECK_EQ(::GetMenuItemCount(bar), 5);
     PRISM_CHECK(::GetSubMenu(bar, 0) != nullptr);  // File
     PRISM_CHECK(::GetSubMenu(bar, 1) != nullptr);  // Edit
-    PRISM_CHECK(::GetSubMenu(bar, 3) != nullptr);  // Help
+    PRISM_CHECK(::GetSubMenu(bar, 3) != nullptr);  // View (C122)
+    PRISM_CHECK(::GetSubMenu(bar, 4) != nullptr);  // Help
     PRISM_CHECK_EQ(::GetMenuItemID(bar, 2),
                    static_cast<UINT>(prism::win::settingsui::SettingsDialog::kMenuSettingsId));
     // The item data is the text (an owner-drawn item has no OS string): the
     // window's own accessor is the one source the painter and this check share.
-    PRISM_CHECK_EQ(window.MenuBarItemCount(), 4);
+    PRISM_CHECK_EQ(window.MenuBarItemCount(), 5);
     PRISM_CHECK(window.MenuBarItemText(0) == L"\u6587\u4EF6");
     PRISM_CHECK(window.MenuBarItemText(1) == L"\u7F16\u8F91");
     PRISM_CHECK(window.MenuBarItemText(2) == L"\u8BBE\u7F6E(&S)...");
-    PRISM_CHECK(window.MenuBarItemText(3) == L"Help");
+    PRISM_CHECK(window.MenuBarItemText(3) == L"\u89C6\u56FE(&V)");  // C122
+    PRISM_CHECK(window.MenuBarItemText(4) == L"Help");
     // The Edit menu's three commands are still there and still greyed while the
     // archive is read-only (C54's rule survives the owner-draw rewrite).
     HMENU edit = ::GetSubMenu(bar, 1);

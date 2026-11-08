@@ -779,27 +779,46 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
   PRISM_CHECK(window.GlassOpticsError().empty());
   PRISM_CHECK_EQ(window.GlassOpticsInitializations(), 1);
 
-  // C123 CHANGED THIS CASE (documented in the card's PR, one line per
-  // assertion): the island used to be the breadcrumb PILL. The pill is gone --
-  // the crumb is a 28 px path bar painted into the page -- so the product window
-  // now publishes NO island rectangle at all. Returning the legacy pill here
-  // would composite a blurred 44 px rectangle over the toolbar: a ghost of a
-  // control the user can no longer click. The contract this case now pins is
-  // exactly that absence.
+  // C123 CHANGED THIS CASE; C126 CHANGED IT BACK -- with a different rectangle.
+  // Every changed assertion, one line each (CONTRACTS D3):
+  //
+  //   file:line (C123)     old assertion                          why it is a DEFECT now
+  //   -------------------  -------------------------------------  ----------------------------
+  //   test_c107_optics.cpp:795  PRISM_CHECK_EQ(panel.x, 0u)       C126 gives the island its host
+  //   test_c107_optics.cpp:796  PRISM_CHECK_EQ(panel.y, 0u)       again -- the flush TOOLBAR band
+  //   test_c107_optics.cpp:797  PRISM_CHECK_EQ(panel.w, 0u)       (not the deleted pill, and not
+  //   test_c107_optics.cpp:798  PRISM_CHECK_EQ(panel.h, 0u)       0x0). "No island" was the
+  //   test_c107_optics.cpp:818  PRISM_CHECK_EQ(GlassComposedFrames(), 0)   correct C123 state,
+  //   test_c107_optics.cpp:819  PRISM_CHECK_EQ(GlassBackdropCaptures(), 0) not a contract; with a
+  //   test_c107_optics.cpp:820  ...BackdropBytes(), 0)                     host the chain MUST run.
+  //
+  // NEW assertions: the panel is prism::layout::ToolbarBandRect, and a bounded
+  // pump of the window's own WM_PAINT path really feeds the chain (composed
+  // frames > 0, backdrop captures > 0, backdrop bytes > 0). WHAT MAKES THEM RED:
+  // PRISM_C123_MUTANT_PILL_ISLAND publishes the old 560x44 pill instead, so the
+  // band equality fails first and the entry prints the CAUGHT marker.
+  const prism::layout::Layout layout = window.LayoutForTest();
+  const prism::layout::Rect toolbar = prism::layout::ToolbarBandRect(layout);
   const prism::glass::IslandRect panel = window.GlassPanelRect();
-  std::printf("  island rect: %u,%u %ux%u (C123: the crumb is a path bar, no island)\n",
-              panel.x, panel.y, panel.w, panel.h);
+  std::printf("  island rect: %u,%u %ux%u (C126: toolbar band %d,%d %dx%d)\n", panel.x,
+              panel.y, panel.w, panel.h, toolbar.left, toolbar.top, toolbar.Width(),
+              toolbar.Height());
 #if defined(PRISM_C123_MUTANT_PILL_ISLAND)
-  g_pillIslandObserved = panel.w != 0 || panel.h != 0;
+  g_pillIslandObserved = !toolbar.Empty() &&
+                         (static_cast<int>(panel.x) != toolbar.left ||
+                          static_cast<int>(panel.y) != toolbar.top ||
+                          static_cast<int>(panel.w) != toolbar.Width() ||
+                          static_cast<int>(panel.h) != toolbar.Height());
 #endif
-  PRISM_CHECK_EQ(panel.x, 0u);
-  PRISM_CHECK_EQ(panel.y, 0u);
-  PRISM_CHECK_EQ(panel.w, 0u);
-  PRISM_CHECK_EQ(panel.h, 0u);
+  PRISM_CHECK(!toolbar.Empty());
+  PRISM_CHECK_EQ(static_cast<int>(panel.x), toolbar.left);
+  PRISM_CHECK_EQ(static_cast<int>(panel.y), toolbar.top);
+  PRISM_CHECK_EQ(static_cast<int>(panel.w), toolbar.Width());
+  PRISM_CHECK_EQ(static_cast<int>(panel.h), toolbar.Height());
 
-  // Frames: pump bounded (D29) through the window's own WM_PAINT path. With no
-  // panel there is nothing to compose, so the chain must stay at frame 0 -- a
-  // non-zero count here would mean a phantom surface was still being fed.
+  // Frames: pump bounded (D29) through the window's own WM_PAINT path. The panel
+  // exists now, so the chain MUST be fed -- a zero here would mean the island
+  // C126 restored is a rectangle with no composition behind it.
   HWND hwnd = window.Hwnd();
   const ULONGLONG deadline = GetTickCount64() + 1500;
   while (GetTickCount64() < deadline) {
@@ -815,9 +834,11 @@ PRISM_TEST("c107_product_window_connects_the_chain") {
   std::printf("  composed frames=%d, backdrop captures=%d, backdrop bytes=%zu, transient=%zu\n",
               window.GlassComposedFrames(), window.GlassBackdropCaptures(),
               window.GlassBackdropBytes(), window.GlassTransientBytes());
-  PRISM_CHECK_EQ(window.GlassComposedFrames(), 0);
-  PRISM_CHECK_EQ(window.GlassBackdropCaptures(), 0);
-  PRISM_CHECK_EQ(window.GlassBackdropBytes(), static_cast<size_t>(0));
+  // C126 (all three shown to be able to go red by the pill-island arm, where the
+  // panel is the wrong rectangle and the first assertion already fails):
+  PRISM_CHECK(window.GlassComposedFrames() > 0);
+  PRISM_CHECK(window.GlassBackdropCaptures() > 0);
+  PRISM_CHECK(window.GlassBackdropBytes() > static_cast<size_t>(0));
 }
 
 // The suite's own marker (D1): printed only when every check passed, with the

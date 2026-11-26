@@ -581,6 +581,11 @@ struct OpenIoCounters {
   std::atomic<uint64_t> mutantVolumeConcatOff{0};
   // C82: sets opened through the concatenated stream (observation, not a gate).
   std::atomic<uint64_t> volumeConcatOpens{0};
+  // C138: multi-volume OpenCallback openings + negative-control counters (D3/D27).
+  std::atomic<uint64_t> volumeCallbackOpens{0};
+  std::atomic<uint64_t> mutantNoVolumeCallback{0};
+  std::atomic<uint64_t> mutantNoMemCrypto{0};
+  std::atomic<uint64_t> mutantNoAmbiguity{0};
 };
 
 inline OpenIoCounters& IoCounters() {
@@ -769,6 +774,51 @@ inline bool VolumeSetComplete(const VolumeStream& stream, const prism::VolumePla
   return false;
 }
 
+// C138: SplitZip (.z01/.z02/.../.zip) stores its Central Directory and EOCD in
+// the final .zip volume, where EOCD+4 records numberOfThisDisk (0-based). If a
+// middle .zNN part was deleted, PlanSplitZip stops before the gap and pairs the
+// prefix with .zip, so EOCD.numberOfThisDisk exceeds the contiguous part count.
+inline bool SplitZipSetComplete(const InFileStream& zipStream, const prism::VolumePlan& plan,
+                                std::string* reason) {
+  if (plan.family != prism::VolumeFamily::SplitZip || plan.volumes.size() < 2) return true;
+  abi::UInt64 sizeRaw = 0;
+  if (FAILED(const_cast<InFileStream&>(zipStream).GetSize(&sizeRaw)) || sizeRaw < 22) return true;
+  const abi::UInt64 tailLen = (std::min)(sizeRaw, static_cast<abi::UInt64>(66000));
+  const abi::Int64 startOff = static_cast<abi::Int64>(sizeRaw - tailLen);
+  abi::UInt64 pos = 0;
+  if (FAILED(const_cast<InFileStream&>(zipStream).Seek(startOff, 0, &pos))) return true;
+  std::vector<uint8_t> buf(static_cast<size_t>(tailLen));
+  abi::UInt32 got = 0;
+  if (FAILED(const_cast<InFileStream&>(zipStream).Read(buf.data(), static_cast<abi::UInt32>(buf.size()),
+                                                       &got)) ||
+      got < 22) {
+    return true;
+  }
+  for (size_t i = got - 22 + 1; i-- > 0;) {
+    if (buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x05 && buf[i + 3] == 0x06) {
+      const uint16_t commentLen = static_cast<uint16_t>(buf[i + 20] | (buf[i + 21] << 8));
+      if (i + 22 + commentLen != got) continue;
+      const uint16_t thisDisk = static_cast<uint16_t>(buf[i + 4] | (buf[i + 5] << 8));
+      if (thisDisk == 0xFFFFu) return true;  // Zip64: leave to engine volume callback
+      // plan.volumes holds contiguous .z01..zK plus .zip at back(), so total present = K+1
+      // and expected total = thisDisk + 1. Missing when K + 1 < thisDisk + 1.
+      if (plan.volumes.size() <= static_cast<size_t>(thisDisk)) {
+        const uint64_t absentOrdinal = static_cast<uint64_t>(plan.volumes.size());
+        const std::string missing =
+            prism::volume_detail::MissingName(plan.family, plan.stem, absentOrdinal, 2);
+        if (reason != nullptr) {
+          *reason = "missing volume: " + missing + " (zip EOCD expects " +
+                    std::to_string(static_cast<unsigned>(thisDisk) + 1u) +
+                    " volumes; contiguous prefix ends before it)";
+        }
+        return false;
+      }
+      return true;
+    }
+  }
+  return true;
+}
+
 inline bool ReadSniffWindow(abi::IInStream& stream, abi::IStreamGetSize& streamSize,
                             sniff::Window* window,
                             std::vector<uint8_t>* head, std::vector<uint8_t>* tail,
@@ -887,6 +937,89 @@ class MemoryOutStream final : public abi::ISequentialOutStream {
   LONG refs_ = 1;
 };
 
+namespace bridge_detail {
+
+// {23170F69-40C1-278A-0000-000600030000} (IArchive.h: family 06, member 03)
+constexpr GUID kIID_ISetProperties = {0x23170F69, 0x40C1, 0x278A,
+                                      {0x00, 0x00, 0x00, 0x06, 0x00, 0x03, 0x00, 0x00}};
+
+struct ISetProperties : public IUnknown {
+  STDMETHOD(SetProperties)(const wchar_t* const* names, const PROPVARIANT* values,
+                           abi::UInt32 numProps) PURE;
+};
+
+inline void ScrubWide(std::wstring& s) {
+  if (!s.empty()) {
+    volatile wchar_t* p = s.data();
+    for (size_t i = 0; i < s.size(); ++i) p[i] = L'\0';
+    s.clear();
+  }
+}
+
+inline prism::Encoding EncodingForCodePage(uint32_t cp) {
+  switch (cp) {
+    case 65001: return prism::Encoding::Utf8;
+    case 936:
+    case 54936: return prism::Encoding::Gb18030;
+    case 950: return prism::Encoding::Big5;
+    case 932: return prism::Encoding::ShiftJis;
+    case 949: return prism::Encoding::EucKr;
+    case 28591: return prism::Encoding::Latin1;
+    default: return prism::Encoding::Unknown;
+  }
+}
+
+inline void ApplyHandlerCodePage(abi::IInArchive* candidate, uint32_t codePage) {
+  if (!candidate || codePage == 0) return;
+  ISetProperties* props = nullptr;
+  if (FAILED(candidate->QueryInterface(kIID_ISetProperties, reinterpret_cast<void**>(&props))) ||
+      !props) {
+    return;
+  }
+  const wchar_t* name = L"cp";
+  PROPVARIANT value{};
+  PropVariantInit(&value);
+  value.vt = VT_UI4;
+  value.ulVal = static_cast<ULONG>(codePage);
+  (void)props->SetProperties(&name, &value, 1);
+  PropVariantClear(&value);
+  props->Release();
+}
+
+// Queries available free space on the target volume (walking up to the nearest
+// existing ancestor directory when targetRoot has not been created yet).
+inline uint64_t QueryTargetVolumeFreeBytes(const std::string& targetRootUtf8) {
+  std::wstring path = Utf8ToWide(targetRootUtf8);
+  for (wchar_t& c : path) {
+    if (c == L'/') c = L'\\';
+  }
+  while (!path.empty()) {
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      ULARGE_INTEGER avail{};
+      if (GetDiskFreeSpaceExW(path.c_str(), &avail, nullptr, nullptr) != FALSE) {
+        return static_cast<uint64_t>(avail.QuadPart);
+      }
+      break;
+    }
+    const size_t slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos) break;
+    if (slash == 2 && path.size() >= 3 && path[1] == L':') {
+      // Drive root "C:\"
+      const std::wstring root = path.substr(0, 3);
+      ULARGE_INTEGER avail{};
+      if (GetDiskFreeSpaceExW(root.c_str(), &avail, nullptr, nullptr) != FALSE) {
+        return static_cast<uint64_t>(avail.QuadPart);
+      }
+      break;
+    }
+    path.resize(slash);
+  }
+  return 0;
+}
+
+}  // namespace bridge_detail
+
 // ---------------------------------------------------------------------------
 // Sink 2: final physical file (NT long-path aware, \\?\ prefix)
 // ---------------------------------------------------------------------------
@@ -909,10 +1042,14 @@ class DiskOutStream final : public abi::IOutStream {
   // here instead of guessed from "files done / files requested". Optional: every
   // other caller (writer, editor, virtual tree) leaves it empty.
   using WriteProgress = std::function<void(uint64_t)>;
+  // C137: per-chunk BombFuse gate. Returning false aborts the write immediately
+  // (before the bomb finishes filling the volume).
+  using WriteGate = std::function<bool(uint64_t)>;
 
   explicit DiskOutStream(std::wstring finalPath) : path_(std::move(finalPath)) {}
 
   void SetWriteProgress(WriteProgress progress) { progress_ = std::move(progress); }
+  void SetWriteGate(WriteGate gate) { gate_ = std::move(gate); }
 
   bool Open() {
     // Blueprint ch. 7.2: \\?\ lifts the MAX_PATH ceiling and allows the Linux
@@ -963,6 +1100,7 @@ class DiskOutStream final : public abi::IOutStream {
     }
     written_ += done;
     if (processed) *processed = done;
+    if (gate_ && done > 0 && !gate_(done)) return E_ABORT;
     if (progress_) progress_(written_);
     return S_OK;
   }
@@ -1006,17 +1144,27 @@ class DiskOutStream final : public abi::IOutStream {
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   uint64_t written_ = 0;
   WriteProgress progress_;
+  WriteGate gate_;
   LONG refs_ = 1;
 };
 
 // ---------------------------------------------------------------------------
-// Open callback (also doubles as the password provider)
+// Open callback (doubles as password provider + IArchiveOpenVolumeCallback)
 // ---------------------------------------------------------------------------
-class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICryptoGetTextPassword {
-  // (IArchiveOpenCallback is IUnknown-based; ICryptoGetTextPassword is queried
-  //  separately when a password is needed.)
+class OpenCallback final : public abi::IArchiveOpenCallback,
+                           public abi::ICryptoGetTextPassword,
+                           public IArchiveOpenVolumeCallback {
+  // (IArchiveOpenCallback is IUnknown-based; ICryptoGetTextPassword and
+  //  IArchiveOpenVolumeCallback are queried separately when needed.)
  public:
-  explicit OpenCallback(std::wstring password = {}) : password_(std::move(password)) {}
+  explicit OpenCallback(std::wstring password = {}, VolumeOpenCallback* volumeCallback = nullptr)
+      : password_(std::move(password)), volumeCallback_(volumeCallback) {
+    if (volumeCallback_) volumeCallback_->AddRef();
+  }
+  ~OpenCallback() {
+    bridge_detail::ScrubWide(password_);
+    if (volumeCallback_) volumeCallback_->Release();
+  }
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
@@ -1024,6 +1172,14 @@ class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICrypto
       *out = static_cast<abi::IArchiveOpenCallback*>(this);
     } else if (iid == abi::IID_ICryptoGetTextPassword) {
       *out = static_cast<abi::ICryptoGetTextPassword*>(this);
+    } else if (volumeCallback_ != nullptr && iid == IID_IArchiveOpenVolumeCallback) {
+#if defined(PRISM_C138_MUTANT_NO_VOLUME_CALLBACK)
+      IoCounters().mutantNoVolumeCallback.fetch_add(1, std::memory_order_relaxed);
+      *out = nullptr;
+      return E_NOINTERFACE;
+#else
+      *out = static_cast<IArchiveOpenVolumeCallback*>(this);
+#endif
     } else {
       *out = nullptr;
       return E_NOINTERFACE;
@@ -1064,8 +1220,28 @@ class OpenCallback final : public abi::IArchiveOpenCallback, public abi::ICrypto
     return *password ? S_OK : E_OUTOFMEMORY;
   }
 
+  // IArchiveOpenVolumeCallback -- delegates to VolumeOpenCallback (VolumeStream.hpp)
+  STDMETHODIMP GetProperty(PROPID propID, PROPVARIANT* value) override {
+    if (!volumeCallback_) {
+      if (!value) return E_POINTER;
+      PropVariantInit(value);
+      return S_OK;
+    }
+    return volumeCallback_->GetProperty(propID, value);
+  }
+
+  STDMETHODIMP GetStream(const wchar_t* name, abi::IInStream** inStream) override {
+    if (!volumeCallback_) {
+      if (!inStream) return E_POINTER;
+      *inStream = nullptr;
+      return S_FALSE;
+    }
+    return volumeCallback_->GetStream(name, inStream);
+  }
+
  private:
   std::wstring password_;
+  VolumeOpenCallback* volumeCallback_ = nullptr;
   LONG refs_ = 1;
 };
 
@@ -1158,6 +1334,7 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     uint64_t bytesWritten = 0;
     bool guardTripped = false;
     bool fuseTripped = false;
+    bool fuseCritical = false;
     std::string guardReason;
     std::string fuseReason;
     std::vector<std::string> writtenPaths;
@@ -1237,6 +1414,16 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     }
   }
 
+  ~SmartExtractCallback() {
+    if (currentSink_) {
+      currentSink_->Release();
+      currentSink_ = nullptr;
+    }
+    if (result_.fuseTripped && !currentPath_.empty()) {
+      DeleteFileW((L"\\\\?\\" + ToBackslashes(Utf8ToWide(currentPath_))).c_str());
+    }
+  }
+
   const Result& result() const { return result_; }
   void SetFreeDiskBytes(uint64_t freeBytes) { freeDiskBytes_ = freeBytes; }
 
@@ -1269,18 +1456,10 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     if (progress_ && plannedTotal_ > 0) {
       progress_(completedBytes_ + (currentSink_ ? currentSink_->written() : 0), plannedTotal_);
     }
-    if (completeValue && fuse_) {
+    if (completeValue && fuse_ && !result_.fuseTripped) {
       // The fuse is a sliding-window monitor, so it must be fed deltas.
-      const uint64_t produced = *completeValue;
-      const uint64_t deltaPacked = packedSoFar_ - fedPacked_;
-      const uint64_t deltaProduced = produced > fedProduced_ ? produced - fedProduced_ : 0;
-      fedPacked_ = packedSoFar_;
-      fedProduced_ = produced;
-      if (!fuse_->Feed(deltaPacked, deltaProduced, freeDiskBytes_)) {
-        result_.fuseTripped = true;
-        result_.fuseReason = fuse_->reason();
-        return E_ABORT;
-      }
+      const uint64_t produced = (std::max)(static_cast<uint64_t>(*completeValue), actualWritten_);
+      if (!AdvanceBombFuse(produced)) return E_ABORT;
     }
     return S_OK;
   }
@@ -1307,8 +1486,6 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       result_.guardReason = "blocked out-of-root write: " + finalPath;
       return E_ABORT;
     }
-
-    packedSoFar_ += item.packSize ? item.packSize : 1;
 
     // C71: extract.overwrite. Before this decision every policy behaved like
     // "replace" because DiskOutStream opens with CREATE_ALWAYS. A skip must not
@@ -1342,6 +1519,9 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
       }
       targetPath = decided.path;
     }
+
+    if (fuse_) fuse_->BeginFile(item.packSize);
+    packedSoFar_ += item.packSize ? item.packSize : 1;
 
     const std::wstring wide = Utf8ToWide(targetPath);
     CreateParentDirectories(wide);
@@ -1378,6 +1558,12 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
         progress_(completedBytes_ + itemWritten, plannedTotal_);
       }
     });
+    if (fuse_) {
+      sink->SetWriteGate([this](uint64_t chunkBytes) {
+        actualWritten_ += chunkBytes;
+        return AdvanceBombFuse(actualWritten_);
+      });
+    }
     *outStream = sink;       // engine's (the one created by operator new)
     return S_OK;
   }
@@ -1404,7 +1590,9 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     ++MutantIgnoredOpResultHits();
     operationResult = 0;  // the pre-C26 defect, injected on purpose
 #endif
-    if (operationResult == 0) {
+    const bool abortedByFuse = result_.fuseTripped;
+    const std::string finishedPath = currentPath_;
+    if (operationResult == 0 && !abortedByFuse) {
       if (!currentPath_.empty()) {
         ++result_.filesWritten;
         result_.writtenPaths.push_back(currentPath_);
@@ -1413,7 +1601,7 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
           completedBytes_ += currentSink_->written();
         }
       }
-    } else {
+    } else if (!abortedByFuse) {
       RecordFailure(operationResult);
     }
     // Drop OUR reference (see GetStream); the engine drops its own when it is
@@ -1422,10 +1610,29 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
     currentSink_ = nullptr;
     currentPath_.clear();
     currentIndex_ = 0;
-    return S_OK;
+    if (abortedByFuse && !finishedPath.empty()) {
+      DeleteFileW((L"\\\\?\\" + ToBackslashes(Utf8ToWide(finishedPath))).c_str());
+    }
+    return abortedByFuse ? E_ABORT : S_OK;
   }
 
  private:
+  bool AdvanceBombFuse(uint64_t totalProduced) {
+    if (!fuse_) return true;
+    if (result_.fuseTripped) return false;
+    const uint64_t deltaPacked = packedSoFar_ > fedPacked_ ? packedSoFar_ - fedPacked_ : 0;
+    const uint64_t deltaProduced = totalProduced > fedProduced_ ? totalProduced - fedProduced_ : 0;
+    if (deltaPacked == 0 && deltaProduced == 0) return true;
+    fedPacked_ = packedSoFar_;
+    fedProduced_ = totalProduced;
+    if (!fuse_->Feed(deltaPacked, deltaProduced, freeDiskBytes_)) {
+      result_.fuseTripped = true;
+      result_.fuseCritical = fuse_->critical();
+      result_.fuseReason = fuse_->reason();
+      return false;
+    }
+    return true;
+  }
   // Naming an unknown coder: 7-Zip reports it by its hex method id. 04F71101 is
   // zstd (7-Zip Zstandard), the method that produced this card's fixture.
   static std::string FriendlyMethodName(const std::string& raw) {
@@ -1527,6 +1734,7 @@ class SmartExtractCallback final : public abi::IArchiveExtractCallback {
   uint64_t packedSoFar_ = 0;
   uint64_t fedPacked_ = 0;
   uint64_t fedProduced_ = 0;
+  uint64_t actualWritten_ = 0;
   uint64_t freeDiskBytes_ = 0;
   abi::UInt64 total_ = 0;
   // C71/C94: extract.overwrite inputs. The exists probe is injected so this
@@ -1679,19 +1887,44 @@ class ArchiveReader {
       : library_(library), transcoder_(transcoder) {}
 
   ~ArchiveReader() {
+    Close();
+    bridge_detail::ScrubWide(lastPassword_);
+  }
+
+  bool Open(const std::wstring& archivePath, const std::wstring& password = {},
+            uint32_t codePage = 0) {
+    // Release any previous state so Open()/ReopenWithCodePage() never leaks.
     if (archive_) {
       archive_->Close();
       archive_->Release();
+      archive_ = nullptr;
     }
-    if (stream_) stream_->Release();
-    if (volumeStream_) volumeStream_->Release();
-  }
-
-  bool Open(const std::wstring& archivePath, const std::wstring& password = {}) {
+    if (stream_) {
+      stream_->Release();
+      stream_ = nullptr;
+    }
+    if (volumeStream_) {
+      volumeStream_->Release();
+      volumeStream_ = nullptr;
+    }
+    if (volumeCallback_) {
+      volumeCallback_->Release();
+      volumeCallback_ = nullptr;
+    }
+    openTrace_.clear();
+    propTrace_.clear();
+    propIdSet_.clear();
     // C85: a stale reason from a previous Open() on this reader is worse than
     // none -- the dialog would explain the PREVIOUS file's failure.
     failureReason_.clear();
     failureHr_ = 0;
+    unsupportedFormat_.clear();
+
+    lastPath_ = archivePath;
+    lastPassword_ = password;
+    password_ = password;
+    codePage_ = codePage;
+
     auto hr = [this](const char* what, HRESULT code) {
       char buf[80];
       std::snprintf(buf, sizeof(buf), "%s hr=0x%08lX; ", what,
@@ -1699,23 +1932,20 @@ class ArchiveReader {
       openTrace_ += buf;
       return code;
     };
-    // C82: a numeric-split set (*.7z.001, or *.001 with increasing siblings)
-    // must reach the handler as ONE seekable stream across its volumes. The
-    // pre-C82 shape handed the bare .001 over; the 7z handler then failed
-    // addressing past the first volume and the open died as
-    // "declined=7z reason=handler-rejected" even though real 7-Zip accepts the
-    // same set (it concatenates by the .7z.001 naming convention).
-    //
-    // The plan is built BEFORE any stream exists: a set with a hole refuses
-    // HERE, by name, instead of surfacing later as a corrupt-file verdict.
+    // C82 + C138: multi-volume planning across all four families.
+    //   * NumericSplit (.7z.001 / .zip.001) -> VolumeStream concatenation + start header check.
+    //   * SplitZip (.z01/.zip), RarNew (.part1.rar), RarOld (.r00/.rar) ->
+    //     VolumeOpenCallback (IArchiveOpenVolumeCallback) wired into OpenCallback.
     prism::VolumePlan volumePlan;
     bool concatVolumes = false;
+    std::wstring openPath = archivePath;
     wchar_t concatMutant[64]{};
     const bool mutantConcatOff = GetEnvironmentVariableW(L"PRISM_C82_MUTANT_NO_VOLUME_CONCAT",
                                                          concatMutant, ARRAYSIZE(concatMutant)) > 0;
+    const std::wstring volumeDir = DirectoryOfVolumePath(archivePath);
     if (!mutantConcatOff) {
       volumePlan = prism::MakeVolumePlan(WideToUtf8(archivePath),
-                                         ListVolumeSiblings(DirectoryOfVolumePath(archivePath)));
+                                         ListVolumeSiblings(volumeDir));
       if (volumePlan.family == VolumeFamily::NumericSplit) {
         if (!volumePlan.ok()) {
           // A real set with a gap, a wrong start ordinal or a bad order: refuse
@@ -1736,6 +1966,30 @@ class ArchiveReader {
         const bool isSevenZipSplit =
             dot != std::string::npos && AllDigitsAscii(baseLower.substr(dot + 4));
         concatVolumes = isSevenZipSplit || volumePlan.volumes.size() >= 2;
+      } else if (volumePlan.family == VolumeFamily::SplitZip ||
+                 volumePlan.family == VolumeFamily::RarNew ||
+                 volumePlan.family == VolumeFamily::RarOld) {
+        if (!volumePlan.ok()) {
+          failureReason_ = volumePlan.error;
+          failureHr_ = static_cast<unsigned long>(E_FAIL);
+          openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                        " family=" + std::string(prism::ToString(volumePlan.family)) +
+                        " reason=missing-volume; ";
+          return false;
+        }
+        // Primary volume handed as the initial IInStream:
+        //   SplitZip -> final .zip (holds central directory + EOCD)
+        //   RarNew   -> .part1.rar (first volume)
+        //   RarOld   -> .rar (main volume; .r00.. are continuation parts)
+        const std::string primaryName =
+            volumePlan.family == VolumeFamily::RarNew ? volumePlan.volumes.front().name
+                                                      : volumePlan.volumes.back().name;
+        openPath = JoinVolumePath(volumeDir, primaryName);
+        volumeCallback_ = new VolumeOpenCallback(volumeDir, volumePlan, primaryName);
+        IoCounters().volumeCallbackOpens.fetch_add(1, std::memory_order_relaxed);
+        openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                      " family=" + std::string(prism::ToString(volumePlan.family)) +
+                      " reason=volume-callback; ";
       }
     } else {
       IoCounters().mutantVolumeConcatOff.fetch_add(1, std::memory_order_relaxed);
@@ -1743,7 +1997,7 @@ class ArchiveReader {
     if (concatVolumes) {
       volumeStream_ = new VolumeStream();
       std::string volumeError;
-      if (!volumeStream_->Open(DirectoryOfVolumePath(archivePath), volumePlan, &volumeError)) {
+      if (!volumeStream_->Open(volumeDir, volumePlan, &volumeError)) {
         failureReason_ = volumeError.empty() ? "cannot open the volume set" : volumeError;
         failureHr_ = static_cast<unsigned long>(E_FAIL);
         openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
@@ -1769,15 +2023,22 @@ class ArchiveReader {
       }
     }
     if (!volumeStream_) {
-      stream_ = new InFileStream(archivePath);
+      stream_ = new InFileStream(openPath);
       if (!stream_->valid()) {
         // C85: the semicolon-after-nothing that the user saw. The Win32 code and
         // the path are both known here, so the sentence names them.
         const DWORD code = stream_->lastError();
-        failureReason_ = DescribeFileOpenFailure(archivePath, code);
+        failureReason_ = DescribeFileOpenFailure(openPath, code);
         failureHr_ = static_cast<unsigned long>(HRESULT_FROM_WIN32(code));
-        openTrace_ = std::string("CreateFileW failed path=") + WideToUtf8(archivePath) +
+        openTrace_ = std::string("CreateFileW failed path=") + WideToUtf8(openPath) +
                      " reason=win32-" + Win32CodeText(code) + "; ";
+        return false;
+      }
+      if (volumePlan.family == VolumeFamily::SplitZip &&
+          !SplitZipSetComplete(*stream_, volumePlan, &failureReason_)) {
+        failureHr_ = static_cast<unsigned long>(E_FAIL);
+        openTrace_ += "volumes=" + std::to_string(volumePlan.volumes.size()) +
+                      " family=SplitZip reason=missing-volume; ";
         return false;
       }
     }
@@ -1799,7 +2060,7 @@ class ArchiveReader {
     // fails by NAME instead (failureReason()/unsupportedFormat()). kHint and
     // kNone keep the full route + probe list, so a mislabeled or prefix-wrapped
     // file still opens.
-    const std::wstring extension = PathExtensionLower(archivePath);
+    const std::wstring extension = PathExtensionLower(openPath);
     const FormatRoute* route = FindRouteForExtension(extension);
     openTrace_ += "ext=" + (extension.empty() ? std::string("<none>") : WideToUtf8(extension));
     // The C26 trace token stays verbatim ("route=<handler>" / "route=probe"):
@@ -1925,6 +2186,7 @@ class ArchiveReader {
     // still carries a machine cause into the dialog.
     HRESULT lastDeclineHr = E_FAIL;
     const char* lastDeclineName = "";
+    const uint32_t handlerCodePage = codePage_ != 0 ? codePage_ : (transcoder_ ? 28591u : 0u);
     for (const Candidate& slot : candidates) {
       abi::IInArchive* candidate = nullptr;
       const char* name = slot.label;
@@ -1934,7 +2196,10 @@ class ArchiveReader {
         openTrace_ += "(no object) ";
         continue;
       }
-      auto* callback = new OpenCallback(password);
+      if (handlerCodePage != 0) {
+        bridge_detail::ApplyHandlerCodePage(candidate, handlerCodePage);
+      }
+      auto* callback = new OpenCallback(password, volumeCallback_);
       // A failed Open may leave the stream mid-file (the Zip handler reads
       // the header before rejecting): rewind so the next candidate sees the
       // real magic bytes, not the leftovers.
@@ -1960,6 +2225,14 @@ class ArchiveReader {
       lastDeclineHr = result;
       lastDeclineName = name;
       candidate->Release();
+    }
+    if (volumeCallback_ && !volumeCallback_->missingRequests().empty()) {
+      failureHr_ = static_cast<unsigned long>(lastDeclineHr);
+      failureReason_ = volumeCallback_->lastStreamError().empty()
+                           ? ("missing volume: " + volumeCallback_->missingRequests().front())
+                           : volumeCallback_->lastStreamError();
+      openTrace_ += "reason=missing-volume; ";
+      return false;
     }
     if (sniffIsFinal) {
       // Proven format, handler refused the file (truncated, corrupt, or an
@@ -2017,12 +2290,31 @@ class ArchiveReader {
       volumeStream_->Release();
       volumeStream_ = nullptr;
     }
+    if (volumeCallback_) {
+      volumeCallback_->Release();
+      volumeCallback_ = nullptr;
+    }
+    bridge_detail::ScrubWide(password_);
+    codePage_ = 0;
     openTrace_.clear();
     propTrace_.clear();
+    propIdSet_.clear();
     failureReason_.clear();
     unsupportedFormat_.clear();
   }
 
+  // C138: re-open the same archive with an explicit Windows code page (e.g.
+  // 936 GBK, 950 Big5, 932 Shift-JIS, 949 EUC-KR, 65001 UTF-8, or 0 for auto)
+  // so the UI can switch encodings cleanly when CharsetRepair flags ambiguity.
+  bool ReopenWithCodePage(uint32_t codePage) {
+    if (lastPath_.empty()) return false;
+    const std::wstring path = lastPath_;
+    const std::wstring password = lastPassword_;
+    Close();
+    return Open(path, password, codePage);
+  }
+
+  uint32_t codePage() const { return codePage_; }
   bool opened() const { return archive_ != nullptr; }
 
   // Blueprint ch. 2.2: a 50 000-entry directory tree in about a millisecond,
@@ -2057,11 +2349,23 @@ class ArchiveReader {
       item.mtime = static_cast<int64_t>(GetUInt64(i, pidMTime));
       item.encrypted = GetBool(i, pidEnc);
       if (pidBlock != 0) item.block = static_cast<uint32_t>(GetUInt64(i, pidBlock));
-      if (transcoder_) {
+      if (codePage_ != 0) {
+        item.pathEncoding = bridge_detail::EncodingForCodePage(codePage_);
+        item.pathAmbiguous = false;
+      } else if (transcoder_) {
         // Legacy CJK names are repaired here, at the single place where raw
         // archive bytes enter the product (blueprint ch. 7.1 defence #4).
         const auto repaired = RepairArchiveName(item.path, false, transcoder_);
         item.path = repaired.name;
+#if defined(PRISM_C138_MUTANT_NO_AMBIGUITY)
+        if (repaired.ambiguous) {
+          IoCounters().mutantNoAmbiguity.fetch_add(1, std::memory_order_relaxed);
+        }
+#else
+        item.pathAmbiguous = repaired.ambiguous;
+        item.pathEncoding = repaired.encoding;
+        item.pathAlternatives = repaired.alternatives;
+#endif
       }
       // 7-Zip reports kpidPath with native separators on Windows; PrismCore's
       // contract is UTF-8 + '/' everywhere.
@@ -2157,19 +2461,23 @@ class ArchiveReader {
 
   // Sink 1: thumbnail / preview extraction under a hard memory budget.
   std::optional<std::vector<uint8_t>> ExtractToMemory(
-      uint32_t index, size_t maxBytes = 16ull * 1024 * 1024) const {
+      uint32_t index, size_t maxBytes = 16ull * 1024 * 1024,
+      const std::wstring& passwordOverride = {}) const {
     if (!archive_) return std::nullopt;
     OperationScope operation(*this);
     if (!operation.Enter()) return std::nullopt;  // C41: one handler, one operation
+    const std::wstring& effectivePassword =
+        !passwordOverride.empty() ? passwordOverride : password_;
     auto* sink = new MemoryOutStream(maxBytes);
-    auto* callback = new MemoryExtractCallback(sink);
+    auto* callback = new MemoryExtractCallback(sink, effectivePassword);
     const abi::UInt32 idx = index;
     const HRESULT hr = archive_->Extract(&idx, 1, 0, callback);
     const bool tripped = sink->tripped();
+    const abi::Int32 opResult = callback->opResult();
     std::vector<uint8_t> out = sink->bytes();
     callback->Release();
     sink->Release();
-    if (FAILED(hr) || tripped) return std::nullopt;
+    if (FAILED(hr) || tripped || opResult != 0) return std::nullopt;
     return out;
   }
 
@@ -2218,6 +2526,7 @@ class ArchiveReader {
         std::vector<uint32_t>(indices.begin(), indices.end()), overwriteMode,
         std::move(overwritePrompt), std::move(exists), std::move(progress),
         std::move(overwriteBatchPrompt));
+    callback->SetFreeDiskBytes(bridge_detail::QueryTargetVolumeFreeBytes(targetRoot));
     const HRESULT hr =
         archive_->Extract(indices.data(), static_cast<abi::UInt32>(indices.size()), 0, callback);
     // C26: SUCCEEDED(hr) is NOT the verdict. The engine reports "this item did
@@ -2227,6 +2536,16 @@ class ArchiveReader {
     SmartExtractCallback::Result result = callback->result();
     callback->Release();
     bool ok = SUCCEEDED(hr) && !result.guardTripped && !result.fuseTripped && !result.failed();
+    if (!ok && !result.fuseTripped && !result.guardTripped && volumeCallback_ &&
+        !volumeCallback_->missingRequests().empty()) {
+      const std::string missingDiag =
+          volumeCallback_->lastStreamError().empty()
+              ? ("missing volume: " + volumeCallback_->missingRequests().front())
+              : volumeCallback_->lastStreamError();
+      result.failureReason = result.failureReason.empty()
+                                 ? missingDiag
+                                 : (missingDiag + "; " + result.failureReason);
+    }
     // C41: the OTHER half of the same contract. Every requested index is a file
     // (directories and ignored entries are skipped above), so a run that wrote
     // NO file at all did not extract anything -- and "ok with 0 bytes" is
@@ -2565,10 +2884,15 @@ class ArchiveReader {
     LONG refs_ = 1;
   };
 
-  class MemoryExtractCallback final : public abi::IArchiveExtractCallback {
+  class MemoryExtractCallback final : public abi::IArchiveExtractCallback,
+                                      public abi::ICryptoGetTextPassword {
    public:
-    explicit MemoryExtractCallback(MemoryOutStream* sink) : sink_(sink) { sink_->AddRef(); }
+    explicit MemoryExtractCallback(MemoryOutStream* sink, std::wstring password = {})
+        : sink_(sink), password_(std::move(password)) {
+      sink_->AddRef();
+    }
     ~MemoryExtractCallback() {
+      bridge_detail::ScrubWide(password_);
       if (sink_) sink_->Release();
     }
     STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
@@ -2577,6 +2901,17 @@ class ArchiveReader {
         *out = static_cast<abi::IArchiveExtractCallback*>(this);
         AddRef();
         return S_OK;
+      }
+      if (iid == abi::IID_ICryptoGetTextPassword) {
+#if defined(PRISM_C138_MUTANT_NO_MEM_CRYPTO)
+        IoCounters().mutantNoMemCrypto.fetch_add(1, std::memory_order_relaxed);
+        *out = nullptr;
+        return E_NOINTERFACE;
+#else
+        *out = static_cast<abi::ICryptoGetTextPassword*>(this);
+        AddRef();
+        return S_OK;
+#endif
       }
       *out = nullptr;
       return E_NOINTERFACE;
@@ -2600,10 +2935,27 @@ class ArchiveReader {
       return S_OK;
     }
     STDMETHODIMP PrepareOperation(abi::Int32) override { return S_OK; }
-    STDMETHODIMP SetOperationResult(abi::Int32) override { return S_OK; }
+    STDMETHODIMP SetOperationResult(abi::Int32 operationResult) override {
+#if defined(PRISM_C138_MUTANT_NO_MEM_CRYPTO)
+      (void)operationResult;
+      return S_OK;
+#else
+      opResult_ = operationResult;
+      return S_OK;
+#endif
+    }
+    STDMETHODIMP CryptoGetTextPassword(BSTR* password) override {
+      if (!password) return E_POINTER;
+      if (password_.empty()) return E_ABORT;
+      *password = SysAllocString(password_.c_str());
+      return *password ? S_OK : E_OUTOFMEMORY;
+    }
+    abi::Int32 opResult() const { return opResult_; }
 
    private:
     MemoryOutStream* sink_ = nullptr;
+    std::wstring password_;
+    abi::Int32 opResult_ = 0;
     LONG refs_ = 1;
   };
 
@@ -2694,6 +3046,11 @@ class ArchiveReader {
   // one of stream_/volumeStream_ exists; both are handed to the handler as the
   // input stream, so both share the lifetime rule (released with the reader).
   VolumeStream* volumeStream_ = nullptr;
+  VolumeOpenCallback* volumeCallback_ = nullptr;
+  std::wstring lastPath_;
+  std::wstring lastPassword_;
+  std::wstring password_;
+  uint32_t codePage_ = 0;
   abi::IInArchive* archive_ = nullptr;
   // C43: the explicit verdict when the bytes prove a format this build cannot
   // open. 'unsupportedFormat_' is set only when NO handler exists at all;

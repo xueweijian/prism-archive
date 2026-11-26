@@ -224,6 +224,8 @@ class VolumeOpenCallback final : public abi::IArchiveOpenCallback,
 
   std::uint32_t streamRequests() const { return streamRequests_; }
   std::uint32_t streamsServed() const { return streamsServed_; }
+  const std::vector<std::string>& missingRequests() const { return missingRequests_; }
+  const std::string& lastStreamError() const { return lastStreamError_; }
 
   STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
     if (!out) return E_POINTER;
@@ -266,13 +268,16 @@ class VolumeOpenCallback final : public abi::IArchiveOpenCallback,
     if (!name) return E_INVALIDARG;
     ++streamRequests_;
     const std::string requested = WideToUtf8Volume(name);
-    const std::string requestedLower = volume_detail::Lower(requested);
+    const std::string requestedBase(volume_detail::BaseName(requested));
+    const std::string requestedLower = volume_detail::Lower(requestedBase);
     for (const prism::VolumeEntry& entry : plan_.volumes) {
       if (volume_detail::Lower(entry.name) != requestedLower) continue;
       auto* stream = new VolumeFileStream(JoinVolumePath(directory_, entry.name));
       if (!stream->valid()) {
         const DWORD cause = stream->lastError();
         delete stream;
+        missingRequests_.push_back(entry.name);
+        lastStreamError_ = "cannot open volume: " + entry.name;
         const HRESULT hr = HRESULT_FROM_WIN32(cause);
         // HRESULT_FROM_WIN32(ERROR_SUCCESS) is S_OK: never let an unopenable
         // volume come back as "here is your stream" with a null pointer.
@@ -284,6 +289,8 @@ class VolumeOpenCallback final : public abi::IArchiveOpenCallback,
     }
     // S_FALSE is 7-Zip's "that volume does not exist"; the handler then reports
     // a missing-volume error instead of silently reading a shifted stream.
+    missingRequests_.push_back(requestedBase);
+    lastStreamError_ = "missing volume: " + requestedBase;
     return S_FALSE;
   }
 
@@ -293,6 +300,8 @@ class VolumeOpenCallback final : public abi::IArchiveOpenCallback,
   std::string requestedName_;
   std::uint32_t streamRequests_ = 0;
   std::uint32_t streamsServed_ = 0;
+  std::vector<std::string> missingRequests_;
+  std::string lastStreamError_;
   LONG refs_ = 1;
 };
 

@@ -382,6 +382,11 @@ inline RepairResult RepairArchiveName(std::string_view rawBytes, bool utf8Flagge
         result.encoding = reDetect.front().encoding;
         result.repaired = true;
         result.confidence = reDetect.front().score;
+        result.ambiguous = IsAmbiguous(reDetect);
+        result.alternatives.clear();
+        for (const Detection& d : reDetect) {
+          if (d.encoding != Encoding::Latin1) result.alternatives.push_back(d.encoding);
+        }
         return result;
       }
     }

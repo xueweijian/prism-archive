@@ -115,6 +115,8 @@
 #include "../PrismWin/PasswordDialog.hpp"     // C35: the password dialog (C40 wires it)
 #include "../PrismWin/PrismEngineBridge.hpp"
 #include "../PrismWin/ReaderPool.hpp"
+#include "../PrismWin/SecurityAlertDialog.hpp"  // C137: red glass security alert modal/card
+#include "../PrismWin/Win32Transcoder.hpp"      // C138: Win32 NLS codepage transcoder
 #include "../PrismWin/CompanionPreviewBridge.hpp"  // C30: the shell <-> companion channel
 #include "../PrismWin/CompanionWindow.hpp"            // C30: the focus-free flyout (C34 hosts it)
 #include "../PrismWin/SettingsFile.hpp"       // C14 file layer (%LOCALAPPDATA%, atomic)
@@ -487,9 +489,37 @@ inline prism::SmartPlan BuildSelectionPlan(const std::vector<ArchiveItem>& catal
 // that never lands from leaving even an empty folder behind.
 struct DragOutMaterialization {
   bool ok = false;
+  bool fuseTripped = false;
+  std::string fuseReason;
   std::string error;
   std::vector<std::wstring> paths;
 };
+
+#if defined(PRISM_C137_MUTANT_NULL_FUSE)
+inline std::atomic<uint64_t>& MutantNullFuseHits() {
+  static std::atomic<uint64_t> hits{0};
+  return hits;
+}
+#endif
+
+// C137: canonical product BombFuse configuration (85% target-volume free-space
+// cap + 1000:1 expansion ratio).
+inline prism::BombFuse MakeProductBombFuse() {
+  prism::BombLimits limits;
+  limits.maxDiskFraction = 0.85;
+  limits.maxRatio = 1000.0;
+  return prism::BombFuse(limits);
+}
+
+inline prism::BombFuse* SelectProductBombFuse(prism::BombFuse& fuse) {
+#if defined(PRISM_C137_MUTANT_NULL_FUSE)
+  MutantNullFuseHits().fetch_add(1, std::memory_order_relaxed);
+  (void)fuse;
+  return nullptr;
+#else
+  return &fuse;
+#endif
+}
 
 inline DragOutMaterialization MaterializeSelectionForDragOut(
     prism::win::SevenZipLibrary& library, const std::wstring& archivePathWide,
@@ -518,11 +548,21 @@ inline DragOutMaterialization MaterializeSelectionForDragOut(
     return out;
   }
   prism::win::SmartExtractCallback::Result result;
-  const bool ok = reader.ExtractWithPlan(catalog, plan, plan.baseTargetDir, nullptr, &result);
+  prism::BombFuse fuse = MakeProductBombFuse();
+  const bool ok = reader.ExtractWithPlan(catalog, plan, plan.baseTargetDir,
+                                         SelectProductBombFuse(fuse), &result);
   reader.Close();
   if (!ok) {
-    out.error = result.failureReason.empty() ? std::string("dragout: extraction failed")
-                                             : ("dragout: " + result.failureReason);
+    out.fuseTripped = result.fuseTripped;
+    out.fuseReason = result.fuseReason;
+    if (result.fuseTripped && !result.fuseReason.empty()) {
+      out.error = "dragout: " + result.fuseReason;
+    } else if (result.guardTripped && !result.guardReason.empty()) {
+      out.error = "dragout: " + result.guardReason;
+    } else {
+      out.error = result.failureReason.empty() ? std::string("dragout: extraction failed")
+                                               : ("dragout: " + result.failureReason);
+    }
     return out;
   }
   out.paths.reserve(result.writtenPaths.size());
@@ -1006,6 +1046,8 @@ inline SecuritySummary ApplySecurityPass(const std::wstring& archivePathWide,
 //   * overwrite      -- ask/replace/skip/rename, applied per entry;
 //   * verifyAfterExtract -- run C13's VerifyIntegrity over the catalog after a
 //     successful write, so "verified" is the engine's per-item CRC verdict.
+using SecurityAlertCallback = std::function<void(const prism::win::securityui::SecurityAlertModel&)>;
+
 struct ExtractionOptions {
   prism::overwrite::Mode overwrite = prism::overwrite::Mode::Ask;
   bool verifyAfterExtract = false;
@@ -1017,6 +1059,8 @@ struct ExtractionOptions {
   // later conflict (see OverwriteSession.hpp). Empty -> `prompt` per file.
   prism::overwrite::BatchPromptFn promptAll;
   prism::overwrite::ExistsFn exists;
+  // C137: surfaced when BombFuse trips, WriteGuard trips, or AMSI blocks.
+  SecurityAlertCallback onSecurityAlert;
 };
 
 #if defined(PRISM_C71_MUTANT_IGNORE_VERIFY)
@@ -1051,7 +1095,33 @@ struct ExtractionOutcome {
   // C71: files a skip/ask policy left alone. Reported so a verb that extracted
   // "0 files" can say WHY instead of looking like an empty archive (D12).
   uint64_t skippedFiles = 0;
+  // C137: explicit security trip flags for alert modal + diagnostics.
+  bool fuseTripped = false;
+  bool fuseCritical = false;
+  std::string fuseReason;
+  bool guardTripped = false;
+  std::string guardReason;
 };
+
+inline void NotifySecurityAlertIfNeeded(
+    const ExtractionOutcome& outcome, const std::wstring& archivePathWide,
+    const std::function<void(const prism::win::securityui::SecurityAlertModel&)>& onAlert) {
+  if (!onAlert) return;
+  if (outcome.fuseTripped) {
+    onAlert(prism::win::securityui::BuildSecurityAlertModel(
+        prism::win::securityui::SecurityAlertKind::BombFuse, archivePathWide,
+        outcome.fuseReason, outcome.fuseCritical));
+  } else if (outcome.guardTripped) {
+    onAlert(prism::win::securityui::BuildSecurityAlertModel(
+        prism::win::securityui::SecurityAlertKind::WriteGuard, archivePathWide,
+        outcome.guardReason, true));
+  }
+  if (outcome.security.amsiBlocked > 0) {
+    onAlert(prism::win::securityui::BuildSecurityAlertModel(
+        prism::win::securityui::SecurityAlertKind::AmsiThreat, archivePathWide,
+        outcome.security.amsiDetail, true));
+  }
+}
 
 namespace detail {
 
@@ -1063,6 +1133,18 @@ inline std::wstring BuildStatusText(const ExtractionOutcome& outcome, bool ok,
                          : std::wstring(L"\x89E3\x538B\x5931\x8D25");  // 解压失败
   text += L" " + std::to_wstring(outcome.filesWritten) + L" \u4E2A\u6587\u4EF6";
   if (ok && !targetDir.empty()) text += L" \x2192 " + prism::win::Utf8ToWide(targetDir);
+  if (outcome.fuseTripped) {
+    text += L" | \u70B8\u5F39\u7194\u65AD";  // 炸弹熔断
+    if (!outcome.fuseReason.empty()) {
+      text += L": " + prism::win::Utf8ToWide(outcome.fuseReason);
+    }
+  }
+  if (outcome.guardTripped) {
+    text += L" | \u8D8A\u754C\u62E6\u622A";  // 越界拦截
+    if (!outcome.guardReason.empty()) {
+      text += L": " + prism::win::Utf8ToWide(outcome.guardReason);
+    }
+  }
   if (outcome.security.filesStamped > 0) {
     text += L" | Zone.Identifier " + std::to_wstring(outcome.security.filesStamped);
   }
@@ -1118,9 +1200,10 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   }
 
   prism::win::SmartExtractCallback::Result result;
+  prism::BombFuse fuse = MakeProductBombFuse();
   bool ok = task->reader->ExtractWithPlan(catalog, plan.plan, plan.plan.baseTargetDir,
-                                          nullptr, &result, options.overwrite,
-                                          options.prompt, options.exists,
+                                          SelectProductBombFuse(fuse), &result,
+                                          options.overwrite, options.prompt, options.exists,
                                           prism::win::SmartExtractCallback::ProgressFn(),
                                           options.promptAll);
   handles.Finish(*task, ok);
@@ -1129,10 +1212,15 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   outcome.filesWritten = result.filesWritten;
   outcome.bytesWritten = result.bytesWritten;
   outcome.skippedFiles = result.skippedFiles;
+  outcome.fuseTripped = result.fuseTripped;
+  outcome.fuseCritical = result.fuseCritical;
+  outcome.fuseReason = result.fuseReason;
+  outcome.guardTripped = result.guardTripped;
+  outcome.guardReason = result.guardReason;
   if (!ok) {
     if (result.guardTripped) outcome.error = result.guardReason;
     else if (result.fuseTripped) outcome.error = result.fuseReason;
-    else outcome.error = "engine reported failure";
+    else outcome.error = result.failureReason.empty() ? "engine reported failure" : result.failureReason;
   }
   if (ok) {
     outcome.security =
@@ -1165,6 +1253,7 @@ inline ExtractionOutcome RunExtraction(OperationHandles& handles,
   if (outcome.verifyFailed) {
     outcome.status += L" | \u6821\u9A8C\u5931\u8D25";  // 校验失败
   }
+  NotifySecurityAlertIfNeeded(outcome, archivePathWide, options.onSecurityAlert);
   return outcome;
 }
 
@@ -2447,6 +2536,10 @@ struct ArchiveSession {
   std::vector<ArchiveItem>* items = nullptr;          // what the window navigates
   std::wstring* archivePath = nullptr;                // the file the session shows
   size_t handlerSlots = 2;
+  // C138: optional transcoder, password & codePage override for ReopenWithCodePage.
+  prism::ITranscoder* transcoder = nullptr;
+  std::wstring password;
+  uint32_t codePage = 0;
 };
 
 struct ArchiveSwitch {
@@ -2456,6 +2549,7 @@ struct ArchiveSwitch {
   std::string error;
   std::wstring archivePath;   // what the session shows AFTER the call
   size_t items = 0;
+  uint32_t codePage = 0;
 };
 
 // Must run on the UI thread with NO live lease (see the order above). A caller
@@ -2475,9 +2569,10 @@ inline ArchiveSwitch SwitchArchive(const ArchiveSession& session, const std::wst
   // (1) The new file, on its own handler, before anything is torn down.
   std::vector<ArchiveItem> next;
   {
-    prism::win::ArchiveReader probe(*session.library);
-    if (!probe.Open(newPath)) {
-      out.error = "cannot open the new archive: " + probe.openTrace();
+    prism::win::ArchiveReader probe(*session.library, session.transcoder);
+    if (!probe.Open(newPath, session.password, session.codePage)) {
+      out.error = "cannot open the new archive: " +
+                  (probe.failureReason().empty() ? probe.openTrace() : probe.failureReason());
       return out;
     }
     next = probe.ReadCatalog();
@@ -2489,6 +2584,7 @@ inline ArchiveSwitch SwitchArchive(const ArchiveSession& session, const std::wst
   // (2) A pool that can serve it, still without touching the old one.
   OperationHandles::Config config;
   config.archivePath = newPath;
+  config.password = session.password;
   config.handlerSlots = session.handlerSlots;
   std::string why;
   std::shared_ptr<OperationHandles> nextOps =
@@ -2521,8 +2617,31 @@ inline ArchiveSwitch SwitchArchive(const ArchiveSession& session, const std::wst
   out.poolRebuilt = true;
   out.archivePath = *session.archivePath;
   out.items = session.items->size();
+  out.codePage = session.codePage;
   return out;
 #endif
+}
+
+// C138: re-open the currently displayed archive under a different Windows code
+// page (e.g. 936/950/932/949/65001) so the UI can switch encodings cleanly.
+inline ArchiveSwitch ReopenWithCodePage(const ArchiveSession& session, uint32_t codePage) {
+  if (session.archivePath == nullptr || session.archivePath->empty()) {
+    ArchiveSwitch out;
+    out.error = "reopen with codepage: no active archive";
+    return out;
+  }
+  ArchiveSession updated = session;
+  updated.codePage = codePage;
+  return SwitchArchive(updated, *session.archivePath);
+}
+
+template <class WindowLike>
+ArchiveSwitch ApplyReopenWithCodePage(WindowLike& window, const ArchiveSession& session,
+                                      uint32_t codePage) {
+  ArchiveSwitch out = ReopenWithCodePage(session, codePage);
+  if (!out.ok) return out;
+  window.SetItems(session.items);
+  return out;
 }
 
 // ---------------------------------------------------------------------------

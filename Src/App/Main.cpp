@@ -115,10 +115,12 @@
 #include "../PrismWin/LogFile.hpp"           // C85: the daily file sink + the wall clock
 #include "../PrismWin/PasswordDialog.hpp"    // C35's dialog (C40 wires it into open)
 #include "../PrismWin/PrismEngineBridge.hpp"  // Resolve7zDll, WideToUtf8
+#include "../PrismWin/SecurityAlertDialog.hpp"  // C137: red glass security alert modal
 #include "../PrismWin/SettingsDialog.hpp"   // C53: Settings... menu + dialog (C31/V3)
 #include "../PrismWin/StartupTrace.hpp"  // C76: the QPC segment recorder
 #include "../PrismCore/SidebarModel.hpp"   // prism::sidebar::ArchiveInfo (C12)
 #include "../PrismWin/SolidSweeper.hpp"
+#include "../PrismWin/Win32Transcoder.hpp"  // C138: legacy CJK filename repair
 
 #pragma comment(lib, "advapi32.lib")  // RegOpenKeyExW in Resolve7zDll
 #pragma comment(lib, "comctl32.lib")  // InitCommonControlsEx (C18's trackbar)
@@ -269,6 +271,7 @@ std::wstring DescribeMissing7zDll(const prism::win::SevenZipDllLookup& lookup, c
 // reads the pointers. Neither order can miss the other side.
 struct AppContext {
   prism::win::SevenZipLibrary library;
+  prism::win::Win32Transcoder transcoder;
   std::shared_ptr<prism::app::OperationHandles> ops;
   std::vector<prism::ArchiveItem> items;    // full catalog: what the window navigates
   std::vector<prism::ArchiveItem> catalog;  // full catalog: what plans are built over
@@ -421,6 +424,7 @@ int RunHeadless(const prism::app::LaunchRequest& request, AppContext& app, const
   if (outcome.security.amsiBlocked > 0 || outcome.security.amsiCouldNotScan > 0) {
     std::fprintf(stderr, "security: %s\n",
                  prism::win::WideToUtf8(outcome.status).c_str());
+    if (outcome.security.amsiBlocked > 0) return 1;
   }
   return 0;
 }
@@ -904,7 +908,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     unsigned long openFailureHr = 0;
     bool opened = false;
     {
-      prism::win::ArchiveReader probe(app->library);
+      prism::win::ArchiveReader probe(app->library, &app->transcoder);
       opened = probe.Open(archive, launch.password);
       if (opened) {
         app->catalog = probe.ReadCatalog();
@@ -942,7 +946,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       if (!archivePassword.empty()) {
         // A fresh reader: the failed one already holds a stream and a partial
         // archive object, and re-Open()ing it would leak both.
-        prism::win::ArchiveReader retry(app->library);
+        prism::win::ArchiveReader retry(app->library, &app->transcoder);
         opened = retry.Open(archive, archivePassword);
         if (opened) {
           app->catalog = retry.ReadCatalog();
@@ -1062,6 +1066,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(coInit)) CoUninitialize();
     return 1;
   }
+  // C137: UI-thread sink that renders the red glass security alert modal/card
+  // whenever a worker trips BombFuse, WriteGuard, or AMSI detection.
+  prism::win::securityui::SecurityAlertSink alertSink;
+  alertSink.Create(instance, window.Hwnd());
+  const prism::app::SecurityAlertCallback guiSecurityAlert =
+      [&alertSink](const prism::win::securityui::SecurityAlertModel& model) {
+        alertSink.Post(model);
+      };
+  app->extractOptions.onSecurityAlert = guiSecurityAlert;
   // C83: the shell follows the saved appearance BEFORE the first frame. The
   // mapping is pure (prism::chrome::ShellVariantFor): "dark" and the schema's
   // "system" default paint the Midnight shell the canvas already uses, "light"
@@ -1273,7 +1286,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // C69: the translator the launch resolved, held by reference for the launcher
   // below (the dialog reads the SAME table the bar does).
   const prism::i18n::Translator& startupTranslator = language.translator;
-  window.SetSettingsLauncher([&window, &settings, &app, &logger, &startupTranslator]() {
+  window.SetSettingsLauncher(
+      [&window, &settings, &app, &logger, &startupTranslator, &guiSecurityAlert]() {
     prism::win::settingsui::SettingsDialog dialog;
     dialog.SetPaths(settings.paths);
     dialog.SetTranslator(&startupTranslator);   // C69: the rows read the same table
@@ -1325,6 +1339,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       window.SetMenuAutoHide(
           settings.store.GetBool(prism::win::settingsui::kMenuAutoHideKey, false));
       app->extractOptions = LiveExtractionOptions(settings.store);
+      app->extractOptions.onSecurityAlert = guiSecurityAlert;
       InvalidateRect(window.Hwnd(), nullptr, FALSE);
       window.SetStatus(L"\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
     }
@@ -1375,12 +1390,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // thread, and captured by value.
   const std::string extractHeadline = prism::win::WideToUtf8(tr("action.extract"));
   std::function<void(int)> activateHandler =
-      [&window, app, &extractWorker, extractHeadline](int catalogIndex) {
+      [&window, app, &extractWorker, extractHeadline, &logger, &alertSink](int catalogIndex) {
     (void)catalogIndex;  // the whole-archive plan is v1's behaviour; see above
     if (app->extracting.exchange(true)) return;
     // A previous run must be finished before its std::thread is assigned over.
     if (extractWorker.joinable()) extractWorker.join();
-    extractWorker = std::thread([app, &window, extractHeadline]() {
+    extractWorker = std::thread([app, &window, extractHeadline, &logger, &alertSink]() {
       CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       const uint64_t t0 = GalleryWindow::NowMs();
       window.PostHudStart(extractHeadline);
@@ -1410,8 +1425,10 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           lastPostedPercent = percent;
           window.PostProgress(done, total);
         };
+        prism::BombFuse fuse = prism::app::MakeProductBombFuse();
         bool ok = task->reader->ExtractWithPlan(
-            app->catalog, app->plan.plan, app->plan.plan.baseTargetDir, nullptr, &result,
+            app->catalog, app->plan.plan, app->plan.plan.baseTargetDir,
+            prism::app::SelectProductBombFuse(fuse), &result,
             app->extractOptions.overwrite, app->extractOptions.prompt,
             app->extractOptions.exists, reportProgress,
             app->extractOptions.promptAll);
@@ -1421,6 +1438,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         outcome.filesWritten = result.filesWritten;
         outcome.bytesWritten = result.bytesWritten;
         outcome.skippedFiles = result.skippedFiles;
+        outcome.fuseTripped = result.fuseTripped;
+        outcome.fuseCritical = result.fuseCritical;
+        outcome.fuseReason = result.fuseReason;
+        outcome.guardTripped = result.guardTripped;
+        outcome.guardReason = result.guardReason;
+        if (!ok) {
+          if (result.fuseTripped) outcome.error = result.fuseReason;
+          else if (result.guardTripped) outcome.error = result.guardReason;
+          else outcome.error = result.failureReason;
+        }
         if (ok) {
           outcome.security = prism::app::ApplySecurityPass(
               app->archivePath, result.writtenPaths, /*scanExecutables=*/true);
@@ -1445,6 +1472,20 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       } else {
         outcome.status = L"\x89E3\x538B\x88AB\x62D2\x7EDD";
         if (!why.empty()) outcome.status += L" (" + prism::win::Utf8ToWide(why) + L")";
+      }
+      if (outcome.fuseTripped || outcome.guardTripped || outcome.security.amsiBlocked > 0) {
+        logger.Emit(prism::log::Level::kError, "security", "security alert triggered during extract",
+                    {{"fuseTripped", outcome.fuseTripped ? "1" : "0"},
+                     {"guardTripped", outcome.guardTripped ? "1" : "0"},
+                     {"amsiBlocked", std::to_string(outcome.security.amsiBlocked)},
+                     {"detail", outcome.fuseTripped ? outcome.fuseReason
+                                                    : (outcome.guardTripped ? outcome.guardReason
+                                                                            : outcome.security.amsiDetail)}});
+        prism::app::NotifySecurityAlertIfNeeded(
+            outcome, app->archivePath,
+            [&alertSink](const prism::win::securityui::SecurityAlertModel& model) {
+              alertSink.Post(model);
+            });
       }
       // C26 (delivered by the engine card, wired here): a handler can answer
       // S_OK while reporting a per-item failure through opResult -- the zstd
@@ -1654,7 +1695,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // press travelled past Explorer's own threshold, and the payload is produced
   // on the FIRST GetData(CF_HDROP) -- a hovering target costs nothing. The temp
   // tree is removed when DoDragDrop returns, i.e. on drop AND on cancel.
-  window.SetDragOutHandler([app, archivePassword, &window](
+  window.SetDragOutHandler([app, archivePassword, &window, &alertSink](
                                HWND owner, const std::vector<uint32_t>& selection) {
     namespace dragout = prism::win::dragoutfiles;
     std::error_code ec;
@@ -1671,13 +1712,20 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       return false;
     }
     const std::wstring dir = drag->temp_dir();
-    drag->SetExtractor([app, archivePassword, selection, dir](dragout::MaterializeResult* out) {
+    bool fuseTrippedDuringDrag = false;
+    std::string fuseReasonDuringDrag;
+    drag->SetExtractor([app, archivePassword, selection, dir, &fuseTrippedDuringDrag,
+                        &fuseReasonDuringDrag](dragout::MaterializeResult* out) {
       const prism::app::DragOutMaterialization produced =
           prism::app::MaterializeSelectionForDragOut(app->library, app->archivePath,
                                                      archivePassword, app->catalog, selection, dir);
       out->ok = produced.ok;
       out->error = produced.error;
       out->paths = produced.paths;
+      if (produced.fuseTripped) {
+        fuseTrippedDuringDrag = true;
+        fuseReasonDuringDrag = produced.fuseReason;
+      }
       return produced.ok;
     });
     DWORD effect = DROPEFFECT_NONE;
@@ -1687,7 +1735,13 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                  static_cast<unsigned long>(hr), static_cast<unsigned long>(effect),
                  selection.size(), drag->files(), drag->extractions(),
                  static_cast<int>(drag->temp_dir_exists()));
-    if (drag->files() > 0) {
+    if (fuseTrippedDuringDrag) {
+      window.SetStatus(L"\u62D6\u51FA\u5DF2\u7194\u65AD\uFF1A" +
+                       prism::win::Utf8ToWide(fuseReasonDuringDrag));
+      alertSink.Post(prism::win::securityui::BuildSecurityAlertModel(
+          prism::win::securityui::SecurityAlertKind::BombFuse, app->archivePath,
+          fuseReasonDuringDrag));
+    } else if (drag->files() > 0) {
       window.SetStatus(L"\u5DF2\u62D6\u51FA " + std::to_wstring(drag->files()) +
                        L" \u4E2A\u6587\u4EF6");  // 已拖出 N 个文件
     } else if (hr == DRAGDROP_S_CANCEL) {
@@ -1839,10 +1893,27 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
               plan.strategy = prism::SmartStrategy::FlatDirectly;
               plan.baseTargetDir = prism::win::WideToUtf8(stage);
               prism::win::SmartExtractCallback::Result staged_;
+              prism::BombFuse fuse = prism::app::MakeProductBombFuse();
               staged = task->reader->ExtractWithPlan(app->catalog, plan, plan.baseTargetDir,
-                                                     nullptr, &staged_);
+                                                     prism::app::SelectProductBombFuse(fuse),
+                                                     &staged_);
               app->extractReader.store(nullptr);
               app->ops->Finish(*task, staged);
+              if (!staged) {
+                if (staged_.fuseTripped) {
+                  outcome.error = staged_.fuseReason;
+                  alertSink.Post(prism::win::securityui::BuildSecurityAlertModel(
+                      prism::win::securityui::SecurityAlertKind::BombFuse, app->archivePath,
+                      staged_.fuseReason, staged_.fuseCritical));
+                } else if (staged_.guardTripped) {
+                  outcome.error = staged_.guardReason;
+                  alertSink.Post(prism::win::securityui::BuildSecurityAlertModel(
+                      prism::win::securityui::SecurityAlertKind::WriteGuard, app->archivePath,
+                      staged_.guardReason, true));
+                } else if (!staged_.failureReason.empty()) {
+                  outcome.error = staged_.failureReason;
+                }
+              }
             } else {
               outcome.error = why;
             }
@@ -2346,6 +2417,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (selectedWorker.joinable()) selectedWorker.join();
   if (compressWorker.joinable()) compressWorker.join();
   if (editWorker.joinable()) editWorker.join();
+  alertSink.Destroy();
   // The dialog outlives Run() only when the user closed the main window while it
   // was open; its destructor destroys the HWND, which is safe after the loop.
   compressDialog.reset();

@@ -4,18 +4,39 @@
 // brain of the product and must build + test on Linux/macOS/Windows alike.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+#include "CharsetRepair.hpp"
 
 namespace prism {
 
 // One entry of an archive central directory.
 // Mirrors the data PrismWin's 7z.dll bridge lifts out of IInArchive::GetProperty.
 struct ArchiveItem {
+  ArchiveItem() = default;
+  ArchiveItem(uint32_t indexIn, std::string pathIn, uint64_t sizeIn, uint64_t packSizeIn,
+              int64_t mtimeIn, uint32_t blockIn, bool isDirIn, bool encryptedIn,
+              bool pathAmbiguousIn = false, Encoding pathEncodingIn = Encoding::Unknown,
+              std::vector<Encoding> pathAlternativesIn = {})
+      : index(indexIn),
+        path(std::move(pathIn)),
+        size(sizeIn),
+        packSize(packSizeIn),
+        mtime(mtimeIn),
+        block(blockIn),
+        isDir(isDirIn),
+        encrypted(encryptedIn),
+        pathAmbiguous(pathAmbiguousIn),
+        pathEncoding(pathEncodingIn),
+        pathAlternatives(std::move(pathAlternativesIn)) {}
+
   uint32_t index = 0;
   std::string path;  // UTF-8, '/'-separated, relative, no leading '/'
   uint64_t size = 0;      // uncompressed
@@ -24,6 +45,11 @@ struct ArchiveItem {
   uint32_t block = 0;     // solid block id (used by the gallery prefetch engine)
   bool isDir = false;
   bool encrypted = false;
+  // C138: preserve CharsetRepair's ambiguity verdict & alternatives so the UI
+  // can offer an encoding switcher instead of silently guessing.
+  bool pathAmbiguous = false;
+  Encoding pathEncoding = Encoding::Unknown;
+  std::vector<Encoding> pathAlternatives;
 };
 
 // Immutable snapshot of an archive's central directory plus O(1) path lookup.
@@ -80,6 +106,34 @@ class ArchiveCatalog {
       if (!item.isDir) total += item.size;
     }
     return total;
+  }
+
+  bool HasAmbiguousPaths() const {
+    for (const auto& item : items_) {
+      if (item.pathAmbiguous) return true;
+    }
+    return false;
+  }
+
+  std::vector<uint32_t> AmbiguousIndices() const {
+    std::vector<uint32_t> out;
+    for (const auto& item : items_) {
+      if (item.pathAmbiguous) out.push_back(item.index);
+    }
+    return out;
+  }
+
+  std::vector<Encoding> AmbiguousAlternatives() const {
+    std::vector<Encoding> out;
+    for (const auto& item : items_) {
+      if (!item.pathAmbiguous) continue;
+      for (const Encoding enc : item.pathAlternatives) {
+        if (std::find(out.begin(), out.end(), enc) == out.end()) {
+          out.push_back(enc);
+        }
+      }
+    }
+    return out;
   }
 
  private:

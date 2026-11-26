@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "CharsetRepair.hpp"
@@ -19,6 +20,23 @@ namespace prism {
 // One entry of an archive central directory.
 // Mirrors the data PrismWin's 7z.dll bridge lifts out of IInArchive::GetProperty.
 struct ArchiveItem {
+  ArchiveItem() = default;
+  ArchiveItem(uint32_t indexIn, std::string pathIn, uint64_t sizeIn, uint64_t packSizeIn,
+              int64_t mtimeIn, uint32_t blockIn, bool isDirIn, bool encryptedIn,
+              bool pathAmbiguousIn = false, Encoding pathEncodingIn = Encoding::Unknown,
+              std::vector<Encoding> pathAlternativesIn = {})
+      : index(indexIn),
+        path(std::move(pathIn)),
+        size(sizeIn),
+        packSize(packSizeIn),
+        mtime(mtimeIn),
+        block(blockIn),
+        isDir(isDirIn),
+        encrypted(encryptedIn),
+        pathAmbiguous(pathAmbiguousIn),
+        pathEncoding(pathEncodingIn),
+        pathAlternatives(std::move(pathAlternativesIn)) {}
+
   uint32_t index = 0;
   std::string path;  // UTF-8, '/'-separated, relative, no leading '/'
   uint64_t size = 0;      // uncompressed

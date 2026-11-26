@@ -482,6 +482,14 @@ function Find-AssetsDir {
 # file deployment
 # ---------------------------------------------------------------------------
 
+function Get-FileSha256 {
+    param([string]$Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $sha.Dispose() }
+}
+
 function Copy-FileStable {
     param([string]$Source, [string]$Destination, [switch]$Required)
     if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
@@ -498,7 +506,7 @@ function Copy-FileStable {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     if (Test-Path -LiteralPath $Destination) {
         $same = ((Get-Item -LiteralPath $Destination).Length -eq (Get-Item -LiteralPath $Source).Length) -and
-                ((Get-FileHash -LiteralPath $Destination).Hash -eq (Get-FileHash -LiteralPath $Source).Hash)
+                ((Get-FileSha256 $Destination) -eq (Get-FileSha256 $Source))
         if ($same) {
             $script:Kept++
             Say ('unchanged ' + $Destination) 'same'
@@ -544,12 +552,12 @@ function Deploy-Payload {
             if (-not (Test-Path -LiteralPath $dstLang -PathType Leaf)) {
                 Warn ('language table not present after install: ' + $dstLang)
             } else {
-                $a = (Get-FileHash -LiteralPath $srcLang -Algorithm SHA256).Hash
-                $b = (Get-FileHash -LiteralPath $dstLang -Algorithm SHA256).Hash
+                $a = Get-FileSha256 $srcLang
+                $b = Get-FileSha256 $dstLang
                 if ($a -ne $b) {
                     throw ('language table differs from the payload: ' + $dstLang)
                 }
-                Say ('language table verified: ' + $dstLang) 'done'
+                Say ('language table verified: ' + $dstLang) 'same'
             }
         }
     } else {
@@ -752,10 +760,9 @@ function Invoke-Install {
     Say ('payload: ' + $SourceDir)
     Say ('target:  ' + $TargetDir)
     $assets = Find-AssetsDir -SourceDir $SourceDir -Explicit $AssetsDir
-if (-not $assets) {
-    Warn 'no Assets directory with Lang\*.json was found; the installed language tables would be stale or absent'
-}
-    if (-not $assets) { Warn 'Assets directory not found next to the payload' }
+    if (-not $assets) {
+        Warn 'no Assets directory with Lang\*.json was found; the installed language tables would be stale or absent'
+    }
     Deploy-Payload -SourceDir $SourceDir -TargetDir $TargetDir -AssetsDir $assets
 
     if ($PortableMode) {

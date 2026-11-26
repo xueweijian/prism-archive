@@ -206,6 +206,16 @@ const prism::win::sidebar::Command* FirstCardLabel(
   return nullptr;
 }
 
+const prism::win::sidebar::Command* FirstStatusTextCommand(
+    const prism::win::sidebar::Layout& layout) {
+  for (const prism::win::sidebar::Command& command : layout.commands) {
+    if (command.kind == prism::win::sidebar::PrimKind::StatusText) {
+      return &command;
+    }
+  }
+  return nullptr;
+}
+
 // The ink extent (x only) of a run inside a rectangle, measured against a
 // sampled background colour. Returns 0 when the run painted nothing.
 int InkWidth(const Frame& frame, const prism::win::sidebar::Box& box, UINT32 background) {
@@ -293,10 +303,20 @@ PRISM_TEST("c127 the FIRST card label's ink is the Chinese word, not ENCRYPTION"
   const int widthChinese = CandidateWidth(wic.Get(), L"\u52A0\u5BC6");                    // 加密
   const int widthLong = CandidateWidth(wic.Get(), L"\u52A0\u5BC6\u72B6\u6001");           // 加密状态
 
-  // ---- 1. complete table: the shipping fix ------------------------------
+  // ---- 1. complete table: folded default + expanded shipping fix ---------
   prism::i18n::Translator complete;
   if (!PRISM_CHECK(LoadCompleteTranslator(&complete))) return;
   window.ApplyLanguage(&complete);
+  PRISM_CHECK(!window.InfoCardExpanded());
+  PRISM_CHECK(FirstCardLabel(window.SidebarLayout()) == nullptr);
+  const prism::win::sidebar::Command* foldedText =
+      FirstStatusTextCommand(window.SidebarLayout());
+  if (!PRISM_CHECK(foldedText != nullptr)) return;
+  PRISM_CHECK(foldedText->text.find("\xE6\x9C\xAA\xE5\x8A\xA0\xE5\xAF\x86") == 0);  // 未加密
+  PRISM_CHECK(foldedText->text.find("NOT ENCRYPTED") == std::string::npos);
+
+  window.SetInfoCardExpanded(true);
+  PRISM_CHECK(window.InfoCardExpanded());
   const prism::win::sidebar::Command* label = FirstCardLabel(window.SidebarLayout());
   if (!PRISM_CHECK(label != nullptr)) return;
   PRISM_CHECK_EQ(label->text, std::string("\xE5\x8A\xA0\xE5\xAF\x86"));

@@ -151,6 +151,15 @@ std::string StatusLabelAt(const prism::win::sidebar::Layout& layout, int index) 
   return std::string();
 }
 
+std::string FirstStatusText(const prism::win::sidebar::Layout& layout) {
+  for (const prism::win::sidebar::Command& command : layout.commands) {
+    if (command.kind == prism::win::sidebar::PrimKind::StatusText) {
+      return command.text;
+    }
+  }
+  return std::string();
+}
+
 std::string ReadWholeFile(const std::string& path) {
   std::ifstream stream(path, std::ios::binary);
   if (!stream) return std::string();
@@ -171,9 +180,11 @@ std::size_t CountIn(const std::string& haystack, std::string_view needle) {
   return count;
 }
 
-prism::win::sidebar::Layout BuildShippingSidebar(const Translator& translator) {
+prism::win::sidebar::Layout BuildShippingSidebar(const Translator& translator,
+                                                 bool infoCardExpanded = true) {
   CardFixture fixture;
-  const prism::win::sidebar::Metrics metrics;
+  prism::win::sidebar::Metrics metrics;
+  metrics.infoCardExpanded = infoCardExpanded;
   return prism::win::sidebar::Build(fixture.model, metrics,
                                     prism::win::sidebar::LabelsFrom(&translator));
 }
@@ -209,6 +220,40 @@ PRISM_TEST("c127 the info card's four labels are Chinese words, not English caps
   for (int i = 0; i < 4; ++i) {
     for (int j = i + 1; j < 4; ++j) PRISM_CHECK(labels[i] != labels[j]);
   }
+}
+
+PRISM_TEST("c127 the folded info card summary is localized under zh-CN and en-US") {
+  Catalog zh;
+  Catalog en;
+  if (!LoadShipped("zh-CN", &zh) || !LoadShipped("en-US", &en)) return;
+
+  // Default Metrics (C128): folded one-line summary without field labels.
+  const prism::win::sidebar::Metrics defaultMetrics;
+  PRISM_CHECK(!defaultMetrics.infoCardExpanded);
+
+  const Translator zhTranslator = MakeTranslator(zh);
+  const prism::win::sidebar::Layout zhFolded =
+      BuildShippingSidebar(zhTranslator, /*infoCardExpanded=*/false);
+  PRISM_CHECK(StatusLabelAt(zhFolded, 0).empty());
+  const std::string zhSummary = FirstStatusText(zhFolded);
+  const std::string zhNotEncrypted = "\xE6\x9C\xAA\xE5\x8A\xA0\xE5\xAF\x86";  // 未加密
+  const std::string expectedZh =
+      zhNotEncrypted + prism::win::sidebar::kCardSeparator + "LZMA2" +
+      prism::win::sidebar::kCardSeparator + "98.8%";
+  std::printf("  [c127] folded summary (zh-CN) = \"%s\"\n", zhSummary.c_str());
+  PRISM_CHECK(HasNonAscii(zhSummary));
+  PRISM_CHECK_EQ(zhSummary, expectedZh);
+  PRISM_CHECK(zhSummary.find("NOT ENCRYPTED") == std::string::npos);
+
+  Translator enTranslator;
+  enTranslator.AddCatalog(en);
+  enTranslator.SetLanguage("en-US");
+  const prism::win::sidebar::Layout enFolded =
+      BuildShippingSidebar(enTranslator, /*infoCardExpanded=*/false);
+  const std::string expectedEn =
+      std::string("NOT ENCRYPTED") + prism::win::sidebar::kCardSeparator + "LZMA2" +
+      prism::win::sidebar::kCardSeparator + "98.8%";
+  PRISM_CHECK_EQ(FirstStatusText(enFolded), expectedEn);
 }
 
 // I1b -- the labels are reached THROUGH the translator, not hardcoded.
@@ -347,7 +392,8 @@ PRISM_TEST("c127 a stale table is REPORTED and explains the mixed-language card"
   // And this IS how the screenshot happened: the lookup asks, the table cannot
   // answer, the compiled default is English next to a Chinese value.
   CardFixture fixture;
-  const prism::win::sidebar::Metrics metrics;
+  prism::win::sidebar::Metrics metrics;
+  metrics.infoCardExpanded = true;
   const prism::win::sidebar::Layout staleLayout =
       prism::win::sidebar::Build(fixture.model, metrics,
                                  prism::win::sidebar::LabelsFrom(&staleTranslator));
